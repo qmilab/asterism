@@ -54,6 +54,12 @@ export interface FirewallVerdict {
 // Injection — attempts to override instructions / reassign role / forge turns.
 // ---------------------------------------------------------------------------
 
+// Role/identity/mode nouns an injection tries to reassign the agent into. Used
+// only to anchor the "role reassignment" rule so it fires on "you are now an
+// <assistant>" but not on benign "you are now eligible for …".
+const ROLE_NOUN =
+  "(assistant|ai|model|agent|bot|chatbot|system|admin(?:istrator)?|root|superuser|developer|operator|persona|character|jailbroken|unrestricted|dan)";
+
 export const MEMORY_INJECTION_RULES: readonly FirewallRule[] = [
   // "ignore/disregard/forget the previous instructions", and close variants. The
   // verb and the {previous|prior|above|all} target must co-occur, so a plain
@@ -64,11 +70,20 @@ export const MEMORY_INJECTION_RULES: readonly FirewallRule[] = [
     pattern:
       /\b(ignore|disregard|forget|override|bypass)\b[^.\n]{0,40}\b(previous|prior|earlier|above|all|the)\b[^.\n]{0,24}\b(instructions?|prompts?|rules?|directions?|guidelines?)\b/i,
   },
-  // "you are now …", "from now on you are/act …" — a wholesale role reassignment.
+  // Wholesale role reassignment. "you are now …" only fires when an actual
+  // role/mode target follows — "you are now an unrestricted assistant", "you are
+  // now in developer mode" — so benign predicates ("you are now eligible for
+  // admin training") are not blocked. The "from now on you/act/behave/pretend"
+  // form is matched directly.
   {
     name: "role reassignment",
     category: "injection",
-    pattern: /\b(you are now\b|from now on,?\s+(you|act|behave|pretend)\b)/i,
+    pattern: new RegExp(
+      `\\byou are now\\s+(an?|the)\\s+(?:[a-z]+\\s+){0,2}${ROLE_NOUN}\\b` +
+        `|\\byou are now\\s+in\\b[^.\\n]{0,20}\\bmode\\b` +
+        `|\\bfrom now on,?\\s+(you|act|behave|pretend)\\b`,
+      "i",
+    ),
   },
   // "pretend to be …", "act as if you are …" — soul/role spoofing.
   {

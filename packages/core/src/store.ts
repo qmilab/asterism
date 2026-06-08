@@ -44,8 +44,26 @@ export class AsterismStore {
    * the CLI's `secrets add` sits on (Phase 0).
    */
   addCredential(agentId: string, key: string, value: string): Credential {
-    const ref = this.secrets.issue(agentId, key, value);
-    return this.credentials.create(agentId, { key, valueRef: ref.valueRef });
+    return this.driver.transaction(() => {
+      const prior = this.credentials.getByKey(agentId, key);
+      const ref = this.secrets.issue(agentId, key, value);
+      const cred = this.credentials.create(agentId, {
+        key,
+        valueRef: ref.valueRef,
+      });
+      // If this rotation repointed the credential away from a different (e.g.
+      // non-default) backing ref, the old secret is now stale. Revoke it — unless
+      // another credential still references it — so rotation never leaves stale
+      // plaintext readable behind the previous ref.
+      if (
+        prior &&
+        prior.valueRef !== cred.valueRef &&
+        this.credentials.countByValueRef(agentId, prior.valueRef) === 0
+      ) {
+        this.secrets.deleteByRef(agentId, prior.valueRef);
+      }
+      return cred;
+    });
   }
 
   /**
@@ -58,7 +76,9 @@ export class AsterismStore {
    * The secret dropped is the exact one the credential references — identified by
    * the row's stored `valueRef`, not by key — so a credential created with a
    * non-default ref has its real plaintext removed, and an unrelated standalone
-   * secret that merely shares the key is left alone. When no credential row
+   * secret that merely shares the key is left alone. The secret is revoked only
+   * when no OTHER credential still references that ref, so removing one of two
+   * credentials sharing a ref never orphans the survivor. When no credential row
    * exists this is a no-op returning false, touching no secret (a standalone
    * secret is removed via `secrets.delete`).
    */
@@ -67,7 +87,9 @@ export class AsterismStore {
       const cred = this.credentials.getByKey(agentId, key);
       if (!cred) return false;
       this.credentials.deleteByKey(agentId, key);
-      this.secrets.deleteByRef(agentId, cred.valueRef);
+      if (this.credentials.countByValueRef(agentId, cred.valueRef) === 0) {
+        this.secrets.deleteByRef(agentId, cred.valueRef);
+      }
       return true;
     });
   }

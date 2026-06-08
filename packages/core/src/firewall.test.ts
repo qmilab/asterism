@@ -67,6 +67,9 @@ describe("memory firewall — benign content passes (no over-blocking)", () => {
     "Remember to ignore the flaky timeout warning in the staging logs.",
     "The deploy docs live at https://docs.internal/runbook.",
     "Her password manager is 1Password; do not ask her to type passwords.",
+    // "you are now" as an ordinary predicate, not a role reassignment.
+    "After onboarding, you are now eligible for admin training.",
+    "Once the migration finishes, you are now done for the day.",
   ];
 
   test("none of the benign samples trip the firewall", () => {

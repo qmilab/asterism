@@ -204,6 +204,44 @@ describe("removeCredential — both tables stay in sync", () => {
     expect(store.secrets.readByKey(alice.id, "TOKEN")).toBe("standalone-value");
   });
 
+  test("a secret shared by two credentials survives until the last one is removed", () => {
+    // Two credentials (different keys) pointing at the same backing secret.
+    const sharedRef = store.addCredential(alice.id, "PRIMARY", "shared-value").valueRef;
+    store.credentials.create(alice.id, { key: "ALIAS", valueRef: sharedRef });
+
+    // Removing the first leaves the secret alive — ALIAS still references it.
+    expect(store.removeCredential(alice.id, "PRIMARY")).toBe(true);
+    expect(store.secrets.read(alice.id, sharedRef)).toBe("shared-value");
+    expect(store.credentials.getByKey(alice.id, "ALIAS")?.valueRef).toBe(sharedRef);
+
+    // Removing the last reference finally revokes the secret.
+    expect(store.removeCredential(alice.id, "ALIAS")).toBe(true);
+    expect(store.secrets.read(alice.id, sharedRef)).toBeUndefined();
+  });
+
+  test("rotation revokes a stale non-default backing secret", () => {
+    // A credential pointing at a non-default backing ref.
+    const oldRef = store.secrets.issue(alice.id, "BACKING", "old-value").valueRef;
+    store.credentials.create(alice.id, { key: "API", valueRef: oldRef });
+
+    // Rotating the credential repoints it to the default ref and must not leave
+    // the old plaintext readable behind its old ref.
+    const rotated = store.addCredential(alice.id, "API", "new-value");
+    expect(rotated.valueRef).toBe(secretValueRef(alice.id, "API"));
+    expect(store.secrets.read(alice.id, rotated.valueRef)).toBe("new-value");
+    expect(store.secrets.read(alice.id, oldRef)).toBeUndefined(); // stale plaintext gone
+  });
+
+  test("rotation does not revoke an old ref still shared by another credential", () => {
+    const oldRef = store.secrets.issue(alice.id, "BACKING", "old-value").valueRef;
+    store.credentials.create(alice.id, { key: "API", valueRef: oldRef });
+    store.credentials.create(alice.id, { key: "ALIAS", valueRef: oldRef });
+
+    // Rotating API away from oldRef must keep oldRef alive for ALIAS.
+    store.addCredential(alice.id, "API", "new-value");
+    expect(store.secrets.read(alice.id, oldRef)).toBe("old-value");
+  });
+
   test("removing alice's credential leaves bob's identically-keyed one intact", () => {
     store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_alice");
     const bobCred = store.addCredential(bob.id, "GITHUB_TOKEN", "ghp_bob");
