@@ -84,6 +84,11 @@ export type {
   ResolveSoulOptions,
 } from "./framing";
 
+// The audit bridge — turns trust-gate decisions into append-only events. The
+// kernel's run-orchestration surfaces compose this around their own hooks.
+export { auditTrustHooks } from "./audit";
+export type { AuditContext } from "./audit";
+
 export { AsterismStore } from "./store";
 export { openDatabase } from "./db/index";
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver";
@@ -99,4 +104,4 @@ export type { CreateSkillInput } from "./repositories/skills";
 export { CredentialRepository } from "./repositories/credentials";
 export type { CreateCredentialInput } from "./repositories/credentials";
 export { EventRepository } from "./repositories/events";
-export type { AppendEventInput } from "./repositories/events";
+export type { AppendEventInput, TailOptions } from "./repositories/events";

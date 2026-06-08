@@ -40,6 +40,39 @@ export const REVIEW_STATES = ["proposed", "accepted", "rejected"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
 
 /**
+ * The kernel's canonical event vocabulary. Every consequential action the kernel
+ * performs writes one of these to the append-only log, scoped to its `agentId`:
+ * agent + run lifecycle, memory writes (and firewall refusals), skill/credential
+ * changes, credential-value disclosures, and each trust-gate decision.
+ *
+ * The `events.type` column is itself a free string — an adapter may also log its
+ * own run-loop event types (`message_end`, `tool_execution_end`, …) through the
+ * same table — so this is the *kernel's own* set, kept as a single source of
+ * truth so emitters and readers agree, not an exhaustive constraint on the column.
+ *
+ * Payloads carry REFERENCES ONLY: a credential's key and `valueRef`, a
+ * capability key and effect class, a `memoryId`/`runId`. Never a secret value,
+ * never raw tool args — the event log records references, not plaintext.
+ */
+export const EVENT_TYPES = [
+  "agent.created",
+  "agent.trust_changed",
+  "run.started",
+  "run.status_changed",
+  "memory.recorded",
+  "memory.blocked",
+  "skill.attached",
+  "credential.added",
+  "credential.rotated",
+  "credential.removed",
+  "secret.read",
+  "action.executed",
+  "action.withheld",
+  "action.awaiting_confirmation",
+] as const;
+export type EventType = (typeof EVENT_TYPES)[number];
+
+/**
  * Assert that `value` is one of `allowed`, returning it narrowed. Throws a clear
  * error otherwise. The single chokepoint for enum validation on the write path —
  * the storage layer never trusts the TypeScript type alone, mirroring how it
