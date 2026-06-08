@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsterismStore } from "./store";
-import type { Agent } from "./types";
+import type { Agent, MemoryType, RunStatus, TrustLevel } from "./types";
 
 let store: AsterismStore;
 let alice: Agent;
@@ -190,5 +190,75 @@ describe("isolation — the agent is the boundary", () => {
     expect(store.credentials.getByKey(bob.id, "GITHUB_TOKEN")?.valueRef).toBe(
       "secret://bob/GITHUB_TOKEN",
     );
+  });
+});
+
+describe("write-path validation & state semantics", () => {
+  test("invalid enum values are rejected at the write boundary", () => {
+    expect(() =>
+      store.agents.create({
+        name: "x",
+        role: "y",
+        soulRef: "z",
+        workspaceDir: "/tmp/x",
+        trustLevel: "bogus" as unknown as TrustLevel,
+      }),
+    ).toThrow(/invalid trustLevel/);
+    expect(() =>
+      store.agents.setTrustLevel(alice.id, "nope" as unknown as TrustLevel),
+    ).toThrow(/invalid trustLevel/);
+
+    const run = store.runs.create(alice.id, { input: "t" });
+    expect(() =>
+      store.runs.setStatus(alice.id, run.id, "weird" as unknown as RunStatus),
+    ).toThrow(/invalid run status/);
+    expect(() =>
+      store.memories.create(alice.id, {
+        memoryType: "nope" as unknown as MemoryType,
+        content: "c",
+      }),
+    ).toThrow(/invalid memoryType/);
+  });
+
+  test("setStatus stamps finished_at on terminal, keeps first finish, clears on non-terminal", () => {
+    const run = store.runs.create(alice.id, { input: "t" });
+    expect(run.finishedAt).toBeUndefined();
+
+    const done = store.runs.setStatus(alice.id, run.id, "done");
+    const firstFinish = done?.finishedAt;
+    expect(firstFinish).toBeDefined();
+
+    // A redundant terminal re-set must not mutate the recorded finish time.
+    const doneAgain = store.runs.setStatus(alice.id, run.id, "done");
+    expect(doneAgain?.finishedAt).toBe(firstFinish as string);
+
+    // Returning to a non-terminal state clears the stale stamp.
+    const running = store.runs.setStatus(alice.id, run.id, "running");
+    expect(running?.status).toBe("running");
+    expect(running?.finishedAt).toBeUndefined();
+  });
+
+  test("secrets add is idempotent — re-adding a key rotates its valueRef, no throw", () => {
+    const first = store.credentials.create(alice.id, {
+      key: "API",
+      valueRef: "secret://alice/API#1",
+    });
+    const second = store.credentials.create(alice.id, {
+      key: "API",
+      valueRef: "secret://alice/API#2",
+    });
+    expect(second.id).toBe(first.id); // same credential identity, rotated value
+    expect(store.credentials.getByKey(alice.id, "API")?.valueRef).toBe(
+      "secret://alice/API#2",
+    );
+    expect(store.credentials.list(alice.id).filter((c) => c.key === "API")).toHaveLength(1);
+  });
+
+  test("list() preserves insertion order even for same-millisecond writes", () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      ids.push(store.events.append(alice.id, { type: `e${i}`, payload: { i } }).id);
+    }
+    expect(store.events.list(alice.id).map((e) => e.id)).toEqual(ids);
   });
 });

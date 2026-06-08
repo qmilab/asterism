@@ -54,10 +54,37 @@ export interface ToolRegistry {
   list(): readonly ScopedTool[];
 }
 
-/** Build a frozen, read-only registry from an explicit set of scoped tools. */
+/** Recursively freeze a plain-data value (objects/arrays). Functions are left as-is. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * Build a deeply-frozen, read-only registry from an explicit set of scoped
+ * tools. The snapshot is independent of the caller's objects and immutable: the
+ * substrate can neither grow the set nor mutate a tool's descriptor or
+ * `inputSchema` to widen what the model is offered, and reused `ScopedTool`
+ * instances cannot bleed state across runs. Only `execute` is kept by reference
+ * — it is the kernel's closure, opaque to the adapter.
+ */
 export function createToolRegistry(tools: readonly ScopedTool[]): ToolRegistry {
-  const snapshot = Object.freeze([...tools]);
-  return { list: () => snapshot };
+  const snapshot: readonly ScopedTool[] = Object.freeze(
+    tools.map((tool) =>
+      Object.freeze({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: deepFreeze(structuredClone(tool.inputSchema)),
+        execute: tool.execute,
+      }),
+    ),
+  );
+  return Object.freeze({ list: () => snapshot });
 }
 
 /**
@@ -82,8 +109,11 @@ export interface RunRequest {
 }
 
 /**
- * A single lifecycle event emitted during a run. JSON-serializable and free of
- * secret values — the kernel may append it to the event log verbatim.
+ * A single lifecycle event emitted during a run. Payloads are content-free,
+ * JSON-serializable references — event type, counts, tool names/ids — never
+ * transcript text or secret values. The agent's actual output is delivered
+ * through `RunOutput`, not the event stream, so the kernel may append these to
+ * the event log verbatim without leaking what a run read or produced.
  */
 export interface RunEvent {
   type: string;

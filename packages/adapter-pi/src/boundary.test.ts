@@ -8,6 +8,9 @@ import { join } from "node:path";
 
 const PACKAGES_DIR = join(import.meta.dir, "..", "..");
 const PI_IMPORT = /["']@earendil-works\//;
+// Any TypeScript source extension, anywhere in a package (not just src/), so a
+// Pi import can't slip in via a .mts/.cts/.tsx file or an out-of-src location.
+const TS_SOURCE = /\.(ts|mts|cts|tsx)$/;
 
 function tsSources(dir: string): string[] {
   const files: string[] = [];
@@ -15,7 +18,7 @@ function tsSources(dir: string): string[] {
     if (entry === "node_modules" || entry === "dist") continue;
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) files.push(...tsSources(full));
-    else if (entry.endsWith(".ts")) files.push(full);
+    else if (TS_SOURCE.test(entry)) files.push(full);
   }
   return files;
 }
@@ -25,12 +28,13 @@ describe("adapter boundary", () => {
     const offenders: string[] = [];
     for (const pkg of readdirSync(PACKAGES_DIR)) {
       if (pkg === "adapter-pi") continue;
-      const srcDir = join(PACKAGES_DIR, pkg, "src");
+      const pkgDir = join(PACKAGES_DIR, pkg);
       let files: string[];
       try {
-        files = tsSources(srcDir);
+        if (!statSync(pkgDir).isDirectory()) continue;
+        files = tsSources(pkgDir);
       } catch {
-        continue; // package has no src/ yet
+        continue; // not a package directory
       }
       for (const file of files) {
         if (PI_IMPORT.test(readFileSync(file, "utf8"))) offenders.push(file);
