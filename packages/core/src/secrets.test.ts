@@ -1,0 +1,144 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { AsterismStore } from "./store";
+import { secretValueRef } from "./secrets";
+import type { Agent } from "./types";
+
+let store: AsterismStore;
+let alice: Agent;
+let bob: Agent;
+
+beforeEach(() => {
+  store = AsterismStore.open(":memory:");
+  alice = store.agents.create({
+    name: "alice",
+    role: "personal helper",
+    soulRef: "casual-helper",
+    workspaceDir: "/tmp/alice",
+    trustLevel: "autonomous",
+  });
+  bob = store.agents.create({
+    name: "bob",
+    role: "careful consultant",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/bob",
+    trustLevel: "propose",
+  });
+});
+
+afterEach(() => {
+  store.close();
+});
+
+describe("secret store — issue / read round-trip", () => {
+  test("issue returns a ref, never the value; read resolves it", () => {
+    const ref = store.secrets.issue(alice.id, "GITHUB_TOKEN", "ghp_realsecret");
+    expect(ref.valueRef).toBe(secretValueRef(alice.id, "GITHUB_TOKEN"));
+    expect(ref.key).toBe("GITHUB_TOKEN");
+    // The returned ref object carries no value field at all.
+    expect("value" in (ref as Record<string, unknown>)).toBe(false);
+
+    expect(store.secrets.read(alice.id, ref.valueRef)).toBe("ghp_realsecret");
+    expect(store.secrets.readByKey(alice.id, "GITHUB_TOKEN")).toBe(
+      "ghp_realsecret",
+    );
+  });
+
+  test("re-issuing a key rotates the value in place (idempotent add)", () => {
+    const first = store.secrets.issue(alice.id, "API", "v1");
+    const second = store.secrets.issue(alice.id, "API", "v2");
+    expect(second.valueRef).toBe(first.valueRef);
+    expect(store.secrets.readByKey(alice.id, "API")).toBe("v2");
+    expect(store.secrets.list(alice.id).filter((r) => r.key === "API")).toHaveLength(1);
+  });
+
+  test("has / list / delete operate without exposing values", () => {
+    store.secrets.issue(alice.id, "A", "secret-a");
+    store.secrets.issue(alice.id, "B", "secret-b");
+
+    expect(store.secrets.has(alice.id, "A")).toBe(true);
+    expect(store.secrets.has(alice.id, "Z")).toBe(false);
+
+    const listed = store.secrets.list(alice.id);
+    expect(listed.map((r) => r.key).sort()).toEqual(["A", "B"]);
+    // No value ever appears in a listed ref.
+    for (const ref of listed) {
+      expect(JSON.stringify(ref)).not.toContain("secret-a");
+      expect(JSON.stringify(ref)).not.toContain("secret-b");
+    }
+
+    expect(store.secrets.delete(alice.id, "A")).toBe(true);
+    expect(store.secrets.has(alice.id, "A")).toBe(false);
+    expect(store.secrets.delete(alice.id, "A")).toBe(false);
+  });
+});
+
+describe("secret store — agent is the boundary", () => {
+  test("an agentId is required for every secret operation", () => {
+    expect(() => store.secrets.issue("", "K", "v")).toThrow();
+    expect(() => store.secrets.read("", "secret://x/K")).toThrow();
+    expect(() => store.secrets.readByKey("", "K")).toThrow();
+    expect(() => store.secrets.has("", "K")).toThrow();
+    expect(() => store.secrets.list("")).toThrow();
+    expect(() => store.secrets.delete("", "K")).toThrow();
+    // A key is also required at issue time.
+    expect(() => store.secrets.issue(alice.id, "", "v")).toThrow();
+  });
+
+  test("bob cannot read alice's secret by ref or by key", () => {
+    const ref = store.secrets.issue(alice.id, "GITHUB_TOKEN", "ghp_alice");
+
+    // Cross-agent read of a valid ref minted for alice returns undefined.
+    expect(store.secrets.read(bob.id, ref.valueRef)).toBeUndefined();
+    expect(store.secrets.readByKey(bob.id, "GITHUB_TOKEN")).toBeUndefined();
+    expect(store.secrets.has(bob.id, "GITHUB_TOKEN")).toBe(false);
+    expect(store.secrets.list(bob.id)).toEqual([]);
+
+    // Even guessing/forging alice's ref shape does not help bob.
+    expect(
+      store.secrets.read(bob.id, secretValueRef(alice.id, "GITHUB_TOKEN")),
+    ).toBeUndefined();
+
+    // Alice still reads her own.
+    expect(store.secrets.read(alice.id, ref.valueRef)).toBe("ghp_alice");
+  });
+
+  test("same key in two agents stays distinct and isolated", () => {
+    store.secrets.issue(alice.id, "GITHUB_TOKEN", "ghp_alice");
+    store.secrets.issue(bob.id, "GITHUB_TOKEN", "ghp_bob");
+    expect(store.secrets.readByKey(alice.id, "GITHUB_TOKEN")).toBe("ghp_alice");
+    expect(store.secrets.readByKey(bob.id, "GITHUB_TOKEN")).toBe("ghp_bob");
+  });
+});
+
+describe("addCredential — plaintext never reaches the credential row or log", () => {
+  test("the credential carries only a valueRef; the value is read-only via the store", () => {
+    const cred = store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_plaintext");
+
+    // The returned credential is reference-only — no plaintext anywhere on it.
+    expect(cred.key).toBe("GITHUB_TOKEN");
+    expect(cred.valueRef).toBe(secretValueRef(alice.id, "GITHUB_TOKEN"));
+    expect(JSON.stringify(cred)).not.toContain("ghp_plaintext");
+
+    // The persisted credential row is likewise value-free.
+    const persisted = store.credentials.getByKey(alice.id, "GITHUB_TOKEN");
+    expect(JSON.stringify(persisted)).not.toContain("ghp_plaintext");
+
+    // The plaintext is recoverable only through the scoped secret store.
+    expect(store.secrets.read(alice.id, cred.valueRef)).toBe("ghp_plaintext");
+
+    // And an event recording this action would reference, never carry, the value.
+    const evt = store.events.append(alice.id, {
+      type: "secret.added",
+      payload: { key: cred.key, valueRef: cred.valueRef },
+    });
+    expect(JSON.stringify(store.events.get(alice.id, evt.id))).not.toContain(
+      "ghp_plaintext",
+    );
+  });
+
+  test("bob cannot resolve the value behind alice's credential ref", () => {
+    const cred = store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_alice");
+    expect(store.secrets.read(bob.id, cred.valueRef)).toBeUndefined();
+    expect(store.credentials.getByKey(bob.id, "GITHUB_TOKEN")).toBeUndefined();
+  });
+});

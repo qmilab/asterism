@@ -7,6 +7,7 @@ import {
   REVIEW_STATES,
   validateEnum,
 } from "../types";
+import { assertMemorySafe } from "../firewall";
 import { requireAgentId } from "./scope";
 
 export interface CreateMemoryInput {
@@ -39,6 +40,9 @@ export class MemoryRepository {
 
   create(agentId: string, input: CreateMemoryInput): Memory {
     requireAgentId(agentId);
+    // The memory firewall screens every inbound write before persistence — there
+    // is no create path that bypasses it. Throws MemoryFirewallError on a hit.
+    assertMemorySafe(input.content);
     validateEnum(input.memoryType, MEMORY_TYPES, "memoryType");
     const status = input.status ?? "active";
     validateEnum(status, MEMORY_STATUSES, "memory status");
