@@ -123,7 +123,13 @@ export class SecretStore {
       .map(mapRef);
   }
 
-  /** Remove an agent's secret by key. Returns true if a row was deleted. */
+  /**
+   * Remove an agent's secret by key. Returns true if a row was deleted. This is
+   * the low-level primitive for *standalone* secrets; a secret backing a
+   * credential row must be removed via {@link AsterismStore.removeCredential},
+   * which drops both halves together so the credential cannot be left pointing at
+   * a valueRef that no longer resolves.
+   */
   delete(agentId: string, key: string): boolean {
     requireAgentId(agentId);
     const before = this.has(agentId, key);

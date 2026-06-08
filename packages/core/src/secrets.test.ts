@@ -142,3 +142,42 @@ describe("addCredential — plaintext never reaches the credential row or log", 
     expect(store.credentials.getByKey(bob.id, "GITHUB_TOKEN")).toBeUndefined();
   });
 });
+
+describe("removeCredential — both tables stay in sync", () => {
+  test("removing a credential drops the metadata row and the plaintext together", () => {
+    const cred = store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_alice");
+    // Precondition: both halves present.
+    expect(store.credentials.getByKey(alice.id, "GITHUB_TOKEN")).toBeDefined();
+    expect(store.secrets.read(alice.id, cred.valueRef)).toBe("ghp_alice");
+
+    expect(store.removeCredential(alice.id, "GITHUB_TOKEN")).toBe(true);
+
+    // Neither half survives — no credential pointing at an unresolvable valueRef,
+    // no orphaned secret.
+    expect(store.credentials.getByKey(alice.id, "GITHUB_TOKEN")).toBeUndefined();
+    expect(store.credentials.list(alice.id)).toEqual([]);
+    expect(store.secrets.read(alice.id, cred.valueRef)).toBeUndefined();
+    expect(store.secrets.readByKey(alice.id, "GITHUB_TOKEN")).toBeUndefined();
+    expect(store.secrets.has(alice.id, "GITHUB_TOKEN")).toBe(false);
+  });
+
+  test("removeCredential reports false when nothing existed", () => {
+    expect(store.removeCredential(alice.id, "NOPE")).toBe(false);
+  });
+
+  test("removing alice's credential leaves bob's identically-keyed one intact", () => {
+    store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_alice");
+    const bobCred = store.addCredential(bob.id, "GITHUB_TOKEN", "ghp_bob");
+
+    store.removeCredential(alice.id, "GITHUB_TOKEN");
+
+    expect(store.credentials.getByKey(bob.id, "GITHUB_TOKEN")?.id).toBe(bobCred.id);
+    expect(store.secrets.read(bob.id, bobCred.valueRef)).toBe("ghp_bob");
+  });
+
+  test("credentials.deleteByKey is scoped — bob cannot delete alice's row", () => {
+    store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_alice");
+    expect(store.credentials.deleteByKey(bob.id, "GITHUB_TOKEN")).toBe(false);
+    expect(store.credentials.getByKey(alice.id, "GITHUB_TOKEN")).toBeDefined();
+  });
+});

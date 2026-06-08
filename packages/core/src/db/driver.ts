@@ -18,5 +18,12 @@ export interface SqlStatement {
 export interface SqlDriver {
   exec(sql: string): void;
   prepare(sql: string): SqlStatement;
+  /**
+   * Run `fn` inside a single transaction: its writes commit together on success
+   * and roll back together if `fn` throws. The kernel uses this to keep paired
+   * tables consistent (e.g. a credential row and its secret row), so a delete can
+   * never leave one half behind.
+   */
+  transaction<T>(fn: () => T): T;
   close(): void;
 }

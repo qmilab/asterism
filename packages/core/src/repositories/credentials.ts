@@ -66,4 +66,18 @@ export class CredentialRepository {
       .all([agentId])
       .map(mapCredential);
   }
+
+  /**
+   * Remove the credential metadata for an agent's key. Returns true if a row was
+   * deleted. This drops only the reference row — the plaintext lives in the secret
+   * store; use {@link AsterismStore.removeCredential} to remove both together.
+   */
+  deleteByKey(agentId: string, key: string): boolean {
+    requireAgentId(agentId);
+    const existed = this.getByKey(agentId, key) !== undefined;
+    this.driver
+      .prepare(`DELETE FROM credentials WHERE key = ? AND agent_id = ?`)
+      .run([key, agentId]);
+    return existed;
+  }
 }

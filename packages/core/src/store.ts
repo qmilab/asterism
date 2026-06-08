@@ -48,6 +48,21 @@ export class AsterismStore {
     return this.credentials.create(agentId, { key, valueRef: ref.valueRef });
   }
 
+  /**
+   * Remove an agent-scoped credential — the symmetric counterpart to
+   * {@link addCredential}. Drops the credential metadata row AND its plaintext in
+   * the secret store within one transaction, so the two tables can never drift:
+   * there is no path that leaves a credential whose `valueRef` no longer resolves,
+   * nor an orphaned secret. Returns true if a credential row existed.
+   */
+  removeCredential(agentId: string, key: string): boolean {
+    return this.driver.transaction(() => {
+      const existed = this.credentials.deleteByKey(agentId, key);
+      this.secrets.delete(agentId, key);
+      return existed;
+    });
+  }
+
   /** Open a store backed by a local SQLite database (in-memory by default). */
   static open(path?: string): AsterismStore {
     return new AsterismStore(openDatabase(path));
