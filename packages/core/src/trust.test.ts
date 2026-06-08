@@ -71,6 +71,8 @@ describe("classifyEffect — explicit, escalate-only classification", () => {
     "file removal (rm)": "rm secret.txt",
     "directory removal (rmdir)": "rmdir build",
     "file move/rename (mv)": "mv a.txt b.txt",
+    "file overwrite (cp/dd/truncate)": "cp -f new notes.md",
+    "tee overwrite (no --append)": "cat x | tee notes.md",
     "truncating redirect (>)": "echo hi > notes.md",
     "git reset --hard": "git reset --hard HEAD~1",
     "git force-push": "git push origin main --force",
@@ -206,6 +208,23 @@ describe("classifyEffect — explicit, escalate-only classification", () => {
     ).toBe("package install script");
     // The executable alone, with a benign vector, is not escalated.
     expect(matchDestructiveCommand({ command: "git", args: ["status"] })).toBeUndefined();
+  });
+
+  test("overwrite commands without a redirect are destructive; append-tee is not", () => {
+    expect(matchDestructiveCommand("truncate -s 0 notes.md")).toBe(
+      "file overwrite (cp/dd/truncate)",
+    );
+    expect(matchDestructiveCommand("dd if=/dev/zero of=notes.md")).toBe(
+      "file overwrite (cp/dd/truncate)",
+    );
+    expect(matchDestructiveCommand("cp new notes.md")).toBe(
+      "file overwrite (cp/dd/truncate)",
+    );
+    expect(matchDestructiveCommand("cat x | tee notes.md")).toBe(
+      "tee overwrite (no --append)",
+    );
+    // tee in append mode is not a truncating overwrite.
+    expect(matchDestructiveCommand("cat x | tee -a notes.md")).toBeUndefined();
   });
 
   test("a force push via leading-+ refspec is destructive", () => {

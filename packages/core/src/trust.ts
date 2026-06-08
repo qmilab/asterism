@@ -102,6 +102,11 @@ export const DESTRUCTIVE_COMMAND_RULES: readonly {
   { name: "file removal (rm)", pattern: /\brm\b/ },
   { name: "directory removal (rmdir)", pattern: /\brmdir\b/ },
   { name: "file move/rename (mv)", pattern: /\bmv\b/ },
+  // Commands that overwrite/clobber file contents without a `>` redirect.
+  // `cp` overwrites its destination by default, `dd` and `truncate` rewrite in
+  // place. `tee` writes to a file too — flagged unless it is appending (`-a`).
+  { name: "file overwrite (cp/dd/truncate)", pattern: /\b(cp|dd|truncate)\b/ },
+  { name: "tee overwrite (no --append)", pattern: /\btee\b(?![^\n]*(?:\s-a\b|--append\b))/ },
   // A truncating `>` redirect, including one that opens the command (`> file`),
   // but not append (`>>`) or fd-duplication (`2>&1`).
   { name: "truncating redirect (>)", pattern: /(?:^|[^|>&])>(?![>&])/ },
