@@ -165,6 +165,16 @@ describe("removeCredential — both tables stay in sync", () => {
     expect(store.removeCredential(alice.id, "NOPE")).toBe(false);
   });
 
+  test("a no-op removal leaves an unrelated standalone secret untouched", () => {
+    // A secret issued directly, with no credential row backing it.
+    store.secrets.issue(alice.id, "STANDALONE", "keep-me");
+
+    // Removing a credential for that key is a no-op — there is no credential —
+    // and must NOT destroy the standalone secret.
+    expect(store.removeCredential(alice.id, "STANDALONE")).toBe(false);
+    expect(store.secrets.readByKey(alice.id, "STANDALONE")).toBe("keep-me");
+  });
+
   test("removing alice's credential leaves bob's identically-keyed one intact", () => {
     store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_alice");
     const bobCred = store.addCredential(bob.id, "GITHUB_TOKEN", "ghp_bob");
