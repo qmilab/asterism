@@ -87,12 +87,12 @@ export interface Action {
  * `effect: "destructive"` directly. This table covers the in-shell cases a
  * single declared effect cannot capture.
  */
-// Git accepts global options between `git` and the subcommand
-// (`git -C <path> …`, `git -c k=v …`, `git --git-dir=… …`, `--no-pager`, …). A
-// run of such option tokens (each optionally taking one argument) must not let a
-// destructive subcommand slip past the gate — `git -C repo reset --hard` is just
-// as destructive as `git reset --hard`. This fragment matches that leading run.
-const GIT_OPTS = "(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*";
+// Many CLIs accept global options between the executable and the subcommand
+// (`git -C <path> reset …`, `git -c k=v …`, `npm --prefix web install`,
+// `pip --disable-pip-version-check install …`). A run of such option tokens
+// (each optionally taking one non-flag argument) must not let a destructive
+// subcommand slip past the gate. This fragment matches that leading run.
+const LEADING_OPTS = "(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*";
 
 export const DESTRUCTIVE_COMMAND_RULES: readonly {
   readonly name: string;
@@ -102,19 +102,22 @@ export const DESTRUCTIVE_COMMAND_RULES: readonly {
   { name: "file removal (rm)", pattern: /\brm\b/ },
   { name: "directory removal (rmdir)", pattern: /\brmdir\b/ },
   { name: "file move/rename (mv)", pattern: /\bmv\b/ },
-  // A truncating `>` redirect, but not append (`>>`) or fd-duplication (`2>&1`).
-  { name: "truncating redirect (>)", pattern: /[^|>&]>(?![>&])/ },
-  // Destructive git history / remote operations. `GIT_OPTS` tolerates leading
+  // A truncating `>` redirect, including one that opens the command (`> file`),
+  // but not append (`>>`) or fd-duplication (`2>&1`).
+  { name: "truncating redirect (>)", pattern: /(?:^|[^|>&])>(?![>&])/ },
+  // Destructive git history / remote operations. `LEADING_OPTS` tolerates
   // global options (e.g. `-C repo`) before the subcommand.
-  { name: "git reset --hard", pattern: new RegExp(`\\bgit${GIT_OPTS}\\s+reset\\b[^\\n]*--hard\\b`) },
-  { name: "git force-push", pattern: new RegExp(`\\bgit${GIT_OPTS}\\s+push\\b[^\\n]*(--force\\b|--force-with-lease\\b|\\s-f\\b)`) },
-  { name: "git branch delete", pattern: new RegExp(`\\bgit${GIT_OPTS}\\s+branch\\b[^\\n]*(\\s-D\\b|\\s-d\\b|--delete\\b)`) },
-  { name: "git rebase (history rewrite)", pattern: new RegExp(`\\bgit${GIT_OPTS}\\s+rebase\\b`) },
-  { name: "git clean (delete untracked)", pattern: new RegExp(`\\bgit${GIT_OPTS}\\s+clean\\b`) },
+  { name: "git reset --hard", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+reset\\b[^\\n]*--hard\\b`) },
+  { name: "git force-push", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+push\\b[^\\n]*(--force\\b|--force-with-lease\\b|\\s-f\\b)`) },
+  { name: "git branch delete", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+branch\\b[^\\n]*(\\s-D\\b|\\s-d\\b|--delete\\b)`) },
+  { name: "git rebase (history rewrite)", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+rebase\\b`) },
+  { name: "git clean (delete untracked)", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+clean\\b`) },
   // Running install / untrusted shell scripts. `npm ci` also runs lifecycle
-  // install scripts, so it belongs here alongside install/add/i.
-  { name: "package install script", pattern: /\b(npm|pnpm|yarn|bun|pip|pip3|gem|cargo|brew)\s+(install|add|i|ci)\b/ },
-  { name: "piped remote shell (curl|wget → sh)", pattern: /\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(sh|bash|zsh)\b/ },
+  // install scripts; `LEADING_OPTS` catches options before the subcommand
+  // (`npm --prefix web install`, `pnpm -C app install`).
+  { name: "package install script", pattern: new RegExp(`\\b(npm|pnpm|yarn|bun|pip|pip3|gem|cargo|brew)${LEADING_OPTS}\\s+(install|add|i|ci)\\b`) },
+  // A remote script piped to a shell, including a path-qualified one (`| /bin/bash`).
+  { name: "piped remote shell (curl|wget → sh)", pattern: /\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(?:[^\s|]*\/)?(sh|bash|zsh)\b/ },
 ] as const;
 
 /**
