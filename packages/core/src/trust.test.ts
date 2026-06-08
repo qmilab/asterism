@@ -194,6 +194,29 @@ describe("classifyEffect — explicit, escalate-only classification", () => {
     expect(matchDestructiveCommand(undefined)).toBeUndefined();
   });
 
+  test("an executable split from its argument vector is scanned in full", () => {
+    expect(matchDestructiveCommand({ command: "git", args: ["reset", "--hard"] })).toBe(
+      "git reset --hard",
+    );
+    expect(matchDestructiveCommand({ cmd: "rm", args: ["-rf", "dist"] })).toBe(
+      "file removal (rm)",
+    );
+    expect(
+      matchDestructiveCommand({ command: "npm", arguments: ["ci"] }),
+    ).toBe("package install script");
+    // The executable alone, with a benign vector, is not escalated.
+    expect(matchDestructiveCommand({ command: "git", args: ["status"] })).toBeUndefined();
+  });
+
+  test("a force push via leading-+ refspec is destructive", () => {
+    expect(matchDestructiveCommand("git push origin +main")).toBe("git force-push");
+    expect(matchDestructiveCommand("git push origin +HEAD:main")).toBe(
+      "git force-push",
+    );
+    // A plain push of a +-free refspec is not.
+    expect(matchDestructiveCommand("git push origin main")).toBeUndefined();
+  });
+
   test("isDestructive agrees with classifyEffect", () => {
     expect(isDestructive({ capability: "shell", effect: "write", args: "rm x" })).toBe(
       true,
@@ -250,6 +273,26 @@ describe("decideGate — the policy in one table", () => {
 // --- 3. resolveToolRegistry — the gate proven through real invocations ------
 
 describe("resolveToolRegistry — exposure filter + the gate, end to end", () => {
+  test("the resolved registry snapshots policy; later mutation cannot widen it", async () => {
+    const del = spyTool("delete");
+    const profile = trustProfile({
+      level: "autonomous",
+      capabilities: ["fs.delete"],
+    });
+    const cap = capability("fs.delete", "destructive", del.tool);
+    const registry = resolveToolRegistry(profile, [cap]);
+
+    // Mutate every policy input after the registry was resolved.
+    (profile.autoApprove as Set<string>).add("fs.delete"); // would skip confirmation
+    (profile as { level: string }).level = "notify";
+    (cap as { effect: string }).effect = "read"; // would dodge the gate entirely
+    (cap as { key: string }).key = "renamed";
+
+    const out = await invoke(registry, "delete", { path: "dist/" });
+    expect(del.calls).toHaveLength(0); // still gated as destructive
+    expect(out).toContain("[awaiting confirmation]");
+  });
+
   test("confined by default: only allow-listed capabilities are exposed", () => {
     const read = spyTool("read");
     const del = spyTool("delete");

@@ -108,7 +108,9 @@ export const DESTRUCTIVE_COMMAND_RULES: readonly {
   // Destructive git history / remote operations. `LEADING_OPTS` tolerates
   // global options (e.g. `-C repo`) before the subcommand.
   { name: "git reset --hard", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+reset\\b[^\\n]*--hard\\b`) },
-  { name: "git force-push", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+push\\b[^\\n]*(--force\\b|--force-with-lease\\b|\\s-f\\b)`) },
+  // Force push via flag (`--force`/`--force-with-lease`/`-f`) or a leading-`+`
+  // refspec (`git push origin +main`, `git push origin +HEAD:main`).
+  { name: "git force-push", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+push\\b[^\\n]*(--force\\b|--force-with-lease\\b|\\s-f\\b|\\s\\+\\S)`) },
   { name: "git branch delete", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+branch\\b[^\\n]*(\\s-D\\b|\\s-d\\b|--delete\\b)`) },
   // Remote branch deletion: `git push … --delete branch`, `git push … -d branch`,
   // or the colon refspec `git push origin :branch` (space before the colon, so a
@@ -128,23 +130,40 @@ export const DESTRUCTIVE_COMMAND_RULES: readonly {
   { name: "piped remote shell (curl|wget → sh)", pattern: /\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(?:[^\s|]*\/)?(sh|bash|zsh)\b/ },
 ] as const;
 
+/** Flatten a field that may be a string or an array of tokens into one string. */
+function tokensOf(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(String).join(" ");
+  return undefined;
+}
+
 /**
- * Extract a candidate command string from an action's arguments. The kernel does
- * not assume a single tool shape: it inspects the common `command` / `cmd` /
- * `script` fields and falls back to a string argument. Returns `undefined` when
- * there is nothing string-like to scan.
+ * Build a candidate command string from an action's arguments. The kernel does
+ * not assume a single tool shape: it reads the executable / command-line field
+ * (`command` / `cmd` / `script` / `argv`) AND a companion argument vector
+ * (`args` / `arguments`) and joins them, so a split schema like
+ * `{ command: "git", args: ["reset", "--hard"] }` is scanned in full rather than
+ * seeing only `git`. Returns `undefined` when there is nothing string-like.
  */
 function commandText(args: unknown): string | undefined {
   if (typeof args === "string") return args;
-  if (args !== null && typeof args === "object") {
-    const record = args as Record<string, unknown>;
-    for (const field of ["command", "cmd", "script", "argv"] as const) {
-      const value = record[field];
-      if (typeof value === "string") return value;
-      if (Array.isArray(value)) return value.map(String).join(" ");
+  if (args === null || typeof args !== "object") return undefined;
+  const record = args as Record<string, unknown>;
+  const parts: string[] = [];
+  // The executable or full command line (first matching field wins).
+  for (const field of ["command", "cmd", "script", "argv"] as const) {
+    const text = tokensOf(record[field]);
+    if (text !== undefined) {
+      parts.push(text);
+      break;
     }
   }
-  return undefined;
+  // A companion argument vector some schemas keep separate from the executable.
+  for (const field of ["args", "arguments"] as const) {
+    const text = tokensOf(record[field]);
+    if (text !== undefined) parts.push(text);
+  }
+  return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
 /**
@@ -341,6 +360,11 @@ function gateTool(
   hooks: TrustHooks,
 ): ScopedTool {
   const { tool } = capability;
+  // Snapshot the capability's policy-bearing fields at resolution time. The gate
+  // closure must decide from what was scoped for this run, not from a `Capability`
+  // object the caller could later mutate to soften `effect` or rename `key`.
+  const key = capability.key;
+  const effect = capability.effect;
   return {
     name: tool.name,
     description: tool.description,
@@ -350,15 +374,15 @@ function gateTool(
       signal?: AbortSignal,
     ): Promise<ToolResult> => {
       const action: Action = {
-        capability: capability.key,
-        effect: capability.effect,
+        capability: key,
+        effect,
         ...(invocation.args !== undefined ? { args: invocation.args } : {}),
       };
       const decision = decideGate(profile, action);
 
       if (decision === "withhold") {
         hooks.onWithhold?.(action);
-        return withheldResult(capability.key);
+        return withheldResult(key);
       }
 
       if (decision === "confirm") {
@@ -369,9 +393,9 @@ function gateTool(
           // controller suspends the agent loop so it cannot proceed to other
           // side-effecting tools while the action waits on a human.
           hooks.abortController?.abort(
-            new Error(`destructive action requires confirmation: ${capability.key}`),
+            new Error(`destructive action requires confirmation: ${key}`),
           );
-          return awaitingConfirmationResult(capability.key);
+          return awaitingConfirmationResult(key);
         }
         // Explicitly confirmed: fall through to execute. The audit hook still
         // fires so the now-permitted destructive action is recorded.
@@ -396,14 +420,24 @@ function gateTool(
  * The result is a frozen, independent {@link ToolRegistry} (via
  * `createToolRegistry`): the substrate can neither grow the set nor widen a
  * schema, and the gate cannot be unwrapped from outside the closure.
+ *
+ * The policy itself is also snapshotted: the profile (level + private copies of
+ * both allow-list Sets) and each capability's `key`/`effect` are captured at
+ * resolution time, so mutating the caller's `profile` or `Capability` objects
+ * afterward cannot change what an already-scoped run is allowed to do.
  */
 export function resolveToolRegistry(
   profile: TrustProfile,
   capabilities: readonly Capability[],
   hooks: TrustHooks = {},
 ): ToolRegistry {
+  const snapshot: TrustProfile = Object.freeze({
+    level: profile.level,
+    capabilities: new Set(profile.capabilities),
+    autoApprove: new Set(profile.autoApprove),
+  });
   const exposed = capabilities.filter((cap) =>
-    profile.capabilities.has(cap.key),
+    snapshot.capabilities.has(cap.key),
   );
-  return createToolRegistry(exposed.map((cap) => gateTool(profile, cap, hooks)));
+  return createToolRegistry(exposed.map((cap) => gateTool(snapshot, cap, hooks)));
 }
