@@ -86,6 +86,17 @@ export interface Action {
  * — they are purpose-built capabilities the kernel registers with
  * `effect: "destructive"` directly. This table covers the in-shell cases a
  * single declared effect cannot capture.
+ *
+ * SCOPE — this is a best-effort *denylist over arbitrary shell strings*, not the
+ * primary safety boundary. Arbitrary shell is unbounded: equivalent destructive
+ * effects can always be re-expressed (`python -c "open(p,'w')"`, `perl -e`,
+ * `busybox rm`, base64-decode-then-pipe, env-var indirection, an unlisted
+ * binary). Treat the two real guarantees as primary: (1) purpose-built
+ * capabilities declare `effect: "destructive"` so they never rely on
+ * string-matching, and (2) the trust profile's exposure allow-list decides
+ * whether a raw `shell`/`exec` tool is handed to the agent at all. These
+ * patterns are defense-in-depth for the case where one *is* exposed — extend the
+ * table when a common form is missed, but do not mistake it for a sandbox.
  */
 // Many CLIs accept global options between the executable and the subcommand
 // (`git -C <path> reset …`, `git -c k=v …`, `npm --prefix web install`,
