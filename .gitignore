@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+.bun/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# local runtime state & secrets
+.asterism/
+*.db
+*.db-journal
+*.sqlite
+.env
+.env.*
+
+# internal — strategy/positioning, not for the public repo
+CONTEXT_HANDOFF.md
+ROADMAP.md
+PROJECT_INSTRUCTIONS.md
+STARTER_PROMPTS.md
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/

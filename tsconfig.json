@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/adapter-pi" },
+    { "path": "packages/reflect" },
+    { "path": "packages/server" },
+    { "path": "packages/cli" }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@qmilab/asterism",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "asterism": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@qmilab/asterism-core": "workspace:*",
+    "@qmilab/asterism-adapter-pi": "workspace:*",
+    "@qmilab/asterism-reflect": "workspace:*",
+    "@qmilab/asterism-server": "workspace:*"
+  }
+}
