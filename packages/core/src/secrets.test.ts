@@ -175,6 +175,35 @@ describe("removeCredential — both tables stay in sync", () => {
     expect(store.secrets.readByKey(alice.id, "STANDALONE")).toBe("keep-me");
   });
 
+  test("drops the secret the credential references, even with a non-default valueRef", () => {
+    // A credential whose valueRef is NOT the key-derived default: the backing
+    // secret lives under key "BACKING", but the credential is keyed "API".
+    const backingRef = store.secrets.issue(alice.id, "BACKING", "real-value").valueRef;
+    store.credentials.create(alice.id, { key: "API", valueRef: backingRef });
+
+    expect(store.removeCredential(alice.id, "API")).toBe(true);
+
+    // The actual referenced plaintext is gone — not orphaned.
+    expect(store.secrets.read(alice.id, backingRef)).toBeUndefined();
+    expect(store.credentials.getByKey(alice.id, "API")).toBeUndefined();
+  });
+
+  test("does not delete an unrelated standalone secret that shares the credential's key", () => {
+    // Credential "TOKEN" references a CUSTOM ref; a separate standalone secret
+    // happens to be stored under key "TOKEN". Removing the credential must touch
+    // only what the credential references.
+    const customRef = store.secrets.issue(alice.id, "CUSTOM", "cred-value").valueRef;
+    store.credentials.create(alice.id, { key: "TOKEN", valueRef: customRef });
+    store.secrets.issue(alice.id, "TOKEN", "standalone-value");
+
+    expect(store.removeCredential(alice.id, "TOKEN")).toBe(true);
+
+    // The credential's own secret is gone…
+    expect(store.secrets.read(alice.id, customRef)).toBeUndefined();
+    // …but the unrelated standalone secret keyed "TOKEN" survives.
+    expect(store.secrets.readByKey(alice.id, "TOKEN")).toBe("standalone-value");
+  });
+
   test("removing alice's credential leaves bob's identically-keyed one intact", () => {
     store.addCredential(alice.id, "GITHUB_TOKEN", "ghp_alice");
     const bobCred = store.addCredential(bob.id, "GITHUB_TOKEN", "ghp_bob");

@@ -55,16 +55,20 @@ export class AsterismStore {
    * there is no path that leaves a credential whose `valueRef` no longer resolves,
    * nor an orphaned secret. Returns true if a credential row existed.
    *
-   * The secret is dropped ONLY when a credential row actually existed. A
-   * standalone secret (one created via `secrets.issue` without an accompanying
-   * credential) is not credential-backed, so a no-op `removeCredential` for an
-   * absent key must leave it untouched — use `secrets.delete` to remove those.
+   * The secret dropped is the exact one the credential references — identified by
+   * the row's stored `valueRef`, not by key — so a credential created with a
+   * non-default ref has its real plaintext removed, and an unrelated standalone
+   * secret that merely shares the key is left alone. When no credential row
+   * exists this is a no-op returning false, touching no secret (a standalone
+   * secret is removed via `secrets.delete`).
    */
   removeCredential(agentId: string, key: string): boolean {
     return this.driver.transaction(() => {
-      const existed = this.credentials.deleteByKey(agentId, key);
-      if (existed) this.secrets.delete(agentId, key);
-      return existed;
+      const cred = this.credentials.getByKey(agentId, key);
+      if (!cred) return false;
+      this.credentials.deleteByKey(agentId, key);
+      this.secrets.deleteByRef(agentId, cred.valueRef);
+      return true;
     });
   }
 

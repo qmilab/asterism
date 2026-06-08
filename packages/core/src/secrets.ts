@@ -127,8 +127,8 @@ export class SecretStore {
    * Remove an agent's secret by key. Returns true if a row was deleted. This is
    * the low-level primitive for *standalone* secrets; a secret backing a
    * credential row must be removed via {@link AsterismStore.removeCredential},
-   * which drops both halves together so the credential cannot be left pointing at
-   * a valueRef that no longer resolves.
+   * which targets the credential's stored `valueRef` so the right plaintext is
+   * dropped even when the ref is not the key-derived default.
    */
   delete(agentId: string, key: string): boolean {
     requireAgentId(agentId);
@@ -137,5 +137,25 @@ export class SecretStore {
       .prepare(`DELETE FROM secrets WHERE key = ? AND agent_id = ?`)
       .run([key, agentId]);
     return before;
+  }
+
+  /**
+   * Remove an agent's secret by its `value_ref`, scoped to the agent. This is the
+   * precise counterpart to a credential row, whose `valueRef` may be any string
+   * (e.g. created via `credentials.create` directly), not necessarily the
+   * key-derived default. Returns true if a row was deleted.
+   */
+  deleteByRef(agentId: string, valueRef: string): boolean {
+    requireAgentId(agentId);
+    const existed =
+      this.driver
+        .prepare(
+          `SELECT 1 AS present FROM secrets WHERE value_ref = ? AND agent_id = ?`,
+        )
+        .get([valueRef, agentId]) !== undefined;
+    this.driver
+      .prepare(`DELETE FROM secrets WHERE value_ref = ? AND agent_id = ?`)
+      .run([valueRef, agentId]);
+    return existed;
   }
 }
