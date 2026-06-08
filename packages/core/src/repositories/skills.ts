@@ -25,15 +25,15 @@ export class SkillRepository {
     requireAgentId(agentId);
     const id = randomUUID();
     const createdAt = new Date().toISOString();
-    this.driver
+    const row = this.driver
       .prepare(
         `INSERT INTO skills (id, agent_id, name, path, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?)
+         RETURNING *`,
       )
-      .run([id, agentId, input.name, input.path, createdAt]);
-    const created = this.get(agentId, id);
-    if (!created) throw new Error("skill insert did not persist");
-    return created;
+      .get([id, agentId, input.name, input.path, createdAt]);
+    if (!row) throw new Error("skill insert did not persist");
+    return mapSkill(row);
   }
 
   get(agentId: string, id: string): Skill | undefined {
@@ -47,7 +47,9 @@ export class SkillRepository {
   list(agentId: string): Skill[] {
     requireAgentId(agentId);
     return this.driver
-      .prepare(`SELECT * FROM skills WHERE agent_id = ? ORDER BY created_at ASC`)
+      .prepare(
+        `SELECT * FROM skills WHERE agent_id = ? ORDER BY created_at ASC, rowid ASC`,
+      )
       .all([agentId])
       .map(mapSkill);
   }

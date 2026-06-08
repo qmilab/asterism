@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow } from "../db/driver";
 import type { Memory, MemoryStatus, MemoryType, ReviewState } from "../types";
+import {
+  MEMORY_STATUSES,
+  MEMORY_TYPES,
+  REVIEW_STATES,
+  validateEnum,
+} from "../types";
 import { requireAgentId } from "./scope";
 
 export interface CreateMemoryInput {
@@ -33,28 +39,33 @@ export class MemoryRepository {
 
   create(agentId: string, input: CreateMemoryInput): Memory {
     requireAgentId(agentId);
+    validateEnum(input.memoryType, MEMORY_TYPES, "memoryType");
+    const status = input.status ?? "active";
+    validateEnum(status, MEMORY_STATUSES, "memory status");
+    const reviewState = input.reviewState ?? "accepted";
+    validateEnum(reviewState, REVIEW_STATES, "memory reviewState");
     const id = randomUUID();
     const createdAt = new Date().toISOString();
-    this.driver
+    const row = this.driver
       .prepare(
         `INSERT INTO memories
            (id, agent_id, memory_type, content, confidence, source_run_id, status, review_state, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING *`,
       )
-      .run([
+      .get([
         id,
         agentId,
         input.memoryType,
         input.content,
         input.confidence ?? 1,
         input.sourceRunId ?? null,
-        input.status ?? "active",
-        input.reviewState ?? "accepted",
+        status,
+        reviewState,
         createdAt,
       ]);
-    const created = this.get(agentId, id);
-    if (!created) throw new Error("memory insert did not persist");
-    return created;
+    if (!row) throw new Error("memory insert did not persist");
+    return mapMemory(row);
   }
 
   get(agentId: string, id: string): Memory | undefined {
@@ -68,7 +79,9 @@ export class MemoryRepository {
   list(agentId: string): Memory[] {
     requireAgentId(agentId);
     return this.driver
-      .prepare(`SELECT * FROM memories WHERE agent_id = ? ORDER BY created_at ASC`)
+      .prepare(
+        `SELECT * FROM memories WHERE agent_id = ? ORDER BY created_at ASC, rowid ASC`,
+      )
       .all([agentId])
       .map(mapMemory);
   }
@@ -79,11 +92,12 @@ export class MemoryRepository {
     reviewState: ReviewState,
   ): Memory | undefined {
     requireAgentId(agentId);
-    this.driver
+    validateEnum(reviewState, REVIEW_STATES, "memory reviewState");
+    const row = this.driver
       .prepare(
-        `UPDATE memories SET review_state = ? WHERE id = ? AND agent_id = ?`,
+        `UPDATE memories SET review_state = ? WHERE id = ? AND agent_id = ? RETURNING *`,
       )
-      .run([reviewState, id, agentId]);
-    return this.get(agentId, id);
+      .get([reviewState, id, agentId]);
+    return row ? mapMemory(row) : undefined;
   }
 }

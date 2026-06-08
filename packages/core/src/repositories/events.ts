@@ -28,12 +28,13 @@ export class EventRepository {
     requireAgentId(agentId);
     const id = randomUUID();
     const createdAt = new Date().toISOString();
-    this.driver
+    const row = this.driver
       .prepare(
         `INSERT INTO events (id, agent_id, run_id, type, payload, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?)
+         RETURNING *`,
       )
-      .run([
+      .get([
         id,
         agentId,
         input.runId ?? null,
@@ -41,9 +42,8 @@ export class EventRepository {
         JSON.stringify(input.payload ?? null),
         createdAt,
       ]);
-    const created = this.get(agentId, id);
-    if (!created) throw new Error("event insert did not persist");
-    return created;
+    if (!row) throw new Error("event insert did not persist");
+    return mapEvent(row);
   }
 
   get(agentId: string, id: string): Event | undefined {
@@ -57,7 +57,9 @@ export class EventRepository {
   list(agentId: string): Event[] {
     requireAgentId(agentId);
     return this.driver
-      .prepare(`SELECT * FROM events WHERE agent_id = ? ORDER BY created_at ASC`)
+      .prepare(
+        `SELECT * FROM events WHERE agent_id = ? ORDER BY created_at ASC, rowid ASC`,
+      )
       .all([agentId])
       .map(mapEvent);
   }

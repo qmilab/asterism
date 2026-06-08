@@ -128,12 +128,17 @@ function messageText(message: AgentMessage): string {
   return "";
 }
 
-/** The text of the last assistant message in a transcript, if any. */
+/**
+ * The text of the most recent assistant message that actually has text. A
+ * terminal turn that is tool-call- or thinking-only carries no text, so we fall
+ * back to the last assistant turn that produced some, rather than reporting "".
+ */
 function lastAssistantText(messages: readonly AgentMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message && "role" in message && message.role === "assistant") {
-      return messageText(message);
+      const text = messageText(message);
+      if (text) return text;
     }
   }
   return "";
@@ -155,7 +160,12 @@ function lastAssistantFailure(
   return undefined;
 }
 
-/** Translate a Pi lifecycle event into a neutral, log-safe RunEvent. */
+/**
+ * Translate a Pi lifecycle event into a neutral, log-safe RunEvent. Payloads are
+ * content-free references (counts, tool names/ids, event subtype) — never the
+ * transcript text itself, so the kernel can persist them without leaking what a
+ * run read or produced. The final output travels via RunOutput, not here.
+ */
 function toRunEvent(event: AgentEvent): RunEvent {
   switch (event.type) {
     case "agent_start":
@@ -163,14 +173,16 @@ function toRunEvent(event: AgentEvent): RunEvent {
       return { type: event.type, payload: {} };
     case "message_start":
     case "message_end":
-      return { type: event.type, payload: { text: messageText(event.message) } };
+    case "turn_end":
+      return {
+        type: event.type,
+        payload: { chars: messageText(event.message).length },
+      };
     case "message_update":
       return {
         type: event.type,
         payload: { event: event.assistantMessageEvent.type },
       };
-    case "turn_end":
-      return { type: event.type, payload: { text: messageText(event.message) } };
     case "agent_end":
       return { type: event.type, payload: { messages: event.messages.length } };
     case "tool_execution_start":
@@ -189,8 +201,10 @@ function toRunEvent(event: AgentEvent): RunEvent {
         },
       };
     default: {
-      const unknownEvent = event as { type: string };
-      return { type: unknownEvent.type, payload: {} };
+      // Exhaustiveness guard: a new Pi AgentEvent variant fails the build here,
+      // forcing a deliberate mapping instead of silently lossy passthrough.
+      const _exhaustive: never = event;
+      return { type: (_exhaustive as { type: string }).type, payload: {} };
     }
   }
 }
@@ -271,6 +285,22 @@ export class PiAdapter implements RuntimeAdapter {
       settled = true;
       resolveOutput(result);
     };
+    // One definition of "what did this run produce", used by every completion
+    // path so they can never disagree about success vs. failure or final text.
+    const settleFromMessages = (messages: readonly AgentMessage[]): void => {
+      const text = lastAssistantText(messages);
+      const failure = lastAssistantFailure(messages);
+      if (failure) settle({ status: "failed", text, error: failure });
+      else settle({ status: "done", text });
+    };
+
+    // An already-cancelled request never starts a run.
+    if (request.signal?.aborted) {
+      events.push({ type: "run_aborted", payload: {} });
+      settle({ status: "failed", text: "", error: "run aborted before start" });
+      events.close();
+      return { events, output };
+    }
 
     const tools = request.tools.list().map(toPiTool);
     const agent = new Agent({
@@ -285,20 +315,13 @@ export class PiAdapter implements RuntimeAdapter {
 
     agent.subscribe((event) => {
       events.push(toRunEvent(event));
-      if (event.type === "agent_end") {
-        const text = lastAssistantText(event.messages);
-        const failure = lastAssistantFailure(event.messages);
-        if (failure) settle({ status: "failed", text, error: failure });
-        else settle({ status: "done", text });
-      }
+      if (event.type === "agent_end") settleFromMessages(event.messages);
     });
 
+    let onAbort: (() => void) | undefined;
     if (request.signal) {
-      if (request.signal.aborted) agent.abort();
-      else
-        request.signal.addEventListener("abort", () => agent.abort(), {
-          once: true,
-        });
+      onAbort = () => agent.abort();
+      request.signal.addEventListener("abort", onAbort, { once: true });
     }
 
     // Pi's `prompt` resolves once the run is idle (after agent_end listeners
@@ -307,16 +330,18 @@ export class PiAdapter implements RuntimeAdapter {
     void agent
       .prompt(request.input)
       .then(() => {
-        if (!settled) {
-          settle({ status: "done", text: lastAssistantText(agent.state.messages) });
-        }
+        if (!settled) settleFromMessages(agent.state.messages);
       })
       .catch((error: unknown) => {
+        if (settled) return;
         const message = error instanceof Error ? error.message : String(error);
         events.push({ type: "run_error", payload: { error: message } });
         settle({ status: "failed", text: "", error: message });
       })
       .finally(() => {
+        if (request.signal && onAbort) {
+          request.signal.removeEventListener("abort", onAbort);
+        }
         events.close();
       });
 

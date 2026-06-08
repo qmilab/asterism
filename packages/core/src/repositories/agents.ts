@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow } from "../db/driver";
 import type { Agent, TrustLevel } from "../types";
+import { TRUST_LEVELS, validateEnum } from "../types";
 import { requireAgentId } from "./scope";
 
 /**
@@ -40,15 +41,17 @@ export class AgentRepository {
   constructor(private readonly driver: SqlDriver) {}
 
   create(input: CreateAgentInput): Agent {
+    validateEnum(input.trustLevel, TRUST_LEVELS, "trustLevel");
     const id = randomUUID();
     const createdAt = new Date().toISOString();
-    this.driver
+    const row = this.driver
       .prepare(
         `INSERT INTO agents
            (id, name, role, soul_ref, workspace_dir, trust_level, created_at, team_id, owner_principal_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING *`,
       )
-      .run([
+      .get([
         id,
         input.name,
         input.role,
@@ -60,9 +63,8 @@ export class AgentRepository {
         null,
         null,
       ]);
-    const created = this.get(id);
-    if (!created) throw new Error("agent insert did not persist");
-    return created;
+    if (!row) throw new Error("agent insert did not persist");
+    return mapAgent(row);
   }
 
   get(agentId: string): Agent | undefined {
@@ -76,18 +78,18 @@ export class AgentRepository {
   /** The agent registry itself — used to enumerate identities, not scoped data. */
   list(): Agent[] {
     return this.driver
-      .prepare(`SELECT * FROM agents ORDER BY created_at ASC`)
+      .prepare(`SELECT * FROM agents ORDER BY created_at ASC, rowid ASC`)
       .all()
       .map(mapAgent);
   }
 
   setTrustLevel(agentId: string, trustLevel: TrustLevel): Agent {
     requireAgentId(agentId);
-    this.driver
-      .prepare(`UPDATE agents SET trust_level = ? WHERE id = ?`)
-      .run([trustLevel, agentId]);
-    const updated = this.get(agentId);
-    if (!updated) throw new Error(`agent not found: ${agentId}`);
-    return updated;
+    validateEnum(trustLevel, TRUST_LEVELS, "trustLevel");
+    const row = this.driver
+      .prepare(`UPDATE agents SET trust_level = ? WHERE id = ? RETURNING *`)
+      .get([trustLevel, agentId]);
+    if (!row) throw new Error(`agent not found: ${agentId}`);
+    return mapAgent(row);
   }
 }

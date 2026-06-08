@@ -226,3 +226,47 @@ describe("PiAdapter — the adapter cannot reach a credential or memory store", 
     store.close();
   });
 });
+
+describe("PiAdapter — run lifecycle hardening", () => {
+  test("an already-aborted signal short-circuits the run without invoking the model", async () => {
+    let streamCalled = false;
+    const spy: StreamFn = (...args) => {
+      streamCalled = true;
+      return textStreamFn("should not run")(...args);
+    };
+    const adapter = new PiAdapter({ model: MODEL, streamFn: spy });
+
+    const handle = adapter.run({
+      workspaceDir: "/tmp/agent-ws",
+      input: "ping",
+      tools: createToolRegistry([]),
+      signal: AbortSignal.abort(),
+    });
+    const events = await collect(handle.events);
+    const output = await handle.output;
+
+    expect(streamCalled).toBe(false);
+    expect(output.status).toBe("failed");
+    expect(events.map((e) => e.type)).toContain("run_aborted");
+  });
+
+  test("event payloads carry no transcript text — only content-free references", async () => {
+    const secret = "SECRET_TEXT_IN_MODEL_OUTPUT_99";
+    const adapter = new PiAdapter({ model: MODEL, streamFn: textStreamFn(secret) });
+
+    const handle = adapter.run({
+      workspaceDir: "/tmp/agent-ws",
+      input: secret,
+      tools: createToolRegistry([]),
+    });
+    const events = await collect(handle.events);
+    const output = await handle.output;
+
+    // The model's text reaches the structured output…
+    expect(output.text).toBe(secret);
+    // …but never the event stream — payloads are counts/types/ids only.
+    expect(JSON.stringify(events)).not.toContain(secret);
+    const messageEnd = events.find((e) => e.type === "message_end");
+    expect(messageEnd?.payload).toEqual({ chars: secret.length });
+  });
+});

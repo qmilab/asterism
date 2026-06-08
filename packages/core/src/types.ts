@@ -6,25 +6,57 @@
 // (nullable) but are intentionally absent from these public types — they must
 // not be exposed anywhere in Phase 0.
 
-export type TrustLevel = "propose" | "notify" | "autonomous";
+// Each enum has a single source of truth: a `readonly` array of its allowed
+// values, with the union type derived from it. The arrays let the persistence
+// layer validate untrusted input at the write boundary (a string from the CLI
+// or HTTP surface cast to one of these types must still be a real member) so an
+// invalid value can never reach a safety-critical path like trust resolution.
 
-export type RunStatus =
-  | "pending"
-  | "running"
-  | "awaiting_confirmation"
-  | "done"
-  | "failed";
+export const TRUST_LEVELS = ["propose", "notify", "autonomous"] as const;
+export type TrustLevel = (typeof TRUST_LEVELS)[number];
 
-export type MemoryType =
-  | "semantic"
-  | "procedural"
-  | "convention"
-  | "negative"
-  | "episodic";
+export const RUN_STATUSES = [
+  "pending",
+  "running",
+  "awaiting_confirmation",
+  "done",
+  "failed",
+] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
 
-export type MemoryStatus = "active" | "archived";
+export const MEMORY_TYPES = [
+  "semantic",
+  "procedural",
+  "convention",
+  "negative",
+  "episodic",
+] as const;
+export type MemoryType = (typeof MEMORY_TYPES)[number];
 
-export type ReviewState = "proposed" | "accepted" | "rejected";
+export const MEMORY_STATUSES = ["active", "archived"] as const;
+export type MemoryStatus = (typeof MEMORY_STATUSES)[number];
+
+export const REVIEW_STATES = ["proposed", "accepted", "rejected"] as const;
+export type ReviewState = (typeof REVIEW_STATES)[number];
+
+/**
+ * Assert that `value` is one of `allowed`, returning it narrowed. Throws a clear
+ * error otherwise. The single chokepoint for enum validation on the write path —
+ * the storage layer never trusts the TypeScript type alone, mirroring how it
+ * never trusts application code to remember the `agentId` filter.
+ */
+export function validateEnum<T extends string>(
+  value: string,
+  allowed: readonly T[],
+  label: string,
+): T {
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(
+      `invalid ${label}: ${JSON.stringify(value)} (expected one of: ${allowed.join(", ")})`,
+    );
+  }
+  return value as T;
+}
 
 /** The agent identity. `teamId` / `ownerPrincipalId` are reserved and hidden. */
 export interface Agent {
