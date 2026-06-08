@@ -21,6 +21,30 @@ export type {
 } from "./adapter";
 export { createToolRegistry } from "./adapter";
 
+// Trust enforcement + the destructive-action gate. The kernel resolves an
+// agent's trust level + allow-lists into a scoped, gated tool registry; the
+// adapter only ever sees the wrapped tools this produces.
+export {
+  EFFECT_CLASSES,
+  GATE_DECISIONS,
+  DESTRUCTIVE_COMMAND_RULES,
+  classifyEffect,
+  isDestructive,
+  matchDestructiveCommand,
+  decideGate,
+  trustProfile,
+  resolveToolRegistry,
+} from "./trust";
+export type {
+  EffectClass,
+  GateDecision,
+  Capability,
+  Action,
+  TrustProfile,
+  TrustProfileInput,
+  TrustHooks,
+} from "./trust";
+
 export { AsterismStore } from "./store";
 export { openDatabase } from "./db/index";
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver";
