@@ -60,6 +60,22 @@ CREATE TABLE IF NOT EXISTS credentials (
 );
 CREATE INDEX IF NOT EXISTS idx_credentials_agent ON credentials(agent_id);
 
+-- The local secret store. Holds the plaintext credential value, addressed by a
+-- value_ref; the credentials table stores only that ref. Scoped by agent_id like
+-- every other table — a value_ref is meaningless without its owning agentId in
+-- the filter. The value is the one plaintext-bearing column in the schema; it is
+-- read only through SecretStore.read (a kernel-internal, destructive-classified
+-- path) and never copied into events, runs, or memory.
+CREATE TABLE IF NOT EXISTS secrets (
+  value_ref   TEXT PRIMARY KEY,
+  agent_id    TEXT NOT NULL REFERENCES agents(id),
+  key         TEXT NOT NULL,
+  value       TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  UNIQUE(agent_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_secrets_agent ON secrets(agent_id);
+
 CREATE TABLE IF NOT EXISTS events (
   id          TEXT PRIMARY KEY,
   agent_id    TEXT NOT NULL REFERENCES agents(id),

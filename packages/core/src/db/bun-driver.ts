@@ -38,6 +38,12 @@ export class BunSqlDriver implements SqlDriver {
     return new BunStatement(this.db.query(sql));
   }
 
+  transaction<T>(fn: () => T): T {
+    // `bun:sqlite` returns a function that runs `fn` wrapped in BEGIN/COMMIT,
+    // rolling back if it throws. Invoke it immediately.
+    return this.db.transaction(fn)();
+  }
+
   close(): void {
     this.db.close();
   }

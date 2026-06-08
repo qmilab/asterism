@@ -45,6 +45,45 @@ export type {
   TrustHooks,
 } from "./trust";
 
+// The memory firewall — screens every inbound memory write for injection /
+// exfiltration before persistence. The classifier (`screenMemory`) is pure; the
+// memory repository enforces it via `assertMemorySafe` on the write path.
+export {
+  FIREWALL_CATEGORIES,
+  MEMORY_INJECTION_RULES,
+  MEMORY_EXFILTRATION_RULES,
+  MEMORY_FIREWALL_RULES,
+  screenMemory,
+  assertMemorySafe,
+  MemoryFirewallError,
+} from "./firewall";
+export type {
+  FirewallCategory,
+  FirewallRule,
+  FirewallFinding,
+  FirewallVerdict,
+} from "./firewall";
+
+// The local secret store — holds credential plaintext behind a scoped `read`;
+// the credentials table stores only the `valueRef` into it.
+export { SecretStore, secretValueRef } from "./secrets";
+export type { SecretRef } from "./secrets";
+
+// Run framing — composes soul / role / scoped skills / accepted memories into the
+// RunRequest's system prompt.
+export {
+  buildSystemPrompt,
+  frameRun,
+  resolveSoul,
+  BUILTIN_SOULS,
+} from "./framing";
+export type {
+  SkillContext,
+  FramingContext,
+  FrameRunInput,
+  ResolveSoulOptions,
+} from "./framing";
+
 export { AsterismStore } from "./store";
 export { openDatabase } from "./db/index";
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver";

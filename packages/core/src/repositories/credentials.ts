@@ -66,4 +66,33 @@ export class CredentialRepository {
       .all([agentId])
       .map(mapCredential);
   }
+
+  /**
+   * How many of the agent's credential rows reference a given `valueRef`. The
+   * store uses this before revoking a secret so a value still pointed at by
+   * another credential is never deleted out from under it.
+   */
+  countByValueRef(agentId: string, valueRef: string): number {
+    requireAgentId(agentId);
+    const row = this.driver
+      .prepare(
+        `SELECT COUNT(*) AS n FROM credentials WHERE value_ref = ? AND agent_id = ?`,
+      )
+      .get([valueRef, agentId]);
+    return row ? Number(row.n) : 0;
+  }
+
+  /**
+   * Remove the credential metadata for an agent's key. Returns true if a row was
+   * deleted. This drops only the reference row — the plaintext lives in the secret
+   * store; use {@link AsterismStore.removeCredential} to remove both together.
+   */
+  deleteByKey(agentId: string, key: string): boolean {
+    requireAgentId(agentId);
+    const existed = this.getByKey(agentId, key) !== undefined;
+    this.driver
+      .prepare(`DELETE FROM credentials WHERE key = ? AND agent_id = ?`)
+      .run([key, agentId]);
+    return existed;
+  }
 }
