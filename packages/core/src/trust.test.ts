@@ -95,6 +95,28 @@ describe("classifyEffect — explicit, escalate-only classification", () => {
     }
   });
 
+  test("git global options before a destructive subcommand are still caught", () => {
+    expect(matchDestructiveCommand("git -C repo reset --hard HEAD")).toBe(
+      "git reset --hard",
+    );
+    expect(matchDestructiveCommand("git -C repo clean -fd")).toBe(
+      "git clean (delete untracked)",
+    );
+    expect(
+      matchDestructiveCommand("git -c user.name=x push origin main --force"),
+    ).toBe("git force-push");
+    expect(matchDestructiveCommand("git --no-pager branch -D feature")).toBe(
+      "git branch delete",
+    );
+  });
+
+  test("npm ci runs lifecycle install scripts and is classified destructive", () => {
+    expect(matchDestructiveCommand("npm ci")).toBe("package install script");
+    expect(
+      classifyEffect({ capability: "shell", effect: "write", args: "npm ci" }),
+    ).toBe("destructive");
+  });
+
   test("benign commands are not escalated", () => {
     for (const command of ["ls -la", "git status", "cat notes.md", "git commit -m wip"]) {
       expect(matchDestructiveCommand(command)).toBeUndefined();
