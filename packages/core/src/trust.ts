@@ -110,12 +110,20 @@ export const DESTRUCTIVE_COMMAND_RULES: readonly {
   { name: "git reset --hard", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+reset\\b[^\\n]*--hard\\b`) },
   { name: "git force-push", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+push\\b[^\\n]*(--force\\b|--force-with-lease\\b|\\s-f\\b)`) },
   { name: "git branch delete", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+branch\\b[^\\n]*(\\s-D\\b|\\s-d\\b|--delete\\b)`) },
+  // Remote branch deletion: `git push … --delete branch`, `git push … -d branch`,
+  // or the colon refspec `git push origin :branch` (space before the colon, so a
+  // normal `src:dst` push is not flagged).
+  { name: "git push --delete (remote branch)", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+push\\b[^\\n]*(--delete\\b|\\s-d\\b|\\s:)`) },
   { name: "git rebase (history rewrite)", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+rebase\\b`) },
   { name: "git clean (delete untracked)", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+clean\\b`) },
   // Running install / untrusted shell scripts. `npm ci` also runs lifecycle
   // install scripts; `LEADING_OPTS` catches options before the subcommand
   // (`npm --prefix web install`, `pnpm -C app install`).
   { name: "package install script", pattern: new RegExp(`\\b(npm|pnpm|yarn|bun|pip|pip3|gem|cargo|brew)${LEADING_OPTS}\\s+(install|add|i|ci)\\b`) },
+  // Yarn classic: bare `yarn` (or `yarn` with only flags) is an install that
+  // runs lifecycle scripts. Match `yarn` not followed by a subcommand word —
+  // `yarn run build` / `yarn test` are not installs and are left alone.
+  { name: "bare yarn install", pattern: /\byarn\b(?!\s+[a-z])/i },
   // A remote script piped to a shell, including a path-qualified one (`| /bin/bash`).
   { name: "piped remote shell (curl|wget → sh)", pattern: /\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(?:[^\s|]*\/)?(sh|bash|zsh)\b/ },
 ] as const;
@@ -285,6 +293,15 @@ export interface TrustHooks {
    * a CLI/HTTP surface uses to ask the human and resume.
    */
   confirm?: (action: Action) => boolean | Promise<boolean>;
+  /**
+   * The run's abort controller. When a destructive action is paused without
+   * approval, the gate aborts it — a *real* stop signal, not just a refused tool
+   * result. The {@link RuntimeAdapter} honors `request.signal`, so aborting here
+   * suspends the in-flight agent loop instead of letting it continue to other
+   * side-effecting tools or finish the run as `done`. The kernel passes the same
+   * controller whose `signal` it placed on the run request.
+   */
+  abortController?: AbortController;
 }
 
 /** ToolResult shown to the model when a side effect is withheld under `propose`. */
@@ -297,13 +314,18 @@ function withheldResult(capability: string): ToolResult {
   };
 }
 
-/** ToolResult shown to the model when a destructive action awaits confirmation. */
+/**
+ * ToolResult returned when a destructive action awaits confirmation. Marked
+ * `isError: true` so the substrate cannot read it as a successful action — the
+ * action did not run. The hard stop is the run abort (see {@link gateTool}); this
+ * result is only what a model would see if the loop were not suspended.
+ */
 function awaitingConfirmationResult(capability: string): ToolResult {
   return {
     output:
       `[awaiting confirmation] '${capability}' is a destructive action and ` +
       `requires explicit human confirmation before it can run. It has not been executed.`,
-    isError: false,
+    isError: true,
   };
 }
 
@@ -342,7 +364,15 @@ function gateTool(
       if (decision === "confirm") {
         hooks.onAwaitConfirmation?.(action);
         const approved = hooks.confirm ? await hooks.confirm(action) : false;
-        if (!approved) return awaitingConfirmationResult(capability.key);
+        if (!approved) {
+          // Not a refused-but-continuable result: stop the run. Aborting the
+          // controller suspends the agent loop so it cannot proceed to other
+          // side-effecting tools while the action waits on a human.
+          hooks.abortController?.abort(
+            new Error(`destructive action requires confirmation: ${capability.key}`),
+          );
+          return awaitingConfirmationResult(capability.key);
+        }
         // Explicitly confirmed: fall through to execute. The audit hook still
         // fires so the now-permitted destructive action is recorded.
       }
