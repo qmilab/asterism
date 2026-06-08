@@ -124,7 +124,11 @@ describe("classifyEffect — explicit, escalate-only classification", () => {
   test("a redirect that opens the command is caught; append/fd-dup are not", () => {
     expect(matchDestructiveCommand("> notes.md")).toBe("truncating redirect (>)");
     expect(matchDestructiveCommand(">existing.log")).toBe("truncating redirect (>)");
+    expect(matchDestructiveCommand("make &> build.log")).toBe(
+      "truncating redirect (>)",
+    ); // Bash combined stdout+stderr truncating redirect
     expect(matchDestructiveCommand(">> notes.md")).toBeUndefined(); // append
+    expect(matchDestructiveCommand("make &>> build.log")).toBeUndefined(); // append-both
     expect(matchDestructiveCommand("make 2>&1")).toBeUndefined(); // fd duplication
   });
 

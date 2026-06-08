@@ -107,9 +107,10 @@ export const DESTRUCTIVE_COMMAND_RULES: readonly {
   // place. `tee` writes to a file too — flagged unless it is appending (`-a`).
   { name: "file overwrite (cp/dd/truncate)", pattern: /\b(cp|dd|truncate)\b/ },
   { name: "tee overwrite (no --append)", pattern: /\btee\b(?![^\n]*(?:\s-a\b|--append\b))/ },
-  // A truncating `>` redirect, including one that opens the command (`> file`),
-  // but not append (`>>`) or fd-duplication (`2>&1`).
-  { name: "truncating redirect (>)", pattern: /(?:^|[^|>&])>(?![>&])/ },
+  // A truncating `>` redirect, including one that opens the command (`> file`)
+  // or Bash's combined `&>` form. Excludes append (`>>`, `&>>`) and
+  // fd-duplication (`2>&1`) — both handled by the trailing `(?![>&])`.
+  { name: "truncating redirect (>)", pattern: /(?:^|[^|>])>(?![>&])/ },
   // Destructive git history / remote operations. `LEADING_OPTS` tolerates
   // global options (e.g. `-C repo`) before the subcommand.
   { name: "git reset --hard", pattern: new RegExp(`\\bgit${LEADING_OPTS}\\s+reset\\b[^\\n]*--hard\\b`) },
