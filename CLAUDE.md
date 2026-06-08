@@ -6,7 +6,7 @@ Guidance for Claude Code (and any contributor) working in this repo. Read this b
 
 ## What Asterism is
 
-A local-first runtime for running **many distinct agents from one install**. Each agent is its own identity with its own soul, role, memory, secrets, skills, working directory (sandbox), and autonomy level — and nothing leaks between them. Agents run alone by default; collaboration, when it comes, is an explicit permissioned connection, never implicit shared state. Phase 0 ships a local CLI + a local HTTP endpoint; richer cognition and collaboration come later (see `ROADMAP.md`).
+A local-first runtime for running **many distinct agents from one install**. Each agent is its own identity with its own soul, role, memory, secrets, skills, working directory (sandbox), and autonomy level — and nothing leaks between them. Agents run alone by default; collaboration, when it comes, is an explicit permissioned connection, never implicit shared state. Phase 0 ships a local CLI + a local HTTP endpoint; richer cognition and collaboration come later.
 
 The codebase has three bands:
 
@@ -21,10 +21,10 @@ The codebase has three bands:
 1. **`agentId` on everything.** Every persisted row — memory, skill, credential, run, event — carries an `agentId`. No query is ever issued without it in the filter. The **agent is the isolation boundary**; this single decision keeps later phases from becoming rewrites.
 2. **Pi never sees raw capability.** The kernel builds a *pre-scoped* tool registry per run (filtered by agent + trust level + session) and hands that to the adapter. Pi/the adapter must not read credentials, write memory, or expose tools the kernel didn't approve.
 3. **Confined by default.** Every agent runs in its own workspace directory with only its scoped tool registry — confinement is the default, not an opt-in. Note this is *logical* scoping in Phase 0, not OS-level containment (see "Phase 0 isolation model" below); don't let copy imply otherwise.
-4. **Destructive actions confirm regardless of trust level.** Even an `autonomous` agent must pause for explicit confirmation before an action classified destructive (file deletion, force-push, outbound spend, irreversible external calls) unless that specific capability is explicitly allow-listed for that agent. This "safety through cognition" beat is the product's signature — never quietly remove it.
+4. **Destructive actions confirm regardless of trust level.** Even an `autonomous` agent must pause for explicit confirmation before an action classified destructive (file deletion, force-push, outbound spend, irreversible external calls) unless that specific capability is explicitly allow-listed for that agent. Never silently remove this gate.
 5. **No shared state across agents, ever.** Memory, secrets, and skills are scoped to one agent. There is no "global" store an agent can reach. Cross-agent reads are a bug, not a feature. Future collaboration happens only through explicit channels (handoff, artifact exchange, curated summaries) — **never** implicit shared memory or credentials.
 6. **Replaceable substrate.** Treat Pi as disposable. All Pi-specific code lives in `adapter-pi` behind `RuntimeAdapter`. Nothing outside that package may import Pi.
-7. **Public copy stays clean.** README, CLI help text, and any user-facing string sell the *behavioral outcome* ("distinct agents, dialable autonomy, reviewable memory, separate lives"). No internal architecture vocabulary, no roadmap/positioning language, no commercialization language in user-facing text. (Strategy context lives in `CONTEXT_HANDOFF.md`, which is not committed.)
+7. **Public copy stays clean.** README, CLI help text, and any user-facing string sell the *behavioral outcome* ("distinct agents, dialable autonomy, reviewable memory, separate lives"). No internal architecture vocabulary in user-facing text.
 
 ---
 
@@ -52,7 +52,7 @@ Owns: entities & persistence (local SQLite in Phase 0, every row scoped by `agen
 Implements `RuntimeAdapter` over Pi. Receives a scoped tool registry + workspace path; runs the agent loop; returns structured run output and a stream of events. **No credential, memory, or unscoped-tool access here.**
 
 ### `reflect`
-Default `ReflectionProvider`: takes a run transcript, calls a hosted model via API, returns *proposed* typed memory writes with confidence. Pure TypeScript — **no Python, no local ML, no embeddings in Phase 0.** (A Python/local-ML provider is a deferred, opt-in alternative implementation of the same interface — `ROADMAP.md` Phase 2. Do not add it now.)
+Default `ReflectionProvider`: takes a run transcript, calls a hosted model via API, returns *proposed* typed memory writes with confidence. Pure TypeScript — **no Python, no local ML, no embeddings in Phase 0.** (A Python/local-ML provider is a deferred, opt-in alternative implementation of the same interface. Do not add it now.)
 
 ### `server`
 Minimal HTTP over the kernel. Phase 0 endpoints only:
@@ -87,9 +87,9 @@ Persistence note: scope at the storage layer (an `agentId` column on every table
 
 ## Phase 0 isolation model (be precise; do not overclaim)
 
-Phase 0 isolation means **agent-scoped** memory, credentials, skills, workspace paths, trust profiles, event logs, and tool registries — logical separation enforced by the kernel. It is **not** yet a hardened boundary against hostile code. Do **not** describe Phase 0 as microVM, container, or gVisor isolation, and do not imply it safely contains a deliberately adversarial agent. Stronger process / container / microVM execution isolation is a later phase (`ROADMAP.md` Phase 4).
+Phase 0 isolation means **agent-scoped** memory, credentials, skills, workspace paths, trust profiles, event logs, and tool registries — logical separation enforced by the kernel. It is **not** yet a hardened boundary against hostile code. Do **not** describe Phase 0 as microVM, container, or gVisor isolation, and do not imply it safely contains a deliberately adversarial agent. Stronger process / container / microVM execution isolation is a later phase.
 
-Why this matters: autonomous agents with persistent memory, tools, and credentials are a *framework-level* security problem, not just a model problem. Because our copy leans on the word "boundary," we have to be exact about which boundary exists today — runtime scoping now, hardened containment later. In user-facing text prefer "separate" / "scoped" / "boundary" over "sandboxed" unless the OS-level mechanism is actually present.
+Why this matters: autonomous agents with persistent memory, tools, and credentials are a *framework-level* security problem, not just a model problem. Because the copy leans on the word "boundary," we have to be exact about which boundary exists today — runtime scoping now, hardened containment later. In user-facing text prefer "separate" / "scoped" / "boundary" over "sandboxed" unless the OS-level mechanism is actually present.
 
 ---
 
@@ -158,7 +158,7 @@ asterism serve <agent>                               start the local HTTP endpoi
 ## Coding standards
 
 - **TypeScript, strict.** `tsconfig.base.json` enables `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`. No `any` without a written reason.
-- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node 20+ is a *tested compatibility floor* — no Bun-only API in `core` without a Node fallback. **First task before depending on Bun anywhere: run the Pi-on-Bun spike** (see `STARTER_PROMPTS.md`) and record the result. Multi-package-manager install is a Phase 1 concern.
+- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node 20+ is a *tested compatibility floor* — no Bun-only API in `core` without a Node fallback. **First task before depending on Bun anywhere: run the Pi-on-Bun spike** and record the result. Multi-package-manager install is a later concern.
 - **ESM only.** `verbatimModuleSyntax`. No CommonJS.
 - **Secrets never in code or logs.** Credentials live in the local secret store, referenced by `valueRef`. The event log stores references, never values.
 - **Adapter boundary is law.** Outside `adapter-pi`, nothing imports Pi. Outside `reflect`, nothing imports a reflection model client.
