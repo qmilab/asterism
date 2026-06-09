@@ -19,8 +19,8 @@
 // places it. `buildSystemPrompt` is pure and deterministic so it is trivially
 // testable; `frameRun` assembles the full `RunRequest`.
 
-import type { RunRequest, ToolRegistry } from "./adapter";
-import type { Agent, Memory } from "./types";
+import type { RunRequest, ToolRegistry } from "./adapter.js";
+import type { Agent, Memory } from "./types.js";
 
 /**
  * A skill made available to a run: its name and, when loaded, the markdown body.
@@ -177,8 +177,10 @@ export function resolveSoul(
   soulRef: string,
   options: ResolveSoulOptions = {},
 ): string | undefined {
-  const builtin = BUILTIN_SOULS[soulRef];
-  if (builtin !== undefined) return builtin;
+  // Own-property check, not bracket access: a `soulRef` that names an inherited
+  // property (`toString`, `__proto__`, `constructor`) must NOT resolve to the
+  // inherited value — that would hand framing a non-string and crash `.trim()`.
+  if (Object.hasOwn(BUILTIN_SOULS, soulRef)) return BUILTIN_SOULS[soulRef];
   if (options.readFile) {
     try {
       return options.readFile(soulRef);

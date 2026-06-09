@@ -12,9 +12,9 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --noEmit",
+    "typecheck": "tsc -b",
     "test": "bun test",
-    "asterism": "bun run packages/cli/src/index.ts"
+    "asterism": "bun run packages/cli/src/bin.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

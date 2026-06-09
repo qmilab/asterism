@@ -17,8 +17,8 @@
 // handed to the substrate. Any agent-facing capability that would surface a value
 // must be registered with `effect: "destructive"` so the gate fires.
 
-import type { SqlDriver, SqlRow } from "./db/driver";
-import { requireAgentId } from "./repositories/scope";
+import type { SqlDriver, SqlRow } from "./db/driver.js";
+import { requireAgentId } from "./repositories/scope.js";
 
 /** A stored secret's metadata — deliberately without the value. */
 export interface SecretRef {

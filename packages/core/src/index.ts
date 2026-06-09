@@ -2,7 +2,7 @@
 // Phase 0: entity types and agent-scoped SQLite persistence. The agent is the
 // isolation boundary; every scoped repository asserts an agentId.
 
-export * from "./types";
+export * from "./types.js";
 
 // The RuntimeAdapter contract — the kernel/substrate seam. Core defines it and
 // depends on no adapter and no Pi; adapters depend on core and implement it.
@@ -18,8 +18,8 @@ export type {
   ToolInvocation,
   ToolResult,
   ToolInputSchema,
-} from "./adapter";
-export { createToolRegistry } from "./adapter";
+} from "./adapter.js";
+export { createToolRegistry } from "./adapter.js";
 
 // Trust enforcement + the destructive-action gate. The kernel resolves an
 // agent's trust level + allow-lists into a scoped, gated tool registry; the
@@ -34,7 +34,7 @@ export {
   decideGate,
   trustProfile,
   resolveToolRegistry,
-} from "./trust";
+} from "./trust.js";
 export type {
   EffectClass,
   GateDecision,
@@ -43,7 +43,7 @@ export type {
   TrustProfile,
   TrustProfileInput,
   TrustHooks,
-} from "./trust";
+} from "./trust.js";
 
 // The memory firewall — screens every inbound memory write for injection /
 // exfiltration before persistence. The classifier (`screenMemory`) is pure; the
@@ -56,18 +56,18 @@ export {
   screenMemory,
   assertMemorySafe,
   MemoryFirewallError,
-} from "./firewall";
+} from "./firewall.js";
 export type {
   FirewallCategory,
   FirewallRule,
   FirewallFinding,
   FirewallVerdict,
-} from "./firewall";
+} from "./firewall.js";
 
 // The local secret store — holds credential plaintext behind a scoped `read`;
 // the credentials table stores only the `valueRef` into it.
-export { SecretStore, secretValueRef } from "./secrets";
-export type { SecretRef } from "./secrets";
+export { SecretStore, secretValueRef } from "./secrets.js";
+export type { SecretRef } from "./secrets.js";
 
 // Run framing — composes soul / role / scoped skills / accepted memories into the
 // RunRequest's system prompt.
@@ -76,32 +76,32 @@ export {
   frameRun,
   resolveSoul,
   BUILTIN_SOULS,
-} from "./framing";
+} from "./framing.js";
 export type {
   SkillContext,
   FramingContext,
   FrameRunInput,
   ResolveSoulOptions,
-} from "./framing";
+} from "./framing.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The
 // kernel's run-orchestration surfaces compose this around their own hooks.
-export { auditTrustHooks } from "./audit";
-export type { AuditContext } from "./audit";
+export { auditTrustHooks } from "./audit.js";
+export type { AuditContext } from "./audit.js";
 
-export { AsterismStore } from "./store";
-export { openDatabase } from "./db/index";
-export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver";
+export { AsterismStore } from "./store.js";
+export { openDatabase } from "./db/index.js";
+export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver.js";
 
-export { AgentRepository } from "./repositories/agents";
-export type { CreateAgentInput } from "./repositories/agents";
-export { RunRepository } from "./repositories/runs";
-export type { CreateRunInput } from "./repositories/runs";
-export { MemoryRepository } from "./repositories/memories";
-export type { CreateMemoryInput } from "./repositories/memories";
-export { SkillRepository } from "./repositories/skills";
-export type { CreateSkillInput } from "./repositories/skills";
-export { CredentialRepository } from "./repositories/credentials";
-export type { CreateCredentialInput } from "./repositories/credentials";
-export { EventRepository } from "./repositories/events";
-export type { AppendEventInput, TailOptions } from "./repositories/events";
+export { AgentRepository } from "./repositories/agents.js";
+export type { CreateAgentInput } from "./repositories/agents.js";
+export { RunRepository } from "./repositories/runs.js";
+export type { CreateRunInput } from "./repositories/runs.js";
+export { MemoryRepository } from "./repositories/memories.js";
+export type { CreateMemoryInput } from "./repositories/memories.js";
+export { SkillRepository } from "./repositories/skills.js";
+export type { CreateSkillInput } from "./repositories/skills.js";
+export { CredentialRepository } from "./repositories/credentials.js";
+export type { CreateCredentialInput } from "./repositories/credentials.js";
+export { EventRepository } from "./repositories/events.js";
+export type { AppendEventInput, TailOptions } from "./repositories/events.js";

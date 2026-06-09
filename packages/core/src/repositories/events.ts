@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { SqlDriver, SqlRow, SqlValue } from "../db/driver";
-import type { Event } from "../types";
-import { requireAgentId } from "./scope";
+import type { SqlDriver, SqlRow, SqlValue } from "../db/driver.js";
+import type { Event } from "../types.js";
+import { requireAgentId } from "./scope.js";
 
 export interface AppendEventInput {
   type: string;

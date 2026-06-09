@@ -28,10 +28,10 @@ import type {
   ToolInvocation,
   ToolRegistry,
   ToolResult,
-} from "./adapter";
-import { createToolRegistry } from "./adapter";
-import type { TrustLevel } from "./types";
-import { TRUST_LEVELS, validateEnum } from "./types";
+} from "./adapter.js";
+import { createToolRegistry } from "./adapter.js";
+import type { TrustLevel } from "./types.js";
+import { TRUST_LEVELS, validateEnum } from "./types.js";
 
 /**
  * The effect an action has on the world.
