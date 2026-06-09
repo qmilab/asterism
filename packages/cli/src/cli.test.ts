@@ -663,3 +663,25 @@ test("serve rejects a --port given without a value", async () => {
   expect(code).toBe(1);
   expect(h.err.join("\n")).toContain("The --port option needs a value");
 });
+
+test("serve rejects a non-numeric or out-of-range --port instead of binding the default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let started = false;
+  const serveOverrides: Partial<CliIO> = {
+    startServer: () => {
+      started = true;
+      return fakeRunningServer();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  };
+
+  // A typo'd port must not silently fall back to 4831.
+  expect(await runCli(["serve", "personal", "--port", "80O8"], { ...h.io, ...serveOverrides })).toBe(1);
+  // Out of range.
+  expect(await runCli(["serve", "personal", "--port", "99999"], { ...h.io, ...serveOverrides })).toBe(1);
+  expect(h.err.join("\n")).toContain("between 0 and 65535");
+  expect(started).toBe(false);
+});

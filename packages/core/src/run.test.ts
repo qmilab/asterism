@@ -118,6 +118,26 @@ test("a substrate failure finishes failed and surfaces the error", async () => {
   expect(result.run.finishedAt).toBeDefined();
 });
 
+test("an adapter that rejects drives the run to failed, not stuck running", async () => {
+  // A non-conforming/crashing substrate rejects its output promise instead of
+  // resolving with status "failed". The run must still reach a terminal state.
+  const rejectingAdapter: RuntimeAdapter = {
+    run() {
+      async function* noEvents() {}
+      return { events: noEvents(), output: Promise.reject(new Error("socket hang up")) };
+    },
+  };
+
+  const result = await executeRun(store, agent, "do the thing", { adapter: rejectingAdapter });
+
+  expect(result.status).toBe("failed");
+  expect(result.error).toBe("socket hang up");
+  expect(result.run.status).toBe("failed");
+  expect(result.run.finishedAt).toBeDefined();
+  // Nothing is left mid-flight in the store.
+  expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
+});
+
 test("a destructive action pauses an autonomous run at awaiting_confirmation", async () => {
   // No `confirm` callback ⇒ the gate cannot be approved, so the action stays
   // paused. The agent is `autonomous`, proving the gate fires regardless of trust.

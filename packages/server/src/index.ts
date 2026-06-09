@@ -78,19 +78,23 @@ function listRuns(deps: ServerDeps): Response {
 function listEvents(deps: ServerDeps, url: URL): Response {
   const options: TailOptions = {};
 
+  // An absent param is `null`; an empty one (`?type=`) is `""`. Treat both as "not
+  // given" so an empty value means "no filter" — matching the CLI, where a flag
+  // with no value is dropped — rather than filtering on `type = ''` / an empty
+  // cursor and silently returning nothing.
   const limitRaw = url.searchParams.get("limit");
-  if (limitRaw !== null) {
-    // Mirror the CLI's `--limit`: a non-negative integer or it is a client error,
-    // never a silently-ignored garbage value.
+  if (limitRaw) {
+    // A present, non-empty `limit` must be a non-negative integer or it is a
+    // client error, never a silently-ignored garbage value.
     if (!/^\d+$/.test(limitRaw)) {
       return fail(400, "limit must be a non-negative integer.");
     }
     options.limit = Number(limitRaw);
   }
   const type = url.searchParams.get("type");
-  if (type !== null) options.type = type;
+  if (type) options.type = type;
   const since = url.searchParams.get("since");
-  if (since !== null) options.sinceId = since;
+  if (since) options.sinceId = since;
 
   return json(200, { events: deps.store.events.tail(deps.agent.id, options) });
 }
@@ -137,33 +141,48 @@ async function startRun(deps: ServerDeps, req: Request): Promise<Response> {
  * paths 404, the wrong agent 404s, and a known path with the wrong method 405s.
  */
 export async function handleRequest(deps: ServerDeps, req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const segments = url.pathname.split("/").filter((s) => s.length > 0);
+  try {
+    const url = new URL(req.url);
+    const segments = url.pathname.split("/").filter((s) => s.length > 0);
 
-  // The only shape we serve is /agents/:agent/(runs|events).
-  if (segments.length !== 3 || segments[0] !== "agents") {
+    // The only shape we serve is /agents/:agent/(runs|events).
+    if (segments.length !== 3 || segments[0] !== "agents") {
+      return fail(404, "Not found.");
+    }
+    // A malformed percent-encoding (e.g. `/agents/%/runs`) makes decodeURIComponent
+    // throw. Such a name can never match the served agent, so treat it as the same
+    // 404 rather than letting it escape as an unhandled error.
+    let agentName: string;
+    try {
+      agentName = decodeURIComponent(segments[1]!);
+    } catch {
+      return fail(404, `This endpoint serves only the agent "${deps.agent.name}".`);
+    }
+    const resource = segments[2]!;
+
+    // One agent per server: any name but the served one is not found here. This is
+    // the network-edge expression of "no shared state across agents" — a server
+    // bound to one agent can never address another's runs or events.
+    if (agentName !== deps.agent.name) {
+      return fail(404, `This endpoint serves only the agent "${deps.agent.name}".`);
+    }
+
+    if (resource === "runs") {
+      if (req.method === "GET") return listRuns(deps);
+      if (req.method === "POST") return startRun(deps, req);
+      return fail(405, "Method not allowed.");
+    }
+    if (resource === "events") {
+      if (req.method === "GET") return listEvents(deps, url);
+      return fail(405, "Method not allowed.");
+    }
     return fail(404, "Not found.");
+  } catch {
+    // Backstop: nothing the kernel raises (a driver error, an unexpected throw)
+    // should reach the client verbatim — a message or stack could leak internal
+    // detail. Answer with a generic 500 instead of Bun's default error page.
+    return fail(500, "Internal server error.");
   }
-  const agentName = decodeURIComponent(segments[1]!);
-  const resource = segments[2]!;
-
-  // One agent per server: any name but the served one is not found here. This is
-  // the network-edge expression of "no shared state across agents" — a server
-  // bound to one agent can never address another's runs or events.
-  if (agentName !== deps.agent.name) {
-    return fail(404, `This endpoint serves only the agent "${deps.agent.name}".`);
-  }
-
-  if (resource === "runs") {
-    if (req.method === "GET") return listRuns(deps);
-    if (req.method === "POST") return startRun(deps, req);
-    return fail(405, "Method not allowed.");
-  }
-  if (resource === "events") {
-    if (req.method === "GET") return listEvents(deps, url);
-    return fail(405, "Method not allowed.");
-  }
-  return fail(404, "Not found.");
 }
 
 /** Options for {@link serve}: the handler's deps plus where to bind. */
@@ -191,8 +210,12 @@ export interface RunningServer {
   hostname: string;
   /** The base URL the endpoints hang off (e.g. http://127.0.0.1:4831). */
   url: string;
-  /** Stop accepting connections and shut the server down. */
-  stop: () => void;
+  /**
+   * Stop accepting connections and shut the server down. Returns a promise that
+   * resolves once in-flight requests have drained, so a caller can await it before
+   * tearing down resources (e.g. closing the store) the handler still depends on.
+   */
+  stop: () => void | Promise<void>;
 }
 
 /**
@@ -216,8 +239,8 @@ export function serve(options: ServeOptions): RunningServer {
     port: boundPort,
     hostname: boundHost,
     url: `http://${boundHost}:${boundPort}`,
-    stop: () => {
-      server.stop();
-    },
+    // Return Bun's drain promise so callers can await a clean shutdown — in-flight
+    // requests finish before the server is torn down.
+    stop: () => server.stop(),
   };
 }

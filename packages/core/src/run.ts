@@ -15,7 +15,7 @@
 // the structured result. Filesystem and environment access stay at the surface;
 // this function takes an injected `readFile` and never imports `node:fs`.
 
-import type { RuntimeAdapter } from "./adapter.js";
+import type { RuntimeAdapter, RunOutput } from "./adapter.js";
 import { frameRun, resolveSoul } from "./framing.js";
 import type { SkillContext } from "./framing.js";
 import { auditTrustHooks } from "./audit.js";
@@ -138,8 +138,31 @@ export async function executeRun(
     signal: abortController.signal,
   });
 
-  const handle = options.adapter.run(request);
-  const output = await handle.output;
+  // The substrate runs the loop. If it throws, or its output promise rejects (the
+  // contract says a run settles with status "failed", but a non-conforming or
+  // crashing adapter can reject outright), do not strand the run in `running`:
+  // drive it to a terminal state so every surface gets a structured result rather
+  // than an opaque rejection — over HTTP that would otherwise surface as a 500
+  // with the run row left mid-flight.
+  let output: RunOutput;
+  try {
+    output = await options.adapter.run(request).output;
+  } catch (err) {
+    // A gate pause aborts the run via the signal, which some adapters surface as a
+    // rejection. If the gate paused it, preserve `awaiting_confirmation` rather
+    // than masking it as a failure; otherwise the substrate genuinely failed.
+    const paused = store.runs.get(agent.id, run.id);
+    if (paused?.status === "awaiting_confirmation") {
+      return { run: paused, status: "awaiting_confirmation", output: "" };
+    }
+    const failed = store.finishRun(agent.id, run.id, "", "failed");
+    return {
+      run: failed ?? run,
+      status: "failed",
+      output: "",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 
   // If a destructive action paused the run, the gate already flipped it to
   // awaiting_confirmation — leave it there rather than forcing a terminal state,

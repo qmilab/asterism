@@ -116,8 +116,8 @@ to draft the proposals.`,
 
 Offer one agent over a local HTTP endpoint, with the same separation guarantees as
 the command line. The endpoint serves only this agent — it is never a way to reach
-another. Runs a destructive action would pause are declined rather than run, since
-there is no one at the keyboard to confirm.
+another. A run that would pause for a destructive action is declined rather than
+run, since there is no one at the keyboard to confirm.
 
 Endpoints (with <agent> fixed to the one you serve):
   POST /agents/<agent>/runs     start a run; JSON body {"input":"<task>"}

@@ -146,6 +146,20 @@ function noAgent(io: CliIO, name: string): number {
   return 1;
 }
 
+/**
+ * Build the run substrate from the IO's override or, lazily, from the environment.
+ * The single seam either run-bearing command (`run`, `serve`) reaches the model
+ * through, so the two cannot drift in how it is wired — the same reason the run
+ * flow itself lives in one kernel call.
+ */
+async function resolveAdapter(
+  io: CliIO,
+): Promise<{ adapter?: RuntimeAdapter; reason?: string }> {
+  return io.makeAdapter
+    ? io.makeAdapter(io.env)
+    : (await import("./model.js")).buildAdapterFromEnv(io.env);
+}
+
 // --- init ------------------------------------------------------------------
 
 async function cmdInit(args: string[], io: CliIO): Promise<number> {
@@ -371,9 +385,7 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     // Resolve the adapter only after the workspace and agent check out, so an
     // uninitialized workspace or unknown agent fails like every other command
     // (and no adapter is constructed for a run that cannot proceed).
-    const made = io.makeAdapter
-      ? io.makeAdapter(io.env)
-      : (await import("./model.js")).buildAdapterFromEnv(io.env);
+    const made = await resolveAdapter(io);
     if (!made.adapter) {
       io.err(made.reason ?? "No model configured.");
       return 1;
@@ -653,8 +665,18 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
   }
-  const port = intFlag(parsed.flags.port);
   const host = stringFlag(parsed.flags.host);
+  // A `--port` with a value that is not a valid port (non-numeric, or out of
+  // range) must be an error, not silently dropped — otherwise a typo'd port binds
+  // the default and the user is told they are serving somewhere they are not.
+  let port: number | undefined;
+  if (typeof parsed.flags.port === "string") {
+    port = intFlag(parsed.flags.port);
+    if (port === undefined || port > 65535) {
+      io.err("The --port option must be a whole number between 0 and 65535.");
+      return 1;
+    }
+  }
 
   if (!io.startServer) {
     io.err("Serving over HTTP is not available in this embedding.");
@@ -669,9 +691,7 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     // Build the substrate the same way `run` does. A missing model is not fatal
     // for serving: the read endpoints work regardless, and a run started without
     // one is declined with a clear message rather than failing to serve at all.
-    const made = io.makeAdapter
-      ? io.makeAdapter(io.env)
-      : (await import("./model.js")).buildAdapterFromEnv(io.env);
+    const made = await resolveAdapter(io);
 
     // The kernel store stays open for the server's lifetime — `withHomeStore`
     // closes it only after this callback returns, which it does once shutdown is
@@ -695,11 +715,14 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     }
     io.out("Press Ctrl+C to stop.");
 
-    // Block until shutdown is requested, then stop the server and let the store
-    // close. A non-interactive embedding without this hook returns immediately.
+    // Block until shutdown is requested, then stop the server BEFORE returning —
+    // awaiting the stop drains in-flight requests, so the store (which
+    // `withHomeStore` closes once this callback returns) is never pulled out from
+    // under a request still being served. A non-interactive embedding without this
+    // hook returns immediately.
     const waitForShutdown = io.waitForShutdown ?? (() => Promise.resolve());
     await waitForShutdown();
-    server.stop();
+    await server.stop();
     io.out("Stopped.");
     return 0;
   });

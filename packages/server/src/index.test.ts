@@ -155,6 +155,54 @@ test("a malformed run request is a 400", async () => {
   expect(store.runs.list(personal.id)).toHaveLength(0);
 });
 
+test("a malformed percent-encoded agent name is a clean 404, not a 500", async () => {
+  // decodeURIComponent('%') throws; the handler must not leak that as a 500.
+  const res = await handleRequest(deps(), get("/agents/%/runs"));
+  expect(res.status).toBe(404);
+  const bad = await handleRequest(deps(), get("/agents/%ZZ/events"));
+  expect(bad.status).toBe(404);
+});
+
+test("an empty filter param means 'no filter', not an empty result", async () => {
+  await handleRequest(deps(), post("/agents/personal/runs", { input: "do a thing" }));
+
+  // ?type= (empty) must return the whole log, the same as omitting it — not filter
+  // on type='' and return nothing.
+  const emptyType = await handleRequest(deps(), get("/agents/personal/events?type="));
+  expect(emptyType.status).toBe(200);
+  const ev = (await emptyType.json()) as { events: unknown[] };
+  expect(ev.events.length).toBeGreaterThan(0);
+
+  // ?since= (empty) likewise returns the full log rather than nothing.
+  const emptySince = await handleRequest(deps(), get("/agents/personal/events?since="));
+  const sinceEv = (await emptySince.json()) as { events: unknown[] };
+  expect(sinceEv.events.length).toBeGreaterThan(0);
+
+  // ?limit= (empty) is ignored, not a 400.
+  const emptyLimit = await handleRequest(deps(), get("/agents/personal/events?limit="));
+  expect(emptyLimit.status).toBe(200);
+});
+
+test("an internal error becomes a generic 500 without leaking detail", async () => {
+  // A store whose read throws stands in for any kernel-side failure.
+  const boom = {
+    ...deps(),
+    store: {
+      ...store,
+      runs: {
+        list() {
+          throw new Error("secret-bearing internal detail");
+        },
+      },
+    } as unknown as ServerDeps["store"],
+  };
+  const res = await handleRequest(boom, get("/agents/personal/runs"));
+  expect(res.status).toBe(500);
+  const json = (await res.json()) as { error: string };
+  expect(json.error).toBe("Internal server error.");
+  expect(json.error).not.toContain("secret-bearing");
+});
+
 test("unknown paths 404 and wrong methods 405", async () => {
   expect((await handleRequest(deps(), get("/"))).status).toBe(404);
   expect((await handleRequest(deps(), get("/agents/personal"))).status).toBe(404);
