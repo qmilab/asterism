@@ -250,6 +250,37 @@ test("run drives the adapter, records the run, and prints output", async () => {
   expect(log).toContain("run.status_changed");
 });
 
+test("run preserves a full unquoted multi-word task", async () => {
+  const h = harness();
+  let captured: string | undefined;
+  const capturing: RuntimeAdapter = {
+    run(request) {
+      captured = request.input;
+      async function* noEvents() {}
+      return {
+        events: noEvents(),
+        output: Promise.resolve({ status: "done" as const, text: "ok" }),
+      };
+    },
+  };
+  h.io.makeAdapter = () => ({ adapter: capturing });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  expect(await runCli(["run", "personal", "fix", "the", "login", "bug"], h.io)).toBe(0);
+  expect(captured).toBe("fix the login bug");
+});
+
+test("new rejects a value-bearing flag given with no value", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["new", "bot", "--trust"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("--trust");
+  expect(await runCli(["new", "bot", "--soul"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("--soul");
+  // And it did not create the agent under a silent default.
+  expect(await runCli(["memory", "inspect", "bot"], h.io)).toBe(1);
+});
+
 test("run validates the workspace before model configuration", async () => {
   const h = harness(); // no init
   expect(await runCli(["run", "ghost", "do it"], h.io)).toBe(1);

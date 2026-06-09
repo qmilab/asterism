@@ -150,6 +150,15 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
     );
     return 1;
   }
+  // A value-bearing flag given with no value parses as boolean `true`. Reject it
+  // rather than silently falling back to a default — `new bot --trust` must not
+  // quietly create a `propose` agent the user did not ask for.
+  for (const flag of ["soul", "role", "trust"] as const) {
+    if (parsed.flags[flag] === true) {
+      io.err(`The --${flag} option needs a value.`);
+      return 1;
+    }
+  }
   const role = stringFlag(parsed.flags.role) ?? "";
   const trustLevel = stringFlag(parsed.flags.trust) ?? "propose";
 
@@ -314,7 +323,10 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   const name = parsed.positionals[0];
-  const task = parsed.positionals[1];
+  // Join every remaining positional so an unquoted multi-word task
+  // (`run agent fix the login bug`) is preserved in full, not silently
+  // truncated to the first word.
+  const task = parsed.positionals.slice(1).join(" ");
   if (!name || !task) {
     io.err('Usage: asterism run <agent> "<task>"');
     return 1;
