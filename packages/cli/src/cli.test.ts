@@ -85,6 +85,43 @@ test("new creates an agent and rejects duplicates", async () => {
   expect(h.err.join("\n")).toContain("already exists");
 });
 
+test("a relative custom soul is stored as a stable absolute path", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  writeFileSync(join(h.dir, "soul.md"), "Calm and exacting.\n");
+  expect(await runCli(["new", "persona", "--soul", "./soul.md"], h.io)).toBe(0);
+  const printed = h.out.join("\n");
+  // The stored reference is the absolute path, not the CWD-relative one, so the
+  // soul resolves identically from any directory at run time.
+  expect(printed).toContain(`soul: ${join(h.dir, "soul.md")}`);
+  expect(printed).not.toContain("soul: ./soul.md");
+});
+
+test("creating an agent with a missing soul file warns but still succeeds", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["new", "persona", "--soul", "nope.md"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("no soul file at");
+});
+
+test("a built-in soul name is stored verbatim, not as a path", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--soul", "careful-consultant"], h.io);
+  expect(h.out.join("\n")).toContain("soul: careful-consultant");
+});
+
+test("a failure opening the store returns an error code, not a rejection", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  h.io.openStore = () => {
+    throw new Error("database is locked");
+  };
+  const code = await runCli(["memory", "inspect", "whoever"], h.io);
+  expect(code).toBe(1);
+  expect(h.err.join("\n")).toContain("database is locked");
+});
+
 test("new rejects an invalid trust level", async () => {
   const h = harness();
   await runCli(["init"], h.io);

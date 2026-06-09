@@ -11,6 +11,7 @@ import { basename, join, resolve as resolvePath } from "node:path";
 import { AsterismStore } from "@qmilab/asterism-core";
 import {
   auditTrustHooks,
+  BUILTIN_SOULS,
   frameRun,
   resolveSoul,
   resolveToolRegistry,
@@ -78,14 +79,18 @@ async function withHomeStore(
     return 1;
   }
   const open = io.openStore ?? ((p: string) => AsterismStore.open(p));
-  const store = open(dbPath(home));
+  // Open inside the try: a corrupt or unreadable database must surface as a
+  // clean error code, not an unhandled rejection. `store` stays undefined if the
+  // open throws, so the finally guards the close.
+  let store: AsterismStore | undefined;
   try {
+    store = open(dbPath(home));
     return await fn(store, home);
   } catch (err) {
     io.err(`error: ${errorMessage(err)}`);
     return 1;
   } finally {
-    store.close();
+    store?.close();
   }
 }
 
@@ -145,9 +150,22 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
     );
     return 1;
   }
-  const soulRef = stringFlag(parsed.flags.soul) ?? "casual-helper";
   const role = stringFlag(parsed.flags.role) ?? "";
   const trustLevel = stringFlag(parsed.flags.trust) ?? "propose";
+
+  // Resolve the soul reference now, while we still know the directory the user
+  // invoked from. A built-in name is stored verbatim; anything else is a file
+  // path, captured as an absolute path so `run` reads the same soul no matter
+  // which subdirectory it is later invoked from (the home is discovered upward).
+  let soulRef = stringFlag(parsed.flags.soul) ?? "casual-helper";
+  let soulNote: string | undefined;
+  if (!(soulRef in BUILTIN_SOULS)) {
+    const soulPath = resolvePath(io.cwd, soulRef);
+    if (!existsSync(soulPath) || !statSync(soulPath).isFile()) {
+      soulNote = `  note: no soul file at ${soulPath} yet — the agent uses a default character until one exists there.`;
+    }
+    soulRef = soulPath;
+  }
 
   return withHomeStore(io, (store, home) => {
     if (findAgentByName(store, name)) {
@@ -168,6 +186,7 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
     io.out(`Created agent "${agent.name}" (${agent.trustLevel}) — soul: ${agent.soulRef}`);
     if (agent.role) io.out(`  role: ${agent.role}`);
     io.out(`  workspace: ${agent.workspaceDir}`);
+    if (soulNote) io.out(soulNote);
     return 0;
   });
 }
