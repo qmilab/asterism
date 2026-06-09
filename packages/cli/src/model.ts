@@ -12,7 +12,7 @@
 import { PiAdapter } from "@qmilab/asterism-adapter-pi";
 import type { RuntimeAdapter } from "@qmilab/asterism-core";
 
-import { resolveModelConfig } from "./model-config";
+import { resolveModelConfig } from "./model-config.js";
 
 export interface AdapterResult {
   adapter?: RuntimeAdapter;

@@ -19,8 +19,8 @@
 // places it. `buildSystemPrompt` is pure and deterministic so it is trivially
 // testable; `frameRun` assembles the full `RunRequest`.
 
-import type { RunRequest, ToolRegistry } from "./adapter";
-import type { Agent, Memory } from "./types";
+import type { RunRequest, ToolRegistry } from "./adapter.js";
+import type { Agent, Memory } from "./types.js";
 
 /**
  * A skill made available to a run: its name and, when loaded, the markdown body.

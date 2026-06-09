@@ -10,8 +10,8 @@
 // into a process exit code. All parsing, kernel calls, and formatting live in
 // `cli.ts`; the concrete adapter is wired lazily there from the environment.
 
-import { runCli } from "./cli";
-import type { CliIO } from "./cli";
+import { runCli } from "./cli.js";
+import type { CliIO } from "./cli.js";
 import type { Action } from "@qmilab/asterism-core";
 
 const io: CliIO = {

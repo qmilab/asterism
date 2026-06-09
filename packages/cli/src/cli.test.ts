@@ -182,6 +182,23 @@ test("a piped secret value is stored exactly, never normalized", async () => {
   }
 });
 
+test("a dash-prefixed inline secret value is stored, not parsed as a flag", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+  const raw = "-----BEGIN-TOKEN-----";
+  expect(await runCli(["secrets", "add", "work", "KEY", raw], h.io)).toBe(0);
+  expect([...h.out, ...h.err].join("\n")).toContain("Stored credential KEY");
+
+  const store = AsterismStore.open(dbPath(join(h.dir, HOME_DIR_NAME)));
+  try {
+    const agent = store.agents.list().find((a) => a.name === "work")!;
+    expect(store.secrets.readByKey(agent.id, "KEY")).toBe(raw);
+  } finally {
+    store.close();
+  }
+});
+
 test("secrets add reports when no value is available", async () => {
   const h = harness();
   await runCli(["init"], h.io);

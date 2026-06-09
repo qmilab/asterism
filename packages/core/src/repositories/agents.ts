@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type { SqlDriver, SqlRow } from "../db/driver";
-import type { Agent, TrustLevel } from "../types";
-import { TRUST_LEVELS, validateEnum } from "../types";
-import { requireAgentId } from "./scope";
+import type { SqlDriver, SqlRow } from "../db/driver.js";
+import type { Agent, TrustLevel } from "../types.js";
+import { TRUST_LEVELS, validateEnum } from "../types.js";
+import { requireAgentId } from "./scope.js";
 
 /**
  * Public input for creating an agent. The reserved fields `teamId` /

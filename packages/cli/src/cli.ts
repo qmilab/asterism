@@ -30,18 +30,18 @@ import type {
   TrustLevel,
 } from "@qmilab/asterism-core";
 
-import { helpRequested, intFlag, parseArgs, stringFlag } from "./args";
-import type { ParsedArgs } from "./args";
-import { formatEventList, formatMemoryList } from "./format";
-import { COMMAND_HELP, USAGE } from "./help";
+import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
+import type { ParsedArgs } from "./args.js";
+import { formatEventList, formatMemoryList } from "./format.js";
+import { COMMAND_HELP, USAGE } from "./help.js";
 import {
   agentWorkspace,
   createHome,
   dbPath,
   findHome,
   isValidAgentName,
-} from "./paths";
-import { VERSION } from "./version";
+} from "./paths.js";
+import { VERSION } from "./version.js";
 
 /** Everything the CLI touches the outside world through — injectable for tests. */
 export interface CliIO {
@@ -218,20 +218,23 @@ async function cmdTrust(args: string[], io: CliIO): Promise<number> {
 // --- secrets add -----------------------------------------------------------
 
 async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
-  if (helpRequested(parsed)) {
+  if (args[0] === "--help" || args[0] === "-h") {
     io.out(COMMAND_HELP.secrets!);
     return 0;
   }
-  const name = parsed.positionals[0];
-  const key = parsed.positionals[1];
+  // Positional only — no flag parsing. The first two tokens are the agent and
+  // key; the THIRD is the value, taken VERBATIM. Secret material is arbitrary, so
+  // a value that begins with a dash (`-abc`, `-----BEGIN …`) must be stored as
+  // given, not mistaken for an option. Option parsing stops after the key.
+  const name = args[0];
+  const key = args[1];
   if (!name || !key) {
     io.err("Usage: asterism secrets add <agent> <KEY> [value]");
     return 1;
   }
   // Value precedence: inline argument, then the matching environment variable,
   // then piped standard input. Never echoed back, whichever path it came from.
-  let value = parsed.positionals[2] ?? io.env[key];
+  let value = args[2] ?? io.env[key];
   if (value === undefined && io.readStdin) {
     value = await io.readStdin();
   }
@@ -317,7 +320,7 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
 
   const made = io.makeAdapter
     ? io.makeAdapter(io.env)
-    : (await import("./model")).buildAdapterFromEnv(io.env);
+    : (await import("./model.js")).buildAdapterFromEnv(io.env);
   if (!made.adapter) {
     io.err(made.reason ?? "No model configured.");
     return 1;

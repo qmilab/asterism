@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { SqlDriver, SqlRow } from "../db/driver";
-import type { Skill } from "../types";
-import { requireAgentId } from "./scope";
+import type { SqlDriver, SqlRow } from "../db/driver.js";
+import type { Skill } from "../types.js";
+import { requireAgentId } from "./scope.js";
 
 export interface CreateSkillInput {
   name: string;

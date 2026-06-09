@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { SqlDriver, SqlRow } from "../db/driver";
-import type { Credential } from "../types";
-import { requireAgentId } from "./scope";
+import type { SqlDriver, SqlRow } from "../db/driver.js";
+import type { Credential } from "../types.js";
+import { requireAgentId } from "./scope.js";
 
 export interface CreateCredentialInput {
   key: string;

@@ -19,9 +19,9 @@
 // `awaiting_confirmation`, which the store logs as `run.status_changed`) and
 // passes them in to be preserved alongside the audit writes.
 
-import type { Action, TrustHooks } from "./trust";
-import { classifyEffect } from "./trust";
-import type { EventRepository } from "./repositories/events";
+import type { Action, TrustHooks } from "./trust.js";
+import { classifyEffect } from "./trust.js";
+import type { EventRepository } from "./repositories/events.js";
 
 /** Run context stamped onto every audit event so the log ties back to a run. */
 export interface AuditContext {

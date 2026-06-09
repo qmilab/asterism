@@ -7,6 +7,6 @@
 // Embedders can drive the same command surface programmatically via `runCli`,
 // supplying their own `CliIO` (cwd, env, output sinks, store/adapter factories).
 
-export { runCli } from "./cli";
-export type { CliIO } from "./cli";
-export { VERSION } from "./version";
+export { runCli } from "./cli.js";
+export type { CliIO } from "./cli.js";
+export { VERSION } from "./version.js";

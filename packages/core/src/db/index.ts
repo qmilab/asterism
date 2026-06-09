@@ -1,7 +1,7 @@
-import type { SqlDriver } from "./driver";
-import { BunSqlDriver } from "./bun-driver";
+import type { SqlDriver } from "./driver.js";
+import { BunSqlDriver } from "./bun-driver.js";
 
-export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./driver";
+export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./driver.js";
 
 /**
  * Open a local SQLite database. Defaults to an in-memory database.

@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { SqlDriver, SqlRow } from "../db/driver";
-import type { Memory, MemoryStatus, MemoryType, ReviewState } from "../types";
+import type { SqlDriver, SqlRow } from "../db/driver.js";
+import type { Memory, MemoryStatus, MemoryType, ReviewState } from "../types.js";
 import {
   MEMORY_STATUSES,
   MEMORY_TYPES,
   REVIEW_STATES,
   validateEnum,
-} from "../types";
-import { assertMemorySafe } from "../firewall";
-import { requireAgentId } from "./scope";
+} from "../types.js";
+import { assertMemorySafe } from "../firewall.js";
+import { requireAgentId } from "./scope.js";
 
 export interface CreateMemoryInput {
   memoryType: MemoryType;

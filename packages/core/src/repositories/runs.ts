@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type { SqlDriver, SqlRow } from "../db/driver";
-import type { Run, RunStatus } from "../types";
-import { RUN_STATUSES, validateEnum } from "../types";
-import { requireAgentId } from "./scope";
+import type { SqlDriver, SqlRow } from "../db/driver.js";
+import type { Run, RunStatus } from "../types.js";
+import { RUN_STATUSES, validateEnum } from "../types.js";
+import { requireAgentId } from "./scope.js";
 
 export interface CreateRunInput {
   input: string;

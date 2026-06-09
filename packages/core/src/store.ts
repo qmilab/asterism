@@ -1,15 +1,15 @@
-import type { SqlDriver } from "./db/driver";
-import { openDatabase } from "./db/index";
-import { SCHEMA } from "./db/schema";
-import { AgentRepository } from "./repositories/agents";
-import type { CreateAgentInput } from "./repositories/agents";
-import { RunRepository } from "./repositories/runs";
-import type { CreateRunInput } from "./repositories/runs";
-import { MemoryRepository } from "./repositories/memories";
-import type { CreateMemoryInput } from "./repositories/memories";
-import { SkillRepository } from "./repositories/skills";
-import type { CreateSkillInput } from "./repositories/skills";
-import { CredentialRepository } from "./repositories/credentials";
+import type { SqlDriver } from "./db/driver.js";
+import { openDatabase } from "./db/index.js";
+import { SCHEMA } from "./db/schema.js";
+import { AgentRepository } from "./repositories/agents.js";
+import type { CreateAgentInput } from "./repositories/agents.js";
+import { RunRepository } from "./repositories/runs.js";
+import type { CreateRunInput } from "./repositories/runs.js";
+import { MemoryRepository } from "./repositories/memories.js";
+import type { CreateMemoryInput } from "./repositories/memories.js";
+import { SkillRepository } from "./repositories/skills.js";
+import type { CreateSkillInput } from "./repositories/skills.js";
+import { CredentialRepository } from "./repositories/credentials.js";
 import type {
   Agent,
   Credential,
@@ -19,10 +19,10 @@ import type {
   RunStatus,
   Skill,
   TrustLevel,
-} from "./types";
-import { EventRepository } from "./repositories/events";
-import { SecretStore, secretValueRef } from "./secrets";
-import { MemoryFirewallError } from "./firewall";
+} from "./types.js";
+import { EventRepository } from "./repositories/events.js";
+import { SecretStore, secretValueRef } from "./secrets.js";
+import { MemoryFirewallError } from "./firewall.js";
 
 /**
  * The kernel's persistence surface. Applies the Phase 0 schema and exposes one
