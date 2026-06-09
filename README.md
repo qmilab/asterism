@@ -1,6 +1,6 @@
 <div align="center">
 
-# ✶ Asterism
+<img src=".github/assets/asterism-wordmark.svg" alt="Asterism" width="240">
 
 ### Many agents. One runtime. Separate lives.
 
