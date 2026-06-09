@@ -10,6 +10,8 @@ import type {
   ReflectionProvider,
   RuntimeAdapter,
 } from "@qmilab/asterism-core";
+import { handleRequest } from "@qmilab/asterism-server";
+import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
 
 import { runCli } from "./cli.ts";
 import type { CliIO, ReviewDecision, ReviewItem } from "./cli.ts";
@@ -361,12 +363,14 @@ test("secrets and activity never cross between agents", async () => {
   expect(personalEvents.join("\n")).not.toContain("credential.added");
 });
 
-test("serve is recognized but not yet wired", async () => {
+test("serve is unavailable when the embedding wires no server", async () => {
+  // The default `CliIO` (no `startServer`) cannot serve; it must say so plainly
+  // rather than pretend to start. The real CLI supplies the server in `bin.ts`.
   const h = harness();
   await runCli(["init"], h.io);
   await runCli(["new", "personal"], h.io);
   expect(await runCli(["serve", "personal"], h.io)).toBe(1);
-  expect(h.err.join("\n")).toContain("coming soon");
+  expect(h.err.join("\n")).toContain("not available in this embedding");
 });
 
 test("reflect proposes typed memories and persists only what the human accepts", async () => {
@@ -541,4 +545,143 @@ test("an unknown command is an error", async () => {
   const h = harness();
   expect(await runCli(["frobnicate"], h.io)).toBe(1);
   expect(h.err.join("\n")).toContain("Unknown command");
+});
+
+// --- serve -----------------------------------------------------------------
+
+/** A no-op running-server stand-in, so `serve` tests never bind a real socket. */
+function fakeRunningServer(): RunningServer {
+  return {
+    port: 4831,
+    hostname: "127.0.0.1",
+    url: "http://127.0.0.1:4831",
+    stop: () => {},
+  };
+}
+
+test("serve binds the named agent and exposes its endpoints", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  let captured: ServeOptions | undefined;
+  let runStatus: number | undefined;
+  let runsAfter: number | undefined;
+  const out: string[] = [];
+  const code = await runCli(["serve", "personal", "--port", "9090"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startServer: (options) => {
+      captured = options;
+      return fakeRunningServer();
+    },
+    // The store is still open while we are inside the shutdown wait — `serve`
+    // closes it only after this resolves — so exercise the real HTTP handler
+    // against the very deps the CLI wired, proving they are real and scoped.
+    // Read everything that needs the store here, before it closes on return.
+    waitForShutdown: async () => {
+      const res = await handleRequest(
+        captured!,
+        new Request("http://127.0.0.1:9090/agents/personal/runs", {
+          method: "POST",
+          body: JSON.stringify({ input: "write the blog draft" }),
+        }),
+      );
+      runStatus = res.status;
+      runsAfter = captured!.store.runs.list(captured!.agent.id).length;
+    },
+  });
+
+  expect(code).toBe(0);
+  expect(captured?.agent.name).toBe("personal");
+  expect(captured?.port).toBe(9090);
+  expect(captured?.adapter).toBeDefined();
+  expect(out.join("\n")).toContain('Serving agent "personal" at http://127.0.0.1:4831');
+  expect(out.join("\n")).toContain("POST http://127.0.0.1:4831/agents/personal/runs");
+  expect(out.join("\n")).toContain("Stopped.");
+
+  // The wired deps actually serve a run, and it landed in the agent's store.
+  expect(runStatus).toBe(201);
+  expect(runsAfter).toBe(1);
+});
+
+test("serve reports a missing model but still starts (reads work without one)", async () => {
+  const h = harness();
+  // No adapter configured: serve should still come up and say runs are declined.
+  h.io.makeAdapter = () => ({ reason: "Set ASTERISM_MODEL_ID and an API key." });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: ServeOptions | undefined;
+  const out: string[] = [];
+  const code = await runCli(["serve", "personal"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startServer: (options) => {
+      captured = options;
+      return fakeRunningServer();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect(captured?.adapter).toBeUndefined();
+  expect(captured?.adapterReason).toContain("ASTERISM_MODEL_ID");
+  expect(out.join("\n")).toContain("no model configured");
+});
+
+test("serve fails clearly for an unknown agent and never starts a server", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+
+  let started = false;
+  const code = await runCli(["serve", "ghost"], {
+    ...h.io,
+    startServer: () => {
+      started = true;
+      return fakeRunningServer();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(1);
+  expect(started).toBe(false);
+  expect(h.err.join("\n")).toContain('No agent named "ghost"');
+});
+
+test("serve rejects a --port given without a value", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  const code = await runCli(["serve", "personal", "--port"], {
+    ...h.io,
+    startServer: () => fakeRunningServer(),
+    waitForShutdown: () => Promise.resolve(),
+  });
+  expect(code).toBe(1);
+  expect(h.err.join("\n")).toContain("The --port option needs a value");
+});
+
+test("serve rejects a non-numeric or out-of-range --port instead of binding the default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let started = false;
+  const serveOverrides: Partial<CliIO> = {
+    startServer: () => {
+      started = true;
+      return fakeRunningServer();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  };
+
+  // A typo'd port must not silently fall back to 4831.
+  expect(await runCli(["serve", "personal", "--port", "80O8"], { ...h.io, ...serveOverrides })).toBe(1);
+  // Out of range.
+  expect(await runCli(["serve", "personal", "--port", "99999"], { ...h.io, ...serveOverrides })).toBe(1);
+  expect(h.err.join("\n")).toContain("between 0 and 65535");
+  expect(started).toBe(false);
 });

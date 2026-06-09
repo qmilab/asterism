@@ -112,8 +112,22 @@ anything that looks unsafe to remember is flagged for you.
 Uses your configured model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY)
 to draft the proposals.`,
 
-  serve: `asterism serve <agent>
+  serve: `asterism serve <agent> [--port <n>] [--host <addr>]
 
 Offer one agent over a local HTTP endpoint, with the same separation guarantees as
-the command line.`,
+the command line. The endpoint serves only this agent — it is never a way to reach
+another. A run that would pause for a destructive action is declined rather than
+run, since there is no one at the keyboard to confirm.
+
+Endpoints (with <agent> fixed to the one you serve):
+  POST /agents/<agent>/runs     start a run; JSON body {"input":"<task>"}
+  GET  /agents/<agent>/runs     list the agent's runs
+  GET  /agents/<agent>/events   review the agent's activity
+
+Options:
+  --port <n>      Port to listen on. Default 4831.
+  --host <addr>   Address to bind. Default 127.0.0.1 (this machine only).
+
+Configure a model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY) to start
+runs; without one, the read endpoints still work. Press Ctrl+C to stop.`,
 };

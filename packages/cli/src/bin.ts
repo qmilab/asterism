@@ -58,6 +58,18 @@ const io: CliIO = {
     }
     return { kind: "reject" };
   },
+  // `serve`: start the local HTTP endpoint. Imported lazily so non-serve commands
+  // never load the HTTP layer (the same pattern `run` uses for the substrate).
+  startServer: async (options) => (await import("@qmilab/asterism-server")).serve(options),
+  // Block until the first interrupt, then let `serve` shut down gracefully (stop
+  // the server, close the store). A second Ctrl+C falls through to the default
+  // hard exit.
+  waitForShutdown: () =>
+    new Promise<void>((resolve) => {
+      const stop = (): void => resolve();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    }),
 };
 
 const code = await runCli(process.argv.slice(2), io);
