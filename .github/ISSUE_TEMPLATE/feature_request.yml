@@ -1,0 +1,26 @@
+name: Feature request / idea
+description: Suggest a capability or change
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For anything beyond a small change, opening an issue first is the right
+        call (see CONTRIBUTING.md). If your idea touches one of the Phase 0
+        safety rules in CLAUDE.md, please flag that — it's a design discussion.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The need or friction behind the request, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: What you'd like to see. Rough is fine.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
