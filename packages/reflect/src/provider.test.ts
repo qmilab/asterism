@@ -92,6 +92,29 @@ test("accepts a bare array as well as the {memories:[…]} envelope", () => {
   expect(parseProposals(raw, RUN_ID)).toHaveLength(1);
 });
 
+test("extracts the JSON even when prose with stray braces surrounds it", () => {
+  const envelope = JSON.stringify({
+    memories: [{ type: "semantic", content: "the real lesson", confidence: 0.7 }],
+  });
+  // Stray braces both before (a {placeholder}) and after (a {0,1} range note).
+  const raw = `Sure — using {placeholder}: ${envelope}. Note: confidence is in {0,1}.`;
+  const proposals = parseProposals(raw, RUN_ID);
+  expect(proposals).toHaveLength(1);
+  expect(proposals[0]?.content).toBe("the real lesson");
+});
+
+test("coerces a numeric-string confidence and clamps it", () => {
+  const raw = JSON.stringify({
+    memories: [
+      { type: "semantic", content: "stringy conf", confidence: "0.9" },
+      { type: "semantic", content: "blank conf", confidence: "" },
+    ],
+  });
+  const proposals = parseProposals(raw, RUN_ID);
+  expect(proposals[0]?.confidence).toBe(0.9); // "0.9" → 0.9
+  expect(proposals[1]?.confidence).toBe(0.5); // "" → default, not 0
+});
+
 test("a non-JSON or empty response yields no proposals rather than throwing", () => {
   expect(parseProposals("I could not find anything to remember.", RUN_ID)).toEqual([]);
   expect(parseProposals("", RUN_ID)).toEqual([]);

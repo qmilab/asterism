@@ -74,6 +74,24 @@ export class RunRepository {
     return row ? mapRun(row) : undefined;
   }
 
+  /**
+   * The agent's most recent run that produced output — the default target for
+   * reflection. Scoped like every read; runs with no output (or only whitespace)
+   * are excluded so a caller never reflects on a run with nothing to learn from.
+   */
+  latestWithOutput(agentId: string): Run | undefined {
+    requireAgentId(agentId);
+    const row = this.driver
+      .prepare(
+        `SELECT * FROM runs
+           WHERE agent_id = ? AND output IS NOT NULL AND TRIM(output) <> ''
+           ORDER BY started_at DESC, rowid DESC
+           LIMIT 1`,
+      )
+      .get([agentId]);
+    return row ? mapRun(row) : undefined;
+  }
+
   setStatus(agentId: string, id: string, status: RunStatus): Run | undefined {
     requireAgentId(agentId);
     validateEnum(status, RUN_STATUSES, "run status");

@@ -489,6 +489,42 @@ test("reflect without a configured model explains what to set", async () => {
   expect(h.err.join("\n")).toContain("ASTERISM_MODEL_ID");
 });
 
+test("reflect rejects an empty edit rather than saving a blank memory", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "a fact", confidence: 0.8 }]),
+  });
+  h.io.review = (): ReviewDecision => ({ kind: "edit", content: "   " });
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("rejected (empty after edit)");
+  expect(out).toContain("0 saved");
+  expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
+});
+
+test("reflect ignores a proposal whose type is not a reviewable memory type", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  // A non-conforming provider that slips an episodic proposal past the typed seam.
+  h.io.makeReflectionProvider = () => ({
+    provider: {
+      reflect: async (input) =>
+        [
+          { memoryType: "episodic", content: "play-by-play", confidence: 0.9, sourceRunId: input.transcript.runId },
+          { memoryType: "semantic", content: "a real lesson", confidence: 0.8, sourceRunId: input.transcript.runId },
+        ] as unknown as ProposedMemory[],
+    },
+  });
+  h.io.review = (): ReviewDecision => ({ kind: "accept" });
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("Ignored 1 proposal");
+  expect(out).toContain("1 saved");
+
+  const mem = await capture(["memory", "inspect", "personal"], h.io);
+  expect(mem).toContain("a real lesson");
+  expect(mem).not.toContain("play-by-play");
+});
+
 test("--version prints the version", async () => {
   const h = harness();
   expect(await runCli(["--version"], h.io)).toBe(0);

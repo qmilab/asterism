@@ -78,23 +78,59 @@ function stripCodeFence(text: string): string {
     .trim();
 }
 
-/** Parse a JSON value out of a model response, tolerant of surrounding prose. */
+/**
+ * The index of the bracket that closes the `{`/`[` at `start`, or -1 if none.
+ * Tracks nesting of that bracket type and skips over string literals (so a brace
+ * inside a JSON string never miscounts), which lets us pull a JSON value out of a
+ * response even when prose around it contains stray braces.
+ */
+function matchingClose(text: string, start: number): number {
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === open) depth++;
+    else if (ch === close && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * Parse a JSON value out of a model response, tolerant of surrounding prose. Fast
+ * path: the de-fenced text is itself JSON. Otherwise, scan for the first BALANCED
+ * `{…}`/`[…]` span that actually parses — so prose containing stray braces on
+ * either side of the JSON (e.g. "ranges over {0,1}") does not derail extraction
+ * the way a first-bracket-to-last-bracket slice would.
+ */
 function extractJson(raw: string): unknown {
   const text = stripCodeFence(raw);
   try {
     return JSON.parse(text);
   } catch {
-    // Fall back to the widest brace/bracket span — handles a model that wraps the
-    // JSON in a sentence ("Here are the memories: { … }").
-    const start = text.search(/[[{]/);
-    const end = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
-    if (start === -1 || end <= start) return undefined;
+    // fall through to the balanced-span scan
+  }
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch !== "{" && ch !== "[") continue;
+    const end = matchingClose(text, i);
+    if (end === -1) continue;
     try {
-      return JSON.parse(text.slice(start, end + 1));
+      return JSON.parse(text.slice(i, end + 1));
     } catch {
-      return undefined;
+      // not the JSON we want (e.g. a "{placeholder}" in prose) — keep scanning
     }
   }
+  return undefined;
 }
 
 /** Pull the raw memory entries out of either `{memories: [...]}` or a bare `[...]`. */
@@ -104,12 +140,17 @@ function entriesOf(parsed: unknown): unknown[] {
   return Array.isArray(memories) ? memories : [];
 }
 
-/** Clamp a value to a finite confidence in [0, 1], or the default if unusable. */
+/**
+ * Clamp a value to a finite confidence in [0, 1], or the default if unusable.
+ * Accepts a numeric string too ("0.9"), since a model may JSON-encode the number
+ * as a string; a blank or non-numeric value falls back to the default.
+ */
 function normalizeConfidence(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_CONFIDENCE;
-  }
-  return Math.min(1, Math.max(0, value));
+  let n = NaN;
+  if (typeof value === "number") n = value;
+  else if (typeof value === "string" && value.trim() !== "") n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_CONFIDENCE;
+  return Math.min(1, Math.max(0, n));
 }
 
 /**

@@ -41,6 +41,7 @@ export class AsterismStore {
 
   constructor(private readonly driver: SqlDriver) {
     this.driver.exec(SCHEMA);
+    this.migrate();
     this.agents = new AgentRepository(driver);
     this.runs = new RunRepository(driver);
     this.memories = new MemoryRepository(driver);
@@ -48,6 +49,29 @@ export class AsterismStore {
     this.credentials = new CredentialRepository(driver);
     this.secrets = new SecretStore(driver);
     this.events = new EventRepository(driver);
+  }
+
+  // --- Schema migration ------------------------------------------------------
+  //
+  // Phase 0 has no migration framework, and `CREATE TABLE IF NOT EXISTS` cannot
+  // add a column to a table that already exists. So a column introduced after a
+  // database was first created (e.g. `runs.output`) would be missing on that
+  // database, and the first write to it would throw "no such column". These
+  // additive, idempotent steps bring an older schema up to date on open. Fresh
+  // databases already have the column from SCHEMA, so each step is a no-op there.
+
+  private migrate(): void {
+    if (!this.columnExists("runs", "output")) {
+      this.driver.exec(`ALTER TABLE runs ADD COLUMN output TEXT`);
+    }
+  }
+
+  /** Whether `table` has a column named `column` (via PRAGMA table_info). */
+  private columnExists(table: string, column: string): boolean {
+    // `table` is always a hard-coded literal here, never user input — PRAGMA does
+    // not accept a bound parameter for the table name.
+    const rows = this.driver.prepare(`PRAGMA table_info(${table})`).all();
+    return rows.some((r) => String(r.name) === column);
   }
 
   // --- Audited orchestration -------------------------------------------------
@@ -123,6 +147,42 @@ export class AsterismStore {
       }
       return run;
     });
+  }
+
+  /**
+   * Finish a run: persist its output transcript AND its terminal status in ONE
+   * transaction, recording the status transition as `run.status_changed`. Output
+   * is CONTENT, not an event payload (the log stays reference-only), so it rides
+   * the same transaction as the status flip but is never itself logged — keeping
+   * output and status from drifting if the process dies between two writes, which
+   * a raw repo call from the surface could not guarantee.
+   */
+  finishRun(
+    agentId: string,
+    runId: string,
+    output: string,
+    status: RunStatus,
+  ): Run | undefined {
+    return this.driver.transaction(() => {
+      const from = this.runs.get(agentId, runId)?.status ?? null;
+      this.runs.setOutput(agentId, runId, output);
+      const run = this.runs.setStatus(agentId, runId, status);
+      if (run) {
+        this.emit(agentId, "run.status_changed", { runId, from, to: run.status }, runId);
+      }
+      return run;
+    });
+  }
+
+  /**
+   * Persist a run's output transcript WITHOUT changing its status — for a run that
+   * paused (`awaiting_confirmation`) yet still produced text worth reflecting on
+   * later. Content only; emits no event (the log records references, never run
+   * content). Goes through the store so the surface never reaches the repo
+   * directly for a consequential write.
+   */
+  recordRunOutput(agentId: string, runId: string, output: string): Run | undefined {
+    return this.driver.transaction(() => this.runs.setOutput(agentId, runId, output));
   }
 
   /**

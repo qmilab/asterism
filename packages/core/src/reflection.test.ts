@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { AsterismStore } from "./store.js";
+import { openDatabase } from "./db/index.js";
 import {
   isReflectionMemoryType,
   REFLECTION_MEMORY_TYPES,
@@ -72,6 +73,91 @@ test("run output is agent-scoped — one agent cannot stamp output onto another'
 
     // An empty agentId is rejected outright, like every scoped write.
     expect(() => store.runs.setOutput("", aliceRun.id, "x")).toThrow();
+  } finally {
+    store.close();
+  }
+});
+
+test("finishRun persists output and terminal status together and logs the transition", () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const run = store.startRun(agent.id, { input: "do it" });
+    const finished = store.finishRun(agent.id, run.id, "the result", "done");
+    expect(finished?.output).toBe("the result");
+    expect(finished?.status).toBe("done");
+    // The status transition is on the event log; output (content) is not.
+    const types = store.events.list(agent.id).map((e) => e.type);
+    expect(types).toContain("run.status_changed");
+  } finally {
+    store.close();
+  }
+});
+
+test("latestWithOutput returns the most recent run that has non-empty output", () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const r1 = store.startRun(agent.id, { input: "first" });
+    store.finishRun(agent.id, r1.id, "first output", "done");
+    const r2 = store.startRun(agent.id, { input: "second" });
+    store.finishRun(agent.id, r2.id, "second output", "done");
+    // A later run with empty/whitespace output is skipped, not chosen.
+    const r3 = store.startRun(agent.id, { input: "third" });
+    store.finishRun(agent.id, r3.id, "   ", "done");
+
+    expect(store.runs.latestWithOutput(agent.id)?.id).toBe(r2.id);
+
+    // Scoped: another agent's runs are never returned.
+    const other = makeAgent(store, "work");
+    expect(store.runs.latestWithOutput(other.id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("listActiveAccepted returns only active, accepted memories", () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    store.recordMemory(agent.id, { memoryType: "semantic", content: "accepted one", reviewState: "accepted", status: "active" });
+    store.recordMemory(agent.id, { memoryType: "semantic", content: "still proposed", reviewState: "proposed", status: "active" });
+    store.recordMemory(agent.id, { memoryType: "semantic", content: "archived one", reviewState: "accepted", status: "archived" });
+
+    const contents = store.memories.listActiveAccepted(agent.id).map((m) => m.content);
+    expect(contents).toEqual(["accepted one"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("opening a pre-existing database without runs.output migrates the column in", () => {
+  const driver = openDatabase(":memory:");
+  // Simulate an older schema: a runs table created before the output column existed.
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, input TEXT NOT NULL,
+      status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT
+    );
+  `);
+  // Opening the store applies the additive migration over the old table.
+  const store = new AsterismStore(driver);
+  try {
+    const agent = store.createAgent({
+      name: "personal",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/personal",
+      trustLevel: "autonomous",
+    });
+    const run = store.startRun(agent.id, { input: "t" });
+    // The write that would throw "no such column: output" on the un-migrated table works.
+    expect(store.finishRun(agent.id, run.id, "result text", "done")?.output).toBe("result text");
   } finally {
     store.close();
   }

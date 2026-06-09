@@ -13,6 +13,7 @@ import {
   auditTrustHooks,
   BUILTIN_SOULS,
   frameRun,
+  isReflectionMemoryType,
   MemoryFirewallError,
   resolveSoul,
   resolveToolRegistry,
@@ -37,7 +38,7 @@ import type {
 
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
-import { formatEventList, formatMemoryList } from "./format.js";
+import { formatEventList, formatMemoryList, shortId } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import {
   agentWorkspace,
@@ -99,11 +100,6 @@ export interface CliIO {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** First 8 chars of a UUID — enough to recognize a run at a glance. */
-function shortId(id: string): string {
-  return id.slice(0, 8);
 }
 
 /** Open the install's store, or print a clear pointer to `init` and bail. */
@@ -429,23 +425,27 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     const handle = adapter.run(request);
     const output = await handle.output;
 
+    // The run's output is its transcript, which a later `reflect` learns from —
+    // the event log stays reference-only, so this content lives on the run row,
+    // scoped to the agent like every other write.
+    //
     // If a destructive action paused the run, the kernel already flipped it to
-    // awaiting_confirmation — leave it there rather than forcing a terminal state.
+    // awaiting_confirmation — leave it there rather than forcing a terminal state,
+    // but still persist whatever it produced so a paused run is reflectable.
     const current = store.runs.get(agent.id, run.id);
     if (current?.status === "awaiting_confirmation") {
+      if (output.text.length > 0) store.recordRunOutput(agent.id, run.id, output.text);
       io.out("Run paused: a destructive action needs your confirmation before it can proceed.");
       return 0;
     }
+    // Persist output and the terminal status atomically (and audited): the two can
+    // never drift, and a crash between them can't leave output without a status.
     if (output.status === "done") {
-      // Persist the run's output as its transcript so a later `reflect` can learn
-      // from it — the event log stays reference-only, so this content lives on the
-      // run row itself, scoped to the agent like every other write.
-      store.runs.setOutput(agent.id, run.id, output.text);
-      store.setRunStatus(agent.id, run.id, "done");
+      store.finishRun(agent.id, run.id, output.text, "done");
       io.out(output.text.trim().length > 0 ? output.text : "(the agent produced no output)");
       return 0;
     }
-    store.setRunStatus(agent.id, run.id, "failed");
+    store.finishRun(agent.id, run.id, output.text, "failed");
     io.err(`Run failed: ${output.error ?? "unknown error"}`);
     return 1;
   });
@@ -525,9 +525,21 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
 
+    // Reflect on the agent's most recent run that produced output. The kernel owns
+    // both the selection ("latest run with output") and, below, the "already known"
+    // predicate, so this surface holds no policy. Checked BEFORE building the model
+    // so an agent with nothing to reflect on is told so without needing a model
+    // configured. Phase 0 targets the latest run (the canonical flow is run →
+    // reflect); a future flag can target a specific run.
+    const target = store.runs.latestWithOutput(agent.id);
+    if (!target || target.output === undefined) {
+      io.out(`${name} has no completed run with output to reflect on yet.`);
+      return 0;
+    }
+    const transcript = { runId: target.id, input: target.input, output: target.output };
+
     // Build the reflection provider (a hosted model) the same way `run` builds its
-    // adapter — only after the agent checks out, so a misconfigured model never
-    // masks an unknown-agent error.
+    // adapter — only after the agent and a reflectable run check out.
     const made = io.makeReflectionProvider
       ? io.makeReflectionProvider(io.env)
       : (await import("./reflect-model.js")).buildReflectionProviderFromEnv(io.env);
@@ -537,23 +549,11 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     }
     const provider = made.provider;
 
-    // Reflect on the agent's most recent run that produced output. Phase 0 keeps
-    // this to the latest run (the canonical flow is run → reflect); a future flag
-    // can target a specific run.
-    const target = [...store.runs.list(agent.id)]
-      .reverse()
-      .find((r) => (r.output ?? "").trim().length > 0);
-    if (!target || target.output === undefined) {
-      io.out(`${name} has no completed run with output to reflect on yet.`);
-      return 0;
-    }
-    const transcript = { runId: target.id, input: target.input, output: target.output };
-
-    // Hand the provider the memories the agent already accepted, so it can avoid
-    // re-proposing what it already knows.
+    // The memories the agent already accepted, so the provider can avoid
+    // re-proposing what it already knows (the kernel applies the active+accepted
+    // predicate so framing and reflection agree on what "known" means).
     const knownMemories = store.memories
-      .list(agent.id)
-      .filter((m) => m.status === "active" && m.reviewState === "accepted")
+      .listActiveAccepted(agent.id)
       .map((m) => m.content);
 
     let proposals: readonly ProposedMemory[];
@@ -564,14 +564,24 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
 
-    if (proposals.length === 0) {
+    // Defensive backstop for the reflection-only type constraint: the provider is
+    // typed to the reflectable subset, but a non-conforming custom provider must
+    // never slip a disallowed type (e.g. `episodic`) past review — the kernel's
+    // generic memory write accepts any valid memory type, so the reflection-only
+    // rule is enforced here, at the consumption point.
+    const usable = proposals.filter((p) => isReflectionMemoryType(p.memoryType));
+    const ignored = proposals.length - usable.length;
+    if (usable.length === 0) {
       io.out(`${name}: nothing worth remembering from run ${shortId(target.id)}.`);
       return 0;
     }
 
     io.out(
-      `Reviewing ${proposals.length} proposed ${proposals.length === 1 ? "memory" : "memories"} for ${name} (from run ${shortId(target.id)}).`,
+      `Reviewing ${usable.length} proposed ${usable.length === 1 ? "memory" : "memories"} for ${name} (from run ${shortId(target.id)}).`,
     );
+    if (ignored > 0) {
+      io.out(`(Ignored ${ignored} proposal(s) with a non-reviewable memory type.)`);
+    }
     io.out("Nothing is saved unless you accept it.");
 
     // Absent reviewer ⇒ reject everything: nothing persists without an explicit yes.
@@ -579,14 +589,15 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     let accepted = 0;
     let rejected = 0;
     let blocked = 0;
-    for (let i = 0; i < proposals.length; i++) {
-      const p = proposals[i]!;
+    let errored = 0;
+    for (let i = 0; i < usable.length; i++) {
+      const p = usable[i]!;
       // Screen for display so the reviewer sees what tripped a rule; the firewall
       // also re-screens at persistence (`recordMemory`), the real hard gate.
       const verdict = screenMemory(p.content);
 
       io.out("");
-      io.out(`(${i + 1}/${proposals.length}) ${p.memoryType} · confidence ${p.confidence}`);
+      io.out(`(${i + 1}/${usable.length}) ${p.memoryType} · confidence ${p.confidence}`);
       io.out(`  ${p.content}`);
       if (!verdict.ok) {
         io.out(
@@ -598,7 +609,7 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
 
       const decision = await review({
         index: i + 1,
-        total: proposals.length,
+        total: usable.length,
         memoryType: p.memoryType,
         content: p.content,
         confidence: p.confidence,
@@ -610,7 +621,26 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
         io.out("  ✗ rejected");
         continue;
       }
-      const content = decision.kind === "edit" ? decision.content : p.content;
+      // Trim, and treat an empty/whitespace edit as a rejection — never persist a
+      // blank memory, regardless of what the reviewer returned.
+      const content = (decision.kind === "edit" ? decision.content : p.content).trim();
+      if (content.length === 0) {
+        rejected++;
+        io.out("  ✗ rejected (empty after edit)");
+        continue;
+      }
+      // Re-screen the EDITED content so the warning the reviewer sees matches what
+      // is actually about to be persisted (the original screen was on the proposal).
+      if (decision.kind === "edit") {
+        const editVerdict = screenMemory(content);
+        if (!editVerdict.ok) {
+          io.out(
+            `  ⚠ your edit still trips the memory firewall (${editVerdict.findings
+              .map((f) => f.rule)
+              .join(", ")}).`,
+          );
+        }
+      }
       try {
         // The memory firewall re-screens here and refuses a poisoned write
         // regardless of approval — the single hard chokepoint. Accepted memories
@@ -626,6 +656,8 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
         accepted++;
         io.out(decision.kind === "edit" ? "  ✓ saved (edited)" : "  ✓ saved");
       } catch (err) {
+        // A firewall block and a storage error are BOTH per-proposal outcomes — one
+        // bad proposal must not abort the rest of the batch or skip the summary.
         if (err instanceof MemoryFirewallError) {
           blocked++;
           io.out(
@@ -634,14 +666,17 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
               .join(", ")})`,
           );
         } else {
-          throw err;
+          errored++;
+          io.out(`  ⛔ could not save: ${errorMessage(err)}`);
         }
       }
     }
 
     io.out("");
     io.out(
-      `Done — ${accepted} saved, ${rejected} rejected${blocked > 0 ? `, ${blocked} blocked` : ""}.`,
+      `Done — ${accepted} saved, ${rejected} rejected` +
+        `${blocked > 0 ? `, ${blocked} blocked` : ""}` +
+        `${errored > 0 ? `, ${errored} errored` : ""}.`,
     );
     return 0;
   });

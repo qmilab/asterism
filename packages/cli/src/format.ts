@@ -5,7 +5,7 @@
 import type { Event, Memory } from "@qmilab/asterism-core";
 
 /** First 8 chars of a UUID — enough to recognize, short enough to scan. */
-function shortId(id: string): string {
+export function shortId(id: string): string {
   return id.slice(0, 8);
 }
 

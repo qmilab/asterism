@@ -38,17 +38,28 @@ export interface ModelConfigResult {
 }
 
 /**
+ * The environment variable that holds a given provider's API key: the well-known
+ * name for the providers we configure out of the box, else a derived
+ * `<PROVIDER>_API_KEY`. So an OpenAI-compatible provider like `openrouter` reads
+ * `OPENROUTER_API_KEY`, and the "no key" message can name the variable that
+ * actually works instead of always pointing at `OPENAI_API_KEY`.
+ */
+export function providerKeyEnvVar(provider: string): string {
+  const known: Record<string, string> = {
+    openai: "OPENAI_API_KEY",
+    anthropic: "ANTHROPIC_API_KEY",
+  };
+  return known[provider] ?? `${provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY`;
+}
+
+/**
  * Resolve the LLM provider API key from the environment — infrastructure, never an
- * agent-scoped credential. Read per provider (OPENAI_API_KEY / ANTHROPIC_API_KEY),
- * falling back to ASTERISM_API_KEY. Shared by `run` (the adapter) and `reflect`
- * (the reflection model), so both resolve the key the same way.
+ * agent-scoped credential. Read from the provider's own variable
+ * ({@link providerKeyEnvVar}), falling back to `ASTERISM_API_KEY`. Shared by `run`
+ * (the adapter) and `reflect` (the reflection model), so both resolve it the same way.
  */
 export function resolveApiKey(env: Env, provider: string): string | undefined {
-  const perProvider: Record<string, string | undefined> = {
-    openai: env.OPENAI_API_KEY,
-    anthropic: env.ANTHROPIC_API_KEY,
-  };
-  return perProvider[provider] ?? env.ASTERISM_API_KEY;
+  return env[providerKeyEnvVar(provider)] ?? env.ASTERISM_API_KEY;
 }
 
 /**

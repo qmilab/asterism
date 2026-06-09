@@ -14,7 +14,11 @@ import {
 } from "@qmilab/asterism-reflect";
 import type { ReflectionProvider } from "@qmilab/asterism-core";
 
-import { resolveApiKey, resolveModelConfig } from "./model-config.js";
+import {
+  providerKeyEnvVar,
+  resolveApiKey,
+  resolveModelConfig,
+} from "./model-config.js";
 
 export interface ReflectionProviderResult {
   provider?: ReflectionProvider;
@@ -38,8 +42,8 @@ export function buildReflectionProviderFromEnv(env: Env): ReflectionProviderResu
   if (!apiKey) {
     return {
       reason:
-        `No API key for reflection. Set ${model.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"}` +
-        " (or ASTERISM_API_KEY) before reflecting.",
+        `No API key for reflection. Set ${providerKeyEnvVar(model.provider)} ` +
+        "(or ASTERISM_API_KEY) before reflecting.",
     };
   }
   const client = createHttpChatClient({

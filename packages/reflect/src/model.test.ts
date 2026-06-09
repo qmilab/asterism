@@ -52,10 +52,94 @@ test("the OpenAI shape posts chat-completions with a bearer key and reads the me
   const sent = body(call);
   expect(sent.model).toBe("gpt-4o-mini");
   expect(sent.temperature).toBe(0);
+  expect(typeof sent.max_tokens).toBe("number"); // the cap is sent for OpenAI too
   expect(sent.messages).toEqual([
     { role: "system", content: "be helpful" },
     { role: "user", content: "the transcript" },
   ]);
+});
+
+test("an explicit api override wins over the provider name (anthropic name, OpenAI protocol)", async () => {
+  const capture: Captured[] = [];
+  const response = new Response(
+    JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+    { status: 200 },
+  );
+  const config: HttpChatClientConfig = {
+    provider: "anthropic",
+    api: "openai-completions",
+    id: "proxy-model",
+    baseUrl: "https://proxy.example/v1",
+    apiKey: "sk-test",
+    fetchImpl: fakeFetch(response, capture),
+  };
+  await createHttpChatClient(config).complete(REQUEST);
+  // Routed as OpenAI despite the "anthropic" provider name, because api was explicit.
+  expect(capture[0]!.url).toBe("https://proxy.example/v1/chat/completions");
+  expect(headers(capture[0]!)["authorization"]).toBe("Bearer sk-test");
+});
+
+test("a trailing slash on the base URL does not produce a doubled-slash path", async () => {
+  const capture: Captured[] = [];
+  const response = new Response(
+    JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+    { status: 200 },
+  );
+  const config: HttpChatClientConfig = {
+    provider: "openai",
+    id: "gpt-4o-mini",
+    baseUrl: "https://api.openai.com/v1/",
+    apiKey: "sk-test",
+    fetchImpl: fakeFetch(response, capture),
+  };
+  await createHttpChatClient(config).complete(REQUEST);
+  expect(capture[0]!.url).toBe("https://api.openai.com/v1/chat/completions");
+});
+
+test("a present-but-null OpenAI content is treated as empty, not a hard error", async () => {
+  const response = new Response(
+    JSON.stringify({ choices: [{ message: { content: null }, finish_reason: "stop" }] }),
+    { status: 200 },
+  );
+  const config: HttpChatClientConfig = {
+    provider: "openai",
+    id: "gpt-4o-mini",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-test",
+    fetchImpl: fakeFetch(response, []),
+  };
+  expect(await createHttpChatClient(config).complete(REQUEST)).toBe("");
+});
+
+test("a truncated OpenAI response raises a clear error instead of returning partial JSON", async () => {
+  const response = new Response(
+    JSON.stringify({ choices: [{ message: { content: '{"memories":[' }, finish_reason: "length" }] }),
+    { status: 200 },
+  );
+  const config: HttpChatClientConfig = {
+    provider: "openai",
+    id: "gpt-4o-mini",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-test",
+    fetchImpl: fakeFetch(response, []),
+  };
+  await expect(createHttpChatClient(config).complete(REQUEST)).rejects.toThrow(/truncated/);
+});
+
+test("a truncated Anthropic response (stop_reason max_tokens) also raises", async () => {
+  const response = new Response(
+    JSON.stringify({ content: [{ type: "text", text: '{"memories":[' }], stop_reason: "max_tokens" }),
+    { status: 200 },
+  );
+  const config: HttpChatClientConfig = {
+    provider: "anthropic",
+    api: "anthropic-messages",
+    id: "claude-haiku-4-5",
+    baseUrl: "https://api.anthropic.com",
+    apiKey: "ak-test",
+    fetchImpl: fakeFetch(response, []),
+  };
+  await expect(createHttpChatClient(config).complete(REQUEST)).rejects.toThrow(/truncated/);
 });
 
 test("the Anthropic shape posts /v1/messages with x-api-key and concatenates text blocks", async () => {
