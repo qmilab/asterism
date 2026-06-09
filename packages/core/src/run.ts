@@ -182,6 +182,13 @@ export async function executeRun(
 
   // Persist output and the terminal status atomically (and audited): the two can
   // never drift, and a crash between them cannot leave output without a status.
+  //
+  // Store contract: the scoped writes/reads here (`finishRun`, `recordRunOutput`,
+  // `runs.get`) return `Run | undefined` — `undefined` ONLY for a cross-agent or
+  // unknown run, which the run created at the top of this function can never be.
+  // So the `?? current ?? run` fallbacks below (and at the paused/failed returns
+  // above) are the type-required guard for that contract, not dead defensiveness;
+  // do not "simplify" them away.
   const status: RunStatus = output.status === "done" ? "done" : "failed";
   const finished = store.finishRun(agent.id, run.id, output.text, status);
   return {
