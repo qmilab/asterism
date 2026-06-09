@@ -31,11 +31,13 @@ const io: CliIO = {
     return answer !== null && /^y(es)?$/i.test(answer.trim());
   },
   // Only consume stdin when it is piped, so an interactive session is not blocked
-  // waiting on input that will never come.
+  // waiting on input that will never come. The value is returned VERBATIM — inline
+  // and environment secrets are stored exactly as given, and a piped secret (PEM /
+  // private-key material, intentionally padded tokens) must not be normalized.
+  // Callers that want a trailing newline dropped can pipe with `printf`/`echo -n`.
   readStdin: async () => {
     if (process.stdin.isTTY) return undefined;
-    const text = await Bun.stdin.text();
-    return text.trim();
+    return Bun.stdin.text();
   },
 };
 

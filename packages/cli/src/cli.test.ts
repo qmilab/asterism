@@ -4,11 +4,12 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { AsterismStore } from "@qmilab/asterism-core";
 import type { RuntimeAdapter } from "@qmilab/asterism-core";
 
 import { runCli } from "./cli.ts";
 import type { CliIO } from "./cli.ts";
-import { HOME_DIR_NAME } from "./paths.ts";
+import { dbPath, HOME_DIR_NAME } from "./paths.ts";
 import { VERSION } from "./version.ts";
 
 const tempDirs: string[] = [];
@@ -160,6 +161,25 @@ test("secrets add falls back to the environment variable", async () => {
   await runCli(["new", "work"], h.io);
   expect(await runCli(["secrets", "add", "work", "GITHUB_TOKEN"], h.io)).toBe(0);
   expect([...h.out, ...h.err].join("\n")).not.toContain("from-env");
+});
+
+test("a piped secret value is stored exactly, never normalized", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+  // Whitespace and the trailing newline are significant for key material — the
+  // value must round-trip byte-for-byte, like inline and environment values do.
+  const raw = "  -----BEGIN KEY-----\npadded line \n-----END KEY-----\n";
+  h.io.readStdin = async () => raw;
+  expect(await runCli(["secrets", "add", "work", "KEYFILE"], h.io)).toBe(0);
+
+  const store = AsterismStore.open(dbPath(join(h.dir, HOME_DIR_NAME)));
+  try {
+    const agent = store.agents.list().find((a) => a.name === "work")!;
+    expect(store.secrets.readByKey(agent.id, "KEYFILE")).toBe(raw);
+  } finally {
+    store.close();
+  }
 });
 
 test("secrets add reports when no value is available", async () => {
