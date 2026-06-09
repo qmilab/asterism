@@ -69,6 +69,21 @@ export type {
 export { SecretStore, secretValueRef } from "./secrets.js";
 export type { SecretRef } from "./secrets.js";
 
+// The ReflectionProvider contract — the kernel/reflection seam. Core defines it
+// (transcript in → proposed typed memory writes out) and depends on no model
+// client; the default hosted-model provider lives in `@qmilab/asterism-reflect`.
+export {
+  REFLECTION_MEMORY_TYPES,
+  isReflectionMemoryType,
+} from "./reflection.js";
+export type {
+  ReflectionMemoryType,
+  RunTranscript,
+  ReflectionInput,
+  ProposedMemory,
+  ReflectionProvider,
+} from "./reflection.js";
+
 // Run framing — composes soul / role / scoped skills / accepted memories into the
 // RunRequest's system prompt.
 export {

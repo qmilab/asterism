@@ -12,7 +12,7 @@
 import { PiAdapter } from "@qmilab/asterism-adapter-pi";
 import type { RuntimeAdapter } from "@qmilab/asterism-core";
 
-import { resolveModelConfig } from "./model-config.js";
+import { resolveApiKey, resolveModelConfig } from "./model-config.js";
 
 export interface AdapterResult {
   adapter?: RuntimeAdapter;
@@ -21,15 +21,6 @@ export interface AdapterResult {
 }
 
 type Env = Record<string, string | undefined>;
-
-/** Resolve the LLM provider API key from the environment (infra, not an agent secret). */
-function resolveApiKey(env: Env, provider: string): string | undefined {
-  const perProvider: Record<string, string | undefined> = {
-    openai: env.OPENAI_API_KEY,
-    anthropic: env.ANTHROPIC_API_KEY,
-  };
-  return perProvider[provider] ?? env.ASTERISM_API_KEY;
-}
 
 /**
  * Build the run adapter from environment configuration, or return a `reason`

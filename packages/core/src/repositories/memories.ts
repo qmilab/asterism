@@ -90,6 +90,23 @@ export class MemoryRepository {
       .map(mapMemory);
   }
 
+  /**
+   * The agent's active, accepted memories — the ones that frame its runs and that
+   * reflection treats as already known. Applies the same active+accepted predicate
+   * the framing layer uses, kept here so surfaces don't re-derive it.
+   */
+  listActiveAccepted(agentId: string): Memory[] {
+    requireAgentId(agentId);
+    return this.driver
+      .prepare(
+        `SELECT * FROM memories
+           WHERE agent_id = ? AND status = 'active' AND review_state = 'accepted'
+           ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all([agentId])
+      .map(mapMemory);
+  }
+
   setReviewState(
     agentId: string,
     id: string,

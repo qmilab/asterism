@@ -105,8 +105,12 @@ actions. Filter with --type, page forward with --since, or cap with --limit.`,
 
   reflect: `asterism reflect <agent> --review
 
-Review the memories an agent proposes to keep after its work. Nothing is saved
-without your approval — you accept, edit, or reject each one.`,
+Look back over an agent's latest work and review the memories it proposes to keep.
+Nothing is saved without your approval — you accept, edit, or reject each one, and
+anything that looks unsafe to remember is flagged for you.
+
+Uses your configured model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY)
+to draft the proposals.`,
 
   serve: `asterism serve <agent>
 
