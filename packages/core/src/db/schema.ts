@@ -24,7 +24,13 @@ CREATE TABLE IF NOT EXISTS runs (
   input        TEXT NOT NULL,
   status       TEXT NOT NULL,
   started_at   TEXT NOT NULL,
-  finished_at  TEXT
+  finished_at  TEXT,
+  -- The run's final output text, stored so a later reflect invocation has a
+  -- transcript to learn from (the process that produced it has long exited). This
+  -- is the agent's OWN content, scoped by agent_id like input -- not a secret and
+  -- not an event payload (the event log stays reference-only). Nullable until a run
+  -- finishes with output.
+  output       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(agent_id);
 

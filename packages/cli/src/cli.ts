@@ -13,8 +13,10 @@ import {
   auditTrustHooks,
   BUILTIN_SOULS,
   frameRun,
+  MemoryFirewallError,
   resolveSoul,
   resolveToolRegistry,
+  screenMemory,
   trustProfile,
   TRUST_LEVELS,
   validateEnum,
@@ -23,6 +25,9 @@ import type {
   Action,
   Agent,
   Capability,
+  FirewallFinding,
+  ProposedMemory,
+  ReflectionProvider,
   RuntimeAdapter,
   SkillContext,
   TailOptions,
@@ -43,6 +48,24 @@ import {
 } from "./paths.js";
 import { VERSION } from "./version.js";
 
+/** A proposed memory presented for review, with any firewall findings on it. */
+export interface ReviewItem {
+  /** 1-based position in the batch. */
+  index: number;
+  total: number;
+  memoryType: string;
+  content: string;
+  confidence: number;
+  /** Firewall findings on the proposed content; empty when it screens clean. */
+  findings: readonly FirewallFinding[];
+}
+
+/** The reviewer's verdict on one proposed memory during `reflect --review`. */
+export type ReviewDecision =
+  | { kind: "accept" }
+  | { kind: "edit"; content: string }
+  | { kind: "reject" };
+
 /** Everything the CLI touches the outside world through — injectable for tests. */
 export interface CliIO {
   cwd: string;
@@ -60,12 +83,27 @@ export interface CliIO {
     adapter?: RuntimeAdapter;
     reason?: string;
   };
+  /** Build the reflection provider. Absent ⇒ the default wiring reads it from the environment. */
+  makeReflectionProvider?: (env: CliIO["env"]) => {
+    provider?: ReflectionProvider;
+    reason?: string;
+  };
+  /**
+   * Decide a proposed memory's fate during `reflect --review`. Absent ⇒ reject
+   * every proposal, so nothing persists — the same safe default as `confirm`.
+   */
+  review?: (item: ReviewItem) => ReviewDecision | Promise<ReviewDecision>;
   /** Open the kernel store at a path. Absent ⇒ the real local SQLite store. */
   openStore?: (path: string) => AsterismStore;
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** First 8 chars of a UUID — enough to recognize a run at a glance. */
+function shortId(id: string): string {
+  return id.slice(0, 8);
 }
 
 /** Open the install's store, or print a clear pointer to `init` and bail. */
@@ -399,6 +437,10 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       return 0;
     }
     if (output.status === "done") {
+      // Persist the run's output as its transcript so a later `reflect` can learn
+      // from it — the event log stays reference-only, so this content lives on the
+      // run row itself, scoped to the agent like every other write.
+      store.runs.setOutput(agent.id, run.id, output.text);
       store.setRunStatus(agent.id, run.id, "done");
       io.out(output.text.trim().length > 0 ? output.text : "(the agent produced no output)");
       return 0;
@@ -459,7 +501,7 @@ async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
   });
 }
 
-// --- reflect / serve (surface present; engines land in later build steps) ---
+// --- reflect (review loop) / serve (surface present; engine lands in Prompt 9) ---
 
 async function cmdReflect(args: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(args, ["help", "h", "review"]);
@@ -467,8 +509,142 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     io.out(COMMAND_HELP.reflect!);
     return 0;
   }
-  io.err("Reviewing proposed memories is coming soon — it is not wired up in this build yet.");
-  return 1;
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism reflect <agent> --review");
+    return 1;
+  }
+  // `--review` is the only mode in this phase and the documented invocation.
+  // Require it explicitly so reflection never runs in a surprising auto mode.
+  if (parsed.flags.review !== true) {
+    io.err(`Reflection runs in review mode. Re-run with: asterism reflect ${name} --review`);
+    return 1;
+  }
+
+  return withHomeStore(io, async (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    // Build the reflection provider (a hosted model) the same way `run` builds its
+    // adapter — only after the agent checks out, so a misconfigured model never
+    // masks an unknown-agent error.
+    const made = io.makeReflectionProvider
+      ? io.makeReflectionProvider(io.env)
+      : (await import("./reflect-model.js")).buildReflectionProviderFromEnv(io.env);
+    if (!made.provider) {
+      io.err(made.reason ?? "No model configured for reflection.");
+      return 1;
+    }
+    const provider = made.provider;
+
+    // Reflect on the agent's most recent run that produced output. Phase 0 keeps
+    // this to the latest run (the canonical flow is run → reflect); a future flag
+    // can target a specific run.
+    const target = [...store.runs.list(agent.id)]
+      .reverse()
+      .find((r) => (r.output ?? "").trim().length > 0);
+    if (!target || target.output === undefined) {
+      io.out(`${name} has no completed run with output to reflect on yet.`);
+      return 0;
+    }
+    const transcript = { runId: target.id, input: target.input, output: target.output };
+
+    // Hand the provider the memories the agent already accepted, so it can avoid
+    // re-proposing what it already knows.
+    const knownMemories = store.memories
+      .list(agent.id)
+      .filter((m) => m.status === "active" && m.reviewState === "accepted")
+      .map((m) => m.content);
+
+    let proposals: readonly ProposedMemory[];
+    try {
+      proposals = await provider.reflect({ agentId: agent.id, transcript, knownMemories });
+    } catch (err) {
+      io.err(`Reflection failed: ${errorMessage(err)}`);
+      return 1;
+    }
+
+    if (proposals.length === 0) {
+      io.out(`${name}: nothing worth remembering from run ${shortId(target.id)}.`);
+      return 0;
+    }
+
+    io.out(
+      `Reviewing ${proposals.length} proposed ${proposals.length === 1 ? "memory" : "memories"} for ${name} (from run ${shortId(target.id)}).`,
+    );
+    io.out("Nothing is saved unless you accept it.");
+
+    // Absent reviewer ⇒ reject everything: nothing persists without an explicit yes.
+    const review = io.review ?? ((): ReviewDecision => ({ kind: "reject" }));
+    let accepted = 0;
+    let rejected = 0;
+    let blocked = 0;
+    for (let i = 0; i < proposals.length; i++) {
+      const p = proposals[i]!;
+      // Screen for display so the reviewer sees what tripped a rule; the firewall
+      // also re-screens at persistence (`recordMemory`), the real hard gate.
+      const verdict = screenMemory(p.content);
+
+      io.out("");
+      io.out(`(${i + 1}/${proposals.length}) ${p.memoryType} · confidence ${p.confidence}`);
+      io.out(`  ${p.content}`);
+      if (!verdict.ok) {
+        io.out(
+          `  ⚠ the memory firewall flagged this (${verdict.findings
+            .map((f) => f.rule)
+            .join(", ")}) — edit to remove the flagged content, or reject it.`,
+        );
+      }
+
+      const decision = await review({
+        index: i + 1,
+        total: proposals.length,
+        memoryType: p.memoryType,
+        content: p.content,
+        confidence: p.confidence,
+        findings: verdict.findings,
+      });
+
+      if (decision.kind === "reject") {
+        rejected++;
+        io.out("  ✗ rejected");
+        continue;
+      }
+      const content = decision.kind === "edit" ? decision.content : p.content;
+      try {
+        // The memory firewall re-screens here and refuses a poisoned write
+        // regardless of approval — the single hard chokepoint. Accepted memories
+        // are saved active + accepted, so they frame the agent's future runs.
+        store.recordMemory(agent.id, {
+          memoryType: p.memoryType,
+          content,
+          confidence: p.confidence,
+          sourceRunId: p.sourceRunId,
+          reviewState: "accepted",
+          status: "active",
+        });
+        accepted++;
+        io.out(decision.kind === "edit" ? "  ✓ saved (edited)" : "  ✓ saved");
+      } catch (err) {
+        if (err instanceof MemoryFirewallError) {
+          blocked++;
+          io.out(
+            `  ⛔ blocked by the memory firewall — not saved (${err.findings
+              .map((f) => f.rule)
+              .join(", ")})`,
+          );
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    io.out("");
+    io.out(
+      `Done — ${accepted} saved, ${rejected} rejected${blocked > 0 ? `, ${blocked} blocked` : ""}.`,
+    );
+    return 0;
+  });
 }
 
 async function cmdServe(args: string[], io: CliIO): Promise<number> {

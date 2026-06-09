@@ -11,7 +11,7 @@
 // `cli.ts`; the concrete adapter is wired lazily there from the environment.
 
 import { runCli } from "./cli.js";
-import type { CliIO } from "./cli.js";
+import type { CliIO, ReviewDecision } from "./cli.js";
 import type { Action } from "@qmilab/asterism-core";
 
 const io: CliIO = {
@@ -38,6 +38,25 @@ const io: CliIO = {
   readStdin: async () => {
     if (process.stdin.isTTY) return undefined;
     return Bun.stdin.text();
+  },
+  // `reflect --review`: the kernel proposes typed memories and prints each one; the
+  // human decides its fate here. Nothing is saved without an explicit accept, and a
+  // non-interactive (piped) session saves nothing — the safe default, mirroring the
+  // destructive-action prompt above. The proposal text is already printed by the
+  // command, so this only collects the decision.
+  review: (): ReviewDecision => {
+    if (!process.stdin.isTTY) return { kind: "reject" };
+    const answer = prompt("  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject):");
+    const choice = (answer ?? "").trim().toLowerCase();
+    if (choice === "a" || choice === "accept" || choice === "y" || choice === "yes") {
+      return { kind: "accept" };
+    }
+    if (choice === "e" || choice === "edit") {
+      const edited = prompt("  New content:");
+      const content = (edited ?? "").trim();
+      return content.length > 0 ? { kind: "edit", content } : { kind: "reject" };
+    }
+    return { kind: "reject" };
   },
 };
 

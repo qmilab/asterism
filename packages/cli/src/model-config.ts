@@ -38,6 +38,20 @@ export interface ModelConfigResult {
 }
 
 /**
+ * Resolve the LLM provider API key from the environment — infrastructure, never an
+ * agent-scoped credential. Read per provider (OPENAI_API_KEY / ANTHROPIC_API_KEY),
+ * falling back to ASTERISM_API_KEY. Shared by `run` (the adapter) and `reflect`
+ * (the reflection model), so both resolve the key the same way.
+ */
+export function resolveApiKey(env: Env, provider: string): string | undefined {
+  const perProvider: Record<string, string | undefined> = {
+    openai: env.OPENAI_API_KEY,
+    anthropic: env.ANTHROPIC_API_KEY,
+  };
+  return perProvider[provider] ?? env.ASTERISM_API_KEY;
+}
+
+/**
  * Resolve the model config from the environment, applying provider defaults.
  * Required: `ASTERISM_MODEL_ID`. Optional: `ASTERISM_MODEL_PROVIDER`
  * (default "openai"), `ASTERISM_MODEL_BASE_URL`, `ASTERISM_MODEL_API` — each

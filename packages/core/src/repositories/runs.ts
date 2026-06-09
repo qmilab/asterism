@@ -17,6 +17,7 @@ function mapRun(row: SqlRow): Run {
     status: String(row.status) as RunStatus,
     startedAt: String(row.started_at),
     ...(row.finished_at != null ? { finishedAt: String(row.finished_at) } : {}),
+    ...(row.output != null ? { output: String(row.output) } : {}),
   };
 }
 
@@ -56,6 +57,21 @@ export class RunRepository {
       )
       .all([agentId])
       .map(mapRun);
+  }
+
+  /**
+   * Persist a run's final output text — the transcript a later `reflect` reads.
+   * Scoped like every other write: a cross-agent or unknown run matches nothing
+   * and returns undefined, so one agent can never stamp output onto another's run.
+   */
+  setOutput(agentId: string, id: string, output: string): Run | undefined {
+    requireAgentId(agentId);
+    const row = this.driver
+      .prepare(
+        `UPDATE runs SET output = ? WHERE id = ? AND agent_id = ? RETURNING *`,
+      )
+      .get([output, id, agentId]);
+    return row ? mapRun(row) : undefined;
   }
 
   setStatus(agentId: string, id: string, status: RunStatus): Run | undefined {

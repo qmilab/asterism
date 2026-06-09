@@ -111,6 +111,8 @@ export interface Run {
   status: RunStatus;
   startedAt: string;
   finishedAt?: string;
+  /** The run's final output text, once it has finished with output. Reflection reads it. */
+  output?: string;
 }
 
 export interface Memory {
