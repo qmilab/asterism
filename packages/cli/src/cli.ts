@@ -10,31 +10,25 @@ import { basename, join, resolve as resolvePath } from "node:path";
 
 import { AsterismStore } from "@qmilab/asterism-core";
 import {
-  auditTrustHooks,
   BUILTIN_SOULS,
-  frameRun,
+  executeRun,
   isReflectionMemoryType,
   MemoryFirewallError,
-  resolveSoul,
-  resolveToolRegistry,
   screenMemory,
-  trustProfile,
   TRUST_LEVELS,
   validateEnum,
 } from "@qmilab/asterism-core";
 import type {
   Action,
   Agent,
-  Capability,
   FirewallFinding,
   ProposedMemory,
   ReflectionProvider,
   RuntimeAdapter,
-  SkillContext,
   TailOptions,
-  TrustHooks,
   TrustLevel,
 } from "@qmilab/asterism-core";
+import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
 
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
@@ -96,6 +90,19 @@ export interface CliIO {
   review?: (item: ReviewItem) => ReviewDecision | Promise<ReviewDecision>;
   /** Open the kernel store at a path. Absent ⇒ the real local SQLite store. */
   openStore?: (path: string) => AsterismStore;
+  /**
+   * Start the local HTTP endpoint for `serve`. Absent ⇒ serving is unavailable in
+   * this embedding (the default wiring in `bin.ts` supplies the real server). The
+   * store stays open for the server's lifetime, so the handler returns only after
+   * {@link CliIO.waitForShutdown} resolves.
+   */
+  startServer?: (options: ServeOptions) => RunningServer | Promise<RunningServer>;
+  /**
+   * Block until a shutdown is requested (e.g. Ctrl+C). Absent ⇒ returns at once,
+   * so a non-interactive caller does not hang. The default wiring waits on
+   * SIGINT/SIGTERM.
+   */
+  waitForShutdown?: () => Promise<void>;
 }
 
 function errorMessage(err: unknown): string {
@@ -341,15 +348,6 @@ async function cmdSkillAdd(args: string[], io: CliIO): Promise<number> {
 
 // --- run -------------------------------------------------------------------
 
-/** Read a file's text, or undefined if it cannot be read (skills are optional). */
-function readMaybe(path: string): string | undefined {
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return undefined;
-  }
-}
-
 async function cmdRun(args: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(args, ["help", "h"]);
   if (helpRequested(parsed)) {
@@ -380,73 +378,27 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       io.err(made.reason ?? "No model configured.");
       return 1;
     }
-    const adapter = made.adapter;
 
-    // Record the run and move it to `running` (each transition is logged by the
-    // kernel). Then resolve the agent's trust into the tool set this run may use.
-    const run = store.startRun(agent.id, { input: task });
-    store.setRunStatus(agent.id, run.id, "running");
-
-    const abortController = new AbortController();
-    const profile = trustProfile({ level: agent.trustLevel });
-    // Phase 0 registers no capabilities yet — confined by default means an empty
-    // tool set. The gate wiring below is in place for when tools land.
-    const capabilities: Capability[] = [];
-    const baseHooks: TrustHooks = {
-      onAwaitConfirmation: () => {
-        store.setRunStatus(agent.id, run.id, "awaiting_confirmation");
-      },
-      abortController,
-      ...(io.confirm ? { confirm: io.confirm } : {}),
-    };
-    const hooks = auditTrustHooks(store.events, agent.id, { runId: run.id }, baseHooks);
-    const tools = resolveToolRegistry(profile, capabilities, hooks);
-
-    // Frame the run from the agent's identity: soul, role, scoped skills, and the
-    // memories it has accepted (framing filters to active + accepted).
-    const soulText = resolveSoul(agent.soulRef, {
+    // The whole run flow — start, trust-resolve + gate, frame, run, persist — is
+    // the kernel's. This surface only supplies host concerns (the substrate, a
+    // file reader for soul/skill bodies, the interactive confirm prompt) and
+    // formats the structured outcome. The same call backs the HTTP surface, so
+    // the trust/gate path cannot drift between them.
+    const result = await executeRun(store, agent, task, {
+      adapter: made.adapter,
       readFile: (p) => readFileSync(p, "utf8"),
-    });
-    const skills: SkillContext[] = store.skills.list(agent.id).map((s) => {
-      const content = readMaybe(s.path);
-      return { name: s.name, ...(content !== undefined ? { content } : {}) };
-    });
-    const memories = store.memories.list(agent.id);
-    const request = frameRun({
-      agent,
-      ...(soulText !== undefined ? { soulText } : {}),
-      skills,
-      memories,
-      input: task,
-      tools,
-      signal: abortController.signal,
+      ...(io.confirm ? { confirm: io.confirm } : {}),
     });
 
-    const handle = adapter.run(request);
-    const output = await handle.output;
-
-    // The run's output is its transcript, which a later `reflect` learns from —
-    // the event log stays reference-only, so this content lives on the run row,
-    // scoped to the agent like every other write.
-    //
-    // If a destructive action paused the run, the kernel already flipped it to
-    // awaiting_confirmation — leave it there rather than forcing a terminal state,
-    // but still persist whatever it produced so a paused run is reflectable.
-    const current = store.runs.get(agent.id, run.id);
-    if (current?.status === "awaiting_confirmation") {
-      if (output.text.length > 0) store.recordRunOutput(agent.id, run.id, output.text);
+    if (result.status === "awaiting_confirmation") {
       io.out("Run paused: a destructive action needs your confirmation before it can proceed.");
       return 0;
     }
-    // Persist output and the terminal status atomically (and audited): the two can
-    // never drift, and a crash between them can't leave output without a status.
-    if (output.status === "done") {
-      store.finishRun(agent.id, run.id, output.text, "done");
-      io.out(output.text.trim().length > 0 ? output.text : "(the agent produced no output)");
+    if (result.status === "done") {
+      io.out(result.output.trim().length > 0 ? result.output : "(the agent produced no output)");
       return 0;
     }
-    store.finishRun(agent.id, run.id, output.text, "failed");
-    io.err(`Run failed: ${output.error ?? "unknown error"}`);
+    io.err(`Run failed: ${result.error ?? "unknown error"}`);
     return 1;
   });
 }
@@ -501,7 +453,7 @@ async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
   });
 }
 
-// --- reflect (review loop) / serve (surface present; engine lands in Prompt 9) ---
+// --- reflect (review loop) / serve (local HTTP endpoint) -------------------
 
 async function cmdReflect(args: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(args, ["help", "h", "review"]);
@@ -688,8 +640,69 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     io.out(COMMAND_HELP.serve!);
     return 0;
   }
-  io.err("Serving an agent over HTTP is coming soon — it is not wired up in this build yet.");
-  return 1;
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism serve <agent> [--port <n>] [--host <addr>]");
+    return 1;
+  }
+  // A value-bearing flag given with no value parses as boolean `true`. Reject it
+  // rather than silently binding a default the user did not ask for.
+  for (const flag of ["port", "host"] as const) {
+    if (parsed.flags[flag] === true) {
+      io.err(`The --${flag} option needs a value.`);
+      return 1;
+    }
+  }
+  const port = intFlag(parsed.flags.port);
+  const host = stringFlag(parsed.flags.host);
+
+  if (!io.startServer) {
+    io.err("Serving over HTTP is not available in this embedding.");
+    return 1;
+  }
+  const startServer = io.startServer;
+
+  return withHomeStore(io, async (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    // Build the substrate the same way `run` does. A missing model is not fatal
+    // for serving: the read endpoints work regardless, and a run started without
+    // one is declined with a clear message rather than failing to serve at all.
+    const made = io.makeAdapter
+      ? io.makeAdapter(io.env)
+      : (await import("./model.js")).buildAdapterFromEnv(io.env);
+
+    // The kernel store stays open for the server's lifetime — `withHomeStore`
+    // closes it only after this callback returns, which it does once shutdown is
+    // requested below. The HTTP surface is bound to THIS agent alone.
+    const server = await startServer({
+      store,
+      agent,
+      ...(made.adapter ? { adapter: made.adapter } : {}),
+      ...(made.reason !== undefined ? { adapterReason: made.reason } : {}),
+      readFile: (p) => readFileSync(p, "utf8"),
+      ...(port !== undefined ? { port } : {}),
+      ...(host !== undefined ? { hostname: host } : {}),
+    });
+
+    io.out(`Serving agent "${agent.name}" at ${server.url}`);
+    io.out(`  POST ${server.url}/agents/${agent.name}/runs    start a run  (JSON body: {"input":"<task>"})`);
+    io.out(`  GET  ${server.url}/agents/${agent.name}/runs    list runs`);
+    io.out(`  GET  ${server.url}/agents/${agent.name}/events  review activity`);
+    if (!made.adapter) {
+      io.out("  note: no model configured — runs are declined until you set one (reads still work).");
+    }
+    io.out("Press Ctrl+C to stop.");
+
+    // Block until shutdown is requested, then stop the server and let the store
+    // close. A non-interactive embedding without this hook returns immediately.
+    const waitForShutdown = io.waitForShutdown ?? (() => Promise.resolve());
+    await waitForShutdown();
+    server.stop();
+    io.out("Stopped.");
+    return 0;
+  });
 }
 
 // --- dispatch --------------------------------------------------------------
