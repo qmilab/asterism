@@ -153,6 +153,15 @@ describe("resolveSoul — built-ins, then a reader, else undefined", () => {
       }),
     ).toBeUndefined();
   });
+
+  test("a ref named like an inherited property never resolves to that property", () => {
+    // `BUILTIN_SOULS["toString"]` would otherwise hand back a function and crash
+    // framing's `.trim()`; an own-property check keeps these as ordinary refs.
+    for (const ref of ["toString", "__proto__", "constructor", "hasOwnProperty"]) {
+      expect(resolveSoul(ref)).toBeUndefined();
+      expect(resolveSoul(ref, { readFile: (p) => `loaded:${p}` })).toBe(`loaded:${ref}`);
+    }
+  });
 });
 
 // The framing consumes scoped stores. Proving the scoping holds end-to-end: data

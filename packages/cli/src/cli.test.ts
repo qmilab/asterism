@@ -250,6 +250,32 @@ test("run drives the adapter, records the run, and prints output", async () => {
   expect(log).toContain("run.status_changed");
 });
 
+test("run validates the workspace before model configuration", async () => {
+  const h = harness(); // no init
+  expect(await runCli(["run", "ghost", "do it"], h.io)).toBe(1);
+  const err = h.err.join("\n");
+  expect(err).toContain("asterism init");
+  expect(err).not.toContain("ASTERISM_MODEL_ID");
+});
+
+test("run on a missing agent reports the agent, not model configuration", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["run", "ghost", "do it"], h.io)).toBe(1);
+  const err = h.err.join("\n");
+  expect(err).toContain('No agent named "ghost"');
+  expect(err).not.toContain("ASTERISM_MODEL_ID");
+});
+
+test("a soul named like an inherited property is treated as a path, not a built-in", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["new", "p", "--soul", "toString"], h.io)).toBe(0);
+  const printed = h.out.join("\n");
+  // Resolved to an absolute path, not stored as the bare word "toString".
+  expect(printed).toContain(`soul: ${join(h.dir, "toString")}`);
+});
+
 test("run without a configured model explains what to set", async () => {
   const h = harness();
   await runCli(["init"], h.io);

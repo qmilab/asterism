@@ -177,8 +177,10 @@ export function resolveSoul(
   soulRef: string,
   options: ResolveSoulOptions = {},
 ): string | undefined {
-  const builtin = BUILTIN_SOULS[soulRef];
-  if (builtin !== undefined) return builtin;
+  // Own-property check, not bracket access: a `soulRef` that names an inherited
+  // property (`toString`, `__proto__`, `constructor`) must NOT resolve to the
+  // inherited value — that would hand framing a non-string and crash `.trim()`.
+  if (Object.hasOwn(BUILTIN_SOULS, soulRef)) return BUILTIN_SOULS[soulRef];
   if (options.readFile) {
     try {
       return options.readFile(soulRef);

@@ -159,7 +159,9 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
   // which subdirectory it is later invoked from (the home is discovered upward).
   let soulRef = stringFlag(parsed.flags.soul) ?? "casual-helper";
   let soulNote: string | undefined;
-  if (!(soulRef in BUILTIN_SOULS)) {
+  // Own-property check, not `in`: a custom soul named like an inherited property
+  // (`toString`, `__proto__`) is a file path, not a built-in soul.
+  if (!Object.hasOwn(BUILTIN_SOULS, soulRef)) {
     const soulPath = resolvePath(io.cwd, soulRef);
     if (!existsSync(soulPath) || !statSync(soulPath).isFile()) {
       soulNote = `  note: no soul file at ${soulPath} yet — the agent uses a default character until one exists there.`;
@@ -318,18 +320,21 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     return 1;
   }
 
-  const made = io.makeAdapter
-    ? io.makeAdapter(io.env)
-    : (await import("./model.js")).buildAdapterFromEnv(io.env);
-  if (!made.adapter) {
-    io.err(made.reason ?? "No model configured.");
-    return 1;
-  }
-  const adapter = made.adapter;
-
   return withHomeStore(io, async (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
+
+    // Resolve the adapter only after the workspace and agent check out, so an
+    // uninitialized workspace or unknown agent fails like every other command
+    // (and no adapter is constructed for a run that cannot proceed).
+    const made = io.makeAdapter
+      ? io.makeAdapter(io.env)
+      : (await import("./model.js")).buildAdapterFromEnv(io.env);
+    if (!made.adapter) {
+      io.err(made.reason ?? "No model configured.");
+      return 1;
+    }
+    const adapter = made.adapter;
 
     // Record the run and move it to `running` (each transition is logged by the
     // kernel). Then resolve the agent's trust into the tool set this run may use.
