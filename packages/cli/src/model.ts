@@ -6,11 +6,13 @@
 //
 // Adapter-boundary note: the CLI may wire concrete implementations — that is its
 // job. It imports the adapter PACKAGE, never Pi directly; "nothing outside
-// adapter-pi imports Pi" holds.
+// adapter-pi imports Pi" holds. The pure config resolution lives in
+// `model-config.ts`; this module only adds the adapter construction.
 
 import { PiAdapter } from "@qmilab/asterism-adapter-pi";
-import type { PiModelConfig } from "@qmilab/asterism-adapter-pi";
 import type { RuntimeAdapter } from "@qmilab/asterism-core";
+
+import { resolveModelConfig } from "./model-config";
 
 export interface AdapterResult {
   adapter?: RuntimeAdapter;
@@ -19,12 +21,6 @@ export interface AdapterResult {
 }
 
 type Env = Record<string, string | undefined>;
-
-/** Sensible default endpoints for the providers people are most likely to use. */
-const DEFAULT_BASE_URLS: Readonly<Record<string, string>> = {
-  openai: "https://api.openai.com/v1",
-  anthropic: "https://api.anthropic.com/v1",
-};
 
 /** Resolve the LLM provider API key from the environment (infra, not an agent secret). */
 function resolveApiKey(env: Env, provider: string): string | undefined {
@@ -37,36 +33,15 @@ function resolveApiKey(env: Env, provider: string): string | undefined {
 
 /**
  * Build the run adapter from environment configuration, or return a `reason`
- * explaining what to set. Required: `ASTERISM_MODEL_ID`. Optional:
- * `ASTERISM_MODEL_PROVIDER` (default "openai"), `ASTERISM_MODEL_BASE_URL`
- * (defaulted for known providers), `ASTERISM_MODEL_API`. The API key is read per
- * provider (OPENAI_API_KEY / ANTHROPIC_API_KEY) or from ASTERISM_API_KEY.
+ * explaining what to set. Configuration (provider defaults included) is resolved
+ * by {@link resolveModelConfig}; the API key is read per provider
+ * (OPENAI_API_KEY / ANTHROPIC_API_KEY) or from ASTERISM_API_KEY.
  */
 export function buildAdapterFromEnv(env: Env): AdapterResult {
-  const id = env.ASTERISM_MODEL_ID;
-  if (!id) {
-    return {
-      reason:
-        "No model configured. Set ASTERISM_MODEL_ID (and an API key, e.g. " +
-        "OPENAI_API_KEY) before running an agent.",
-    };
+  const { model, reason } = resolveModelConfig(env);
+  if (!model) {
+    return reason !== undefined ? { reason } : {};
   }
-  const provider = env.ASTERISM_MODEL_PROVIDER ?? "openai";
-  const baseUrl = env.ASTERISM_MODEL_BASE_URL ?? DEFAULT_BASE_URLS[provider];
-  if (!baseUrl) {
-    return {
-      reason:
-        `No endpoint for provider "${provider}". Set ASTERISM_MODEL_BASE_URL to ` +
-        "the provider's base URL.",
-    };
-  }
-
-  const model: PiModelConfig = {
-    provider,
-    id,
-    baseUrl,
-    ...(env.ASTERISM_MODEL_API ? { api: env.ASTERISM_MODEL_API } : {}),
-  };
   const adapter = new PiAdapter({
     model,
     getApiKey: (p: string) => resolveApiKey(env, p),
