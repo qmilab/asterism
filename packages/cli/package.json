@@ -1,8 +1,32 @@
 {
   "name": "@qmilab/asterism",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Many agents. One runtime. Separate lives. Run distinct local AI agents — each with its own soul, memory, secrets, skills, workspace, and autonomy level.",
+  "keywords": [
+    "ai",
+    "agents",
+    "cli",
+    "local-first",
+    "autonomy"
+  ],
   "type": "module",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/qmilab/asterism#readme",
+  "bugs": "https://github.com/qmilab/asterism/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qmilab/asterism.git",
+    "directory": "packages/cli"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
   "bin": {
     "asterism": "./dist/bin.js"
   },
