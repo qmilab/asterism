@@ -1,8 +1,25 @@
 {
   "name": "@qmilab/asterism-adapter-pi",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Runs Asterism agents on the Pi agent runtime. You probably want @qmilab/asterism.",
   "type": "module",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/qmilab/asterism#readme",
+  "bugs": "https://github.com/qmilab/asterism/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qmilab/asterism.git",
+    "directory": "packages/adapter-pi"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
