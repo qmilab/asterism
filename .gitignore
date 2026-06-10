@@ -21,6 +21,8 @@ PROJECT_INSTRUCTIONS.md
 STARTER_PROMPTS.md
 CLAUDE_INTERNAL.md
 TASKS.md
+# archived internal docs (e.g. TASKS.md moved to internal/archive/)
+internal/
 
 # editor / OS
 .DS_Store
