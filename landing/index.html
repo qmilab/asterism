@@ -2,14 +2,22 @@
 <!--
   Asterism landing page — served at https://qmilab.com/asterism/
 
-  ⚠ PLACEHOLDER. This is a minimal scaffold so the Pages deploy works end to end
-  (the project site owns the whole /asterism/* prefix, so the root must not 404).
-  Replace it with the full landing page — see internal/website-plan.md §3d.
+  Why this lives here, hand-vendored and self-contained:
+  This repo's GitHub Pages site owns the whole /asterism/* path on the apex
+  domain (it takes precedence over the org site qmilab.github.io for that
+  prefix). The docs build lands at /asterism/docs/; this file lands at the
+  /asterism/ root so that path is not a 404. The docs.yml workflow copies
+  landing/. into the Pages artifact root before upload.
 
-  Self-contained on purpose: CSS is INLINED and the logo is vendored locally
-  (logo.svg). Do NOT link the apex's hash-named stylesheet — that hash changes on
-  every org-site rebuild and would silently break. Favicon/og-image stay
-  apex-absolute (served by the org site qmilab.github.io).
+  CSS is INLINED on purpose. Do NOT link the apex's hash-named stylesheet,
+  e.g. /_assets/global.<hash>.css — that hash changes on every org-site
+  rebuild, so a vendored copy referencing it would silently break. Inlining
+  removes that cross-repo dependency. The nav logo (logo.png, QMI Lab) is
+  vendored locally for the same reason. Favicons/manifest/og-image are stable
+  apex filenames served by the org site, so they stay apex-absolute.
+
+  Structure mirrors lodestar/landing/index.html so the two project pages read
+  as one site.
 -->
 <html lang="en">
   <head>
@@ -26,7 +34,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
 
@@ -34,140 +42,689 @@
     <meta property="og:title" content="Asterism — QMI Lab" />
     <meta
       property="og:description"
-      content="Many agents. One runtime. Separate lives."
+      content="Many agents. One runtime. Separate lives. A local-first runtime for running many distinct AI agents from one install — nothing leaks between them."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://qmilab.com/asterism/" />
     <meta property="og:image" content="https://qmilab.com/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="QMI Lab — Quantum & Machine Intelligence Laboratory" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Asterism — QMI Lab" />
+    <meta
+      name="twitter:description"
+      content="Many agents. One runtime. Separate lives. A local-first runtime for running many distinct AI agents from one install — nothing leaks between them."
+    />
+    <meta name="twitter:image" content="https://qmilab.com/og-image.png" />
+
+    <!-- Favicon & Icons (stable apex filenames, served by the org site) -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#1B2A4A" />
 
     <style>
+      /* ---- Design tokens + base (mirrors qmilab-site global.css) ---- */
       :root {
-        --navy: #1b2a4a;
-        --navy-dark: #142036;
-        --blue: #2e75b6;
-        --ink: #2a2a2a;
-        --muted: #5b6472;
-        --line: #e6e9ef;
-        --bg: #ffffff;
-        --bg-soft: #f7f8fb;
+        --deep-navy: #1b2a4a;
+        --accent-blue: #2e75b6;
+        --dark-gray: #2a2a2a;
+        --med-gray: #5a5a5a;
+        --light-gray: #f7f7f7;
+        --border-gray: #d8d8d8;
+        --white: #ffffff;
+        --font-heading: "EB Garamond", "Georgia", "Times New Roman", serif;
+        --font-body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --font-mono: "IBM Plex Mono", "JetBrains Mono", "Fira Code", "Consolas", monospace;
+        --space-xs: 0.25rem;
+        --space-sm: 0.5rem;
+        --space-md: 1rem;
+        --space-lg: 2rem;
+        --space-xl: 3rem;
+        --space-2xl: 5rem;
+        --max-width: 720px;
+        --max-width-wide: 960px;
       }
-      * { box-sizing: border-box; }
-      html { -webkit-text-size-adjust: 100%; }
-      body {
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
         margin: 0;
-        font-family: "IBM Plex Sans", system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
-        color: var(--ink);
-        background: var(--bg);
-        line-height: 1.6;
+        padding: 0;
       }
-      .wrap { max-width: 720px; margin: 0 auto; padding: 0 24px; }
-      h1, h2 {
-        font-family: "EB Garamond", Georgia, "Times New Roman", serif;
-        color: var(--navy);
-        line-height: 1.15;
-        font-weight: 600;
+
+      html {
+        font-size: 16px;
+        scroll-behavior: smooth;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
       }
-      header { padding: 72px 0 8px; }
-      header img { width: 240px; max-width: 70%; height: auto; }
-      .tagline {
-        font-family: "EB Garamond", Georgia, serif;
-        font-size: clamp(28px, 6vw, 44px);
-        color: var(--navy);
-        margin: 28px 0 10px;
-        font-weight: 600;
+
+      body {
+        font-family: var(--font-body);
+        color: var(--dark-gray);
+        background: var(--white);
+        line-height: 1.75;
+        font-weight: 400;
       }
-      .lede { font-size: 19px; color: var(--muted); margin: 0 0 32px; max-width: 60ch; }
-      .cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; }
-      .btn {
-        display: inline-block;
-        padding: 11px 20px;
-        border-radius: 8px;
+
+      h1,
+      h2,
+      h3,
+      h4,
+      h5,
+      h6 {
+        font-family: var(--font-heading);
+        color: var(--deep-navy);
+        line-height: 1.25;
         font-weight: 500;
-        text-decoration: none;
-        font-size: 15px;
-        transition: background .15s, color .15s, border-color .15s;
       }
-      .btn-primary { background: var(--navy); color: #fff; }
-      .btn-primary:hover { background: var(--navy-dark); }
-      .btn-ghost { border: 1px solid var(--line); color: var(--navy); }
-      .btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
-      .install {
-        margin: 28px 0 0;
-        font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 15px;
-        background: var(--bg-soft);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 14px 16px;
-        color: var(--navy-dark);
+
+      h1 {
+        font-size: 2.75rem;
+        margin-bottom: var(--space-lg);
+        letter-spacing: -0.01em;
+      }
+
+      h2 {
+        font-size: 1.75rem;
+        margin-bottom: var(--space-md);
+        margin-top: var(--space-2xl);
+      }
+
+      p {
+        margin-bottom: var(--space-md);
+        max-width: 65ch;
+      }
+
+      a {
+        color: var(--accent-blue);
+        text-decoration: none;
+        transition: color 0.15s ease;
+      }
+
+      a:hover {
+        color: var(--deep-navy);
+        text-decoration: underline;
+      }
+
+      strong {
+        font-weight: 600;
+      }
+
+      blockquote {
+        border-left: 2px solid var(--deep-navy);
+        padding-left: var(--space-lg);
+        margin: var(--space-xl) 0;
+        color: var(--med-gray);
+        font-style: italic;
+      }
+
+      .container {
+        max-width: var(--max-width);
+        margin: 0 auto;
+        padding: 0 var(--space-lg);
+      }
+
+      .container--wide {
+        max-width: var(--max-width-wide);
+        margin: 0 auto;
+        padding: 0 var(--space-lg);
+      }
+
+      .divider {
+        border: none;
+        border-top: 1px solid var(--border-gray);
+        width: 100%;
+        margin: var(--space-xl) 0;
+      }
+
+      @media (max-width: 768px) {
+        :root {
+          --max-width: 100%;
+          --space-2xl: 3rem;
+        }
+        h1 {
+          font-size: 2rem;
+        }
+        h2 {
+          font-size: 1.4rem;
+        }
+        .container,
+        .container--wide {
+          padding: 0 var(--space-md);
+        }
+      }
+
+      /* ---- Nav + footer (mirrors qmilab-site Base.astro) ---- */
+      .nav {
+        position: sticky;
+        top: 0;
+        background: var(--white);
+        border-bottom: 1px solid var(--border-gray);
+        z-index: 100;
+        padding: var(--space-md) 0;
+      }
+
+      .nav__inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .nav__logo {
+        display: flex;
+        align-items: center;
+        text-decoration: none;
+      }
+
+      .nav__logo-img {
+        height: 32px;
+        width: auto;
+      }
+
+      .nav__logo:hover {
+        text-decoration: none;
+      }
+
+      .nav__links {
+        display: flex;
+        gap: var(--space-lg);
+      }
+
+      .nav__links a {
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        font-weight: 400;
+        color: var(--med-gray);
+        text-decoration: none;
+        letter-spacing: 0.03em;
+        text-transform: lowercase;
+      }
+
+      .nav__links a:hover {
+        color: var(--deep-navy);
+        text-decoration: none;
+      }
+
+      .footer {
+        margin-top: var(--space-2xl);
+        padding: var(--space-xl) 0;
+        border-top: 1px solid var(--border-gray);
+      }
+
+      .footer__inner {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-md);
+      }
+
+      .footer__brand {
+        font-family: var(--font-heading);
+        font-size: 0.95rem;
+        color: var(--deep-navy);
+      }
+
+      .footer__sep {
+        color: var(--border-gray);
+        margin: 0 0.25em;
+      }
+
+      .footer__links {
+        display: flex;
+        gap: var(--space-lg);
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+      }
+
+      .footer__copy {
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        color: var(--med-gray);
+      }
+
+      @media (max-width: 768px) {
+        .nav__links {
+          gap: var(--space-md);
+        }
+        .nav__links a {
+          font-size: 0.72rem;
+        }
+      }
+
+      @media (max-width: 600px) {
+        .nav {
+          padding: var(--space-sm) 0;
+        }
+        .nav__inner {
+          flex-direction: column;
+          align-items: center;
+          gap: var(--space-sm);
+        }
+        .nav__links {
+          flex-wrap: wrap;
+          justify-content: center;
+          gap: var(--space-sm) var(--space-md);
+        }
+      }
+
+      /* ---- Asterism page (mirrors lodestar landing) ---- */
+      .asterism {
+        padding-bottom: var(--space-2xl);
+      }
+
+      .asterism__back {
+        display: inline-block;
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        color: var(--accent-blue);
+        margin-top: var(--space-xl);
+        margin-bottom: var(--space-xl);
+      }
+
+      .asterism__header {
+        padding: var(--space-xl) 0 var(--space-lg);
+      }
+
+      .asterism__kicker {
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        color: var(--accent-blue);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: var(--space-sm);
+        max-width: none;
+      }
+
+      .asterism__header h1 {
+        font-size: clamp(2.5rem, 5vw, 3.5rem);
+        font-weight: 500;
+        margin-bottom: var(--space-xs);
+      }
+
+      .asterism__tagline {
+        font-family: var(--font-heading);
+        font-style: italic;
+        font-size: 1.25rem;
+        color: var(--med-gray);
+        margin-bottom: var(--space-xl);
+        max-width: none;
+      }
+
+      .asterism__meta {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: var(--space-sm) var(--space-lg);
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        max-width: none;
+        margin: 0;
+      }
+
+      .asterism__meta dt {
+        color: var(--med-gray);
+        letter-spacing: 0.04em;
+      }
+
+      .asterism__meta dd {
+        color: var(--dark-gray);
+        margin: 0;
+      }
+
+      .asterism__section {
+        padding: var(--space-xl) 0;
+      }
+
+      .asterism__section h2 {
+        margin-top: 0;
+      }
+
+      .asterism__section p {
+        max-width: 65ch;
+        font-size: 1.0125rem;
+        line-height: 1.85;
+      }
+
+      .asterism__section code {
+        font-family: var(--font-mono);
+        font-size: 0.92em;
+        color: var(--deep-navy);
+        background: var(--light-gray);
+        padding: 0.1em 0.35em;
+        border-radius: 2px;
+      }
+
+      .asterism__list {
+        list-style: none;
+        padding: 0;
+        margin: var(--space-md) 0 var(--space-lg) 0;
+      }
+
+      .asterism__list li {
+        padding-left: 1.5em;
+        position: relative;
+        margin-bottom: var(--space-md);
+        line-height: 1.85;
+        max-width: 65ch;
+        font-size: 1.0125rem;
+      }
+
+      .asterism__list li::before {
+        content: "—";
+        position: absolute;
+        left: 0;
+        color: var(--accent-blue);
+      }
+
+      .asterism__list strong {
+        color: var(--deep-navy);
+      }
+
+      .asterism__terminal {
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+        line-height: 1.7;
+        color: var(--dark-gray);
+        background: var(--light-gray);
+        border: 1px solid var(--border-gray);
+        border-radius: 4px;
+        padding: var(--space-md) var(--space-lg);
+        margin: var(--space-lg) 0;
         overflow-x: auto;
       }
-      .install .prompt { color: var(--blue); user-select: none; }
-      section { padding: 8px 0 16px; }
-      section h2 { font-size: 26px; margin: 40px 0 8px; }
-      ul { padding-left: 20px; }
-      li { margin: 6px 0; }
-      a { color: var(--blue); }
-      footer {
-        border-top: 1px solid var(--line);
-        margin-top: 56px;
-        padding: 28px 0 64px;
-        color: var(--muted);
-        font-size: 14px;
+
+      .asterism__terminal .comment {
+        color: var(--med-gray);
       }
-      footer a { color: var(--muted); text-decoration: none; }
-      footer a:hover { color: var(--blue); }
+
+      .asterism__terminal .keyword {
+        color: var(--accent-blue);
+      }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <header>
-        <img src="logo.svg" alt="Asterism" />
-      </header>
-
-      <p class="tagline">Many agents. One runtime. Separate lives.</p>
-      <p class="lede">
-        Run distinct AI agents for work, clients, side projects, and experiments
-        from one local install — each with its own soul, memory, secrets, skills,
-        workspace, and autonomy level. Nothing leaks between them.
-      </p>
-
-      <div class="cta">
-        <a class="btn btn-primary" href="docs/">Read the docs</a>
-        <a class="btn btn-ghost" href="https://github.com/qmilab/asterism">GitHub</a>
+    <nav class="nav">
+      <div class="nav__inner container--wide">
+        <a href="/" class="nav__logo"><img src="logo.png" alt="QMI Lab" class="nav__logo-img" /></a>
+        <div class="nav__links">
+          <a href="/#research">Research</a>
+          <a href="/#publications">Publications</a>
+          <a href="/#collaborate">Collaborate</a>
+          <a href="/manifesto">Manifesto</a>
+          <a href="/asterism/docs/">Docs</a>
+        </div>
       </div>
+    </nav>
 
-      <div class="install"><span class="prompt">$ </span>bunx @qmilab/asterism init</div>
+    <main>
+      <article class="asterism">
+        <div class="container">
+          <a href="/" class="asterism__back">← Back to main site</a>
 
-      <section>
-        <h2>What you get</h2>
-        <ul>
-          <li>One agent's memory never appears in another's.</li>
-          <li>One agent's secrets are unreadable from another.</li>
-          <li>Dialable autonomy — <code>propose</code>, <code>notify</code>, <code>autonomous</code>.</li>
-          <li>Even an autonomous agent pauses for confirmation before anything destructive.</li>
-          <li>Reviewable memory: every memory an agent forms is typed, scoped, and yours to approve.</li>
-        </ul>
-        <p>
-          See the guarantees proven end to end in the
-          <a href="docs/walkthrough/">five-claims walkthrough</a>.
-        </p>
-      </section>
+          <header class="asterism__header">
+            <p class="asterism__kicker">Applied project</p>
+            <h1>Asterism</h1>
+            <p class="asterism__tagline">Many agents. One runtime. Separate lives.</p>
+            <dl class="asterism__meta">
+              <dt>Status</dt>
+              <dd>v0.1.0 — Phase 0; five packages on npm</dd>
+              <dt>License</dt>
+              <dd>Apache 2.0</dd>
+              <dt>Repository</dt>
+              <dd>
+                <a href="https://github.com/qmilab/asterism" target="_blank" rel="noopener"
+                  >github.com/qmilab/asterism</a
+                >
+              </dd>
+              <dt>Documentation</dt>
+              <dd><a href="/asterism/docs/">qmilab.com/asterism/docs</a></dd>
+            </dl>
+          </header>
 
-      <section>
-        <h2>Pairs with Lodestar</h2>
-        <p>
-          Asterism runs your agents and keeps them apart;
-          <a href="https://qmilab.com/lodestar">Lodestar</a> is the layer that
-          makes each one trustworthy — what it knows, believes, and is allowed to do.
-        </p>
-      </section>
+          <hr class="divider" />
 
-      <footer>
-        Apache-2.0 ·
-        <a href="https://github.com/qmilab/asterism">github.com/qmilab/asterism</a> ·
-        <a href="https://qmilab.com">QMI Lab</a>
-      </footer>
-    </div>
+          <!-- OPENING -->
+          <section class="asterism__section">
+            <p>
+              Asterism is a local-first runtime for running <strong>many distinct AI agents from
+              one install</strong>. You create separate agents for work, clients, side projects,
+              and experiments — each with its own soul, memory, secrets, skills, workspace, event
+              log, and autonomy level. Agents run alone by default. When they collaborate, they do
+              it through explicit connections — never shared memory or shared credentials.
+            </p>
+
+            <div class="asterism__terminal"><span class="keyword">$</span> bunx @qmilab/asterism init</div>
+
+            <blockquote>
+              <p>
+                The name is the idea. The stars in an asterism aren't bound to each other; they can
+                sit light-years apart and only form a pattern from where you're standing. That's
+                the model: agents that are genuinely separate, organized and navigated as one
+                grouping from a single runtime.
+              </p>
+            </blockquote>
+
+            <p>
+              Unlike multi-agent <em>orchestration</em> frameworks — which coordinate agents to
+              finish a task and share context freely — Asterism starts with
+              <strong>identity and boundaries</strong>. Collaboration is a later, explicit,
+              permissioned connection, not the default and never implicit shared state.
+            </p>
+          </section>
+
+          <hr class="divider" />
+
+          <!-- THE PROBLEM -->
+          <section class="asterism__section">
+            <h2>The problem</h2>
+
+            <p>
+              Today's agent runtimes are powerful, but they're naturally centered on
+              <strong>one</strong> long-lived agent identity at a time. The moment you want several
+              distinct agents, you end up duplicating runtimes, configs, workspaces — sometimes
+              whole VMs — just to keep their memory, secrets, and credentials apart. You're doing
+              systems administration instead of building.
+            </p>
+
+            <p>
+              Asterism makes a distinct agent a first-class thing you create in one command. Each
+              agent is its own body — its own soul, memory, secrets, workspace, and autonomy — and
+              nothing crosses between them unless you say so. A soul is nothing exotic: a small
+              persona file defining an agent's voice, values, and operating style.
+            </p>
+          </section>
+
+          <hr class="divider" />
+
+          <!-- WHAT ASTERISM GUARANTEES -->
+          <section class="asterism__section">
+            <h2>What Asterism guarantees</h2>
+
+            <p>Five claims, each proven end to end by an automated acceptance test:</p>
+
+            <ul class="asterism__list">
+              <li>
+                <strong>Memory stays home.</strong> One agent's memory never appears in another's —
+                the boundary holds the moment the agents exist.
+              </li>
+              <li>
+                <strong>Secrets stay home.</strong> A credential added to one agent is unreadable
+                from every other agent.
+              </li>
+              <li>
+                <strong>Autonomy is dialable.</strong> <code>propose</code> hands you a plan and
+                executes nothing; <code>notify</code> and <code>autonomous</code> act on their own,
+                with everything surfaced for review.
+              </li>
+              <li>
+                <strong>Destructive actions always pause.</strong> Even a fully autonomous agent
+                stops for explicit confirmation before anything destructive — deleting files,
+                force-pushing, spending money.
+              </li>
+              <li>
+                <strong>Memory is reviewable.</strong> Every memory an agent forms is typed, scoped
+                to that agent, and yours to approve; nothing is written silently.
+              </li>
+            </ul>
+
+            <p>
+              See them demonstrated step by step in the
+              <a href="/asterism/docs/walkthrough/">five-claims walkthrough</a>, and what
+              "separate" precisely means today in
+              <a href="/asterism/docs/concepts/">Concepts</a>.
+            </p>
+          </section>
+
+          <hr class="divider" />
+
+          <!-- QUICKSTART -->
+          <section class="asterism__section">
+            <h2>Quickstart</h2>
+
+            <div class="asterism__terminal">bunx @qmilab/asterism init
+
+<span class="comment"># create two agents with distinct souls and autonomy</span>
+asterism new writer  --soul calm-editor        --trust autonomous
+asterism new client  --soul careful-consultant --trust propose
+
+<span class="comment"># scoped secrets and skills — never shared across agents</span>
+asterism secrets add client GITHUB_TOKEN
+asterism skill   add writer blog-style.md
+
+<span class="comment"># run them</span>
+asterism run writer "tighten the draft in posts/launch.md"
+asterism run client "summarize the meeting and tidy the notes folder"
+
+<span class="comment"># inspect what each one knows and did</span>
+asterism memory inspect writer
+asterism events tail client</div>
+
+            <p>
+              <code>writer</code>'s memory never appears in <code>client</code>, and
+              <code>client</code>'s <code>GITHUB_TOKEN</code> can't be read from
+              <code>writer</code>. The autonomy you set governs the rest — <code>propose</code>
+              hands you a plan, <code>notify</code> and <code>autonomous</code> act on their own,
+              and at <em>every</em> level an agent pauses for confirmation before anything
+              destructive.
+            </p>
+
+            <p>
+              <a href="/asterism/docs/installation/">Installation</a> covers setup and model
+              configuration; the <a href="/asterism/docs/commands/">command reference</a> covers
+              every command and option, including the
+              <a href="/asterism/docs/http/">local HTTP endpoint</a>.
+            </p>
+          </section>
+
+          <hr class="divider" />
+
+          <!-- LEARNING -->
+          <section class="asterism__section">
+            <h2>Continuous, reviewable learning</h2>
+
+            <div class="asterism__terminal"><span class="keyword">$</span> asterism reflect writer --review
+
+Proposed memory writes:
+  [convention] This blog uses sentence case in headings.   confidence 0.86
+  [procedural] Run a spell pass before saving.             confidence 0.78
+  [negative]   Don't rewrite quotes inside blockquotes.    confidence 0.91
+Accept? edit? reject?</div>
+
+            <p>
+              Each agent grows with use — but on its own track, inside its own boundary. Every
+              memory it forms is <strong>typed, scoped to that agent, and yours to approve</strong>;
+              nothing is written silently. Continuity, but plural: many agents growing separately,
+              not one assistant growing around you.
+            </p>
+          </section>
+
+          <hr class="divider" />
+
+          <!-- STATUS -->
+          <section class="asterism__section">
+            <h2>Status</h2>
+
+            <p>
+              <strong>Phase 0 (Core), v0.1.0 on npm</strong> — local CLI and HTTP endpoint,
+              per-agent scoping of memory, secrets, skills, and workspace, souls and roles, trust
+              profiles with the destructive-action gate, and reviewable memory. Richer cognition,
+              collaboration, and stronger execution isolation come in later phases — the
+              <a href="/asterism/docs/concepts/">Concepts</a> page is precise about which
+              boundaries exist today.
+            </p>
+          </section>
+
+          <hr class="divider" />
+
+          <!-- PAIRS WITH LODESTAR -->
+          <section class="asterism__section">
+            <h2>Pairs with Lodestar</h2>
+
+            <p>
+              A lodestar is the single star you steer by. An asterism is the grouping you navigate
+              within. Asterism runs your agents and keeps them apart;
+              <a href="/lodestar/">Lodestar</a> is the layer that makes each one trustworthy — what
+              it knows, believes, and is allowed to do.
+            </p>
+          </section>
+
+          <hr class="divider" />
+
+          <!-- ENGAGING -->
+          <section class="asterism__section">
+            <h2>Engaging with the project</h2>
+
+            <p>
+              The repository is open:
+              <a href="https://github.com/qmilab/asterism" target="_blank" rel="noopener"
+                >github.com/qmilab/asterism</a
+              >. Apache 2.0. Install with <code>bunx @qmilab/asterism init</code>, or clone and run
+              the acceptance test that proves the five claims.
+            </p>
+
+            <p>
+              The <a href="/asterism/docs/">documentation</a> covers installation, the core
+              concepts, the full command reference, and the
+              <a href="/asterism/docs/walkthrough/">five-claims walkthrough</a> of two agents
+              living side by side without leaking into each other.
+            </p>
+
+            <p>
+              Contributions are welcome through the repository. Found a way for one agent to reach
+              another's memory, secrets, or skills? Please report it privately first — see the
+              repository's security policy.
+            </p>
+
+            <p>
+              For research collaborations, lab affiliations, or commercial inquiries, contact the
+              lab through <a href="/">qmilab.com</a>.
+            </p>
+          </section>
+        </div>
+      </article>
+    </main>
+
+    <footer class="footer">
+      <div class="container">
+        <div class="footer__inner">
+          <div class="footer__brand">
+            <strong>QMI Lab</strong>
+            <span class="footer__sep">&mdash;</span>
+            Quantum &amp; Machine Intelligence Laboratory
+          </div>
+          <div class="footer__links">
+            <a href="mailto:hello@qmilab.com">hello@qmilab.com</a>
+            <a href="https://github.com/qmilab" target="_blank" rel="noopener">GitHub</a>
+          </div>
+          <div class="footer__copy">&copy; 2026 QMI Lab</div>
+        </div>
+      </div>
+    </footer>
   </body>
 </html>
