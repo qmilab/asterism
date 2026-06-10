@@ -590,14 +590,16 @@
             <div class="asterism__terminal">bunx @qmilab/asterism init
 
 <span class="comment"># create two agents with distinct souls and autonomy</span>
-asterism new writer  --soul calm-editor        --trust autonomous
-asterism new client  --soul careful-consultant --trust propose
+asterism new writer  --soul casual-helper       --trust autonomous
+asterism new client  --soul careful-consultant  --trust propose
 
 <span class="comment"># scoped secrets and skills — never shared across agents</span>
 asterism secrets add client GITHUB_TOKEN
+<span class="comment"># a skill is just a markdown file you write</span>
+echo "# Blog style: sentence-case headings, active voice" &gt; blog-style.md
 asterism skill   add writer blog-style.md
 
-<span class="comment"># run them</span>
+<span class="comment"># run them (needs a configured model — see Installation)</span>
 asterism run writer "tighten the draft in posts/launch.md"
 asterism run client "summarize the meeting and tidy the notes folder"
 
@@ -608,10 +610,19 @@ asterism events tail client</div>
             <p>
               <code>writer</code>'s memory never appears in <code>client</code>, and
               <code>client</code>'s <code>GITHUB_TOKEN</code> can't be read from
-              <code>writer</code>. The autonomy you set governs the rest — <code>propose</code>
-              hands you a plan, <code>notify</code> and <code>autonomous</code> act on their own,
-              and at <em>every</em> level an agent pauses for confirmation before anything
-              destructive.
+              <code>writer</code> — those boundaries hold the moment the agents exist. The
+              autonomy you set governs the rest: <code>propose</code> hands you a plan,
+              <code>notify</code> and <code>autonomous</code> act on their own, and at
+              <em>every</em> level an agent pauses for confirmation before anything destructive.
+            </p>
+
+            <p>
+              One honest note for Phase 0: a bare <code>run</code> returns the model's text. The
+              trust levels and the destructive-action pause act on an agent's <em>tools</em>, and
+              the shipped CLI registers none by default — so those two claims are proven end to end
+              by the <a href="/asterism/docs/walkthrough/">acceptance test</a>, which wires demo
+              tools through the same path and runs this exact flow. The memory and secret
+              boundaries, by contrast, you can see from a fresh install.
             </p>
 
             <p>
@@ -640,7 +651,9 @@ Accept? edit? reject?</div>
               Each agent grows with use — but on its own track, inside its own boundary. Every
               memory it forms is <strong>typed, scoped to that agent, and yours to approve</strong>;
               nothing is written silently. Continuity, but plural: many agents growing separately,
-              not one assistant growing around you.
+              not one assistant growing around you. (The proposals above are illustrative —
+              reflection is model-generated, so the exact memories and confidence scores differ each
+              run.)
             </p>
           </section>
 

@@ -35,14 +35,16 @@ Unlike multi-agent *orchestration* frameworks — which coordinate agents to fin
 bunx @qmilab/asterism init
 
 # create two agents with distinct souls and autonomy
-asterism new writer  --soul calm-editor       --trust autonomous
-asterism new client  --soul careful-consultant --trust propose
+asterism new writer  --soul casual-helper       --trust autonomous
+asterism new client  --soul careful-consultant  --trust propose
 
 # scoped secrets and skills — never shared across agents
 asterism secrets add client GITHUB_TOKEN
+# a skill is just a markdown file you write
+echo "# Blog style: sentence-case headings, active voice" > blog-style.md
 asterism skill   add writer blog-style.md
 
-# run them
+# run them (needs a configured model — see Installation)
 asterism run writer "tighten the draft in posts/launch.md"
 asterism run client "summarize the meeting and tidy the notes folder"
 
@@ -51,7 +53,7 @@ asterism memory inspect writer
 asterism events tail client
 ```
 
-> **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. And the autonomy you set governs the rest — `propose` hands you a plan, `notify` and `autonomous` act on their own, and at *every* level an agent **pauses for confirmation before anything destructive** — proven end to end in the [five-claims walkthrough](./docs/walkthrough.md).
+> **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. The autonomy you set governs the rest — `propose` hands you a plan, `notify` and `autonomous` act on their own, and at *every* level an agent **pauses for confirmation before anything destructive**. One honest note for Phase 0: a bare `run` returns the model's text (the trust gate and the destructive pause act on an agent's *tools*, which the shipped CLI doesn't register by default); those two claims are proven end to end by the [acceptance test](./docs/walkthrough.md), which wires demo tools through the same path and runs this exact flow.
 
 ## Documentation
 
