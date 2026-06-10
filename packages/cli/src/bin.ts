@@ -33,7 +33,16 @@ const io: CliIO = {
   // never auto-approve — the safe default is to stay paused.
   confirm: (action: Action) => {
     if (!process.stdin.isTTY) return false;
-    const answer = prompt(`Confirm destructive action '${action.capability}'? [y/N]`);
+    // Show the action's arguments (e.g. the path a delete targets) so the human is
+    // approving a specific operation, not a bare capability name — the difference
+    // between confirming one file and confirming a whole directory. `JSON.stringify`
+    // can return undefined (e.g. for a function arg); guard and cap the length.
+    let detail = "";
+    if (action.args !== undefined) {
+      const rendered = JSON.stringify(action.args);
+      if (rendered) detail = rendered.length > 200 ? ` ${rendered.slice(0, 200)}…` : ` ${rendered}`;
+    }
+    const answer = prompt(`Confirm destructive action '${action.capability}'${detail}? [y/N]`);
     return answer !== null && /^y(es)?$/i.test(answer.trim());
   },
   // Only consume stdin when it is piped, so an interactive session is not blocked

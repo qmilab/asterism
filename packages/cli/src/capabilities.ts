@@ -49,9 +49,20 @@ function failure(message: string): ToolResult {
   return { output: message, isError: true };
 }
 
-/** Normalize an unknown thrown value into a message, without leaking a stack. */
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+/**
+ * A short, host-path-free reason for a filesystem failure. Node's `Error.message`
+ * embeds the absolute path it failed on (e.g. `ENOENT: ... open '/Users/me/...'`),
+ * which would leak the host home directory and username to the model across a
+ * tool contract that is supposed to be workspace-relative. So surface only the
+ * errno code (`ENOENT`, `EISDIR`, `EACCES`, …); the relative path the model asked
+ * for is added by the caller.
+ */
+function failureReason(err: unknown): string {
+  if (err !== null && typeof err === "object" && "code" in err) {
+    const code = (err as { code: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return "operation failed";
 }
 
 /** Read a string field from a tool's (untrusted, `unknown`) arguments. */
@@ -62,10 +73,11 @@ function stringArg(args: unknown, name: string): string | undefined {
 }
 
 /**
- * Resolve a requested path against the workspace, refusing anything that escapes
- * it. Returns the absolute in-workspace path, or a message explaining the refusal.
- * Best-effort logical confinement (see the module header) — `..` traversal and
- * absolute paths are rejected; this is not OS-level containment.
+ * Resolve a requested path to a target *inside* the workspace, or refuse it.
+ * Returns the absolute in-workspace path, or a message explaining the refusal.
+ * Best-effort logical confinement (see the module header) — a path that climbs
+ * out (`..`, an absolute path) and the workspace root itself are rejected; this
+ * is not OS-level containment.
  */
 function confine(
   workspaceDir: string,
@@ -74,13 +86,15 @@ function confine(
   const root = resolvePath(workspaceDir);
   const target = resolvePath(root, requested);
   const rel = relative(root, target);
-  // `rel === ""` means the target IS the workspace root (allowed; the fs op will
-  // fail naturally if it is the wrong kind of path). Anything that starts with
-  // `..` or is absolute has climbed out of the workspace.
-  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+  // Refuse a climb-out (`..`, absolute) AND the workspace root itself
+  // (`rel === ""`, which `.` / `""` / `notes/..` resolve to). A tool must target a
+  // path *inside* the workspace, never the directory itself — otherwise
+  // `delete_file` with "." would `rmSync` the whole workspace (a recursive delete
+  // does NOT "fail naturally" on a directory the way a read/write would).
+  if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     return {
       ok: false,
-      message: `Refused: '${requested}' is outside this agent's workspace.`,
+      message: `Refused: '${requested}' must be a path inside this agent's workspace.`,
     };
   }
   return { ok: true, path: target };
@@ -116,7 +130,7 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
         try {
           return { output: readFileSync(c.path, "utf8") };
         } catch (err) {
-          return failure(`Could not read '${path}': ${errorMessage(err)}`);
+          return failure(`Could not read '${path}': ${failureReason(err)}`);
         }
       },
     },
@@ -141,7 +155,12 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
       execute: (invocation: ToolInvocation): ToolResult => {
         const path = stringArg(invocation.args, "path");
         if (path === undefined) return failure("write_file needs a 'path'.");
-        const content = stringArg(invocation.args, "content") ?? "";
+        // Require `content` explicitly — defaulting a missing/non-string value to
+        // "" would silently truncate the target file to empty and report success,
+        // which is exactly the kind of unasked-for data loss the gate exists to
+        // prevent. A malformed call should fail, not quietly destroy a file.
+        const content = stringArg(invocation.args, "content");
+        if (content === undefined) return failure("write_file needs string 'content'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
         try {
@@ -149,7 +168,7 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
           writeFileSync(c.path, content);
           return { output: `Wrote ${Buffer.byteLength(content, "utf8")} bytes to '${path}'.` };
         } catch (err) {
-          return failure(`Could not write '${path}': ${errorMessage(err)}`);
+          return failure(`Could not write '${path}': ${failureReason(err)}`);
         }
       },
     },
@@ -181,7 +200,7 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
           rmSync(c.path, { recursive: true, force: false });
           return { output: `Deleted '${path}'.` };
         } catch (err) {
-          return failure(`Could not delete '${path}': ${errorMessage(err)}`);
+          return failure(`Could not delete '${path}': ${failureReason(err)}`);
         }
       },
     },

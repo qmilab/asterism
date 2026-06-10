@@ -160,3 +160,28 @@ test("a destructive action pauses an autonomous run at awaiting_confirmation", a
   expect(types).toContain("action.awaiting_confirmation");
   expect(types).toContain("run.status_changed");
 });
+
+test("a confirmed destructive action resumes and finishes done, not stranded paused", async () => {
+  // `confirm` resolves truthy ⇒ the gate pauses, gets its yes, and runs the
+  // action. The run must then finish `done` — the confirmed side effect actually
+  // happened, so leaving it stuck at `awaiting_confirmation` would misreport a
+  // completed deletion as still pending (the gate's "resume" contract).
+  const result = await executeRun(store, agent, "delete the dist files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [deleteFilesCapability()],
+    confirm: () => true,
+  });
+
+  expect(result.status).toBe("done");
+  expect(result.run.status).toBe("done");
+  expect(result.run.finishedAt).toBeDefined();
+  // The tool truly ran — its output, not the awaiting-confirmation notice.
+  expect(result.output).toBe("deleted");
+  expect(result.output).not.toContain("awaiting confirmation");
+  expect(store.runs.get(agent.id, result.run.id)?.status).toBe("done");
+
+  // The record shows confirmation was required AND then the action executed.
+  const types = store.events.tail(agent.id).map((e) => e.type);
+  expect(types).toContain("action.awaiting_confirmation");
+  expect(types).toContain("action.executed");
+});
