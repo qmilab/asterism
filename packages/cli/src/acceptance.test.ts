@@ -163,9 +163,10 @@ describe("canonical demo — Phase 0 acceptance", () => {
       review: (item: ReviewItem): ReviewDecision =>
         item.content === ACCEPTED_MEMORY ? { kind: "accept" } : { kind: "reject" },
       // Deliberately NO `confirm` — the destructive gate must pause, not resolve.
-      // The demo's tools, exposed through the same seam a real embedding uses;
-      // the kernel's trust profile + gate decide what each run may do with them.
-      capabilities: [
+      // The demo's tools, exposed through the same factory seam a real embedding
+      // uses (the workspace arg is unused here — these spies do no real I/O); the
+      // kernel's trust profile + gate decide what each run may do with them.
+      capabilities: () => [
         capability("edit_files", "write"),
         capability("tidy_notes", "write"),
         capability("delete_files", "destructive"),

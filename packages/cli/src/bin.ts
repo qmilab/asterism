@@ -12,11 +12,17 @@
 
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision } from "./cli.js";
+import { workspaceCapabilities } from "./capabilities.js";
 import type { Action } from "@qmilab/asterism-core";
 
 const io: CliIO = {
   cwd: process.cwd(),
   env: process.env,
+  // The default tool catalog the shipped binary exposes — real, workspace-scoped
+  // file tools behind the kernel's trust gate. Built per run from the agent's
+  // workspace so each tool is confined to that agent's directory; the kernel does
+  // the trust scoping and the destructive-action gating on top.
+  capabilities: workspaceCapabilities,
   out: (text) => {
     process.stdout.write(`${text}\n`);
   },

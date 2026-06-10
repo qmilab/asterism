@@ -170,11 +170,13 @@ $ asterism run writer "tighten the intro in posts/launch.md"
 <the agent's response>
 ```
 
-> **Note for Phase 0:** the shipped CLI runs agents with no external tools
-> registered, so a default `run` produces the model's text response. The trust
-> and destructive-action machinery operates on an agent's *tools*; the
-> end-to-end behavior with tools wired in is demonstrated by the acceptance test
-> — see the [walkthrough](./walkthrough.md).
+> **Tools:** the shipped CLI registers a default catalog of workspace-scoped file
+> tools — `read_file`, `write_file`, and `delete_file` — behind the trust gate.
+> `read_file`/`write_file` are ordinary read/write effects; `delete_file` is
+> destructive and pauses for confirmation at every trust level. Each is confined
+> to the agent's workspace (Phase 0 logical scoping — see
+> [what isolation means today](./concepts.md#what-isolation-means-today)). The
+> end-to-end behavior is shown in the [walkthrough](./walkthrough.md).
 
 ---
 

@@ -168,12 +168,16 @@ separation.
 Today's boundary is not a microVM, container, or hardened sandbox, and it does
 not claim to safely contain deliberately hostile code. In particular, an agent's
 **workspace** is its working directory and default scope — not an OS-enforced
-filesystem jail: a tool handed a path outside it is not physically prevented from
-writing there in Phase 0. What guards irreversible writes is the
-[destructive-action gate](#the-destructive-action-gate), not the workspace
-boundary. Stronger execution isolation — process, container, and microVM tiers —
-is planned for a later phase. Until then, prefer the words *separate* and
-*scoped* over *sandboxed* when describing what Asterism does.
+filesystem jail. The shipped file tools refuse a path that climbs out of the
+workspace (`..`, an absolute path), but that is each tool's own best-effort
+check, not OS-level containment — a different or misbehaving tool would not be
+physically prevented from writing elsewhere in Phase 0. What ultimately guards
+against irreversible loss is the
+[destructive-action gate](#the-destructive-action-gate) — a deletion pauses for
+confirmation regardless of trust — not the workspace boundary. Stronger execution
+isolation — process, container, and microVM tiers — is planned for a later phase.
+Until then, prefer the words *separate* and *scoped* over *sandboxed* when
+describing what Asterism does.
 
 That honesty is the point: autonomous agents with persistent memory, tools, and
 credentials are a framework-level security problem, and the framework should be

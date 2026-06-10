@@ -41,7 +41,7 @@ Every agent gets one of three trust levels:
 
 At every level, destructive actions (deleting files, force-pushes, spending money, irreversible external calls) pause for your explicit confirmation.
 
-In Phase 0, a bare `run` returns the model's text — the trust gate and the destructive pause act on an agent's *tools*, which the shipped CLI doesn't register by default. Both are proven end to end by the acceptance test (`bun test packages/cli/src/acceptance.test.ts`), which wires demo tools through the same path.
+The gate acts on an agent's *tools*. The shipped CLI registers a default catalog of workspace-scoped file tools — `read_file`, `write_file`, `delete_file` — behind it, so with a configured model an ordinary write runs under `autonomous` while a deletion pauses regardless of trust level. The acceptance test (`bun test packages/cli/src/acceptance.test.ts`) verifies all five claims, and `catalog.test.ts` drives the shipped tools directly.
 
 ## Learning you can review
 

@@ -74,19 +74,21 @@ export interface CliIO {
   /** Resolve a destructive action's confirmation. Absent ⇒ the action stays paused. */
   confirm?: (action: Action) => boolean | Promise<boolean>;
   /**
-   * Capabilities to expose to runs, handed to the kernel's gate untouched — both
-   * `run` and `serve` forward the same list, so tool exposure cannot differ by
-   * surface. Absent ⇒ none — Phase 0 registers no capabilities, so the default run
-   * is confined to an empty tool set. This is the host seam the acceptance test
-   * (and a future embedding) uses to put real tools behind the kernel's trust
-   * enforcement. Two contract points a host must own: the list is install-wide
-   * (every agent's runs receive the same candidates; only trust level and the gate
-   * differentiate — per-agent capability scoping is a later phase), and each
-   * capability's declared `effect` is load-bearing — the kernel escalates to
-   * `destructive` from command-string arguments but cannot detect a mis-declared
-   * destructive tool with structured args, so declare conservatively.
+   * Builds the capabilities to expose to a run, given the agent's confined
+   * workspace, handed to the kernel's gate untouched — both `run` and `serve` call
+   * the same factory, so tool exposure cannot differ by surface. Absent ⇒ none, so
+   * the run is confined to an empty tool set. This is the host seam `bin.ts` wires
+   * the real catalog through (and that the acceptance test fakes); the workspace
+   * argument lets a file tool be confined to the agent's directory without the
+   * kernel ever learning a path. Two contract points a host must own: the catalog
+   * is install-wide (every agent's runs receive the same tools — only the workspace
+   * binding, the trust level, and the gate differ; per-agent capability scoping is
+   * a later phase), and each capability's declared `effect` is load-bearing — the
+   * kernel escalates to `destructive` from command-string arguments but cannot
+   * detect a mis-declared destructive tool with structured args, so declare
+   * conservatively.
    */
-  capabilities?: readonly Capability[];
+  capabilities?: (workspaceDir: string) => readonly Capability[];
   /** Read piped standard input (for `secrets add` without an inline value). */
   readStdin?: () => Promise<string | undefined>;
   /** Build the run adapter. Absent ⇒ the default wiring reads it from the environment. */
@@ -412,11 +414,15 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     // file reader for soul/skill bodies, the interactive confirm prompt) and
     // formats the structured outcome. The same call backs the HTTP surface, so
     // the trust/gate path cannot drift between them.
+    // The catalog is built per-run from the agent's workspace, so each file tool
+    // is confined to that agent's directory. The kernel still does the scoping and
+    // gating; this only supplies the candidate tools.
+    const capabilities = io.capabilities?.(agent.workspaceDir);
     const result = await executeRun(store, agent, task, {
       adapter: made.adapter,
       readFile: (p) => readFileSync(p, "utf8"),
       ...(io.confirm ? { confirm: io.confirm } : {}),
-      ...(io.capabilities ? { capabilities: io.capabilities } : {}),
+      ...(capabilities ? { capabilities } : {}),
     });
 
     if (result.status === "awaiting_confirmation") {
@@ -710,6 +716,11 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     // one is declined with a clear message rather than failing to serve at all.
     const made = await resolveAdapter(io);
 
+    // Built once for the served agent, the same way `run` builds it — so a run
+    // started over HTTP sees the identical tool catalog, confined to this agent's
+    // workspace, that the command line would give it.
+    const capabilities = io.capabilities?.(agent.workspaceDir);
+
     // The kernel store stays open for the server's lifetime — `withHomeStore`
     // closes it only after this callback returns, which it does once shutdown is
     // requested below. The HTTP surface is bound to THIS agent alone.
@@ -719,7 +730,7 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
       ...(made.adapter ? { adapter: made.adapter } : {}),
       ...(made.reason !== undefined ? { adapterReason: made.reason } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
-      ...(io.capabilities ? { capabilities: io.capabilities } : {}),
+      ...(capabilities ? { capabilities } : {}),
       ...(port !== undefined ? { port } : {}),
       ...(host !== undefined ? { hostname: host } : {}),
     });
