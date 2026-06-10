@@ -11,7 +11,7 @@
 [![Tests](https://img.shields.io/badge/tests-passing-22c55e)](#)
 [![Status](https://img.shields.io/badge/status-Phase%200-6366f1)](#status)
 
-[**Why**](#why) · [**Quickstart**](#quickstart) · [**Learning**](#continuous-reviewable-learning) · [**Lodestar**](#pairs-with-lodestar)
+[**Why**](#why) · [**Quickstart**](#quickstart) · [**Docs**](#documentation) · [**Learning**](#continuous-reviewable-learning) · [**Lodestar**](#pairs-with-lodestar)
 
 </div>
 
@@ -51,7 +51,17 @@ asterism memory inspect writer
 asterism events tail client
 ```
 
-> **What you'll see** — `writer`'s memory never appears in `client`, `client`'s `GITHUB_TOKEN` can't be read from `writer`, the `client` agent *proposes* while `writer` *acts*, and even an autonomous agent **pauses for confirmation before anything destructive**.
+> **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. And the autonomy you set governs the rest — `propose` hands you a plan, `notify` and `autonomous` act on their own, and at *every* level an agent **pauses for confirmation before anything destructive** — proven end to end in the [five-claims walkthrough](./docs/walkthrough.md).
+
+## Documentation
+
+Full docs live in [`docs/`](./docs/):
+
+- [Installation](./docs/installation.md) — install, initialize, and configure a model.
+- [Concepts](./docs/concepts.md) — agents, souls, trust, memory, and what "separate" means today.
+- [Command reference](./docs/commands.md) — every command and option.
+- [Five-claims walkthrough](./docs/walkthrough.md) — the separation guarantees proven end to end.
+- [Local HTTP endpoint](./docs/http.md) — serve one agent over HTTP.
 
 ## Continuous, reviewable learning
 
