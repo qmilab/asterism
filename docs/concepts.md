@@ -163,9 +163,9 @@ separation.
 **What it is not, yet:** this is *logical* separation, not OS-level containment.
 Today's boundary is not a microVM, container, or hardened sandbox, and it does
 not claim to safely contain deliberately hostile code. Stronger execution
-isolation — process, container, and microVM tiers — is planned for a later phase
-(see [ROADMAP.md](../ROADMAP.md)). Until then, prefer the words *separate* and
-*scoped* over *sandboxed* when describing what Asterism does.
+isolation — process, container, and microVM tiers — is planned for a later
+phase. Until then, prefer the words *separate* and *scoped* over *sandboxed*
+when describing what Asterism does.
 
 That honesty is the point: autonomous agents with persistent memory, tools, and
 credentials are a framework-level security problem, and the framework should be

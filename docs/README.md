@@ -31,8 +31,9 @@ New here? Read in this order:
 
 ## About this phase
 
-This documentation covers **Phase 0** — the local-first core. For where Asterism
-is headed (richer cognition, agent-to-agent collaboration, stronger execution
-isolation), see the [roadmap](../ROADMAP.md). For the precise scope of what
-"separate" guarantees today, see
+This documentation covers **Phase 0** — the local-first core. Richer cognition,
+agent-to-agent collaboration, and stronger execution isolation come in later
+phases; follow along in the repo's
+[issues](https://github.com/qmilab/asterism/issues). For the precise scope of
+what "separate" guarantees today, see
 [Concepts → What isolation means today](./concepts.md#what-isolation-means-today).
