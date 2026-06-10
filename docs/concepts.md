@@ -148,6 +148,10 @@ with [`asterism reflect <agent> --review`](./commands.md#reflect). In this phase
 reflection proposes only `semantic`, `procedural`, `convention`, and `negative`
 memories.
 
+Reflection is model-generated, so the exact proposals and confidence scores
+differ from run to run; the transcripts in these docs are illustrative, not
+output you should expect to reproduce verbatim.
+
 ## What isolation means today
 
 Asterism leans on the word *boundary*, so it is worth being exact about which
@@ -162,10 +166,14 @@ separation.
 
 **What it is not, yet:** this is *logical* separation, not OS-level containment.
 Today's boundary is not a microVM, container, or hardened sandbox, and it does
-not claim to safely contain deliberately hostile code. Stronger execution
-isolation — process, container, and microVM tiers — is planned for a later
-phase. Until then, prefer the words *separate* and *scoped* over *sandboxed*
-when describing what Asterism does.
+not claim to safely contain deliberately hostile code. In particular, an agent's
+**workspace** is its working directory and default scope — not an OS-enforced
+filesystem jail: a tool handed a path outside it is not physically prevented from
+writing there in Phase 0. What guards irreversible writes is the
+[destructive-action gate](#the-destructive-action-gate), not the workspace
+boundary. Stronger execution isolation — process, container, and microVM tiers —
+is planned for a later phase. Until then, prefer the words *separate* and
+*scoped* over *sandboxed* when describing what Asterism does.
 
 That honesty is the point: autonomous agents with persistent memory, tools, and
 credentials are a framework-level security problem, and the framework should be

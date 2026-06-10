@@ -23,8 +23,12 @@ asterism init
 asterism new personal --soul casual-helper      --trust autonomous
 asterism new work     --soul careful-consultant --trust propose
 asterism secrets add work GITHUB_TOKEN
+
+# a skill is just a markdown file you write
+echo "# Blog writer: tighten drafts, keep the author's voice" > blog-writer.md
 asterism skill   add personal blog-writer.md
 
+# the run and reflect steps need a configured model — see Installation
 asterism run personal "update my blog draft and delete the generated files in dist/"
 asterism run work     "summarize the client meeting and propose a cleanup of the notes folder"
 
@@ -121,9 +125,11 @@ Same tools, same task shape — the difference is entirely the trust level.
 ## Claim 4 — the destructive gate fires regardless of trust
 
 `personal` is `autonomous` — the highest trust level — and its task asks it to
-**delete** the files in `dist/`. It still stops:
+**delete** the files in `dist/`. With the demo tools wired (as in Claim 3, and as
+the acceptance test does), it still stops:
 
 ```console
+# acceptance-test scenario — demo tools wired through the host seam
 $ asterism run personal "update my blog draft and delete the generated files in dist/"
 Run paused: a destructive action needs your confirmation before it can proceed.
 ```

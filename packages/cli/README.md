@@ -10,14 +10,16 @@ Run distinct local AI agents from one install — each with its own **soul, memo
 bunx @qmilab/asterism init
 
 # create two agents with distinct souls and autonomy
-asterism new writer  --soul calm-editor        --trust autonomous
-asterism new client  --soul careful-consultant --trust propose
+asterism new writer  --soul casual-helper       --trust autonomous
+asterism new client  --soul careful-consultant  --trust propose
 
 # give each agent its own secrets and skills
 asterism secrets add client GITHUB_TOKEN
+# a skill is just a markdown file you write
+echo "# Blog writer: tighten drafts, keep the author's voice" > blog-writer.md
 asterism skill   add writer blog-writer.md
 
-# put them to work
+# put them to work (needs a configured model — see the docs)
 asterism run writer "update my blog draft"
 asterism run client "summarize the client meeting"
 
@@ -38,6 +40,8 @@ Every agent gets one of three trust levels:
 - **`autonomous`** — acts freely inside its workspace, recording everything to its event log.
 
 At every level, destructive actions (deleting files, force-pushes, spending money, irreversible external calls) pause for your explicit confirmation.
+
+In Phase 0, a bare `run` returns the model's text — the trust gate and the destructive pause act on an agent's *tools*, which the shipped CLI doesn't register by default. Both are proven end to end by the acceptance test (`bun test packages/cli/src/acceptance.test.ts`), which wires demo tools through the same path.
 
 ## Learning you can review
 
