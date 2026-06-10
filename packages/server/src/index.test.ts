@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { AsterismStore } from "@qmilab/asterism-core";
-import type { Agent, RuntimeAdapter, RunOutput } from "@qmilab/asterism-core";
+import type { Agent, Capability, RuntimeAdapter, RunOutput } from "@qmilab/asterism-core";
 
 import { handleRequest, serve } from "./index.ts";
 import type { ServerDeps } from "./index.ts";
@@ -227,6 +227,50 @@ test("a failed run surfaces its error in the response", async () => {
   const json = (await res.json()) as { status: string; error: string };
   expect(json.status).toBe("failed");
   expect(json.error).toBe("model unreachable");
+});
+
+test("host capabilities reach HTTP runs, and the gate still pauses destructive actions", async () => {
+  // Surface parity: `capabilities` on ServerDeps mirrors the CLI's CliIO seam, so
+  // a host that wires tools sees the same exposure whichever surface starts the
+  // run — and over HTTP, with no confirm possible, a destructive action must park
+  // the run at awaiting_confirmation without ever executing.
+  const executed: string[] = [];
+  const destructive: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete files",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        executed.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  const toolCallingAdapter: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "delete_files");
+        if (!tool) return { status: "done", text: "(tool not exposed)" };
+        const result = await tool.execute({ args: { command: "rm -rf dist" } }, request.signal);
+        return { status: "done", text: result.output };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const res = await handleRequest(
+    deps({ adapter: toolCallingAdapter, capabilities: [destructive] }),
+    post("/agents/personal/runs", { input: "delete the generated files in dist/" }),
+  );
+  expect(res.status).toBe(201);
+  const json = (await res.json()) as { status: string; output: string };
+  // The tool WAS exposed (the adapter found it), but the gate paused the run.
+  expect(json.output).not.toBe("(tool not exposed)");
+  expect(json.status).toBe("awaiting_confirmation");
+  expect(executed).toHaveLength(0);
 });
 
 test("serve() binds a real socket: a run can be triggered and events read over HTTP", async () => {

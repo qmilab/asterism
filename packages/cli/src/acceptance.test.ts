@@ -24,6 +24,7 @@ import { join } from "node:path";
 
 import { AsterismStore } from "@qmilab/asterism-core";
 import type {
+  Agent,
   Capability,
   ReflectionProvider,
   RunOutput,
@@ -33,7 +34,7 @@ import type {
 
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision, ReviewItem } from "./cli.js";
-import { dbPath } from "./paths.js";
+import { dbPath, HOME_DIR_NAME } from "./paths.js";
 
 const SECRET_VALUE = "ghp_demo_secret_value_12345";
 const ACCEPTED_MEMORY = "the blog drafts live in ./drafts";
@@ -52,7 +53,9 @@ interface ScriptedCall {
  * run's text. It also records the framed request, so the test can assert what
  * each agent's run was allowed to see. It stops when a tool result reports an
  * error — exactly what the gate's awaiting-confirmation result is — or when the
- * kernel aborts the run.
+ * kernel aborts the run. A scripted tool missing from the registry is a harness
+ * bug (the kernel scoped less than the script assumes), so it throws loudly
+ * instead of letting the failure surface far downstream.
  */
 function scriptedAdapter(
   calls: readonly ScriptedCall[],
@@ -67,8 +70,7 @@ function scriptedAdapter(
           if (request.signal?.aborted) break;
           const tool = request.tools.list().find((t) => t.name === call.tool);
           if (!tool) {
-            texts.push(`(tool not available: ${call.tool})`);
-            continue;
+            throw new Error(`scripted tool not in the scoped registry: ${call.tool}`);
           }
           const result = await tool.execute({ args: call.args }, request.signal);
           texts.push(result.output);
@@ -84,8 +86,9 @@ function scriptedAdapter(
 
 describe("canonical demo — Phase 0 acceptance", () => {
   let dir: string;
-  let home: string;
   let store: AsterismStore;
+  let personal: Agent;
+  let work: Agent;
 
   /** Every line the CLI printed across the whole demo, for leak sweeps. */
   const transcript: string[] = [];
@@ -98,7 +101,6 @@ describe("canonical demo — Phase 0 acceptance", () => {
 
   let personalRunOut = "";
   let workRunOut = "";
-  let memoryWorkOut = "";
   let memoryWorkAfterReflectOut = "";
   let memoryPersonalAfterReflectOut = "";
   let eventsPersonalOut = "";
@@ -142,7 +144,6 @@ describe("canonical demo — Phase 0 acceptance", () => {
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "asterism-acceptance-"));
-    home = join(dir, ".asterism");
     writeFileSync(join(dir, "blog-writer.md"), SKILL_BODY);
 
     let script: readonly ScriptedCall[] = [];
@@ -157,9 +158,10 @@ describe("canonical demo — Phase 0 acceptance", () => {
         adapter: scriptedAdapter(script, (r) => requests.push(r)),
       }),
       makeReflectionProvider: () => ({ provider: fakeReflection }),
-      // The human reviewer: accept the first proposal, reject the second.
+      // The human reviewer: accept or reject by content, not presentation order,
+      // so a reordered presentation cannot silently flip the verdicts.
       review: (item: ReviewItem): ReviewDecision =>
-        item.index === 1 ? { kind: "accept" } : { kind: "reject" },
+        item.content === ACCEPTED_MEMORY ? { kind: "accept" } : { kind: "reject" },
       // Deliberately NO `confirm` — the destructive gate must pause, not resolve.
       // The demo's tools, exposed through the same seam a real embedding uses;
       // the kernel's trust profile + gate decide what each run may do with them.
@@ -203,7 +205,7 @@ describe("canonical demo — Phase 0 acceptance", () => {
     ]);
 
     await run(["memory", "inspect", "personal"]);
-    memoryWorkOut = await run(["memory", "inspect", "work"]);
+    await run(["memory", "inspect", "work"]);
     eventsPersonalOut = await run(["events", "tail", "personal"]);
     reflectOut = await run(["reflect", "personal", "--review"]);
 
@@ -212,34 +214,35 @@ describe("canonical demo — Phase 0 acceptance", () => {
     memoryPersonalAfterReflectOut = await run(["memory", "inspect", "personal"]);
     memoryWorkAfterReflectOut = await run(["memory", "inspect", "work"]);
 
-    // Open the same on-disk store the CLI wrote, for kernel-level assertions.
-    store = AsterismStore.open(dbPath(home));
+    // Open the same on-disk store the CLI wrote, for kernel-level assertions, and
+    // resolve both identities once — they are immutable for the rest of the suite.
+    store = AsterismStore.open(dbPath(join(dir, HOME_DIR_NAME)));
+    const byName = (name: string): Agent => {
+      const agent = store.agents.list().find((a) => a.name === name);
+      if (!agent) throw new Error(`acceptance setup lost agent "${name}"`);
+      return agent;
+    };
+    personal = byName("personal");
+    work = byName("work");
   });
 
   afterAll(() => {
+    // Guarded: if beforeAll threw before creating these, the real failure must
+    // not be masked by a second throw from teardown.
     store?.close();
-    rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  function agentByName(name: string) {
-    const agent = store.agents.list().find((a) => a.name === name);
-    if (!agent) throw new Error(`acceptance setup lost agent "${name}"`);
-    return agent;
-  }
-
   test("the demo script runs clean end to end", () => {
+    // A failing step shows up by name; the count guards against a skipped step
+    // (it must equal the number of run() calls in beforeAll).
+    expect(exitCodes.filter(([, code]) => code !== 0)).toEqual([]);
     expect(exitCodes).toHaveLength(13);
-    for (const [command, code] of exitCodes) {
-      expect({ command, code }).toEqual({ command, code: 0 });
-    }
     // Both runs were framed and handed to the substrate.
     expect(requests).toHaveLength(2);
   });
 
   test("claim 1 — personal memory never appears in work's memory", () => {
-    const personal = agentByName("personal");
-    const work = agentByName("work");
-
     // The accepted memory exists for personal — so the isolation check is real.
     const personalMemories = store.memories.list(personal.id);
     expect(personalMemories.map((m) => m.content)).toContain(ACCEPTED_MEMORY);
@@ -247,16 +250,13 @@ describe("canonical demo — Phase 0 acceptance", () => {
     // Scoped store: work has no memories at all, let alone personal's.
     expect(store.memories.list(work.id)).toHaveLength(0);
 
-    // CLI surface agrees, before and after personal's memory was written.
-    expect(memoryWorkOut).toContain("work has no memories yet.");
+    // The CLI surface agrees, inspected after personal's memory was written —
+    // the moment the claim is falsifiable.
     expect(memoryWorkAfterReflectOut).toContain("work has no memories yet.");
     expect(memoryWorkAfterReflectOut).not.toContain(ACCEPTED_MEMORY);
   });
 
   test("claim 2 — work's GITHUB_TOKEN is unreadable from personal", () => {
-    const personal = agentByName("personal");
-    const work = agentByName("work");
-
     // The credential exists for work — by reference only, never the value.
     const workCreds = store.credentials.list(work.id);
     expect(workCreds.map((c) => c.key)).toContain("GITHUB_TOKEN");
@@ -269,20 +269,21 @@ describe("canonical demo — Phase 0 acceptance", () => {
     expect(store.credentials.list(personal.id)).toHaveLength(0);
 
     // The value leaked into no surface: not the CLI's output, not either event
-    // log, not the framed request either agent's run was given.
+    // log, not the framed request either agent's run was given. The tool registry
+    // is swept via list() — stringifying the request alone would serialize the
+    // registry as {} and miss a secret leaked into a tool name/description/schema.
+    const stripFunctions = (_k: string, v: unknown) =>
+      typeof v === "function" ? undefined : v;
     expect(transcript.join("\n")).not.toContain(SECRET_VALUE);
     expect(JSON.stringify(store.events.tail(personal.id))).not.toContain(SECRET_VALUE);
     expect(JSON.stringify(store.events.tail(work.id))).not.toContain(SECRET_VALUE);
     for (const request of requests) {
-      expect(JSON.stringify(request, (_k, v) => (typeof v === "function" ? undefined : v)))
-        .not.toContain(SECRET_VALUE);
+      expect(JSON.stringify(request, stripFunctions)).not.toContain(SECRET_VALUE);
+      expect(JSON.stringify(request.tools.list(), stripFunctions)).not.toContain(SECRET_VALUE);
     }
   });
 
   test("claim 3 — work (propose) returns a plan it never executes; personal (autonomous) acts", () => {
-    const personal = agentByName("personal");
-    const work = agentByName("work");
-
     // work: the side effect was withheld as a plan step — and truly never ran.
     expect(workRunOut).toContain("[proposed]");
     expect(workRunOut).toContain("'tidy_notes' was not executed (trust level: propose)");
@@ -298,8 +299,6 @@ describe("canonical demo — Phase 0 acceptance", () => {
   });
 
   test("claim 4 — the destructive-action gate pauses the autonomous run before deleting", () => {
-    const personal = agentByName("personal");
-
     // The gate fired despite the highest trust level.
     expect(personal.trustLevel).toBe("autonomous");
     expect(personalRunOut).toContain(
@@ -320,8 +319,6 @@ describe("canonical demo — Phase 0 acceptance", () => {
   });
 
   test("claim 5 — reflection proposes typed memories; only what the human approves persists", () => {
-    const personal = agentByName("personal");
-
     // Both proposals were presented; the verdict matched the reviewer.
     expect(reflectOut).toContain(ACCEPTED_MEMORY);
     expect(reflectOut).toContain(REJECTED_MEMORY);
@@ -336,7 +333,6 @@ describe("canonical demo — Phase 0 acceptance", () => {
     expect(memory.memoryType).toBe("semantic");
     expect(memory.reviewState).toBe("accepted");
     expect(memory.sourceRunId).toBe(store.runs.list(personal.id)[0]!.id);
-    expect(memories.map((m) => m.content)).not.toContain(REJECTED_MEMORY);
 
     // The accepted memory shows up for its owner through the CLI.
     expect(memoryPersonalAfterReflectOut).toContain(ACCEPTED_MEMORY);

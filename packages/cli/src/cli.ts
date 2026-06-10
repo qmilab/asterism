@@ -2,8 +2,9 @@
 // parses arguments, calls one or more kernel operations, and formats the result.
 // No business logic, no scoping decisions, no trust reasoning — those live in the
 // kernel and are merely invoked here. The dispatcher is injectable end-to-end
-// (cwd, env, output sinks, store factory, adapter factory, confirm prompt) so the
-// whole surface is testable without touching the real filesystem-of-record.
+// (cwd, env, output sinks, store factory, adapter factory, confirm prompt,
+// capability exposure) so the whole surface is testable without touching the
+// real filesystem-of-record.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, resolve as resolvePath } from "node:path";
@@ -73,10 +74,17 @@ export interface CliIO {
   /** Resolve a destructive action's confirmation. Absent ⇒ the action stays paused. */
   confirm?: (action: Action) => boolean | Promise<boolean>;
   /**
-   * Capabilities to expose to runs, handed to the kernel's gate untouched. Absent
-   * ⇒ none — Phase 0 registers no capabilities, so the default run is confined to
-   * an empty tool set. This is the host seam the acceptance test (and a future
-   * embedding) uses to put real tools behind the kernel's trust enforcement.
+   * Capabilities to expose to runs, handed to the kernel's gate untouched — both
+   * `run` and `serve` forward the same list, so tool exposure cannot differ by
+   * surface. Absent ⇒ none — Phase 0 registers no capabilities, so the default run
+   * is confined to an empty tool set. This is the host seam the acceptance test
+   * (and a future embedding) uses to put real tools behind the kernel's trust
+   * enforcement. Two contract points a host must own: the list is install-wide
+   * (every agent's runs receive the same candidates; only trust level and the gate
+   * differentiate — per-agent capability scoping is a later phase), and each
+   * capability's declared `effect` is load-bearing — the kernel escalates to
+   * `destructive` from command-string arguments but cannot detect a mis-declared
+   * destructive tool with structured args, so declare conservatively.
    */
   capabilities?: readonly Capability[];
   /** Read piped standard input (for `secrets add` without an inline value). */
@@ -711,6 +719,7 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
       ...(made.adapter ? { adapter: made.adapter } : {}),
       ...(made.reason !== undefined ? { adapterReason: made.reason } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
+      ...(io.capabilities ? { capabilities: io.capabilities } : {}),
       ...(port !== undefined ? { port } : {}),
       ...(host !== undefined ? { hostname: host } : {}),
     });

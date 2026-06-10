@@ -30,6 +30,7 @@ import { executeRun } from "@qmilab/asterism-core";
 import type {
   Agent,
   AsterismStore,
+  Capability,
   RuntimeAdapter,
   TailOptions,
 } from "@qmilab/asterism-core";
@@ -57,6 +58,14 @@ export interface ServerDeps {
    * souls resolve to built-ins only and skills are framed by name.
    */
   readFile?: (path: string) => string;
+  /**
+   * Capabilities to expose to runs; forwarded to `executeRun` untouched, so the
+   * kernel's trust profile + gate decide what each run may do with them. Absent ⇒
+   * none (Phase 0 registers no capabilities). This mirrors the CLI's seam — a host
+   * that wires capabilities must see identical tool exposure whether a run is
+   * triggered by `asterism run` or over HTTP.
+   */
+  capabilities?: readonly Capability[];
 }
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;
@@ -123,6 +132,7 @@ async function startRun(deps: ServerDeps, req: Request): Promise<Response> {
   const result = await executeRun(deps.store, deps.agent, input, {
     adapter: deps.adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
+    ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
   });
 
   // 201: the run resource was created and executed. `status` conveys
