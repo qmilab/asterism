@@ -21,6 +21,7 @@ import {
 import type {
   Action,
   Agent,
+  Capability,
   FirewallFinding,
   ProposedMemory,
   ReflectionProvider,
@@ -71,6 +72,13 @@ export interface CliIO {
   err: (text: string) => void;
   /** Resolve a destructive action's confirmation. Absent ⇒ the action stays paused. */
   confirm?: (action: Action) => boolean | Promise<boolean>;
+  /**
+   * Capabilities to expose to runs, handed to the kernel's gate untouched. Absent
+   * ⇒ none — Phase 0 registers no capabilities, so the default run is confined to
+   * an empty tool set. This is the host seam the acceptance test (and a future
+   * embedding) uses to put real tools behind the kernel's trust enforcement.
+   */
+  capabilities?: readonly Capability[];
   /** Read piped standard input (for `secrets add` without an inline value). */
   readStdin?: () => Promise<string | undefined>;
   /** Build the run adapter. Absent ⇒ the default wiring reads it from the environment. */
@@ -400,6 +408,7 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       adapter: made.adapter,
       readFile: (p) => readFileSync(p, "utf8"),
       ...(io.confirm ? { confirm: io.confirm } : {}),
+      ...(io.capabilities ? { capabilities: io.capabilities } : {}),
     });
 
     if (result.status === "awaiting_confirmation") {
