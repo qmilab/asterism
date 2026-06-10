@@ -1,0 +1,173 @@
+<!doctype html>
+<!--
+  Asterism landing page — served at https://qmilab.com/asterism/
+
+  ⚠ PLACEHOLDER. This is a minimal scaffold so the Pages deploy works end to end
+  (the project site owns the whole /asterism/* prefix, so the root must not 404).
+  Replace it with the full landing page — see internal/website-plan.md §3d.
+
+  Self-contained on purpose: CSS is INLINED and the logo is vendored locally
+  (logo.svg). Do NOT link the apex's hash-named stylesheet — that hash changes on
+  every org-site rebuild and would silently break. Favicon/og-image stay
+  apex-absolute (served by the org site qmilab.github.io).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A local-first runtime for running many distinct AI agents — each with its own soul, memory, secrets, skills, workspace, and autonomy — from one install. Nothing leaks between them."
+    />
+    <title>Asterism — QMI Lab</title>
+    <link rel="canonical" href="https://qmilab.com/asterism/" />
+
+    <!-- Fonts: EB Garamond (headings), IBM Plex Sans (body), IBM Plex Mono (labels) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="Asterism — QMI Lab" />
+    <meta
+      property="og:description"
+      content="Many agents. One runtime. Separate lives."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://qmilab.com/asterism/" />
+    <meta property="og:image" content="https://qmilab.com/og-image.png" />
+
+    <style>
+      :root {
+        --navy: #1b2a4a;
+        --navy-dark: #142036;
+        --blue: #2e75b6;
+        --ink: #2a2a2a;
+        --muted: #5b6472;
+        --line: #e6e9ef;
+        --bg: #ffffff;
+        --bg-soft: #f7f8fb;
+      }
+      * { box-sizing: border-box; }
+      html { -webkit-text-size-adjust: 100%; }
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+        line-height: 1.6;
+      }
+      .wrap { max-width: 720px; margin: 0 auto; padding: 0 24px; }
+      h1, h2 {
+        font-family: "EB Garamond", Georgia, "Times New Roman", serif;
+        color: var(--navy);
+        line-height: 1.15;
+        font-weight: 600;
+      }
+      header { padding: 72px 0 8px; }
+      header img { width: 240px; max-width: 70%; height: auto; }
+      .tagline {
+        font-family: "EB Garamond", Georgia, serif;
+        font-size: clamp(28px, 6vw, 44px);
+        color: var(--navy);
+        margin: 28px 0 10px;
+        font-weight: 600;
+      }
+      .lede { font-size: 19px; color: var(--muted); margin: 0 0 32px; max-width: 60ch; }
+      .cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; }
+      .btn {
+        display: inline-block;
+        padding: 11px 20px;
+        border-radius: 8px;
+        font-weight: 500;
+        text-decoration: none;
+        font-size: 15px;
+        transition: background .15s, color .15s, border-color .15s;
+      }
+      .btn-primary { background: var(--navy); color: #fff; }
+      .btn-primary:hover { background: var(--navy-dark); }
+      .btn-ghost { border: 1px solid var(--line); color: var(--navy); }
+      .btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
+      .install {
+        margin: 28px 0 0;
+        font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 15px;
+        background: var(--bg-soft);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px 16px;
+        color: var(--navy-dark);
+        overflow-x: auto;
+      }
+      .install .prompt { color: var(--blue); user-select: none; }
+      section { padding: 8px 0 16px; }
+      section h2 { font-size: 26px; margin: 40px 0 8px; }
+      ul { padding-left: 20px; }
+      li { margin: 6px 0; }
+      a { color: var(--blue); }
+      footer {
+        border-top: 1px solid var(--line);
+        margin-top: 56px;
+        padding: 28px 0 64px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      footer a { color: var(--muted); text-decoration: none; }
+      footer a:hover { color: var(--blue); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <img src="logo.svg" alt="Asterism" />
+      </header>
+
+      <p class="tagline">Many agents. One runtime. Separate lives.</p>
+      <p class="lede">
+        Run distinct AI agents for work, clients, side projects, and experiments
+        from one local install — each with its own soul, memory, secrets, skills,
+        workspace, and autonomy level. Nothing leaks between them.
+      </p>
+
+      <div class="cta">
+        <a class="btn btn-primary" href="docs/">Read the docs</a>
+        <a class="btn btn-ghost" href="https://github.com/qmilab/asterism">GitHub</a>
+      </div>
+
+      <div class="install"><span class="prompt">$ </span>bunx @qmilab/asterism init</div>
+
+      <section>
+        <h2>What you get</h2>
+        <ul>
+          <li>One agent's memory never appears in another's.</li>
+          <li>One agent's secrets are unreadable from another.</li>
+          <li>Dialable autonomy — <code>propose</code>, <code>notify</code>, <code>autonomous</code>.</li>
+          <li>Even an autonomous agent pauses for confirmation before anything destructive.</li>
+          <li>Reviewable memory: every memory an agent forms is typed, scoped, and yours to approve.</li>
+        </ul>
+        <p>
+          See the guarantees proven end to end in the
+          <a href="docs/walkthrough/">five-claims walkthrough</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Pairs with Lodestar</h2>
+        <p>
+          Asterism runs your agents and keeps them apart;
+          <a href="https://qmilab.com/lodestar">Lodestar</a> is the layer that
+          makes each one trustworthy — what it knows, believes, and is allowed to do.
+        </p>
+      </section>
+
+      <footer>
+        Apache-2.0 ·
+        <a href="https://github.com/qmilab/asterism">github.com/qmilab/asterism</a> ·
+        <a href="https://qmilab.com">QMI Lab</a>
+      </footer>
+    </div>
+  </body>
+</html>

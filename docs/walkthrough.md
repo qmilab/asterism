@@ -181,5 +181,5 @@ boundary itself — separation, trust enforcement, the destructive-action gate,
 the memory firewall, the event log — is the real thing, end to end.
 
 Each claim is its own assertion in
-[`packages/cli/src/acceptance.test.ts`](../packages/cli/src/acceptance.test.ts).
+[`packages/cli/src/acceptance.test.ts`](https://github.com/qmilab/asterism/blob/main/packages/cli/src/acceptance.test.ts).
 If a change breaks any of the five, it does not ship.

@@ -1,0 +1,46 @@
+site_name: Asterism
+site_description: Many agents. One runtime. Separate lives.
+site_url: https://qmilab.com/asterism/docs/
+repo_url: https://github.com/qmilab/asterism
+repo_name: qmilab/asterism
+docs_dir: docs
+
+theme:
+  name: material
+  language: en
+  font:
+    text: IBM Plex Sans
+    code: IBM Plex Mono
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    scheme: default
+
+extra_css:
+  - assets/qmilab-theme.css
+
+# Public docs site = reader-facing only. If any internal/private material ever
+# lands under docs/, keep it out of the build here. (Today docs/ is all public.)
+exclude_docs: |
+  internal/
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Concepts: concepts.md
+  - Command reference: commands.md
+  - Local HTTP endpoint: http.md
+  - Five-claims walkthrough: walkthrough.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
