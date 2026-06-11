@@ -144,6 +144,27 @@ test("a substrate failure finishes failed and surfaces the error", async () => {
   expect(result.run.finishedAt).toBeDefined();
 });
 
+test("an adapter that throws synchronously from run() drives the run to failed", async () => {
+  // The substrate can blow up while constructing its handle — before it ever
+  // returns events/output. That synchronous throw must still be caught and driven
+  // to a terminal `failed`, not left stranded in `running` (the streaming rework
+  // must keep `run(request)` itself inside the failure guard).
+  const throwingAdapter: RuntimeAdapter = {
+    run() {
+      throw new Error("could not start the substrate");
+    },
+  };
+
+  const result = await executeRun(store, agent, "do the thing", { adapter: throwingAdapter });
+
+  expect(result.status).toBe("failed");
+  expect(result.error).toBe("could not start the substrate");
+  expect(result.run.status).toBe("failed");
+  expect(result.run.finishedAt).toBeDefined();
+  // Nothing left mid-flight in the store.
+  expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
+});
+
 test("an adapter that rejects drives the run to failed, not stuck running", async () => {
   // A non-conforming/crashing substrate rejects its output promise instead of
   // resolving with status "failed". The run must still reach a terminal state.

@@ -239,21 +239,26 @@ export async function executeRun(
     signal: abortController.signal,
   });
 
-  // The substrate runs the loop. Kick off forwarding its lifecycle events to the
-  // surface NOW (not awaited yet) so activity streams while the run is in flight;
-  // the stream is awaited at each exit below so it is fully flushed before the
-  // surface formats its result. The kernel is the single consumer and only
-  // forwards — it never acts on an event.
-  const handle = options.adapter.run(request);
-  const streamed = drainEvents(handle.events, options.onEvent);
-
-  // If the substrate throws, or its output promise rejects (the contract says a
-  // run settles with status "failed", but a non-conforming or crashing adapter can
-  // reject outright), do not strand the run in `running`: drive it to a terminal
-  // state so every surface gets a structured result rather than an opaque rejection
-  // — over HTTP that would otherwise surface as a 500 with the run row mid-flight.
+  // If the substrate throws — synchronously from `run(request)` while building its
+  // handle, or by rejecting its output promise (the contract says a run settles
+  // with status "failed", but a non-conforming or crashing adapter can do either) —
+  // do not strand the run in `running`: drive it to a terminal state so every
+  // surface gets a structured result rather than an opaque rejection (over HTTP
+  // that would otherwise be a 500 with the run row mid-flight). So `run(request)`
+  // itself stays INSIDE the guard, not just the `await`.
+  //
+  // `streamed` is the event-drain promise: starts as a resolved no-op so the catch
+  // can await it unconditionally even when the substrate threw before handing back
+  // a handle (nothing was ever streamed in that case), and is reassigned the moment
+  // we have a handle. Forwarding is kicked off NOW (not awaited yet) so activity
+  // streams while the run is in flight; it is awaited at each exit below so the
+  // stream is fully flushed before the surface formats its result. The kernel is
+  // the single consumer and only forwards — it never acts on an event.
   let output: RunOutput;
+  let streamed: Promise<void> = Promise.resolve();
   try {
+    const handle = options.adapter.run(request);
+    streamed = drainEvents(handle.events, options.onEvent);
     output = await handle.output;
   } catch (err) {
     await streamed;
