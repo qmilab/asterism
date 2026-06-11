@@ -551,11 +551,16 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
 
-    // The resume is the kernel's: it re-enters the loop with exactly the
-    // destructive capabilities this run was gated on pre-approved, records the
-    // grant, and persists the outcome. This surface only streams activity and
-    // formats the result — the same seams `run` uses, so a confirmed run behaves
-    // identically to one that never paused.
+    // The resume is the kernel's: it re-enters the loop with exactly the actions
+    // this run was gated on pre-approved, records the grant, and persists the
+    // outcome. This surface only streams activity and formats the result.
+    //
+    // Deliberately NO `confirm` hook here, even though `run` forwards one: this
+    // confirm authorizes only the action(s) the run paused on (the reconstructed
+    // grant). If the resumed run reaches a *new* destructive action, it must pause
+    // again for its own `confirm` — not be approved inline by a prompt during this
+    // resume. Omitting the hook keeps the CLI bounded to one confirmation per action,
+    // matching the HTTP endpoint and what the docs promise.
     const capabilities = io.capabilities?.(agent.workspaceDir);
     const outcome = await resumeRun(store, agent, run.id, {
       adapter: made.adapter,
@@ -564,7 +569,6 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
         const line = formatRunActivity(event);
         if (line) io.err(line);
       },
-      ...(io.confirm ? { confirm: io.confirm } : {}),
       ...(capabilities ? { capabilities } : {}),
     });
 

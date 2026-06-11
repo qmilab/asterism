@@ -973,3 +973,65 @@ test("confirm on an unknown agent reports the agent", async () => {
   expect(await runCli(["confirm", "ghost", "abcd1234"], h.io)).toBe(1);
   expect(h.err.join("\n")).toContain('No agent named "ghost"');
 });
+
+test("confirm authorizes only the paused action; a new destructive action re-pauses, never inline-approved", async () => {
+  // `confirm` must not forward the interactive prompt: a single confirm approves
+  // only the action the run stopped on. Here the resume re-runs and reaches a NEW
+  // delete (cache) — it must pause again, NOT be approved by a `[y/N]` during this
+  // resume, even though the confirm hook would say yes.
+  const h = harness();
+  const confirmCalls: unknown[] = [];
+  let confirmAnswer = false;
+  h.io.confirm = (action) => {
+    confirmCalls.push(action);
+    return confirmAnswer;
+  };
+  h.io.capabilities = workspaceCapabilities;
+  // Run 1 pauses on deleting `dist`; the resume deletes `dist` then reaches `cache`.
+  let invocation = 0;
+  h.io.makeAdapter = () => ({
+    adapter: {
+      run(request) {
+        const n = invocation++;
+        const output = (async () => {
+          const tool = request.tools.list().find((t) => t.name === "delete_file");
+          if (n === 0) {
+            await tool?.execute({ args: { path: "dist" } }, request.signal);
+          } else {
+            await tool?.execute({ args: { path: "dist" } }, request.signal);
+            await tool?.execute({ args: { path: "cache" } }, request.signal);
+          }
+          return { status: "done" as const, text: "" };
+        })();
+        async function* noEvents() {}
+        return { events: noEvents(), output };
+      },
+    },
+  });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  const workspace = join(h.dir, HOME_DIR_NAME, "agents", "personal");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "dist"), "x");
+  writeFileSync(join(workspace, "cache"), "y");
+
+  // The initial run pauses on `dist` (the confirm hook answered no).
+  h.out.length = 0;
+  await runCli(["run", "personal", "delete dist"], h.io);
+  const id = confirmIdFromHint(h.out);
+  const callsAfterRun = confirmCalls.length; // the run consulted the hook for dist
+  expect(existsSync(join(workspace, "dist"))).toBe(true);
+
+  // Now make the hook answer YES — if `confirm` forwarded it, `cache` would be
+  // deleted during this resume. It must not.
+  confirmAnswer = true;
+  h.out.length = 0;
+  expect(await runCli(["confirm", "personal", id], h.io)).toBe(0);
+
+  // `dist` (the confirmed action) was deleted; `cache` (a new action) was NOT —
+  // it re-paused, and the confirm hook was never consulted during the resume.
+  expect(existsSync(join(workspace, "dist"))).toBe(false);
+  expect(existsSync(join(workspace, "cache"))).toBe(true);
+  expect(confirmCalls.length).toBe(callsAfterRun);
+  expect(h.out.join("\n")).toContain("paused again");
+});
