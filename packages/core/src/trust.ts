@@ -528,8 +528,16 @@ function gateTool(
         // `onAwaitConfirmation` or `onExecute`, never both.
       }
 
-      hooks.onExecute?.(action);
-      return tool.execute(invocation, signal);
+      // Run the tool, then surface/audit the execution ONLY if it actually
+      // succeeded. A destructive action that FAILED must not be recorded as
+      // executed: a resume counts `onExecute` to decide what to skip, so counting a
+      // failed action would make the replay skip it (returning a fake success) and
+      // the agent would never retry it — diverging from its original trajectory. An
+      // un-counted failure simply re-runs (and likely re-fails) on resume, exactly
+      // as it did the first time.
+      const result = await tool.execute(invocation, signal);
+      if (!result.isError) hooks.onExecute?.(action);
+      return result;
     },
   };
 }

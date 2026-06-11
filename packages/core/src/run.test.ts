@@ -655,6 +655,87 @@ test("a multi-step run does not re-execute an already-confirmed destructive acti
   expect(executed).toEqual(["delete_files", "drop_table"]); // delete_files ran exactly once
 });
 
+test("a failed destructive action is re-attempted on resume, not skipped as already done", async () => {
+  // The first attempt at delete_files FAILS — it must NOT be recorded as executed,
+  // so a later resume re-runs it (rather than skipping it with a fake success and
+  // diverging the agent's trajectory). Here the retry succeeds.
+  let deleteAttempts = 0;
+  const succeeded: string[] = [];
+  const flakyDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        deleteAttempts += 1;
+        if (deleteAttempts === 1) return { output: "transient failure", isError: true };
+        succeeded.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  const drop: Capability = {
+    key: "drop_table",
+    effect: "destructive",
+    tool: {
+      name: "drop_table",
+      description: "drop",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        succeeded.push("drop_table");
+        return { output: "dropped" };
+      },
+    },
+  };
+  // A loop that, unlike `sequenceAdapter`, does NOT stop on a tool error (a failure
+  // is not a pause) — it continues to the next call, the way a real agent loop that
+  // saw an error and pressed on would. It stops only when the run is aborted (a pause).
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const steps = [
+        { tool: "delete_files", args: { path: "dist" } },
+        { tool: "drop_table", args: { command: "DROP TABLE t" } },
+      ];
+      const output = (async (): Promise<RunOutput> => {
+        for (const step of steps) {
+          if (request.signal?.aborted) break;
+          const tool = request.tools.list().find((t) => t.name === step.tool);
+          await tool?.execute({ args: step.args }, request.signal);
+        }
+        return { status: "done", text: "" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const caps = [flakyDelete, drop];
+
+  const parked = await executeRun(store, agent, "delete then drop", {
+    adapter,
+    capabilities: caps,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // Confirm 1: delete_files runs but FAILS; the run reaches drop_table and pauses.
+  const first = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(deleteAttempts).toBe(1); // attempted once
+  expect(succeeded).toEqual([]); // nothing succeeded yet
+
+  // Confirm 2: delete_files is RE-ATTEMPTED — the failure was not counted as done —
+  // succeeds this time, and drop_table runs. The run completes.
+  const second = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(deleteAttempts).toBe(2); // re-attempted, NOT skipped
+  expect(succeeded).toEqual(["delete_files", "drop_table"]);
+});
+
 test("a confirm clears one concurrently-paused action at a time, not all at once", async () => {
   // A substrate that fires two destructive calls before the abort lands, so the run
   // pauses on BOTH at once. A single confirm must approve only ONE of them — the

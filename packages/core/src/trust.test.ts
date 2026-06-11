@@ -465,6 +465,32 @@ describe("resolveToolRegistry — exposure filter + the gate, end to end", () =>
     expect(awaited).toHaveLength(1);
   });
 
+  test("a failed execution is not surfaced as executed (so a resume re-runs it)", async () => {
+    // `onExecute` is what the audit counts to decide what a resume skips, so it must
+    // fire only when the tool actually SUCCEEDED — a failed destructive action stays
+    // un-counted and re-runs on resume instead of being skipped with a fake success.
+    const executed: Action[] = [];
+    const failing: ScopedTool = {
+      name: "delete",
+      description: "delete",
+      inputSchema: {},
+      execute: () => ({ output: "boom", isError: true }),
+    };
+    const registry = resolveToolRegistry(
+      trustProfile({
+        level: "autonomous",
+        capabilities: ["fs.delete"],
+        autoApprove: ["fs.delete"],
+      }),
+      [capability("fs.delete", "destructive", failing)],
+      { onExecute: (a) => executed.push(a) },
+    );
+
+    const out = await invoke(registry, "delete", { path: "x" });
+    expect(out).toBe("boom"); // the failure result is returned to the model
+    expect(executed).toHaveLength(0); // but the action is NOT recorded as executed
+  });
+
   test("a confirm hook resumes a paused destructive action; absence keeps it paused", async () => {
     const del = spyTool("delete");
     const approve = resolveToolRegistry(
