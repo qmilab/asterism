@@ -111,6 +111,18 @@ export async function executeRun(
     onAwaitConfirmation: () => {
       store.setRunStatus(agent.id, run.id, "awaiting_confirmation");
     },
+    onExecute: () => {
+      // A destructive action the human *confirmed* executes here: the gate flipped
+      // the run to `awaiting_confirmation` before prompting, then fell through to
+      // run it. Flip the status back to `running` so a confirmed action lets the
+      // run finish `done`, instead of stranding it non-terminal with the side
+      // effect already performed (the gate's documented "resume" semantics). Guarded
+      // on the transition, so an ordinary action — which runs while already
+      // `running` — never triggers a redundant write or status event.
+      if (store.runs.get(agent.id, run.id)?.status === "awaiting_confirmation") {
+        store.setRunStatus(agent.id, run.id, "running");
+      }
+    },
     abortController,
     ...(options.confirm ? { confirm: options.confirm } : {}),
   };
