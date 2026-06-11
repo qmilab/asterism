@@ -20,7 +20,7 @@ import { frameRun, resolveSoul } from "./framing.js";
 import type { SkillContext } from "./framing.js";
 import { auditTrustHooks } from "./audit.js";
 import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
-import type { Action, Capability, EffectClass, TrustHooks } from "./trust.js";
+import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
 import type { AsterismStore } from "./store.js";
 import type { Agent, Run, RunStatus } from "./types.js";
 
@@ -182,10 +182,13 @@ export async function executeRun(
   // Record the run and move it to `running`; the kernel logs each transition.
   const run = store.startRun(agent.id, { input });
   store.setRunStatus(agent.id, run.id, "running");
-  // A fresh run pre-approves NOTHING (empty grant): every destructive action pauses
-  // for confirmation regardless of trust level. The resume path (`resumeRun`) is the
-  // only caller that supplies a grant, and only for what a human just confirmed.
-  return runAndPersist(store, agent, run, input, options, new Map());
+  // A fresh run has nothing executed and nothing confirmed, so every destructive
+  // action gates (pauses) regardless of trust level. The resume path (`resumeRun`) is
+  // the only caller that supplies prior state.
+  return runAndPersist(store, agent, run, input, options, {
+    executedCount: new Map(),
+    confirmedCount: new Map(),
+  });
 }
 
 /**
@@ -196,13 +199,14 @@ export async function executeRun(
  * the agent's identity, trust level, and tools turn into an executed (and audited)
  * outcome.
  *
- * `preApproved` is the ONLY difference between the two callers: empty for a fresh
- * run (every destructive action pauses), or per-invocation approval COUNTS
- * (capability + arguments fingerprint → how many) for a resume — the exact
- * invocations a human confirmed. Each match consumes one unit, so resuming clears
- * exactly those invocations and a further destructive call — a different capability,
- * the same capability aimed at a new target, or one identical call beyond the
- * confirmed count — still pauses. A resume never widens the gate into a blanket grant.
+ * `preApproved` is the ONLY difference between the two callers: empty maps for a
+ * fresh run (every destructive action pauses), or per-invocation counts for a resume
+ * — how many times each exact invocation has already EXECUTED (skip those on replay)
+ * and how many a human has CONFIRMED (run up to that, pause the rest). So resuming
+ * clears exactly the confirmed invocations, never re-executes one already done, and
+ * still pauses a different capability, the same capability aimed at a new target, or
+ * an identical call beyond the confirmed count. A resume never widens the gate into a
+ * blanket grant.
  */
 async function runAndPersist(
   store: AsterismStore,
@@ -210,7 +214,10 @@ async function runAndPersist(
   run: Run,
   input: string,
   options: ExecuteRunOptions,
-  preApproved: ReadonlyMap<string, number>,
+  preApproved: {
+    executedCount: ReadonlyMap<string, number>;
+    confirmedCount: ReadonlyMap<string, number>;
+  },
 ): Promise<ExecuteRunResult> {
   // Resolve the agent's trust level into the tool set this run may use, with the
   // destructive-action gate wired into every tool's `execute` closure and each
@@ -228,19 +235,21 @@ async function runAndPersist(
   // (which recomputes it to match a pre-approval), so the two agree, and a reader of
   // the event log cannot guess the fingerprint without it.
   const fingerprintKey = store.actionFingerprintKey(agent.id);
-  // A private, MUTABLE copy of the resume's per-invocation approval counts, keyed per
-  // paused ACTION — capability AND a fingerprint of its arguments, not capability
-  // alone. Each match spends one unit, so the grant covers exactly the invocations a
-  // human confirmed: a delete of `dist` does not clear a delete of `cache` (different
-  // fingerprint), and a call beyond the approved count still pauses — including a
-  // second identical call. Empty for a fresh run, so nothing is pre-approved.
-  const remainingApprovals = new Map(preApproved);
-  const claimPreApproval = (action: Action): boolean => {
+  // The resume's per-invocation disposition. For the k-th occurrence of an invocation
+  // (key = capability + arguments fingerprint) in THIS replay: SKIP the first
+  // `executedCount` (they already ran on an earlier confirm — never repeat them), RUN
+  // the next up to `confirmedCount` (the occurrences a human confirmed), and GATE the
+  // rest (pause). `replayOccurrence` counts occurrences seen so far this replay; both
+  // count maps are empty for a fresh run, so every destructive action gates.
+  const { executedCount, confirmedCount } = preApproved;
+  const replayOccurrence = new Map<string, number>();
+  const preApproval = (action: Action): PreApprovalVerdict => {
     const key = approvalKey(action.capability, actionFingerprint(action.args, fingerprintKey));
-    const left = remainingApprovals.get(key) ?? 0;
-    if (left <= 0) return false;
-    remainingApprovals.set(key, left - 1);
-    return true;
+    const k = (replayOccurrence.get(key) ?? 0) + 1;
+    replayOccurrence.set(key, k);
+    if (k <= (executedCount.get(key) ?? 0)) return "skip";
+    if (k <= (confirmedCount.get(key) ?? 0)) return "run";
+    return "gate";
   };
   // Accumulate the run's gate decisions for the post-run summary, sourced from the
   // same hooks that feed the event log. EVERY decision is pushed into `actions` in
@@ -268,7 +277,7 @@ async function runAndPersist(
     onWithhold: (action) => {
       actions.push(record(action, "withheld"));
     },
-    claimPreApproval,
+    preApproval,
     abortController,
     ...(options.confirm ? { confirm: options.confirm } : {}),
   };
@@ -375,32 +384,37 @@ async function runAndPersist(
   };
 }
 
-// An approval keys an action by capability AND a fingerprint of its arguments,
-// joined by a NUL (which a capability key can never contain), so the grant is tied
-// to a specific invocation rather than a whole capability. The fingerprint comes
-// from the paused event (recorded by `audit.ts`) when reconstructing prior grants,
-// and is recomputed from the live action (`claimPreApproval`) on the gate side; the
-// two agree because both use {@link actionFingerprint}.
+// A decision keys an action by capability AND a fingerprint of its arguments,
+// joined by a NUL (which a capability key can never contain), so it is tied to a
+// specific invocation rather than a whole capability. The fingerprint comes from the
+// run's events (recorded by `audit.ts`) when reconstructing prior state, and is
+// recomputed from the live action on the gate side; the two agree because both use
+// {@link actionFingerprint}.
 const APPROVAL_KEY_SEP = "\u0000";
 function approvalKey(capability: string, fingerprint: string): string {
   return `${capability}${APPROVAL_KEY_SEP}${fingerprint}`;
 }
-/** A paused destructive invocation — a reference: capability + a one-way fingerprint of its args. */
+/** A destructive invocation — a reference: capability + a one-way fingerprint of its args. */
 interface ActionRef {
   capability: string;
   fingerprint: string;
 }
 
-/** One invocation a confirm grants, with how many of it (multiplicity) — recorded on `run.resumed`. */
+/** One invocation a confirm has approved, with how many of it (multiplicity) — recorded on `run.resumed`. */
 export interface GrantedAction extends ActionRef {
   count: number;
 }
 
-/** What a confirm grants for a run: per-invocation counts for the gate, and the same as recordable references. */
+/**
+ * The reconstructed resume state a confirm produces — enough for the gate to decide
+ * each destructive invocation on the replay, and the record the next confirm reads.
+ */
 interface ResumeApproval {
-  /** Composite (capability + fingerprint) key → how many of that invocation the gate may pre-approve. */
-  grant: Map<string, number>;
-  /** The same grant as references (with counts), recorded on `run.resumed` so the next confirm reads prior grants. */
+  /** Per invocation (cap+fingerprint key) → how many times it has ALREADY executed (prior cycles). */
+  executedCount: Map<string, number>;
+  /** Per invocation → how many of it a human has confirmed (cumulative, incl. this confirm). */
+  confirmedCount: Map<string, number>;
+  /** `confirmedCount` as references, recorded on `run.resumed` so the next confirm reads prior confirmations. */
   granted: GrantedAction[];
 }
 
@@ -414,38 +428,42 @@ function actionRef(payload: unknown): ActionRef | undefined {
 }
 
 /**
- * What a single confirm grants for a run — reconstructed from its own event log
+ * Reconstruct what a single confirm authorizes for a run, from its own event log
  * (scoped to the agent AND run; references only — capability keys and one-way
- * argument fingerprints, never the args).
+ * argument fingerprints, never the args). Two counts per invocation drive the gate:
  *
- * Bound to specific invocations (capability + fingerprint) and tracked by COUNT, so
- * a run that paused on the SAME action twice (identical capability and args) can be
- * confirmed twice rather than collapsing into one approval the replay consumes once.
- * And crucially it grants at most ONE not-yet-confirmed invocation per confirm:
- * every invocation earlier confirms already granted (read back from `run.resumed`,
- * so the replay re-clears them and converges) PLUS one more of the first invocation
- * whose paused occurrences outnumber its grant. So a run paused on several
- * destructive actions at once — a substrate that fired them before the abort landed —
- * is cleared one confirm at a time; one "yes" never green-lights several distinct
- * destructive actions a human never individually approved.
+ *   - `executedCount` — how many times this exact invocation has already executed
+ *     (counted from `action.executed` events). Re-running the loop replays these, so
+ *     the gate SKIPS the first `executedCount` occurrences rather than repeating a
+ *     confirmed destructive action.
+ *   - `confirmedCount` — how many a human has confirmed (carried across confirms via
+ *     `run.resumed`), grown by ONE for the next paused invocation each confirm.
+ *
+ * On the replay the gate runs occurrences in `(executedCount, confirmedCount]` and
+ * pauses the rest. So a multi-step run is cleared one action per confirm, a confirmed
+ * action never re-executes, and two identical paused invocations each get their own
+ * confirm — without a single "yes" ever approving more than one new action.
  */
 function resumeApproval(
   store: AsterismStore,
   agentId: string,
   runId: string,
 ): ResumeApproval {
-  // How many times each invocation has paused, in first-seen order, and how many of
-  // each earlier confirms already granted (the max recorded on any `run.resumed`).
-  const awaited = new Map<string, number>();
-  const order: { key: string; ref: ActionRef }[] = [];
-  const priorGrant = new Map<string, number>();
-  for (const event of store.events.listForRun(agentId, runId)) {
-    if (event.type === "action.awaiting_confirmation") {
+  const events = store.events.listForRun(agentId, runId);
+  const executedCount = new Map<string, number>();
+  const confirmedCount = new Map<string, number>();
+  const refByKey = new Map<string, ActionRef>();
+  let lastResumedIdx = -1;
+  events.forEach((e, i) => {
+    if (e.type === "run.resumed") lastResumedIdx = i;
+  });
+  for (const event of events) {
+    if (event.type === "action.executed") {
       const ref = actionRef(event.payload);
       if (!ref) continue;
       const key = approvalKey(ref.capability, ref.fingerprint);
-      if (!awaited.has(key)) order.push({ key, ref });
-      awaited.set(key, (awaited.get(key) ?? 0) + 1);
+      executedCount.set(key, (executedCount.get(key) ?? 0) + 1);
+      refByKey.set(key, ref);
     } else if (event.type === "run.resumed") {
       const granted = (event.payload as { granted?: unknown } | null)?.granted;
       if (Array.isArray(granted)) {
@@ -454,23 +472,37 @@ function resumeApproval(
           const count = (g as { count?: unknown } | null)?.count;
           if (!ref || typeof count !== "number") continue;
           const key = approvalKey(ref.capability, ref.fingerprint);
-          // Grants only grow per invocation, so the max across confirms is the latest.
-          priorGrant.set(key, Math.max(priorGrant.get(key) ?? 0, count));
+          // Confirmations only grow per invocation, so the max across confirms wins.
+          confirmedCount.set(key, Math.max(confirmedCount.get(key) ?? 0, count));
+          refByKey.set(key, ref);
         }
       }
+    } else if (event.type === "action.awaiting_confirmation") {
+      const ref = actionRef(event.payload);
+      if (ref) refByKey.set(approvalKey(ref.capability, ref.fingerprint), ref);
     }
   }
 
-  // Re-grant everything already confirmed (for replay convergence) plus ONE more of
-  // the first invocation whose pauses still outnumber its grant — at most one new
-  // approval per confirm.
-  const grant = new Map(priorGrant);
-  const next = order.find((o) => (awaited.get(o.key) ?? 0) > (grant.get(o.key) ?? 0));
-  if (next) grant.set(next.key, (grant.get(next.key) ?? 0) + 1);
-  const granted: GrantedAction[] = order
-    .filter((o) => (grant.get(o.key) ?? 0) > 0)
-    .map((o) => ({ ...o.ref, count: grant.get(o.key)! }));
-  return { grant, granted };
+  // Confirm the FIRST invocation that paused in the latest cycle (after the last
+  // `run.resumed`) — that pause is the run's next un-confirmed occurrence. Granting
+  // exactly one keeps a single confirm bounded to one new action, even when several
+  // paused at once.
+  for (let i = lastResumedIdx + 1; i < events.length; i++) {
+    const event = events[i]!;
+    if (event.type !== "action.awaiting_confirmation") continue;
+    const ref = actionRef(event.payload);
+    if (!ref) continue;
+    const key = approvalKey(ref.capability, ref.fingerprint);
+    confirmedCount.set(key, (confirmedCount.get(key) ?? 0) + 1);
+    break;
+  }
+
+  const granted: GrantedAction[] = [];
+  for (const [key, count] of confirmedCount) {
+    const ref = refByKey.get(key);
+    if (ref && count > 0) granted.push({ ...ref, count });
+  }
+  return { executedCount, confirmedCount, granted };
 }
 
 /**
@@ -495,25 +527,23 @@ export type ResumeOutcome =
  * a future chat reply). This is how a gate pause is cleared from a surface where
  * no one was at the keyboard when the run first stopped.
  *
- * The substrate holds no resumable loop state, and the parked run never executed
- * its destructive action (the gate aborts BEFORE the tool runs). So resuming
- * RE-ENTERS the loop on the same run row: the kernel re-frames the agent's
- * original task and re-runs it with a BOUNDED budget of destructive invocations
- * pre-approved — exactly the count the run was gated on, per capability, and
- * nothing more. The agent re-derives the action with full context and, this time,
- * the gate lets the confirmed invocations through.
+ * The substrate holds no resumable loop state, so resuming RE-ENTERS the loop on the
+ * same run row: the kernel re-frames the agent's original task and re-runs it, this
+ * time letting through exactly the destructive invocation a human confirmed (see
+ * {@link resumeApproval}). The agent re-derives the action with full context.
  *
- * The gate is not weakened: the pre-approval is a per-capability COUNT scoped to
- * this one resumed run, so a destructive invocation beyond what was confirmed —
- * whether a new capability or the same capability aimed at a new target — pauses
- * again (and can be confirmed in turn). Classification is unchanged. The confirmed
- * capabilities are recorded on the event log via `run.resumed` before the re-run,
- * so the audit names what a human granted.
+ * The gate is not weakened, and re-execution is made safe per invocation (keyed by a
+ * fingerprint of the args): a confirmed action runs at most once — on a later confirm
+ * the replay SKIPS it rather than repeating it (no double payment or double delete) —
+ * and a destructive invocation the human has not confirmed still pauses, whether a
+ * new capability, the same capability aimed at a new target, or one more identical
+ * call. Classification is unchanged. Each confirm records what it granted on the
+ * event log via `run.resumed` before re-running, so the audit names what a human
+ * authorized and the next confirm can read it back.
  *
- * Note the honest cost of re-execution: a parked run's NON-destructive side
- * effects (writes done before the gate stopped it) run again on resume. The
- * destructive action it paused on had not run when the gate stopped it, so
- * confirming it does not double it.
+ * One honest cost remains: a parked run's NON-destructive side effects (ordinary
+ * writes done before the gate stopped it) DO run again on resume — only destructive
+ * actions are tracked and skipped.
  */
 export async function resumeRun(
   store: AsterismStore,
@@ -528,24 +558,28 @@ export async function resumeRun(
   if (!parked) return { kind: "not_found" };
   if (parked.status !== "awaiting_confirmation") return { kind: "not_paused", run: parked };
 
-  // What this confirm grants — the actions already confirmed (so the replay clears
-  // them) plus at most ONE new paused action, each bound to its exact invocation by
-  // a fingerprint. A run paused on several actions at once is thus cleared one
-  // confirm at a time, never all at once.
-  const { grant, granted } = resumeApproval(store, agent.id, runId);
+  // Reconstruct what this confirm authorizes: which invocations have already executed
+  // (skip them on replay) and which are confirmed (run up to that, including ONE new
+  // paused action), each bound to its exact invocation by a fingerprint. A run paused
+  // on several actions at once is thus cleared one confirm at a time, and a confirmed
+  // action is never re-executed.
+  const { executedCount, confirmedCount, granted } = resumeApproval(store, agent.id, runId);
   const confirmed = [...new Set(granted.map((g) => g.capability))];
 
   // Atomically claim the run (awaiting_confirmation → running) and record the
-  // grant — both the human-readable capabilities and the per-action references the
-  // NEXT confirm reads back to know what is already granted. If the claim is lost
-  // (a concurrent confirm already took it, or it changed under us), DO NOT re-enter
-  // the loop: that is what stops two racing confirms from double-executing.
+  // grant — both the human-readable capabilities and the per-invocation references
+  // the NEXT confirm reads back to know what is already confirmed. If the claim is
+  // lost (a concurrent confirm already took it, or it changed under us), DO NOT
+  // re-enter the loop: that is what stops two racing confirms from double-executing.
   const claimed = store.recordRunResumed(agent.id, runId, confirmed, granted);
   if (!claimed) {
     const current = store.runs.get(agent.id, runId);
     return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
   }
 
-  const result = await runAndPersist(store, agent, claimed, claimed.input, options, grant);
+  const result = await runAndPersist(store, agent, claimed, claimed.input, options, {
+    executedCount,
+    confirmedCount,
+  });
   return { kind: "resumed", result };
 }

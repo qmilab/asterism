@@ -257,11 +257,12 @@ blanket on the capability: confirming a delete of `dist` clears that delete, but
 later delete of `cache` (the same kind of action, a new target) pauses again for
 its own `confirm`, as does any other destructive step. If a run stopped on several
 destructive actions at once, you clear them one confirm at a time — a single `yes`
-never approves several distinct actions together. Because resuming re-runs the
-task from the start, any ordinary writes the agent had already made happen again —
-but the destructive action it paused on had not run yet, so confirming it does not
-double it. Requires a [configured model](./installation.md#configuring-a-model) —
-the same one the run started with.
+never approves several distinct actions together. Resuming re-runs the task from the
+start, so any ordinary writes the agent had already made happen again; but a
+destructive action you already confirmed is **not** repeated — the run recognizes it
+as done and moves on — so confirming step by step never double-charges or
+double-deletes. Requires a [configured model](./installation.md#configuring-a-model)
+— the same one the run started with.
 
 ---
 

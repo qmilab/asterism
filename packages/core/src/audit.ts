@@ -11,11 +11,14 @@
 // persists to the event log must record references, never the arguments a model
 // produced — those can carry a live secret value. So the payload here is the
 // capability key plus the *effective* effect class (after destructive
-// escalation). `action.args` is never written. The one addition is on a pause: a
-// keyed-HMAC `fingerprint` of the args (a reference to the invocation, not a path
-// back to its arguments, and not guessable without the agent's secret key), which
-// the out-of-band resume uses to bind a confirmation to the exact paused action. It
-// reveals no argument value, even to a reader who can dictionary-attack a bare hash.
+// escalation). `action.args` is never written. The one addition, on both a pause
+// (`action.awaiting_confirmation`) and an execution (`action.executed`), is a
+// keyed-HMAC `fingerprint` of the args — a reference to the invocation, not a path
+// back to its arguments, and not guessable without the agent's secret key. The
+// out-of-band resume uses it to bind a confirmation to the exact paused action AND
+// to count how many times each invocation has already executed (so a re-run skips
+// the ones already done). It reveals no argument value, even to a reader who can
+// dictionary-attack a bare hash.
 //
 // This module depends on `trust` and the event repository; nothing depends on it.
 // It deliberately does NOT know about the store or run-status transitions: the
@@ -70,7 +73,16 @@ export function auditTrustHooks(
   return {
     ...base,
     onExecute: (action) => {
-      record("action.executed", action);
+      // `action.executed` carries the same keyed fingerprint as a pause, so a resume
+      // can count how many times each exact invocation has ALREADY run and skip those
+      // on replay rather than repeating a confirmed destructive action.
+      record(
+        "action.executed",
+        action,
+        fingerprintKey !== undefined
+          ? { fingerprint: actionFingerprint(action.args, fingerprintKey) }
+          : undefined,
+      );
       base.onExecute?.(action);
     },
     onWithhold: (action) => {

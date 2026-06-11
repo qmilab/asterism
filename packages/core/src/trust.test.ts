@@ -11,7 +11,7 @@ import {
   resolveToolRegistry,
   trustProfile,
 } from "./trust";
-import type { Action, Capability, EffectClass, TrustHooks } from "./trust";
+import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust";
 
 // --- helpers ---------------------------------------------------------------
 
@@ -429,21 +429,18 @@ describe("resolveToolRegistry — exposure filter + the gate, end to end", () =>
     expect(out).toBe("delete ran");
   });
 
-  test("claimPreApproval is a consuming count, not a blanket: it clears N then pauses", async () => {
-    // The resume seam. A standing pre-approval clears a destructive action with no
-    // pause — but only as many times as it returns true. The (N+1)th call falls
-    // through to the gate and pauses, so one confirmation never green-lights every
-    // later invocation of the same capability.
+  test("preApproval drives the gate: skip (no repeat), run, or gate (pause)", async () => {
+    // The resume seam returns one of three verdicts per destructive action. `run`
+    // executes without a pause; `skip` reports a prior effect as done WITHOUT
+    // re-executing (so a confirmed action never runs twice); `gate` falls through to
+    // the confirmation pause.
     const del = spyTool("delete");
     const awaited: Action[] = [];
-    let budget = 1;
+    const verdicts: PreApprovalVerdict[] = ["run", "skip", "gate"];
+    let i = 0;
     const hooks: TrustHooks = {
       onAwaitConfirmation: (a) => awaited.push(a),
-      claimPreApproval: () => {
-        if (budget <= 0) return false;
-        budget -= 1;
-        return true;
-      },
+      preApproval: () => verdicts[i++]!,
     };
     const registry = resolveToolRegistry(
       trustProfile({ level: "autonomous", capabilities: ["fs.delete"] }),
@@ -451,14 +448,20 @@ describe("resolveToolRegistry — exposure filter + the gate, end to end", () =>
       hooks,
     );
 
-    // First call: pre-approved, runs, and never paused (no awaiting event).
-    expect(await invoke(registry, "delete", { path: "dist/" })).toBe("delete ran");
+    // "run": executes, no pause.
+    expect(await invoke(registry, "delete", { path: "a" })).toBe("delete ran");
     expect(del.calls).toHaveLength(1);
     expect(awaited).toHaveLength(0);
 
-    // Second call (budget spent): the gate pauses it like any unconfirmed delete.
-    expect(await invoke(registry, "delete", { path: "cache/" })).toContain("[awaiting confirmation]");
-    expect(del.calls).toHaveLength(1); // the second target was NOT deleted
+    // "skip": already performed on an earlier resume — reported done, NOT re-run.
+    const skipped = await invoke(registry, "delete", { path: "a" });
+    expect(skipped).toContain("[already performed]");
+    expect(del.calls).toHaveLength(1); // not executed a second time
+    expect(awaited).toHaveLength(0);
+
+    // "gate": falls through to the pause (no confirm hook here ⇒ stays paused).
+    expect(await invoke(registry, "delete", { path: "b" })).toContain("[awaiting confirmation]");
+    expect(del.calls).toHaveLength(1);
     expect(awaited).toHaveLength(1);
   });
 

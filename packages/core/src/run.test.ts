@@ -597,8 +597,8 @@ test("a resume approves only the count confirmed, not every call of a capability
   expect(deleted).toEqual(["dist"]); // ONLY the confirmed delete ran — never cache
 
   // Confirming again clears the second delete and the run completes. The replay
-  // re-ran the first delete (a documented re-execution cost); what matters is that
-  // `cache` was never deleted without its own confirmation.
+  // re-runs the task from the start, but the already-confirmed `dist` delete is
+  // SKIPPED (not repeated), so each delete happens exactly once.
   const second = await resumeRun(store, agent, parked.run.id, {
     adapter,
     capabilities: [recordingDelete],
@@ -606,7 +606,53 @@ test("a resume approves only the count confirmed, not every call of a capability
   expect(second.kind).toBe("resumed");
   if (second.kind !== "resumed") return;
   expect(second.result.status).toBe("done");
-  expect(deleted).toEqual(["dist", "dist", "cache"]);
+  expect(deleted).toEqual(["dist", "cache"]);
+});
+
+test("a multi-step run does not re-execute an already-confirmed destructive action", async () => {
+  // Confirm A, then the run reaches B; confirming B re-runs the task from the start,
+  // but A — already confirmed and executed — must NOT run a second time.
+  const executed: string[] = [];
+  const cap = (key: string): Capability => ({
+    key,
+    effect: "destructive",
+    tool: {
+      name: key,
+      description: key,
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        executed.push(key);
+        return { output: `${key} ran` };
+      },
+    },
+  });
+  // Sequential: the run pauses on `delete_files` first; once that is confirmed it
+  // reaches `drop_table`.
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { path: "dist" } },
+    { tool: "drop_table", args: { command: "DROP TABLE t" } },
+  ]);
+  const caps = [cap("delete_files"), cap("drop_table")];
+
+  const parked = await executeRun(store, agent, "delete then drop", {
+    adapter,
+    capabilities: caps,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // Confirm 1: delete_files runs; drop_table pauses.
+  const first = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(executed).toEqual(["delete_files"]);
+
+  // Confirm 2: drop_table runs — and delete_files is SKIPPED, not executed again.
+  const second = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(executed).toEqual(["delete_files", "drop_table"]); // delete_files ran exactly once
 });
 
 test("a confirm clears one concurrently-paused action at a time, not all at once", async () => {

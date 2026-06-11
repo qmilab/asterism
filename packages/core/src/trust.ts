@@ -249,7 +249,7 @@ function stableStringify(value: unknown): string {
  * digest is a REFERENCE to the action, never a path back to its arguments, so it is
  * safe to record alongside the capability and effect while preserving the event
  * log's references-only guarantee. The recording side (`audit.ts`) and the matching
- * side (`claimPreApproval`) pass the same key, so their fingerprints agree.
+ * side (the resume's `preApproval`) pass the same key, so their fingerprints agree.
  */
 export function actionFingerprint(args: unknown, key: string): string {
   return createHmac("sha256", key).update(stableStringify(args)).digest("hex").slice(0, 32);
@@ -345,6 +345,14 @@ export function decideGate(profile: TrustProfile, action: Action): GateDecision 
 // ---------------------------------------------------------------------------
 
 /**
+ * What a resume's standing disposition says about a destructive action — see
+ * {@link TrustHooks.preApproval}. `skip`: already executed on an earlier resume,
+ * do not repeat; `run`: confirmed and not yet executed, run it; `gate`: undecided,
+ * fall through to the confirmation pause.
+ */
+export type PreApprovalVerdict = "skip" | "run" | "gate";
+
+/**
  * Side channels the kernel wires around the gate. All are optional; their absence
  * yields the safe default (a destructive action pauses and is never auto-run).
  * Handlers receive the {@link Action}, which carries `args` — a handler that
@@ -370,26 +378,30 @@ export interface TrustHooks {
    */
   confirm?: (action: Action) => boolean | Promise<boolean>;
   /**
-   * A STANDING, BOUNDED pre-approval for a destructive action — the seam a resume
-   * (`resumeRun`) uses to honor an out-of-band confirmation without re-prompting.
-   * Consulted for a destructive action BEFORE the confirmation pause; returning
-   * true clears it to execute with no `onAwaitConfirmation` firing (so a consumed
-   * approval leaves no awaiting-confirmation event and the run never churns through
-   * `awaiting_confirmation`).
+   * The standing disposition for a destructive action on a RESUME — the seam
+   * `resumeRun` uses to honor an out-of-band confirmation without re-prompting,
+   * while re-executing the agent loop from the start. Consulted for a destructive
+   * action BEFORE the confirmation pause, and STATEFUL (it counts occurrences of
+   * each invocation within the replay). Returns:
    *
-   * It is STATEFUL and CONSUMING: each call that returns true spends one unit of the
-   * grant. That makes it a per-capability *count*, never a blanket allow — a
-   * destructive invocation beyond the number a human actually confirmed still pauses
-   * here. Re-entering the loop on resume replays every earlier destructive call, so
-   * the budget is sized to clear exactly those the human confirmed and stop at the
-   * first un-confirmed one. Absent ⇒ no standing approval (every destructive action
-   * pauses — the safe default).
+   * - `"skip"`  — this exact invocation ALREADY executed on an earlier resume cycle.
+   *   Re-running the loop replays it, but it must NOT happen twice — a confirmed
+   *   payment/delete is not repeated. The gate returns an "already performed" result
+   *   without executing or pausing, so the loop continues to the next action.
+   * - `"run"`   — this invocation is confirmed and has not executed yet. It runs.
+   * - `"gate"`  — no standing decision: consult `confirm`, and pause if denied.
    *
-   * This is deliberately separate from a {@link TrustProfile}'s permanent
-   * `autoApprove` allow-list, which is an unbounded, *configured* grant for a
-   * capability. A one-time human confirmation must not become that.
+   * Absent ⇒ always `"gate"` (a fresh run: nothing pre-approved, nothing already
+   * executed). Re-entering the loop replays every earlier destructive call, so this
+   * skips the ones already run, runs exactly the next one a human confirmed, and
+   * gates the rest — never re-executing a confirmed action and never auto-running an
+   * unconfirmed one.
+   *
+   * Deliberately separate from a {@link TrustProfile}'s permanent `autoApprove`
+   * allow-list, which is an unbounded, *configured* grant. A one-time confirmation
+   * must not become that.
    */
-  claimPreApproval?: (action: Action) => boolean;
+  preApproval?: (action: Action) => PreApprovalVerdict;
   /**
    * The run's abort controller. When a destructive action is paused without
    * approval, the gate aborts it — a *real* stop signal, not just a refused tool
@@ -423,6 +435,22 @@ function awaitingConfirmationResult(capability: string): ToolResult {
       `[awaiting confirmation] '${capability}' is a destructive action and ` +
       `requires explicit human confirmation before it can run. It has not been executed.`,
     isError: true,
+  };
+}
+
+/**
+ * ToolResult returned when a resume's replay reaches a destructive action that
+ * ALREADY executed on an earlier confirmation of this run. Re-running the loop
+ * re-issues it, but the gate does not let it happen twice — it reports the prior
+ * effect as a success (so the model continues to the next step) without repeating
+ * it. Marked `isError: false`: from the model's view the action is done.
+ */
+function alreadyPerformedResult(capability: string): ToolResult {
+  return {
+    output:
+      `[already performed] '${capability}' ran on an earlier confirmation of this ` +
+      `run; it was not repeated.`,
+    isError: false,
   };
 }
 
@@ -464,14 +492,17 @@ function gateTool(
       }
 
       if (decision === "confirm") {
-        // A standing, bounded pre-approval (a resume's per-action grant) can clear
-        // this destructive action without a fresh pause. Consulted FIRST so a
-        // consumed approval emits no awaiting-confirmation event and the run does not
-        // churn through `awaiting_confirmation`. It is a per-action count, not a
-        // blanket: once the grant for THIS invocation is spent, a further destructive
-        // call falls through to the pause below.
-        const preApproved = hooks.claimPreApproval?.(action) ?? false;
-        if (!preApproved) {
+        // A resume's standing disposition decides this destructive action without a
+        // fresh pause. Consulted FIRST so a confirmed action emits no awaiting-
+        // confirmation event and the run does not churn through `awaiting_confirmation`.
+        const verdict = hooks.preApproval?.(action) ?? "gate";
+        if (verdict === "skip") {
+          // Already executed on an earlier confirmation of this run — re-running the
+          // loop must not repeat it. Report the prior effect as done, without
+          // executing or pausing, so the loop continues to the next action.
+          return alreadyPerformedResult(key);
+        }
+        if (verdict === "gate") {
           // Consult the (possibly interactive, blocking) confirmation FIRST, then
           // record the pause only if it is denied. `onAwaitConfirmation` is what
           // persists `awaiting_confirmation`, so deferring it past the prompt means a
@@ -491,10 +522,10 @@ function gateTool(
             return awaitingConfirmationResult(key);
           }
         }
-        // Pre-approved or explicitly confirmed: fall through to execute. With the
-        // pause recorded only on denial, an action reaches `onExecute` ONLY when it
-        // was never paused — so a given invocation triggers `onAwaitConfirmation` or
-        // `onExecute`, never both.
+        // verdict === "run", or "gate" + explicitly confirmed: fall through to
+        // execute. With the pause recorded only on denial, an action reaches
+        // `onExecute` ONLY when it was never paused — so a given invocation triggers
+        // `onAwaitConfirmation` or `onExecute`, never both.
       }
 
       hooks.onExecute?.(action);

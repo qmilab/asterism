@@ -43,6 +43,7 @@ export type {
   TrustProfile,
   TrustProfileInput,
   TrustHooks,
+  PreApprovalVerdict,
 } from "./trust.js";
 
 // The memory firewall — screens every inbound memory write for injection /
