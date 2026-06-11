@@ -303,3 +303,133 @@ test("serve() binds a real socket: a run can be triggered and events read over H
     running.stop();
   }
 });
+
+// --- SSE streaming (#16) -------------------------------------------------
+
+/** A substrate stand-in that emits one tool lifecycle event, then resolves canned output. */
+function eventEmittingAdapter(output: RunOutput): RuntimeAdapter {
+  return {
+    run() {
+      async function* events() {
+        yield { type: "tool_execution_start" as const, payload: { tool: "fs.write" } };
+        yield { type: "tool_execution_end" as const, payload: { tool: "fs.write", isError: false } };
+      }
+      return { events: events(), output: Promise.resolve(output) };
+    },
+  };
+}
+
+function postStream(path: string, body: unknown): Request {
+  return new Request(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Pull the JSON payload of the terminal `result` frame out of an SSE body. */
+function parseSseResult(body: string): {
+  status: string;
+  output: string;
+  actions: readonly { capability: string; decision: string }[];
+} {
+  const lines = body.split("\n");
+  const idx = lines.indexOf("event: result");
+  expect(idx).toBeGreaterThanOrEqual(0);
+  const dataLine = lines[idx + 1] ?? "";
+  return JSON.parse(dataLine.replace(/^data: /, ""));
+}
+
+test("POST with Accept: text/event-stream streams activity then a terminal result", async () => {
+  const res = await handleRequest(
+    deps({ adapter: eventEmittingAdapter({ status: "done", text: "hi there" }) }),
+    postStream("/agents/personal/runs", { input: "write a note" }),
+  );
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+  const body = await res.text();
+  // An activity frame for the tool execution, then the terminal result frame.
+  expect(body).toContain("event: activity");
+  expect(body).toContain('"tool":"fs.write"');
+  const result = parseSseResult(body);
+  expect(result.status).toBe("done");
+  expect(result.output).toBe("hi there");
+
+  // The run executed for real and was persisted, exactly like the buffered path.
+  expect(store.runs.list(personal.id)).toHaveLength(1);
+});
+
+test("a destructive action over SSE ends with an awaiting_confirmation result frame", async () => {
+  const destructive: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete files",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "deleted" }),
+    },
+  };
+  const toolAdapter: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "delete_files");
+        if (!tool) return { status: "done", text: "(tool not exposed)" };
+        const result = await tool.execute({ args: { command: "rm -rf dist" } }, request.signal);
+        return { status: "done", text: result.output };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const res = await handleRequest(
+    deps({ adapter: toolAdapter, capabilities: [destructive] }),
+    postStream("/agents/personal/runs", { input: "delete the dist files" }),
+  );
+  expect(res.status).toBe(200);
+  const result = parseSseResult(await res.text());
+  // No confirm over HTTP, so the gate parks the run — the stream just reports it.
+  expect(result.status).toBe("awaiting_confirmation");
+  expect(result.actions).toEqual([
+    { capability: "delete_files", effect: "destructive", decision: "paused" },
+  ]);
+});
+
+test("the buffered POST surfaces the action summary", async () => {
+  const writeCap: Capability = {
+    key: "fs.write",
+    effect: "write",
+    tool: {
+      name: "fs.write",
+      description: "write a file",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "written" }),
+    },
+  };
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "fs.write");
+        if (tool) await tool.execute({ args: { path: "n.md" } }, request.signal);
+        return { status: "done", text: "ok" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const res = await handleRequest(
+    deps({ adapter, capabilities: [writeCap] }),
+    post("/agents/personal/runs", { input: "write a note" }),
+  );
+  expect(res.status).toBe(201);
+  const json = (await res.json()) as {
+    actions: readonly { capability: string; effect: string; decision: string }[];
+  };
+  // personal is autonomous, so the write executes and is summarized as such.
+  expect(json.actions).toEqual([
+    { capability: "fs.write", effect: "write", decision: "executed" },
+  ]);
+});

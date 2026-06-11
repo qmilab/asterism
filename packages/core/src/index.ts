@@ -103,7 +103,7 @@ export type {
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
 export { executeRun } from "./run.js";
-export type { ExecuteRunOptions, ExecuteRunResult } from "./run.js";
+export type { ExecuteRunOptions, ExecuteRunResult, ActionRecord } from "./run.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The
 // kernel's run-orchestration surfaces compose this around their own hooks.

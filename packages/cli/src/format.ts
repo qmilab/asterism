@@ -2,7 +2,14 @@
 // prints — no I/O, no store, trivially testable. Nothing here ever renders a
 // secret value (the kernel never hands one out to these surfaces anyway).
 
-import type { Agent, Event, Memory, Run } from "@qmilab/asterism-core";
+import type {
+  ActionRecord,
+  Agent,
+  Event,
+  Memory,
+  Run,
+  RunEvent,
+} from "@qmilab/asterism-core";
 
 /** First 8 chars of a UUID — enough to recognize, short enough to scan. */
 export function shortId(id: string): string {
@@ -84,6 +91,62 @@ export function formatMemoryList(
     lines.push("");
   }
   return lines.join("\n").trimEnd();
+}
+
+/**
+ * Render one run lifecycle event as a concise activity line for live display, or
+ * `undefined` for the bookkeeping events not worth surfacing (turn/message
+ * boundaries). Only the tool executions — the run's visible *actions* — are
+ * shown as they happen; the authoritative taken/withheld/paused classification
+ * arrives afterward via {@link formatActionSummary}. Payloads are references-only
+ * (tool name, error flag) by the adapter contract — never transcript text.
+ */
+export function formatRunActivity(event: RunEvent): string | undefined {
+  const payload = (event.payload ?? {}) as { tool?: unknown; isError?: unknown };
+  const tool = typeof payload.tool === "string" ? payload.tool : "tool";
+  switch (event.type) {
+    case "tool_execution_start":
+      return `  → ${tool}`;
+    case "tool_execution_end":
+      return payload.isError === true ? `  ✗ ${tool}` : `  ✓ ${tool}`;
+    default:
+      return undefined;
+  }
+}
+
+/** Glyph per gate decision for the action summary. */
+const ACTION_GLYPH: Readonly<Record<ActionRecord["decision"], string>> = {
+  executed: "✓",
+  withheld: "⊘",
+  paused: "⏸",
+};
+
+/**
+ * Render the post-run action summary — what the agent did (executed), withheld
+ * under `propose`, or paused on awaiting confirmation, in order. This is the
+ * after-the-fact notification a `notify`/`autonomous` run ends with ("notify
+ * finally notifies"). References only: each line is the capability key plus its
+ * classified effect, never an argument value. Returns the lines to print; the
+ * caller picks the sink (stderr, so the agent's own output on stdout stays
+ * clean and pipeable). Empty input ⇒ no lines.
+ */
+export function formatActionSummary(actions: readonly ActionRecord[]): string[] {
+  if (actions.length === 0) return [];
+  const counts: Record<ActionRecord["decision"], number> = {
+    executed: 0,
+    withheld: 0,
+    paused: 0,
+  };
+  for (const a of actions) counts[a.decision]++;
+  const tally = (["executed", "withheld", "paused"] as const)
+    .filter((d) => counts[d] > 0)
+    .map((d) => `${counts[d]} ${d}`)
+    .join(", ");
+  const lines = [`Actions (${tally}):`];
+  for (const a of actions) {
+    lines.push(`  ${ACTION_GLYPH[a.decision]} ${a.decision.padEnd(8)} ${a.capability} (${a.effect})`);
+  }
+  return lines;
 }
 
 /** Render an agent's event log for `events tail`. */
