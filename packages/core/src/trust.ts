@@ -464,18 +464,24 @@ function gateTool(
       }
 
       if (decision === "confirm") {
-        // A standing, bounded pre-approval (a resume's per-capability budget) can
-        // clear this destructive action without a fresh pause. Consulted FIRST so a
+        // A standing, bounded pre-approval (a resume's per-action grant) can clear
+        // this destructive action without a fresh pause. Consulted FIRST so a
         // consumed approval emits no awaiting-confirmation event and the run does not
-        // churn through `awaiting_confirmation`. It is a COUNT, not a blanket: once
-        // the budget for this capability is spent, a further destructive invocation
-        // falls through to the pause below — so confirming a `dist` delete never also
-        // green-lights a later, unconfirmed `cache` delete on the same capability.
+        // churn through `awaiting_confirmation`. It is a per-action count, not a
+        // blanket: once the grant for THIS invocation is spent, a further destructive
+        // call falls through to the pause below.
         const preApproved = hooks.claimPreApproval?.(action) ?? false;
         if (!preApproved) {
-          hooks.onAwaitConfirmation?.(action);
+          // Consult the (possibly interactive, blocking) confirmation FIRST, then
+          // record the pause only if it is denied. `onAwaitConfirmation` is what
+          // persists `awaiting_confirmation`, so deferring it past the prompt means a
+          // run sitting at a live `[y/N]` stays `running` — an out-of-band confirm
+          // therefore cannot claim a still-attended run and double-execute the action.
+          // The status flips to `awaiting_confirmation` only when the action truly
+          // parks (no one approved it).
           const approved = hooks.confirm ? await hooks.confirm(action) : false;
           if (!approved) {
+            hooks.onAwaitConfirmation?.(action);
             // Not a refused-but-continuable result: stop the run. Aborting the
             // controller suspends the agent loop so it cannot proceed to other
             // side-effecting tools while the action waits on a human.
@@ -485,8 +491,10 @@ function gateTool(
             return awaitingConfirmationResult(key);
           }
         }
-        // Pre-approved or explicitly confirmed: fall through to execute. The audit
-        // hook still fires so the now-permitted destructive action is recorded.
+        // Pre-approved or explicitly confirmed: fall through to execute. With the
+        // pause recorded only on denial, an action reaches `onExecute` ONLY when it
+        // was never paused — so a given invocation triggers `onAwaitConfirmation` or
+        // `onExecute`, never both.
       }
 
       hooks.onExecute?.(action);

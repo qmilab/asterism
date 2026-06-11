@@ -203,15 +203,15 @@ export class AsterismStore {
    * destructive action twice. The dedicated `run.resumed` event (not a bare
    * `run.status_changed`) is the audit record the trust model needs: `confirmed`
    * names the destructive capabilities this resume permits (for a human reading the
-   * log), and `granted` carries the same as per-action references (capability + a
-   * one-way arguments fingerprint) that the NEXT confirm reads back to know what is
-   * already approved. Both are references only — never the action's args.
+   * log), and `granted` carries the same as per-invocation references (capability +
+   * a one-way arguments fingerprint + how many) that the NEXT confirm reads back to
+   * know what is already approved. Both are references only — never the action's args.
    */
   recordRunResumed(
     agentId: string,
     runId: string,
     confirmed: readonly string[],
-    granted: readonly { capability: string; fingerprint: string }[],
+    granted: readonly { capability: string; fingerprint: string; count: number }[],
   ): Run | undefined {
     return this.driver.transaction(() => {
       const run = this.runs.claimForResume(agentId, runId);
