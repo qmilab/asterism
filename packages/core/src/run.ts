@@ -182,18 +182,47 @@ export async function executeRun(
   // Record the run and move it to `running`; the kernel logs each transition.
   const run = store.startRun(agent.id, { input });
   store.setRunStatus(agent.id, run.id, "running");
+  // A fresh run pre-approves NOTHING (empty `autoApprove`): every destructive
+  // action pauses for confirmation regardless of trust level. The resume path
+  // (`resumeRun`) is the only caller that pre-approves a capability, and only the
+  // exact one a human just confirmed for an already-parked run.
+  return runAndPersist(store, agent, run, input, options, []);
+}
 
+/**
+ * The shared run loop: trust-resolve + gate → frame → substrate → persist, for a
+ * run that is ALREADY recorded and `running`. Both starting a run (`executeRun`)
+ * and resuming a parked one (`resumeRun`) funnel through here, so the trust/gate
+ * path is identical whether a run is fresh or resumed — there is one place where
+ * the agent's identity, trust level, and tools turn into an executed (and audited)
+ * outcome.
+ *
+ * `autoApprove` is the ONLY difference between the two callers: empty for a fresh
+ * run (every destructive action pauses), or exactly the capabilities a human
+ * confirmed out-of-band for a resume. It is applied per-capability and scoped to
+ * this single run — a destructive action whose capability is NOT in the set still
+ * pauses, so resuming never widens the gate beyond what was confirmed.
+ */
+async function runAndPersist(
+  store: AsterismStore,
+  agent: Agent,
+  run: Run,
+  input: string,
+  options: ExecuteRunOptions,
+  autoApprove: readonly string[],
+): Promise<ExecuteRunResult> {
   // Resolve the agent's trust level into the tool set this run may use, with the
   // destructive-action gate wired into every tool's `execute` closure and each
   // gate decision audited to the event log. Confined by default — the exposure
   // list is derived from exactly the capabilities the caller handed in (an empty
-  // set if none), and `autoApprove` stays empty so every destructive action pauses
-  // regardless of trust level.
+  // set if none). `autoApprove` carries only what a resume confirmed (empty for a
+  // fresh run), so the gate still pauses every un-confirmed destructive action.
   const abortController = new AbortController();
   const capabilities = options.capabilities ?? [];
   const profile = trustProfile({
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),
+    autoApprove,
   });
   // Accumulate the run's gate decisions for the post-run summary, sourced from the
   // same hooks that feed the event log. EVERY decision is pushed into `actions` in
@@ -353,4 +382,98 @@ export async function executeRun(
     ...(output.error !== undefined ? { error: output.error } : {}),
     actions: collectActions(),
   };
+}
+
+/**
+ * The destructive capabilities a confirm grants for a run — every capability the
+ * run has reached `action.awaiting_confirmation` on, in first-seen order,
+ * reconstructed from its own event log (scoped to the agent AND run at the storage
+ * layer; references only — the log holds capability keys, never the action's args).
+ *
+ * Crucially this is CUMULATIVE, not "still unexecuted". Resuming re-enters the loop
+ * from the start, so the replay re-encounters every destructive action the run
+ * took before — including ones a previous confirm already let through. If a confirm
+ * granted only the latest pending capability, the replay would re-pause on an
+ * earlier one and never converge. Granting the full set the run has been gated on
+ * is what lets a multi-step run reach completion across successive confirms, while
+ * still never granting a capability the run was never gated on.
+ */
+export function confirmedCapabilities(
+  store: AsterismStore,
+  agentId: string,
+  runId: string,
+): string[] {
+  const events = store.events.listForRun(agentId, runId);
+  const granted: string[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "action.awaiting_confirmation") continue;
+    const payload = event.payload;
+    if (payload === null || typeof payload !== "object") continue;
+    const cap = (payload as { capability?: unknown }).capability;
+    if (typeof cap !== "string" || seen.has(cap)) continue;
+    seen.add(cap);
+    granted.push(cap);
+  }
+  return granted;
+}
+
+/**
+ * The outcome of {@link resumeRun}. A discriminated union so a surface can map each
+ * case to its own response (CLI exit code, HTTP status) without guessing:
+ * - `resumed`    — the run was parked, was re-entered, and reached a terminal (or
+ *                  re-paused) state; `result` is the same shape `executeRun` returns.
+ * - `not_found`  — no such run for this agent (unknown id, or another agent's run —
+ *                  the lookup is scoped, so a foreign run is indistinguishable from
+ *                  a missing one, which is the point).
+ * - `not_paused` — the run exists but is not `awaiting_confirmation`, so there is
+ *                  nothing to confirm; `run` carries its actual current state.
+ */
+export type ResumeOutcome =
+  | { kind: "resumed"; result: ExecuteRunResult }
+  | { kind: "not_found" }
+  | { kind: "not_paused"; run: Run };
+
+/**
+ * Resume a run that paused at `awaiting_confirmation`, after an explicit
+ * out-of-band confirmation (CLI `asterism confirm`, the HTTP confirm endpoint, or
+ * a future chat reply). This is how a gate pause is cleared from a surface where
+ * no one was at the keyboard when the run first stopped.
+ *
+ * The substrate holds no resumable loop state, and the parked run never executed
+ * its destructive action (the gate aborts BEFORE the tool runs). So resuming
+ * RE-ENTERS the loop on the same run row: the kernel re-frames the agent's
+ * original task and re-runs it with exactly the destructive capabilities the run
+ * was waiting on pre-approved — nothing more. The agent re-derives the action with
+ * full context and, this time, the gate lets the confirmed capability through.
+ *
+ * The gate is not weakened: pre-approval is per-capability and lasts only this one
+ * resumed run; any destructive action whose capability was NOT pending pauses
+ * again (and can be confirmed in turn). Classification is unchanged. The confirmed
+ * capabilities are recorded on the event log via `run.resumed` before the re-run,
+ * so the audit names what a human granted.
+ *
+ * Note the honest cost of re-execution: a parked run's NON-destructive side
+ * effects (writes done before the gate stopped it) run again on resume. The
+ * destructive action itself never doubled — it had not run when the gate paused.
+ */
+export async function resumeRun(
+  store: AsterismStore,
+  agent: Agent,
+  runId: string,
+  options: ExecuteRunOptions,
+): Promise<ResumeOutcome> {
+  const parked = store.runs.get(agent.id, runId);
+  if (!parked) return { kind: "not_found" };
+  if (parked.status !== "awaiting_confirmation") return { kind: "not_paused", run: parked };
+
+  // What this confirm grants — every destructive capability the run has been gated
+  // on (cumulative, so the replay clears earlier confirmed actions too).
+  const confirmed = confirmedCapabilities(store, agent.id, runId);
+  // Record the confirmation and flip the run back to `running` BEFORE re-entering
+  // the loop, so the audit shows the grant ahead of the action it permits.
+  store.recordRunResumed(agent.id, runId, confirmed);
+
+  const result = await runAndPersist(store, agent, parked, parked.input, options, confirmed);
+  return { kind: "resumed", result };
 }

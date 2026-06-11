@@ -32,6 +32,7 @@ Commands:
   secrets add <agent> <KEY> [value] Give an agent a private credential
   skill add <agent> <file.md>       Teach an agent a skill from a markdown file
   run <agent> "<task>"              Put an agent to work on a task
+  confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
   events tail <agent>               Review what an agent has done
@@ -106,8 +107,29 @@ Activity streams as it happens, and a run that can act on its own ends with a
 short summary of what it did, withheld, or paused on. (Progress goes to standard
 error, so the agent's own output on standard out stays clean to pipe.)
 
+When a destructive action pauses a run, confirm it later with \`asterism confirm\`
+— the run picks up and finishes the action you approved.
+
 Configure a model with the ASTERISM_MODEL_ID environment variable (and an API key,
 e.g. OPENAI_API_KEY) before running.`,
+
+  confirm: `asterism confirm [<agent>] <run>
+
+Confirm the destructive action a run paused on, and let the run finish. Use this
+when a run stopped for your approval — including a run started somewhere with no
+prompt, like the HTTP endpoint or a piped command.
+
+Identify the run by the short id shown when it paused (or in \`runs\`). Give the
+agent name too if the same short id could mean different runs:
+  asterism confirm personal 3f9c1a2b
+  asterism confirm 3f9c1a2b            (when it is unambiguous)
+
+You are approving only the action it stopped on — nothing else is unlocked. If the
+run then reaches a different destructive action, it pauses again for a fresh
+confirmation. Approving is always explicit; nothing destructive runs unattended.
+
+Configure a model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY) — the run
+resumes through the same model that started it.`,
 
   runs: `asterism runs <agent>
 
@@ -138,14 +160,17 @@ to draft the proposals.`,
 
 Offer one agent over a local HTTP endpoint, with the same separation guarantees as
 the command line. The endpoint serves only this agent — it is never a way to reach
-another. A run that would pause for a destructive action is declined rather than
-run, since there is no one at the keyboard to confirm.
+another. A destructive action still pauses for confirmation even with no one at the
+keyboard: the run waits, and you approve it out of band — POST to its confirm
+endpoint, or run \`asterism confirm\`.
 
 Endpoints (with <agent> fixed to the one you serve):
-  POST /agents/<agent>/runs     start a run; JSON body {"input":"<task>"}
-                                send Accept: text/event-stream to watch it live
-  GET  /agents/<agent>/runs     list the agent's runs
-  GET  /agents/<agent>/events   review the agent's activity
+  POST /agents/<agent>/runs            start a run; JSON body {"input":"<task>"}
+                                       send Accept: text/event-stream to watch it live
+  POST /agents/<agent>/runs/<run>/confirm
+                                       approve a paused run and let it finish
+  GET  /agents/<agent>/runs            list the agent's runs
+  GET  /agents/<agent>/events          review the agent's activity
 
 Options:
   --port <n>      Port to listen on. Default 4831.

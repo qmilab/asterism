@@ -15,6 +15,7 @@ import {
   executeRun,
   isReflectionMemoryType,
   MemoryFirewallError,
+  resumeRun,
   screenMemory,
   TRUST_LEVELS,
   validateEnum,
@@ -26,6 +27,7 @@ import type {
   FirewallFinding,
   ProposedMemory,
   ReflectionProvider,
+  Run,
   RuntimeAdapter,
   TailOptions,
   TrustLevel,
@@ -450,6 +452,143 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
 
     if (result.status === "awaiting_confirmation") {
       io.out("Run paused: a destructive action needs your confirmation before it can proceed.");
+      io.out(`Confirm it to continue:  asterism confirm ${name} ${shortId(result.run.id)}`);
+      return 0;
+    }
+    if (result.status === "done") {
+      io.out(result.output.trim().length > 0 ? result.output : "(the agent produced no output)");
+      return 0;
+    }
+    io.err(`Run failed: ${result.error ?? "unknown error"}`);
+    return 1;
+  });
+}
+
+// --- confirm ---------------------------------------------------------------
+
+/**
+ * Resolve a `confirm` run reference to the run and the agent that owns it. Two
+ * forms are accepted: `<agent> <run>` (scoped to that agent) and a bare `<run>`
+ * (resolved across the operator's own agents). A run reference is a full id or a
+ * unique short-id prefix — the same short id `runs`/`run` print. Resolution stays
+ * agent-scoped throughout (`store.runs` asserts the agentId on every match), so the
+ * bare form is the operator reaching across agents it owns, never one agent's run
+ * leaking into another's view.
+ */
+type RunResolution =
+  | { kind: "ok"; agent: Agent; run: Run }
+  | { kind: "no_agent"; name: string }
+  | { kind: "not_found"; ref: string; agentName?: string }
+  | { kind: "ambiguous"; ref: string };
+
+/** Runs in one agent whose id equals, or uniquely begins with, `ref`. */
+function matchRuns(store: AsterismStore, agent: Agent, ref: string): Run[] {
+  const exact = store.runs.get(agent.id, ref);
+  if (exact) return [exact];
+  return store.runs.list(agent.id).filter((r) => r.id.startsWith(ref));
+}
+
+function resolveRunRef(store: AsterismStore, positionals: string[]): RunResolution {
+  // `<agent> <run>`: resolve within the named agent only.
+  if (positionals.length >= 2) {
+    const name = positionals[0]!;
+    const ref = positionals[1]!;
+    const agent = findAgentByName(store, name);
+    if (!agent) return { kind: "no_agent", name };
+    const runs = matchRuns(store, agent, ref);
+    if (runs.length === 0) return { kind: "not_found", ref, agentName: name };
+    if (runs.length > 1) return { kind: "ambiguous", ref };
+    return { kind: "ok", agent, run: runs[0]! };
+  }
+  // Bare `<run>`: find the unique owning agent among all of the operator's agents.
+  const ref = positionals[0]!;
+  const matches: { agent: Agent; run: Run }[] = [];
+  for (const agent of store.agents.list()) {
+    for (const run of matchRuns(store, agent, ref)) matches.push({ agent, run });
+  }
+  if (matches.length === 0) return { kind: "not_found", ref };
+  if (matches.length > 1) return { kind: "ambiguous", ref };
+  return { kind: "ok", agent: matches[0]!.agent, run: matches[0]!.run };
+}
+
+async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.confirm!);
+    return 0;
+  }
+  if (parsed.positionals.length === 0) {
+    io.err("Usage: asterism confirm [<agent>] <run>");
+    return 1;
+  }
+
+  return withHomeStore(io, async (store) => {
+    const resolved = resolveRunRef(store, parsed.positionals);
+    if (resolved.kind === "no_agent") return noAgent(io, resolved.name);
+    if (resolved.kind === "ambiguous") {
+      io.err(
+        `"${resolved.ref}" matches more than one run. Use the full id, or name the agent: asterism confirm <agent> <run>.`,
+      );
+      return 1;
+    }
+    if (resolved.kind === "not_found") {
+      const where = resolved.agentName ? ` for agent ${resolved.agentName}` : "";
+      io.err(`No run matching "${resolved.ref}"${where}.`);
+      return 1;
+    }
+    const { agent, run } = resolved;
+
+    // Only a parked run can be confirmed. Say so plainly otherwise — and do not
+    // build a model for a run that cannot be resumed (mirrors `run`'s ordering).
+    if (run.status !== "awaiting_confirmation") {
+      io.err(`Run ${shortId(run.id)} (${agent.name}) is ${run.status} — nothing to confirm.`);
+      return 1;
+    }
+
+    const made = await resolveAdapter(io);
+    if (!made.adapter) {
+      io.err(made.reason ?? "No model configured.");
+      return 1;
+    }
+
+    // The resume is the kernel's: it re-enters the loop with exactly the
+    // destructive capabilities this run was gated on pre-approved, records the
+    // grant, and persists the outcome. This surface only streams activity and
+    // formats the result — the same seams `run` uses, so a confirmed run behaves
+    // identically to one that never paused.
+    const capabilities = io.capabilities?.(agent.workspaceDir);
+    const outcome = await resumeRun(store, agent, run.id, {
+      adapter: made.adapter,
+      readFile: (p) => readFileSync(p, "utf8"),
+      onEvent: (event) => {
+        const line = formatRunActivity(event);
+        if (line) io.err(line);
+      },
+      ...(io.confirm ? { confirm: io.confirm } : {}),
+      ...(capabilities ? { capabilities } : {}),
+    });
+
+    // Defensive: the run could have changed between the check above and the resume.
+    if (outcome.kind === "not_found") {
+      io.err(`No run ${shortId(run.id)} for agent ${agent.name}.`);
+      return 1;
+    }
+    if (outcome.kind === "not_paused") {
+      io.err(
+        `Run ${shortId(outcome.run.id)} (${agent.name}) is ${outcome.run.status} — nothing to confirm.`,
+      );
+      return 1;
+    }
+    const { result } = outcome;
+
+    // Surface what the resumed run did — the confirmed action now shows as executed.
+    if (agent.trustLevel !== "propose" && result.actions.length > 0) {
+      for (const line of formatActionSummary(result.actions)) io.err(line);
+    }
+
+    if (result.status === "awaiting_confirmation") {
+      io.out("Run paused again: another destructive action needs your confirmation.");
+      io.out(`Confirm it to continue:  asterism confirm ${agent.name} ${shortId(result.run.id)}`);
       return 0;
     }
     if (result.status === "done") {
@@ -802,6 +941,7 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
 
     io.out(`Serving agent "${agent.name}" at ${server.url}`);
     io.out(`  POST ${server.url}/agents/${agent.name}/runs    start a run  (JSON body: {"input":"<task>"})`);
+    io.out(`  POST ${server.url}/agents/${agent.name}/runs/<run>/confirm    approve a paused run`);
     io.out(`  GET  ${server.url}/agents/${agent.name}/runs    list runs`);
     io.out(`  GET  ${server.url}/agents/${agent.name}/events  review activity`);
     if (!made.adapter) {
@@ -874,6 +1014,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdTrust(rest, io);
     case "run":
       return cmdRun(rest, io);
+    case "confirm":
+      return cmdConfirm(rest, io);
     case "runs":
       return cmdRuns(rest, io);
     case "list":

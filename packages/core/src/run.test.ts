@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { executeRun } from "./run.js";
+import { confirmedCapabilities, executeRun, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
@@ -430,6 +430,161 @@ test("two destructive actions that pause concurrently are both kept, in order", 
     { capability: "delete_files", effect: "destructive", decision: "paused" },
     { capability: "drop_table", effect: "destructive", decision: "paused" },
   ]);
+});
+
+// --- resume a gate-paused run out-of-band (#17) --------------------------
+
+/**
+ * A substrate stand-in that drives a sequence of tools in order, stopping the
+ * moment one returns an error (the gate's awaiting-confirmation result) or the run
+ * is aborted — exactly like a real loop. Re-invoked on resume, it replays the same
+ * sequence, so a now-approved destructive tool gets past the gate this time.
+ */
+function sequenceAdapter(steps: readonly { tool: string; args: unknown }[]): RuntimeAdapter {
+  return {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const texts: string[] = [];
+        for (const step of steps) {
+          if (request.signal?.aborted) break;
+          const tool = request.tools.list().find((t) => t.name === step.tool);
+          if (!tool) continue;
+          const result = await tool.execute({ args: step.args }, request.signal);
+          texts.push(result.output);
+          if (result.isError) break;
+        }
+        return { status: "done", text: texts.join("\n") };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+}
+
+test("resumeRun reports not_found for an unknown run", async () => {
+  const outcome = await resumeRun(store, agent, "no-such-run", {
+    adapter: cannedAdapter({ status: "done", text: "x" }),
+  });
+  expect(outcome.kind).toBe("not_found");
+});
+
+test("resumeRun reports not_paused for a run that already finished", async () => {
+  const done = await executeRun(store, agent, "just answer", {
+    adapter: cannedAdapter({ status: "done", text: "answered" }),
+  });
+  const outcome = await resumeRun(store, agent, done.run.id, {
+    adapter: cannedAdapter({ status: "done", text: "again" }),
+  });
+  expect(outcome.kind).toBe("not_paused");
+  if (outcome.kind === "not_paused") expect(outcome.run.status).toBe("done");
+});
+
+test("a confirmed resume re-enters the loop, executes the action, and finishes done", async () => {
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  // First run parks: no confirm, so the destructive action stops the run.
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(confirmedCapabilities(store, agent.id, parked.run.id)).toEqual(["delete_files"]);
+
+  // Confirming resumes the SAME run and lets the pending capability through.
+  const outcome = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(outcome.kind).toBe("resumed");
+  if (outcome.kind !== "resumed") return;
+  expect(outcome.result.status).toBe("done");
+  expect(outcome.result.output).toBe("deleted");
+  // Same run row, now terminal — not a new run.
+  expect(outcome.result.run.id).toBe(parked.run.id);
+  expect(store.runs.list(agent.id)).toHaveLength(1);
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("done");
+
+  // The resume is on the record: the grant (run.resumed, naming the confirmed
+  // capability) precedes the action it permitted (action.executed).
+  const types = store.events.tail(agent.id).map((e) => e.type);
+  expect(types).toContain("run.resumed");
+  const resumed = store.events
+    .tail(agent.id)
+    .find((e) => e.type === "run.resumed");
+  expect((resumed?.payload as { confirmed: string[] }).confirmed).toEqual(["delete_files"]);
+  // The summary counts ONE executed action, not a pause-then-execute pair.
+  expect(outcome.result.actions).toEqual([
+    { capability: "delete_files", effect: "destructive", decision: "executed" },
+  ]);
+});
+
+test("a resume approves only the pending capability; a different destructive action re-pauses", async () => {
+  // The agent deletes (the pending action) and then drops a table (a NEW
+  // destructive action). The first run parks on the delete before it ever reaches
+  // the drop.
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { command: "rm -rf dist" } },
+    { tool: "drop_table", args: { command: "DROP TABLE users" } },
+  ]);
+  const parked = await executeRun(store, agent, "delete dist then drop the table", {
+    adapter,
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(confirmedCapabilities(store, agent.id, parked.run.id)).toEqual(["delete_files"]);
+
+  // Confirming the delete lets it through — but the drop is a different capability
+  // the human never confirmed, so the gate pauses the run again rather than
+  // auto-running it. The confirmation did NOT become a blanket destructive grant.
+  const first = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  // delete_files ran; drop_table has now been gated on too, so the grant a further
+  // confirm applies has grown to include it (cumulative across the replay).
+  expect(confirmedCapabilities(store, agent.id, parked.run.id)).toEqual([
+    "delete_files",
+    "drop_table",
+  ]);
+
+  // Confirming again converges: the second pending capability now runs and the run
+  // completes.
+  const second = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("done");
+});
+
+test("resume never crosses agents: one agent cannot confirm another's parked run", async () => {
+  const other = store.createAgent({
+    name: "work",
+    role: "careful consultant",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "autonomous",
+  });
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // `work` resuming `personal`'s run id finds nothing — the lookup is agent-scoped,
+  // so a foreign run is indistinguishable from a missing one.
+  const outcome = await resumeRun(store, other, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(outcome.kind).toBe("not_found");
+  // personal's run is untouched — still parked, never resumed by another agent.
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("awaiting_confirmation");
 });
 
 test("a run completes even if the adapter never closes its event stream", async () => {

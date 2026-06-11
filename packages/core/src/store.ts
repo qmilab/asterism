@@ -186,6 +186,31 @@ export class AsterismStore {
   }
 
   /**
+   * Resume a run that paused at `awaiting_confirmation` after an explicit
+   * out-of-band confirmation. Flips the run back to `running` and records the
+   * resume as `run.resumed`, carrying the destructive capabilities the human
+   * confirmed — REFERENCES ONLY (capability keys, never the action's args, which
+   * can hold a live secret). The dedicated event (not a bare `run.status_changed`)
+   * is the audit record the trust model needs: it names exactly which destructive
+   * capabilities this run is now permitted to execute, and that a human granted
+   * them. A cross-agent or unknown run touches nothing and emits nothing.
+   */
+  recordRunResumed(
+    agentId: string,
+    runId: string,
+    confirmed: readonly string[],
+  ): Run | undefined {
+    return this.driver.transaction(() => {
+      const from = this.runs.get(agentId, runId)?.status ?? null;
+      const run = this.runs.setStatus(agentId, runId, "running");
+      if (run) {
+        this.emit(agentId, "run.resumed", { runId, from, confirmed }, runId);
+      }
+      return run;
+    });
+  }
+
+  /**
    * Record a memory through the firewall, logging the outcome either way. On
    * success: `memory.recorded` (references only — id/type/reviewState, never the
    * content). On a firewall refusal: `memory.blocked` (the findings, never the

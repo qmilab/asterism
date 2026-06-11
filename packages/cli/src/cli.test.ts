@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,6 +14,7 @@ import type {
 import { handleRequest } from "@qmilab/asterism-server";
 import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
 
+import { workspaceCapabilities } from "./capabilities.ts";
 import { runCli } from "./cli.ts";
 import type { CliIO, ReviewDecision, ReviewItem } from "./cli.ts";
 import { dbPath, HOME_DIR_NAME } from "./paths.ts";
@@ -843,4 +844,132 @@ test("a propose run prints no action summary — its output is the plan", async 
   expect(await runCli(["run", "work", "write a note"], h.io)).toBe(0);
   // No summary block for propose, even though the write was withheld.
   expect(h.err.join("\n")).not.toContain("Actions (");
+});
+
+// --- confirm: resume a gate-paused run out of band (#17) ------------------
+
+/** A substrate stand-in that drives one named tool with fixed args, in order. */
+function toolCallingAdapter(toolName: string, args: unknown): RuntimeAdapter {
+  return {
+    run(request) {
+      const output = (async () => {
+        const tool = request.tools.list().find((t) => t.name === toolName);
+        if (!tool) return { status: "done" as const, text: "(tool not exposed)" };
+        const result = await tool.execute({ args }, request.signal);
+        return { status: "done" as const, text: result.output };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+}
+
+/** The short id the paused-run hint tells the user to confirm. */
+function confirmIdFromHint(lines: string[]): string {
+  const hint = lines.find((l) => l.includes("asterism confirm"));
+  if (!hint) throw new Error(`no confirm hint in output:\n${lines.join("\n")}`);
+  return hint.trim().split(/\s+/).pop()!;
+}
+
+test("run's paused hint names the exact confirm command", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: toolCallingAdapter("delete_file", { path: "dist" }) });
+  h.io.capabilities = workspaceCapabilities;
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  const workspace = join(h.dir, HOME_DIR_NAME, "agents", "personal");
+  mkdirSync(join(workspace, "dist"), { recursive: true });
+  writeFileSync(join(workspace, "dist", "bundle.js"), "x");
+
+  h.out.length = 0;
+  expect(await runCli(["run", "personal", "delete dist"], h.io)).toBe(0);
+  const out = h.out.join("\n");
+  expect(out).toContain("Run paused");
+  expect(out).toMatch(/asterism confirm personal [0-9a-f]{8}/);
+});
+
+test("confirm resumes a paused run and performs the destructive action", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: toolCallingAdapter("delete_file", { path: "dist" }) });
+  h.io.capabilities = workspaceCapabilities; // the real, workspace-scoped catalog
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // A real file the run will delete — proof the destructive action genuinely runs.
+  const workspace = join(h.dir, HOME_DIR_NAME, "agents", "personal");
+  mkdirSync(join(workspace, "dist"), { recursive: true });
+  writeFileSync(join(workspace, "dist", "bundle.js"), "console.log(1)");
+
+  // The run pauses at the gate; the deletion has NOT happened.
+  h.out.length = 0;
+  expect(await runCli(["run", "personal", "delete dist"], h.io)).toBe(0);
+  const id = confirmIdFromHint(h.out);
+  expect(existsSync(join(workspace, "dist"))).toBe(true);
+
+  // Confirming resumes the same run, runs the delete, and finishes.
+  h.out.length = 0;
+  h.err.length = 0;
+  expect(await runCli(["confirm", "personal", id], h.io)).toBe(0);
+  expect(existsSync(join(workspace, "dist"))).toBe(false); // the file is really gone
+  expect(h.err.join("\n")).toContain("executed fs.delete");
+
+  // One run, now done — not a second run; and the resume is on the record.
+  const events: string[] = [];
+  await runCli(["events", "tail", "personal"], { ...h.io, out: (t) => events.push(t) });
+  expect(events.join("\n")).toContain("run.resumed");
+  const runs: string[] = [];
+  await runCli(["runs", "personal"], { ...h.io, out: (t) => runs.push(t) });
+  expect(runs.join("\n")).toContain("(1):"); // exactly one run
+  expect(runs.join("\n")).toContain("done");
+});
+
+test("the bare confirm form resolves a run across the operator's agents", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: toolCallingAdapter("delete_file", { path: "dist" }) });
+  h.io.capabilities = workspaceCapabilities;
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "autonomous"], h.io);
+  const workspace = join(h.dir, HOME_DIR_NAME, "agents", "personal");
+  mkdirSync(join(workspace, "dist"), { recursive: true });
+  writeFileSync(join(workspace, "dist", "a.js"), "x");
+
+  h.out.length = 0;
+  await runCli(["run", "personal", "delete dist"], h.io);
+  const id = confirmIdFromHint(h.out);
+
+  // No agent named — the operator's install resolves the owning agent by run id.
+  h.out.length = 0;
+  expect(await runCli(["confirm", id], h.io)).toBe(0);
+  expect(existsSync(join(workspace, "dist"))).toBe(false);
+});
+
+test("confirm reports a clear error for an unknown run", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  expect(await runCli(["confirm", "personal", "deadbeef"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain('No run matching "deadbeef"');
+});
+
+test("confirm declines a run that is not awaiting confirmation", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["run", "personal", "say hello"], h.io); // finishes done
+
+  const events: string[] = [];
+  await runCli(["runs", "personal"], { ...h.io, out: (t) => events.push(t) });
+  const id = events.join("\n").match(/• ([0-9a-f]{8})/)![1]!;
+
+  expect(await runCli(["confirm", "personal", id], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("nothing to confirm");
+});
+
+test("confirm on an unknown agent reports the agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["confirm", "ghost", "abcd1234"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain('No agent named "ghost"');
 });

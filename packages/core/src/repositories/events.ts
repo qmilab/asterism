@@ -82,6 +82,24 @@ export class EventRepository {
   }
 
   /**
+   * One run's events, oldest-first — scoped to `agentId` AND `runId` at the
+   * storage layer, so it can never surface another run's (or another agent's)
+   * log. Used by the kernel to reconstruct what a parked run is still waiting on
+   * (the `action.awaiting_confirmation` decisions not yet resolved by an
+   * `action.executed`) when it resumes the run after confirmation.
+   */
+  listForRun(agentId: string, runId: string): Event[] {
+    requireAgentId(agentId);
+    return this.driver
+      .prepare(
+        `SELECT * FROM events WHERE agent_id = ? AND run_id = ?
+           ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all([agentId, runId])
+      .map(mapEvent);
+  }
+
+  /**
    * Read an agent's events for tailing — always returned oldest-first so a reader
    * sees them in the order they happened. Three shapes, all scoped to `agentId`:
    *

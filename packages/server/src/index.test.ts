@@ -433,3 +433,142 @@ test("the buffered POST surfaces the action summary", async () => {
     { capability: "fs.write", effect: "write", decision: "executed" },
   ]);
 });
+
+// --- confirm endpoint: resume a gate-paused run out of band (#17) ---------
+
+/** A destructive capability whose spy records when it truly runs. */
+function destructiveCap(executed: string[]): Capability {
+  return {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete files",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        executed.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+}
+
+/** A substrate stand-in that drives the destructive tool, like a real loop would. */
+function deleteAdapter(): RuntimeAdapter {
+  return {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "delete_files");
+        if (!tool) return { status: "done", text: "(tool not exposed)" };
+        const result = await tool.execute({ args: { command: "rm -rf dist" } }, request.signal);
+        return { status: "done", text: result.output };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+}
+
+function confirmReq(runId: string, stream = false): Request {
+  return new Request(`${BASE}/agents/personal/runs/${runId}/confirm`, {
+    method: "POST",
+    headers: stream
+      ? { "content-type": "application/json", accept: "text/event-stream" }
+      : { "content-type": "application/json" },
+    body: "{}",
+  });
+}
+
+test("a run paused over HTTP can be confirmed out of band and then completes", async () => {
+  const executed: string[] = [];
+  // ONE deps object, reused for both calls, so the start and the confirm share the
+  // same store and adapter — exactly how a server instance handles them.
+  const d = deps({ adapter: deleteAdapter(), capabilities: [destructiveCap(executed)] });
+
+  // The initial run parks: no confirm over HTTP, so the destructive action waits.
+  const start = await handleRequest(d, post("/agents/personal/runs", { input: "delete dist" }));
+  expect(start.status).toBe(201);
+  const startJson = (await start.json()) as { status: string; run: { id: string } };
+  expect(startJson.status).toBe("awaiting_confirmation");
+  expect(executed).toHaveLength(0);
+
+  // The confirm endpoint resumes the SAME run; the destructive action now runs.
+  const confirm = await handleRequest(d, confirmReq(startJson.run.id));
+  expect(confirm.status).toBe(200);
+  const confirmJson = (await confirm.json()) as {
+    status: string;
+    output: string;
+    run: { id: string };
+    actions: readonly { capability: string; decision: string }[];
+  };
+  expect(confirmJson.status).toBe("done");
+  expect(confirmJson.output).toBe("deleted");
+  expect(confirmJson.run.id).toBe(startJson.run.id);
+  expect(executed).toEqual(["delete_files"]);
+  expect(confirmJson.actions).toEqual([
+    { capability: "delete_files", effect: "destructive", decision: "executed" },
+  ]);
+
+  // One run, now done — not a new one — and the resume is on the record.
+  expect(store.runs.list(personal.id)).toHaveLength(1);
+  expect(store.events.tail(personal.id).map((e) => e.type)).toContain("run.resumed");
+});
+
+test("confirming an unknown run is a 404", async () => {
+  const res = await handleRequest(deps(), confirmReq("no-such-run"));
+  expect(res.status).toBe(404);
+});
+
+test("confirming a run that is not awaiting confirmation is a 409", async () => {
+  // deps() default adapter finishes the run `done`, so there is nothing to confirm.
+  const start = await handleRequest(deps(), post("/agents/personal/runs", { input: "hi" }));
+  const id = ((await start.json()) as { run: { id: string } }).run.id;
+  const res = await handleRequest(deps(), confirmReq(id));
+  expect(res.status).toBe(409);
+  const json = (await res.json()) as { status: string; error: string };
+  expect(json.status).toBe("done");
+  expect(json.error).toContain("not awaiting confirmation");
+});
+
+test("confirm with no model configured is a 503", async () => {
+  const res = await handleRequest(
+    deps({ adapter: undefined, adapterReason: "Set ASTERISM_MODEL_ID and an API key." }),
+    confirmReq("anything"),
+  );
+  expect(res.status).toBe(503);
+});
+
+test("the confirm path is POST-only and bound to the served agent", async () => {
+  const wrongMethod = await handleRequest(deps(), get("/agents/personal/runs/abc/confirm"));
+  expect(wrongMethod.status).toBe(405);
+  // One agent per server: another agent's confirm path is not reachable here.
+  const otherAgent = await handleRequest(
+    deps(),
+    new Request(`${BASE}/agents/work/runs/abc/confirm`, { method: "POST", body: "{}" }),
+  );
+  expect(otherAgent.status).toBe(404);
+  expect(store.runs.list(work.id)).toHaveLength(0);
+});
+
+test("confirm streams the resume as SSE, ending with a done result frame", async () => {
+  const executed: string[] = [];
+  const d = deps({ adapter: deleteAdapter(), capabilities: [destructiveCap(executed)] });
+  const start = await handleRequest(d, post("/agents/personal/runs", { input: "delete dist" }));
+  const id = ((await start.json()) as { run: { id: string } }).run.id;
+
+  const res = await handleRequest(d, confirmReq(id, true));
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/event-stream");
+  const result = parseSseResult(await res.text());
+  expect(result.status).toBe("done");
+  expect(executed).toEqual(["delete_files"]);
+});
+
+test("confirm over SSE frames a refusal as an error event, not a result", async () => {
+  const res = await handleRequest(deps(), confirmReq("ghost", true));
+  expect(res.status).toBe(200);
+  const body = await res.text();
+  expect(body).toContain("event: error");
+  expect(body).toContain("No such run");
+  expect(body).not.toContain("event: result");
+});
