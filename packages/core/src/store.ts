@@ -188,43 +188,46 @@ export class AsterismStore {
   }
 
   /**
-   * Resume a run that paused at `awaiting_confirmation` after an explicit
-   * out-of-band confirmation. ATOMICALLY claims the run — a single compare-and-set
-   * from `awaiting_confirmation` to `running` — and, only if THIS call won the
-   * claim, records the resume as `run.resumed`, carrying the destructive
-   * capabilities the human confirmed (REFERENCES ONLY: capability keys, never the
-   * action's args). The claim and the event ride one transaction, so the audit can
-   * never show a resume that did not happen.
+   * Atomically CLAIM a paused run for resume — a single compare-and-set from
+   * `awaiting_confirmation` to `running` (see {@link RunRepository.claimForResume}).
+   * Returns the now-`running` run to the caller that won the claim, or undefined to
+   * one that did NOT — the run was unknown, already terminal, or already claimed by
+   * a concurrent confirm. That single-winner guarantee SERIALIZES confirms: only the
+   * owner re-enters the loop, so two racing confirms can never both execute the
+   * confirmed destructive action.
    *
-   * Returns the now-`running` run to the winner, or undefined to a caller that did
-   * NOT claim it — the run was unknown, already terminal, or already claimed by a
-   * concurrent confirm. That single-winner guarantee is what stops two racing
-   * confirm requests from both re-entering the loop and executing the confirmed
-   * destructive action twice. The dedicated `run.resumed` event (not a bare
-   * `run.status_changed`) is the audit record the trust model needs: `confirmed`
-   * names the destructive capabilities this resume permits (for a human reading the
-   * log), and `granted` carries the same as per-invocation references (capability +
-   * a one-way arguments fingerprint + how many) that the NEXT confirm reads back to
-   * know what is already approved. Both are references only — never the action's args.
+   * A resume claims BEFORE reconstructing its approval state, so the reconstruction
+   * reads the event log under exclusive ownership — after any prior confirm's
+   * executions have committed — and so can never act on stale counts. The grant
+   * itself is recorded separately via {@link recordRunResumed} once reconstructed.
+   */
+  claimRunForResume(agentId: string, runId: string): Run | undefined {
+    return this.driver.transaction(() => this.runs.claimForResume(agentId, runId));
+  }
+
+  /**
+   * Record a resume's grant as `run.resumed`, once the caller has CLAIMED the run
+   * (via {@link claimRunForResume}) and reconstructed what it authorizes. The
+   * dedicated event (not a bare `run.status_changed`) is the audit record the trust
+   * model needs: `confirmed` names the destructive capabilities this resume permits
+   * (for a human reading the log), and `granted` carries the same as per-invocation
+   * references (capability + a one-way arguments fingerprint + how many) that the
+   * NEXT confirm reads back to know what is already approved. Both are references
+   * only — never the action's args. The caller already owns the run, so this just
+   * appends the audit record.
    */
   recordRunResumed(
     agentId: string,
     runId: string,
     confirmed: readonly string[],
     granted: readonly { capability: string; fingerprint: string; count: number }[],
-  ): Run | undefined {
-    return this.driver.transaction(() => {
-      const run = this.runs.claimForResume(agentId, runId);
-      if (run) {
-        this.emit(
-          agentId,
-          "run.resumed",
-          { runId, from: "awaiting_confirmation", confirmed, granted },
-          runId,
-        );
-      }
-      return run;
-    });
+  ): void {
+    this.emit(
+      agentId,
+      "run.resumed",
+      { runId, from: "awaiting_confirmation", confirmed, granted },
+      runId,
+    );
   }
 
   /**

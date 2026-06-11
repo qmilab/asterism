@@ -551,31 +551,32 @@ export async function resumeRun(
   runId: string,
   options: ExecuteRunOptions,
 ): Promise<ResumeOutcome> {
-  // Cheap pre-checks for clear errors. NOT the authoritative guard — the atomic
-  // claim below is — but they avoid computing a budget for a run that obviously
-  // cannot be resumed.
-  const parked = store.runs.get(agent.id, runId);
-  if (!parked) return { kind: "not_found" };
-  if (parked.status !== "awaiting_confirmation") return { kind: "not_paused", run: parked };
-
-  // Reconstruct what this confirm authorizes: which invocations have already executed
-  // (skip them on replay) and which are confirmed (run up to that, including ONE new
-  // paused action), each bound to its exact invocation by a fingerprint. A run paused
-  // on several actions at once is thus cleared one confirm at a time, and a confirmed
-  // action is never re-executed.
-  const { executedCount, confirmedCount, granted } = resumeApproval(store, agent.id, runId);
-  const confirmed = [...new Set(granted.map((g) => g.capability))];
-
-  // Atomically claim the run (awaiting_confirmation → running) and record the
-  // grant — both the human-readable capabilities and the per-invocation references
-  // the NEXT confirm reads back to know what is already confirmed. If the claim is
-  // lost (a concurrent confirm already took it, or it changed under us), DO NOT
-  // re-enter the loop: that is what stops two racing confirms from double-executing.
-  const claimed = store.recordRunResumed(agent.id, runId, confirmed, granted);
+  // CLAIM first — a single compare-and-set (awaiting_confirmation → running) that
+  // serializes confirms: exactly one wins, the loser is declined below. Claiming
+  // BEFORE reconstructing the approval is what keeps the counts fresh. A prior
+  // confirm that resumed and re-paused must commit its execution events before it
+  // releases the run (back to `awaiting_confirmation`) for us to claim it — so by
+  // the time we own the run and read its events, every earlier execution is visible
+  // and gets skipped, never re-run. Reconstructing first and claiming after would
+  // let a confirm act on counts taken before a concurrent confirm's executions
+  // landed, and re-run an already-executed destructive action.
+  const claimed = store.claimRunForResume(agent.id, runId);
   if (!claimed) {
     const current = store.runs.get(agent.id, runId);
     return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
   }
+
+  // Now under exclusive ownership, reconstruct what this confirm authorizes: which
+  // invocations have already executed (skip them on replay) and which are confirmed
+  // (run up to that, including ONE new paused action), each bound to its exact
+  // invocation by a fingerprint. A run paused on several actions at once is thus
+  // cleared one confirm at a time, and a confirmed action is never re-executed.
+  const { executedCount, confirmedCount, granted } = resumeApproval(store, agent.id, runId);
+  const confirmed = [...new Set(granted.map((g) => g.capability))];
+  // Record the grant (`run.resumed`): the human-readable capabilities, plus the
+  // per-invocation references the NEXT confirm reads back to know what is already
+  // confirmed. We already own the run, so this just appends the audit record.
+  store.recordRunResumed(agent.id, runId, confirmed, granted);
 
   const result = await runAndPersist(store, agent, claimed, claimed.input, options, {
     executedCount,

@@ -908,7 +908,7 @@ test("a resume that re-pauses with no new text does not keep the prior attempt's
   expect(store.runs.get(agent.id, parked.run.id)?.output ?? "").not.toContain("STALE-FIRST-ATTEMPT");
 });
 
-test("recordRunResumed is an atomic claim: a second confirm on a claimed run loses", async () => {
+test("claimRunForResume is an atomic claim: a second confirm on a claimed run loses", async () => {
   // The store-level guard behind concurrent-confirm safety. Two confirms racing the
   // same parked run must not both proceed: the compare-and-set lets exactly one flip
   // awaiting_confirmation → running.
@@ -920,15 +920,11 @@ test("recordRunResumed is an atomic claim: a second confirm on a claimed run los
   expect(parked.status).toBe("awaiting_confirmation");
 
   // First claim wins and flips the run to running.
-  const won = store.recordRunResumed(agent.id, parked.run.id, ["delete_files"], []);
+  const won = store.claimRunForResume(agent.id, parked.run.id);
   expect(won?.status).toBe("running");
   // A second claim on the now-running run claims nothing.
-  const lost = store.recordRunResumed(agent.id, parked.run.id, ["delete_files"], []);
+  const lost = store.claimRunForResume(agent.id, parked.run.id);
   expect(lost).toBeUndefined();
-  // Exactly one run.resumed was recorded — the resume that actually happened.
-  expect(
-    store.events.tail(agent.id, { type: "run.resumed" }),
-  ).toHaveLength(1);
 });
 
 test("resumeRun treats a lost claim as not_paused and never re-runs the loop", async () => {
@@ -954,7 +950,7 @@ test("resumeRun treats a lost claim as not_paused and never re-runs the loop", a
   expect(parked.status).toBe("awaiting_confirmation");
 
   // A concurrent confirm already claimed the run (it is now `running`).
-  store.recordRunResumed(agent.id, parked.run.id, ["delete_files"], []);
+  store.claimRunForResume(agent.id, parked.run.id);
   // This confirm must NOT execute the destructive action a second time.
   const outcome = await resumeRun(store, agent, parked.run.id, {
     adapter,
