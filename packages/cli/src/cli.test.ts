@@ -266,6 +266,79 @@ test("events tail shows the kernel's own lifecycle log", async () => {
   expect(h.out.join("\n")).toContain("agent.created");
 });
 
+test("list reports an empty roster before any agent exists", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["list"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("No agents yet");
+});
+
+test("list shows the roster with each agent's name, trust, and role", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous", "--role", "personal helper"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  expect(await runCli(["list"], h.io)).toBe(0);
+  const out = h.out.join("\n");
+  expect(out).toContain("Agents (2)");
+  expect(out).toContain("personal · autonomous");
+  expect(out).toContain("role: personal helper");
+  expect(out).toContain("work · propose");
+});
+
+test("list needs an initialized workspace", async () => {
+  const h = harness(); // no init
+  expect(await runCli(["list"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("asterism init");
+});
+
+test("runs reports an empty history for a new agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  expect(await runCli(["runs", "personal"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("personal has no runs yet");
+});
+
+test("runs shows an agent's run history with status and input", async () => {
+  const h = harness();
+  await withFinishedRun(h, "personal");
+  expect(await runCli(["runs", "personal"], h.io)).toBe(0);
+  const out = h.out.join("\n");
+  expect(out).toContain("Runs for personal (1)");
+  expect(out).toContain("write the blog draft");
+  expect(out).toContain("done");
+});
+
+test("runs requires an agent name", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["runs"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Usage: asterism runs");
+});
+
+test("runs on a missing agent reports no such agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["runs", "ghost"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain('No agent named "ghost"');
+});
+
+test("runs never shows another agent's history", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "autonomous"], h.io);
+  await runCli(["run", "personal", "a personal task"], h.io);
+
+  const workRuns: string[] = [];
+  await runCli(["runs", "work"], { ...h.io, out: (t) => workRuns.push(t) });
+  const log = workRuns.join("\n");
+  expect(log).not.toContain("a personal task");
+  expect(log).toContain("work has no runs yet");
+});
+
 test("run drives the adapter, records the run, and prints output", async () => {
   const h = harness();
   h.io.makeAdapter = () => ({ adapter: fakeAdapter });

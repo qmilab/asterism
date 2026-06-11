@@ -34,7 +34,13 @@ import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
 
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
-import { formatEventList, formatMemoryList, shortId } from "./format.js";
+import {
+  formatAgentList,
+  formatEventList,
+  formatMemoryList,
+  formatRunList,
+  shortId,
+} from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import {
   agentWorkspace,
@@ -438,6 +444,41 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
   });
 }
 
+// --- list ------------------------------------------------------------------
+
+async function cmdList(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.list!);
+    return 0;
+  }
+  return withHomeStore(io, (store) => {
+    io.out(formatAgentList(store.agents.list()));
+    return 0;
+  });
+}
+
+// --- runs ------------------------------------------------------------------
+
+async function cmdRuns(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.runs!);
+    return 0;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism runs <agent>");
+    return 1;
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    io.out(formatRunList(store.runs.list(agent.id), agent.name));
+    return 0;
+  });
+}
+
 // --- memory inspect --------------------------------------------------------
 
 async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
@@ -809,6 +850,10 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdTrust(rest, io);
     case "run":
       return cmdRun(rest, io);
+    case "runs":
+      return cmdRuns(rest, io);
+    case "list":
+      return cmdList(rest, io);
     case "reflect":
       return cmdReflect(rest, io);
     case "serve":

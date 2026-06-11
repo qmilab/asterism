@@ -72,6 +72,31 @@ Created agent "writer" (notify) — soul: careful-consultant
 
 ---
 
+## `list`
+
+```
+asterism list
+```
+
+Show every agent in this workspace — its name, how much it may do on its own, and
+the one line it is responsible for. Reads the roster only; it never reaches into
+any agent's memory, secrets, or files.
+
+```console
+$ asterism list
+Agents (2):
+
+• writer · autonomous
+  role: tightens blog drafts
+• work · propose
+  role: client-facing consultant
+```
+
+Before any agent exists it prints `No agents yet. Create one with: asterism new
+<name>`.
+
+---
+
 ## `trust`
 
 ```
@@ -177,6 +202,32 @@ $ asterism run writer "tighten the intro in posts/launch.md"
 > to the agent's workspace (Phase 0 logical scoping — see
 > [what isolation means today](./concepts.md#what-isolation-means-today)). The
 > end-to-end behavior is shown in the [walkthrough](./walkthrough.md).
+
+---
+
+## `runs`
+
+```
+asterism runs <agent>
+```
+
+Review one agent's run history — each run's short id, status, what it was asked to
+do, and when it started and finished. Shows **only the named agent's runs**,
+oldest first.
+
+```console
+$ asterism runs writer
+Runs for writer (2):
+
+• a1b2c3d4 · done
+  tighten the intro in posts/launch.md
+  started 2026-06-10T12:01:00.000Z · finished 2026-06-10T12:01:04.000Z
+• e5f6a7b8 · awaiting_confirmation
+  delete the generated files in dist/
+  started 2026-06-10T12:05:00.000Z
+```
+
+An agent with no runs prints `writer has no runs yet.`
 
 ---
 

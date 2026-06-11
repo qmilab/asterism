@@ -6,10 +6,12 @@ test("usage lists every command in the surface", () => {
   for (const command of [
     "init",
     "new",
+    "list",
     "trust",
     "secrets add",
     "skill add",
     "run",
+    "runs <agent>",
     "memory inspect",
     "events tail",
     "reflect",
