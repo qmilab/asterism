@@ -617,12 +617,14 @@ asterism events tail client</div>
             </p>
 
             <p>
-              One honest note for Phase 0: a bare <code>run</code> returns the model's text. The
-              trust levels and the destructive-action pause act on an agent's <em>tools</em>, and
-              the shipped CLI registers none by default — so those two claims are proven end to end
-              by the <a href="/asterism/docs/walkthrough/">acceptance test</a>, which wires demo
-              tools through the same path and runs this exact flow. The memory and secret
-              boundaries, by contrast, you can see from a fresh install.
+              The gate acts on an agent's <em>tools</em>. The shipped CLI registers a default
+              catalog of workspace-scoped file tools — <code>read_file</code>,
+              <code>write_file</code>, <code>delete_file</code> — behind it, so with a
+              <a href="/asterism/docs/installation/">configured model</a> an ordinary edit runs
+              under <code>autonomous</code> while a deletion pauses regardless of trust level. The
+              memory and secret boundaries, by contrast, you can see from a fresh install — and all
+              five claims are verified end to end by the
+              <a href="/asterism/docs/walkthrough/">acceptance test</a>.
             </p>
 
             <p>

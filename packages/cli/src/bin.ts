@@ -12,11 +12,17 @@
 
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision } from "./cli.js";
+import { workspaceCapabilities } from "./capabilities.js";
 import type { Action } from "@qmilab/asterism-core";
 
 const io: CliIO = {
   cwd: process.cwd(),
   env: process.env,
+  // The default tool catalog the shipped binary exposes — real, workspace-scoped
+  // file tools behind the kernel's trust gate. Built per run from the agent's
+  // workspace so each tool is confined to that agent's directory; the kernel does
+  // the trust scoping and the destructive-action gating on top.
+  capabilities: workspaceCapabilities,
   out: (text) => {
     process.stdout.write(`${text}\n`);
   },
@@ -27,7 +33,16 @@ const io: CliIO = {
   // never auto-approve — the safe default is to stay paused.
   confirm: (action: Action) => {
     if (!process.stdin.isTTY) return false;
-    const answer = prompt(`Confirm destructive action '${action.capability}'? [y/N]`);
+    // Show the action's arguments (e.g. the path a delete targets) so the human is
+    // approving a specific operation, not a bare capability name — the difference
+    // between confirming one file and confirming a whole directory. `JSON.stringify`
+    // can return undefined (e.g. for a function arg); guard and cap the length.
+    let detail = "";
+    if (action.args !== undefined) {
+      const rendered = JSON.stringify(action.args);
+      if (rendered) detail = rendered.length > 200 ? ` ${rendered.slice(0, 200)}…` : ` ${rendered}`;
+    }
+    const answer = prompt(`Confirm destructive action '${action.capability}'${detail}? [y/N]`);
     return answer !== null && /^y(es)?$/i.test(answer.trim());
   },
   // Only consume stdin when it is piped, so an interactive session is not blocked

@@ -42,9 +42,10 @@ export interface ExecuteRunOptions {
    */
   confirm?: (action: Action) => boolean | Promise<boolean>;
   /**
-   * Capabilities to expose to this run. Phase 0 registers none — confined by
-   * default means an empty tool set; the gate wiring is in place for when tools
-   * land.
+   * Capabilities to expose to this run. Confined by default: absent ⇒ an empty
+   * tool set. A host supplies the real catalog (the CLI ships workspace-scoped
+   * file tools); the kernel filters it by trust level and gates whatever it is
+   * handed — it never constructs a tool itself.
    */
   capabilities?: readonly Capability[];
 }
@@ -97,10 +98,10 @@ export async function executeRun(
 
   // Resolve the agent's trust level into the tool set this run may use, with the
   // destructive-action gate wired into every tool's `execute` closure and each
-  // gate decision audited to the event log. Phase 0 registers no capabilities —
-  // confined by default means an empty tool set; the exposure list is derived from
-  // exactly the capabilities handed in (none, today), and `autoApprove` stays
-  // empty so every destructive action pauses regardless of trust level.
+  // gate decision audited to the event log. Confined by default — the exposure
+  // list is derived from exactly the capabilities the caller handed in (an empty
+  // set if none), and `autoApprove` stays empty so every destructive action pauses
+  // regardless of trust level.
   const abortController = new AbortController();
   const capabilities = options.capabilities ?? [];
   const profile = trustProfile({

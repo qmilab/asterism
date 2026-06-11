@@ -90,6 +90,10 @@ Put an agent to work on a task, framed by its role, character, skills, and the
 memories it has accepted. What it may do on its own depends on its autonomy level;
 destructive actions always pause for your confirmation first.
 
+The agent can read, write, and delete files in its own workspace. Reading and
+writing run according to its autonomy level; deleting is destructive and pauses
+for your confirmation at every level.
+
 Configure a model with the ASTERISM_MODEL_ID environment variable (and an API key,
 e.g. OPENAI_API_KEY) before running.`,
 

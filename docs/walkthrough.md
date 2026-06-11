@@ -1,9 +1,9 @@
 # Five-claims walkthrough
 
 Asterism makes five promises about keeping agents separate and keeping you in
-control. This page is the canonical demo that proves them, and an honest account
-of which you can see by typing commands today versus which are demonstrated by
-the automated acceptance test.
+control. This page is the canonical demo that proves them: what each claim looks
+like from the command line, and how the automated acceptance test verifies all
+five end to end.
 
 The five claims:
 
@@ -41,26 +41,33 @@ asterism reflect personal --review
 Two agents, deliberately different: `personal` is `autonomous` and casual;
 `work` is `propose` and careful, and holds a secret the other must never see.
 
-## What you can see from the CLI today, and what the test proves
+## What you can see from the CLI, and what the test proves
 
-Three of the five claims are visible directly from a fresh install:
+All five claims are demonstrable from a fresh install:
 
 - **Claims 1 and 2** (memory and secret separation) hold structurally — they are
   true the moment you create the agents, with or without a model.
-- **Claim 5** (reviewable reflection) runs end to end with a
-  [configured model](./installation.md#configuring-a-model).
+- **Claims 3, 4, and 5** run end to end with a
+  [configured model](./installation.md#configuring-a-model): the model drives the
+  agent, and the kernel decides what it may actually do.
 
-**Claims 3 and 4 are about an agent's *actions* — the tools it uses.** In
-Phase 0 the shipped CLI runs agents with **no external tools registered**, so a
-bare `asterism run` returns the model's text and there is no file-deleting tool
-for the gate to stop. Tool registration is a deliberate host seam — the trust
-profile and the destructive-action gate are fully built and tested; what Phase 0
-does not yet ship is a default catalog of real tools behind them.
+**Claims 3 and 4 are about an agent's *actions* — the tools it uses.** The shipped
+CLI registers a default catalog of **workspace-scoped file tools** —
+`read_file`, `write_file`, and `delete_file` — behind the trust gate.
+`read_file`/`write_file` are ordinary read/write effects; `delete_file` is
+declared destructive. So a bare `asterism run` (with a model configured) gives the
+gate real actions to govern: an ordinary write executes under `autonomous`, and a
+deletion pauses for confirmation regardless of trust level.
 
-So claims 3 and 4 are proven by the **acceptance test**, which wires three demo
-tools (`edit_files`, `tidy_notes`, `delete_files`) through that same seam and
-runs the exact demo above against the real on-disk store. See
-[Running the acceptance test](#running-the-acceptance-test).
+Each tool is confined to the agent's own workspace — a path that climbs out
+(`..`, an absolute path) is refused. That is Phase 0's *logical* scoping, not an
+OS-enforced jail (see
+[what isolation means today](./concepts.md#what-isolation-means-today)).
+
+The **acceptance test** verifies all five claims without an API key: it runs the
+exact demo above against the real on-disk store with a scripted stand-in for the
+model, so the boundary, trust enforcement, and the destructive-action gate are
+exercised for real. See [Running the acceptance test](#running-the-acceptance-test).
 
 ---
 
@@ -104,14 +111,14 @@ secret resolves for its owner and for no one else. `personal` has no way to read
 
 ## Claim 3 — propose plans, autonomous acts
 
-This is where tools matter. With the demo tools wired (as the acceptance test
-does):
+This is where tools matter. Both agents are offered the same workspace-scoped
+file tools; only their trust level differs:
 
 - **`work` is `propose`.** Its run does not perform the notes cleanup — it
   withholds it as a plan step:
 
   ```
-  [proposed] 'tidy_notes' was not executed (trust level: propose). The intended
+  [proposed] 'fs.write' was not executed (trust level: propose). The intended
   action has been recorded as a plan step for human review.
   ```
 
@@ -125,11 +132,9 @@ Same tools, same task shape — the difference is entirely the trust level.
 ## Claim 4 — the destructive gate fires regardless of trust
 
 `personal` is `autonomous` — the highest trust level — and its task asks it to
-**delete** the files in `dist/`. With the demo tools wired (as in Claim 3, and as
-the acceptance test does), it still stops:
+**delete** the files in `dist/`. It still stops:
 
 ```console
-# acceptance-test scenario — demo tools wired through the host seam
 $ asterism run personal "update my blog draft and delete the generated files in dist/"
 Run paused: a destructive action needs your confirmation before it can proceed.
 ```
@@ -189,3 +194,8 @@ the memory firewall, the event log — is the real thing, end to end.
 Each claim is its own assertion in
 [`packages/cli/src/acceptance.test.ts`](https://github.com/qmilab/asterism/blob/main/packages/cli/src/acceptance.test.ts).
 If a change breaks any of the five, it does not ship.
+
+The shipped file-tool catalog has its own end-to-end test,
+[`packages/cli/src/catalog.test.ts`](https://github.com/qmilab/asterism/blob/main/packages/cli/src/catalog.test.ts),
+which drives the exact tools `asterism run` registers — so claims 3 and 4 are
+proven for the real catalog, not only the acceptance test's stand-ins.
