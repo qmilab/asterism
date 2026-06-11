@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsterismStore } from "./store";
-import { secretValueRef } from "./secrets";
+import { RESERVED_SECRET_PREFIX, secretValueRef } from "./secrets";
 import type { Agent } from "./types";
 
 let store: AsterismStore;
@@ -69,6 +69,35 @@ describe("secret store — issue / read round-trip", () => {
     expect(store.secrets.delete(alice.id, "A")).toBe(true);
     expect(store.secrets.has(alice.id, "A")).toBe(false);
     expect(store.secrets.delete(alice.id, "A")).toBe(false);
+  });
+});
+
+describe("secret store — the kernel-reserved namespace is off-limits to user writes", () => {
+  const reservedKey = `${RESERVED_SECRET_PREFIX}action_fingerprint_key`;
+
+  test("issue (the user credential path) rejects a reserved key", () => {
+    expect(() => store.secrets.issue(alice.id, reservedKey, "evil")).toThrow(/reserved/);
+    // addCredential goes through issue, so `secrets add` is blocked too.
+    expect(() => store.addCredential(alice.id, reservedKey, "evil")).toThrow(/reserved/);
+  });
+
+  test("ensure (the kernel path) may seed a reserved key and never rotates it", () => {
+    const first = store.secrets.ensure(alice.id, reservedKey, "seed-1");
+    expect(first).toBe("seed-1");
+    // A second ensure with a different value is a no-op — the original key stands.
+    expect(store.secrets.ensure(alice.id, reservedKey, "seed-2")).toBe("seed-1");
+  });
+
+  test("a user cannot overwrite the kernel's action-fingerprint key out from under a run", () => {
+    // The kernel seeds its per-agent fingerprint key lazily.
+    const key = store.actionFingerprintKey(alice.id);
+    expect(key).toMatch(/^[0-9a-f]{64}$/);
+    // An operator trying to rotate it via `secrets add` is refused, so the key the
+    // resume gate relies on stays stable across a paused run.
+    expect(() => store.addCredential(alice.id, `${RESERVED_SECRET_PREFIX}action_fingerprint_key`, "x")).toThrow(
+      /reserved/,
+    );
+    expect(store.actionFingerprintKey(alice.id)).toBe(key); // unchanged
   });
 });
 

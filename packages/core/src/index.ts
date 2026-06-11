@@ -67,7 +67,12 @@ export type {
 
 // The local secret store — holds credential plaintext behind a scoped `read`;
 // the credentials table stores only the `valueRef` into it.
-export { SecretStore, secretValueRef } from "./secrets.js";
+export {
+  SecretStore,
+  secretValueRef,
+  RESERVED_SECRET_PREFIX,
+  isReservedSecretKey,
+} from "./secrets.js";
 export type { SecretRef } from "./secrets.js";
 
 // The ReflectionProvider contract — the kernel/reflection seam. Core defines it

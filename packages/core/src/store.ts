@@ -23,7 +23,7 @@ import type {
   TrustLevel,
 } from "./types.js";
 import { EventRepository } from "./repositories/events.js";
-import { SecretStore, secretValueRef } from "./secrets.js";
+import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError } from "./firewall.js";
 
 /**
@@ -380,12 +380,14 @@ export class AsterismStore {
    * oracle on low-entropy arguments (a reader cannot hash candidate paths/commands
    * and match, because they lack this key). A reserved internal key, never a user
    * credential; reading it is the kernel using its own key, not surfacing a value
-   * to the substrate.
+   * to the substrate. Its key sits in the kernel-reserved secret namespace, so a
+   * user `secrets add` cannot rotate it and invalidate a paused run's fingerprints
+   * (only `ensure`, used here, may write there — `issue` rejects reserved keys).
    */
   actionFingerprintKey(agentId: string): string {
     return this.secrets.ensure(
       agentId,
-      "__asterism.action_fingerprint_key__",
+      `${RESERVED_SECRET_PREFIX}action_fingerprint_key`,
       randomBytes(32).toString("hex"),
     );
   }

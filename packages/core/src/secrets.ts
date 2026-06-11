@@ -20,6 +20,20 @@
 import type { SqlDriver, SqlRow } from "./db/driver.js";
 import { requireAgentId } from "./repositories/scope.js";
 
+/**
+ * Keys under this prefix are RESERVED for the kernel's own internal secrets (e.g.
+ * the action-fingerprint key the resume gate depends on). User credential writes
+ * ({@link SecretStore.issue}) reject them, so an operator's `secrets add` can never
+ * overwrite a kernel key out from under a paused run; only {@link SecretStore.ensure}
+ * (the kernel's create-if-absent path) may write here.
+ */
+export const RESERVED_SECRET_PREFIX = "__asterism.";
+
+/** Whether a secret key belongs to the kernel's reserved namespace. */
+export function isReservedSecretKey(key: string): boolean {
+  return key.startsWith(RESERVED_SECRET_PREFIX);
+}
+
 /** A stored secret's metadata — deliberately without the value. */
 export interface SecretRef {
   agentId: string;
@@ -62,6 +76,13 @@ export class SecretStore {
     if (typeof key !== "string" || key.length === 0) {
       throw new Error("a secret key is required");
     }
+    // The kernel-reserved namespace is off-limits to user credential writes: a
+    // `secrets add` must never rotate (and thereby invalidate) a key the kernel
+    // depends on, such as the action-fingerprint key a paused run was fingerprinted
+    // under. The kernel seeds its own keys via `ensure`, which is exempt.
+    if (isReservedSecretKey(key)) {
+      throw new Error(`the secret key "${key}" is reserved for internal use`);
+    }
     const valueRef = secretValueRef(agentId, key);
     const createdAt = new Date().toISOString();
     const row = this.driver
@@ -83,7 +104,8 @@ export class SecretStore {
    * rotates (`ON CONFLICT DO NOTHING`), so two callers racing to seed the same key
    * converge on a single value rather than overwriting each other. The kernel uses
    * it for internal keys it generates lazily (e.g. the action-fingerprint key),
-   * never for user credentials.
+   * never for user credentials — and unlike {@link issue} it is EXEMPT from the
+   * reserved-namespace check, since seeding those kernel keys is exactly its job.
    */
   ensure(agentId: string, key: string, value: string): string {
     requireAgentId(agentId);

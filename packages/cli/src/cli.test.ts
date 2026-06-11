@@ -241,6 +241,18 @@ test("secrets add reports when no value is available", async () => {
   expect(h.err.join("\n")).toContain("No value for GITHUB_TOKEN");
 });
 
+test("secrets add refuses a key in the kernel-reserved namespace", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+  // The kernel's internal keys (e.g. the action-fingerprint key) live under this
+  // prefix; a user must not be able to set/rotate one and break a paused run.
+  expect(
+    await runCli(["secrets", "add", "work", "__asterism.action_fingerprint_key", "evil"], h.io),
+  ).toBe(1);
+  expect(h.err.join("\n")).toContain("reserved");
+});
+
 test("skill add copies a markdown skill into the agent's workspace", async () => {
   const h = harness();
   await runCli(["init"], h.io);
