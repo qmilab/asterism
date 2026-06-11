@@ -674,6 +674,48 @@ test("a resume binds approval to the exact action: a reordered same-capability t
   expect(deleted).toEqual([]);
 });
 
+test("a resume that re-pauses with no new text does not keep the prior attempt's transcript", async () => {
+  // The first pause persisted a transcript. The resume re-runs from the start and
+  // pauses again before producing any text; the row must not still carry the stale
+  // first-attempt transcript (which `reflect` could otherwise pick up).
+  let invocation = 0;
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const n = invocation++;
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "delete_files");
+        if (n === 0) {
+          await tool?.execute({ args: { path: "dist" } }, request.signal);
+          return { status: "done", text: "STALE-FIRST-ATTEMPT" };
+        }
+        // On resume the replay reaches a NEW destructive target first, which has no
+        // budget, so it pauses again — and this attempt produced no text.
+        await tool?.execute({ args: { path: "cache" } }, request.signal);
+        return { status: "done", text: "" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const parked = await executeRun(store, agent, "delete dist", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(store.runs.get(agent.id, parked.run.id)?.output).toBe("STALE-FIRST-ATTEMPT");
+
+  const resumed = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(resumed.kind).toBe("resumed");
+  if (resumed.kind !== "resumed") return;
+  expect(resumed.result.status).toBe("awaiting_confirmation");
+  // The re-run cleared the stale transcript; nothing for `reflect` to pick up.
+  expect(store.runs.get(agent.id, parked.run.id)?.output ?? "").not.toContain("STALE-FIRST-ATTEMPT");
+});
+
 test("recordRunResumed is an atomic claim: a second confirm on a claimed run loses", async () => {
   // The store-level guard behind concurrent-confirm safety. Two confirms racing the
   // same parked run must not both proceed: the compare-and-set lets exactly one flip

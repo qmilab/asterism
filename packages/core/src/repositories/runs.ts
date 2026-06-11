@@ -121,9 +121,15 @@ export class RunRepository {
    */
   claimForResume(agentId: string, id: string): Run | undefined {
     requireAgentId(agentId);
+    // Also CLEAR `output`: the run is being re-executed from the start, so the
+    // transcript persisted at the previous pause is stale. Leaving it would let a
+    // resume that re-pauses before producing new text keep the old attempt's text
+    // on the row (and `reflect` could pick it up via `latestWithOutput`). A re-run
+    // that completes or re-pauses with text overwrites this NULL; one that produces
+    // nothing honestly has no transcript.
     const row = this.driver
       .prepare(
-        `UPDATE runs SET status = 'running', finished_at = NULL
+        `UPDATE runs SET status = 'running', finished_at = NULL, output = NULL
           WHERE id = ? AND agent_id = ? AND status = 'awaiting_confirmation'
           RETURNING *`,
       )

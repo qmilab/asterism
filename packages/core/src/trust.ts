@@ -23,7 +23,7 @@
 // Nothing here imports Pi or any adapter. Core owns the policy; the adapter only
 // ever sees the wrapped tools this module produces.
 
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 
 import type {
   ScopedTool,
@@ -241,16 +241,18 @@ function stableStringify(value: unknown): string {
  * different arguments (deleting `dist` vs `cache`) have different fingerprints, so a
  * confirmation for one never clears the other.
  *
- * It is a one-way digest — a REFERENCE to the action, never a path back to its
- * arguments — so it is safe to record on the event log alongside the capability and
- * effect, preserving the log's references-only guarantee (the arguments, which can
- * carry a live secret value, are still never written). Phase 0's gated tools take
- * paths and command strings, not secrets; a future destructive capability that
- * accepts secret-bearing arguments should fingerprint under a stored salt so the
- * digest cannot be confirmed by guessing.
+ * It is a KEYED HMAC, not a bare hash. `key` is the agent's secret action-
+ * fingerprint key ({@link AsterismStore.actionFingerprintKey}); without it, an
+ * attacker who can read the event log (e.g. over the HTTP events endpoint) could
+ * dictionary-attack a bare digest of low-entropy arguments like `{ path: "dist" }`
+ * and recover what the log deliberately never stores. Keying defeats that: the
+ * digest is a REFERENCE to the action, never a path back to its arguments, so it is
+ * safe to record alongside the capability and effect while preserving the event
+ * log's references-only guarantee. The recording side (`audit.ts`) and the matching
+ * side (`claimPreApproval`) pass the same key, so their fingerprints agree.
  */
-export function actionFingerprint(args: unknown): string {
-  return createHash("sha256").update(stableStringify(args)).digest("hex").slice(0, 32);
+export function actionFingerprint(args: unknown, key: string): string {
+  return createHmac("sha256", key).update(stableStringify(args)).digest("hex").slice(0, 32);
 }
 
 // ---------------------------------------------------------------------------

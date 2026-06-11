@@ -223,6 +223,11 @@ async function runAndPersist(
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),
   });
+  // The agent's secret key for fingerprinting a paused action's arguments. The same
+  // key feeds the audit (which records the fingerprint on a pause) and the gate
+  // (which recomputes it to match a pre-approval), so the two agree, and a reader of
+  // the event log cannot guess the fingerprint without it.
+  const fingerprintKey = store.actionFingerprintKey(agent.id);
   // A private, MUTABLE copy of the resume's approval budget, keyed per paused
   // ACTION — capability AND a fingerprint of its arguments, not capability alone.
   // Each pre-approved destructive action spends one unit (`claimPreApproval`), so
@@ -232,7 +237,7 @@ async function runAndPersist(
   // is ever pre-approved.
   const remainingApprovals = new Map(preApprovedBudget);
   const claimPreApproval = (action: Action): boolean => {
-    const key = approvalKey(action.capability, actionFingerprint(action.args));
+    const key = approvalKey(action.capability, actionFingerprint(action.args, fingerprintKey));
     const left = remainingApprovals.get(key) ?? 0;
     if (left <= 0) return false;
     remainingApprovals.set(key, left - 1);
@@ -296,7 +301,7 @@ async function runAndPersist(
     abortController,
     ...(options.confirm ? { confirm: options.confirm } : {}),
   };
-  const hooks = auditTrustHooks(store.events, agent.id, { runId: run.id }, baseHooks);
+  const hooks = auditTrustHooks(store.events, agent.id, { runId: run.id, fingerprintKey }, baseHooks);
   const tools = resolveToolRegistry(profile, capabilities, hooks);
 
   // Frame the run from the agent's identity: soul, role, scoped skills, and the

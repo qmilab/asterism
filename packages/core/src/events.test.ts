@@ -326,7 +326,7 @@ describe("audit bridge — trust-gate decisions become events", () => {
   });
 
   test("a destructive action at autonomous logs action.awaiting_confirmation and the effect is classified", async () => {
-    const hooks = auditTrustHooks(store.events, alice.id);
+    const hooks = auditTrustHooks(store.events, alice.id, { fingerprintKey: "test-fingerprint-key" });
     const registry = resolveToolRegistry(
       // declared write, but the command escalates to destructive via the taxonomy.
       trustProfile({ level: "autonomous", capabilities: ["shell"] }),

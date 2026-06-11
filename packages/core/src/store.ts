@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import type { SqlDriver } from "./db/driver.js";
 import { openDatabase } from "./db/index.js";
 import { SCHEMA } from "./db/schema.js";
@@ -364,6 +366,25 @@ export class AsterismStore {
       });
       return true;
     });
+  }
+
+  /**
+   * The agent-scoped key for fingerprinting destructive-action arguments on a
+   * pause (see `audit.ts` and `resumeRun`). Lazily generated and held in the
+   * agent's secret store, so the fingerprint recorded on an `action.awaiting_
+   * confirmation` event is a KEYED HMAC, not a bare hash: the event log can carry
+   * it as a reference to the paused invocation without it becoming a dictionary
+   * oracle on low-entropy arguments (a reader cannot hash candidate paths/commands
+   * and match, because they lack this key). A reserved internal key, never a user
+   * credential; reading it is the kernel using its own key, not surfacing a value
+   * to the substrate.
+   */
+  actionFingerprintKey(agentId: string): string {
+    return this.secrets.ensure(
+      agentId,
+      "__asterism.action_fingerprint_key__",
+      randomBytes(32).toString("hex"),
+    );
   }
 
   /** Open a store backed by a local SQLite database (in-memory by default). */

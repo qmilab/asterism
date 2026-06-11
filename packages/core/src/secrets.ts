@@ -77,6 +77,34 @@ export class SecretStore {
   }
 
   /**
+   * Get-or-create: store `value` under the agent's `key` ONLY if none exists
+   * there yet, and return the effective stored value — the existing one on
+   * conflict, the freshly-stored one otherwise. Unlike {@link issue} this never
+   * rotates (`ON CONFLICT DO NOTHING`), so two callers racing to seed the same key
+   * converge on a single value rather than overwriting each other. The kernel uses
+   * it for internal keys it generates lazily (e.g. the action-fingerprint key),
+   * never for user credentials.
+   */
+  ensure(agentId: string, key: string, value: string): string {
+    requireAgentId(agentId);
+    if (typeof key !== "string" || key.length === 0) {
+      throw new Error("a secret key is required");
+    }
+    const valueRef = secretValueRef(agentId, key);
+    const createdAt = new Date().toISOString();
+    this.driver
+      .prepare(
+        `INSERT INTO secrets (value_ref, agent_id, key, value, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id, key) DO NOTHING`,
+      )
+      .run([valueRef, agentId, key, value, createdAt]);
+    const stored = this.readByKey(agentId, key);
+    if (stored === undefined) throw new Error("secret ensure did not persist");
+    return stored;
+  }
+
+  /**
    * Resolve a value_ref to its plaintext, scoped to the agent. The ONLY path
    * that returns a value. Cross-agent reads return undefined — a value_ref minted
    * for one agent cannot be redeemed by another. Destructive-classified: callers

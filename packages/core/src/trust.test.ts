@@ -3,6 +3,7 @@ import type { ScopedTool, ToolInvocation } from "./adapter";
 import { AsterismStore } from "./store";
 import {
   DESTRUCTIVE_COMMAND_RULES,
+  actionFingerprint,
   classifyEffect,
   decideGate,
   isDestructive,
@@ -238,6 +239,20 @@ describe("classifyEffect — explicit, escalate-only classification", () => {
     );
     // A plain push of a +-free refspec is not.
     expect(matchDestructiveCommand("git push origin main")).toBeUndefined();
+  });
+
+  test("actionFingerprint is keyed, stable, and order-insensitive over object keys", () => {
+    const args = { path: "dist" };
+    // Keyed: the SAME args under different keys differ — so a reader of the event
+    // log cannot dictionary-attack a paused action's arguments without the key.
+    expect(actionFingerprint(args, "key-a")).not.toBe(actionFingerprint(args, "key-b"));
+    // Stable: same key + same args always match, so a resume's recompute lines up
+    // with what the pause recorded.
+    expect(actionFingerprint(args, "key-a")).toBe(actionFingerprint(args, "key-a"));
+    // Different arguments under one key differ — `dist` never matches `cache`.
+    expect(actionFingerprint({ path: "dist" }, "k")).not.toBe(actionFingerprint({ path: "cache" }, "k"));
+    // Object key order is not significant; array order is preserved elsewhere.
+    expect(actionFingerprint({ a: 1, b: 2 }, "k")).toBe(actionFingerprint({ b: 2, a: 1 }, "k"));
   });
 
   test("isDestructive agrees with classifyEffect", () => {
