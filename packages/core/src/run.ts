@@ -19,7 +19,7 @@ import type { RuntimeAdapter, RunOutput, RunEvent } from "./adapter.js";
 import { frameRun, resolveSoul } from "./framing.js";
 import type { SkillContext } from "./framing.js";
 import { auditTrustHooks } from "./audit.js";
-import { classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
+import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
 import type { Action, Capability, EffectClass, TrustHooks } from "./trust.js";
 import type { AsterismStore } from "./store.js";
 import type { Agent, Run, RunStatus } from "./types.js";
@@ -197,12 +197,12 @@ export async function executeRun(
  * outcome.
  *
  * `preApprovedBudget` is the ONLY difference between the two callers: empty for a
- * fresh run (every destructive action pauses), or a per-capability COUNT for a
- * resume — how many destructive invocations of each capability a human confirmed.
- * It is consumed one unit per pre-approved action, so resuming clears exactly the
- * confirmed invocations and a further destructive call (the same capability with a
- * new target, or a different capability) still pauses. A resume never widens the
- * gate into a blanket grant.
+ * fresh run (every destructive action pauses), or a COUNT per paused ACTION for a
+ * resume — keyed by capability AND an arguments fingerprint, so it grants exactly
+ * the invocations a human confirmed. It is consumed one unit per pre-approved
+ * action, so resuming clears those exact invocations and a further destructive call
+ * — a different capability, OR the same capability aimed at a new target — still
+ * pauses. A resume never widens the gate into a blanket grant.
  */
 async function runAndPersist(
   store: AsterismStore,
@@ -223,15 +223,19 @@ async function runAndPersist(
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),
   });
-  // A private, MUTABLE copy of the resume's per-capability approval budget. Each
-  // pre-approved destructive action spends one unit (`claimPreApproval`), so the
-  // standing grant covers exactly the invocations a human confirmed and a further
-  // one still pauses. Empty for a fresh run, so nothing is ever pre-approved.
+  // A private, MUTABLE copy of the resume's approval budget, keyed per paused
+  // ACTION — capability AND a fingerprint of its arguments, not capability alone.
+  // Each pre-approved destructive action spends one unit (`claimPreApproval`), so
+  // the standing grant covers exactly the invocations a human confirmed: a delete
+  // of `dist` does not clear a delete of `cache` (different fingerprint), and a
+  // call beyond the confirmed count still pauses. Empty for a fresh run, so nothing
+  // is ever pre-approved.
   const remainingApprovals = new Map(preApprovedBudget);
   const claimPreApproval = (action: Action): boolean => {
-    const left = remainingApprovals.get(action.capability) ?? 0;
+    const key = approvalKey(action.capability, actionFingerprint(action.args));
+    const left = remainingApprovals.get(key) ?? 0;
     if (left <= 0) return false;
-    remainingApprovals.set(action.capability, left - 1);
+    remainingApprovals.set(key, left - 1);
     return true;
   };
   // Accumulate the run's gate decisions for the post-run summary, sourced from the
@@ -395,27 +399,41 @@ async function runAndPersist(
   };
 }
 
+// The approval budget keys an action by capability AND a fingerprint of its
+// arguments, joined by a NUL (which a capability key can never contain), so the
+// grant is tied to a specific invocation rather than a whole capability. The
+// fingerprint comes from the paused event (recorded by `audit.ts`) on the budget
+// side, and is recomputed from the live action (`claimPreApproval`) on the gate
+// side; the two agree because both use {@link actionFingerprint}.
+const APPROVAL_KEY_SEP = "\u0000";
+function approvalKey(capability: string, fingerprint: string): string {
+  return `${capability}${APPROVAL_KEY_SEP}${fingerprint}`;
+}
+function capabilityOf(key: string): string {
+  const i = key.indexOf(APPROVAL_KEY_SEP);
+  return i === -1 ? key : key.slice(0, i);
+}
+
 /**
- * The per-capability approval budget a confirm grants for a run: for each
- * destructive capability, HOW MANY of its invocations the run has been gated on,
- * counted from the run's own event log (scoped to the agent AND run at the storage
- * layer; references only — the log holds capability keys, never the action's args).
+ * The approval budget a confirm grants for a run: for each paused ACTION (keyed by
+ * capability + an arguments fingerprint), HOW MANY times the run has been gated on
+ * it, counted from the run's own event log (scoped to the agent AND run at the
+ * storage layer; references only — the log holds capability keys and a one-way
+ * arguments fingerprint, never the args).
  *
- * A COUNT, not a set, and that is the whole point. Resuming re-enters the loop from
- * the start, so the replay re-encounters every destructive action the run took
- * before. Granting a bounded count per capability lets the replay clear exactly the
- * invocations a human confirmed and pause at the first one beyond them — so a run
- * that deletes `dist` and then `cache` through the same `fs.delete` capability,
- * confirmed once, clears only the `dist` delete and pauses again on `cache`, rather
- * than a blanket capability grant green-lighting both.
+ * Keyed per action, not per capability, so the grant is bound to the exact paused
+ * invocation: a run that deletes `dist` then `cache` through one `fs.delete`
+ * capability, confirmed once, clears only the `dist` delete; the `cache` delete has
+ * a different fingerprint, no budget, and pauses again. And a COUNT, not a set, so a
+ * second identical call beyond the confirmed number still pauses.
  *
- * The count is CUMULATIVE across resume cycles by construction: a pre-approved
- * action executes without emitting `action.awaiting_confirmation` (it never pauses),
- * so only genuine pauses are counted, and each successive confirm sees the budget
- * grow by exactly the newly-paused invocations. That is what lets a multi-step run
- * converge across confirms without ever re-granting more than was gated.
+ * CUMULATIVE across resume cycles by construction: a pre-approved action executes
+ * without emitting `action.awaiting_confirmation` (it never pauses), so only genuine
+ * pauses are counted, and each successive confirm sees the budget grow by exactly
+ * the newly-paused invocations. That is what lets a multi-step run converge across
+ * confirms without ever re-granting more than was gated.
  */
-export function confirmationBudget(
+function confirmationBudget(
   store: AsterismStore,
   agentId: string,
   runId: string,
@@ -426,8 +444,10 @@ export function confirmationBudget(
     const payload = event.payload;
     if (payload === null || typeof payload !== "object") continue;
     const cap = (payload as { capability?: unknown }).capability;
-    if (typeof cap !== "string") continue;
-    budget.set(cap, (budget.get(cap) ?? 0) + 1);
+    const fingerprint = (payload as { fingerprint?: unknown }).fingerprint;
+    if (typeof cap !== "string" || typeof fingerprint !== "string") continue;
+    const key = approvalKey(cap, fingerprint);
+    budget.set(key, (budget.get(key) ?? 0) + 1);
   }
   return budget;
 }
@@ -480,18 +500,30 @@ export async function resumeRun(
   runId: string,
   options: ExecuteRunOptions,
 ): Promise<ResumeOutcome> {
+  // Cheap pre-checks for clear errors. NOT the authoritative guard — the atomic
+  // claim below is — but they avoid computing a budget for a run that obviously
+  // cannot be resumed.
   const parked = store.runs.get(agent.id, runId);
   if (!parked) return { kind: "not_found" };
   if (parked.status !== "awaiting_confirmation") return { kind: "not_paused", run: parked };
 
-  // What this confirm grants — a bounded count of destructive invocations per
-  // capability, sized to exactly what the run has been gated on (cumulative, so the
-  // replay clears earlier confirmed actions too without ever over-granting).
+  // What this confirm grants — a bounded count of pre-approvals per paused action
+  // (capability + arguments fingerprint), sized to exactly what the run has been
+  // gated on (cumulative, so the replay clears earlier confirmed actions too
+  // without ever over-granting).
   const budget = confirmationBudget(store, agent.id, runId);
-  // Record the confirmation and flip the run back to `running` BEFORE re-entering
-  // the loop, so the audit shows the grant ahead of the action it permits.
-  store.recordRunResumed(agent.id, runId, [...budget.keys()]);
+  const confirmed = [...new Set([...budget.keys()].map(capabilityOf))];
 
-  const result = await runAndPersist(store, agent, parked, parked.input, options, budget);
+  // Atomically claim the run (awaiting_confirmation → running) and record the
+  // grant. If the claim is lost — a concurrent confirm already took it, or it
+  // changed under us — DO NOT re-enter the loop: that is what stops two racing
+  // confirms from executing the same destructive action twice.
+  const claimed = store.recordRunResumed(agent.id, runId, confirmed);
+  if (!claimed) {
+    const current = store.runs.get(agent.id, runId);
+    return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
+  }
+
+  const result = await runAndPersist(store, agent, claimed, claimed.input, options, budget);
   return { kind: "resumed", result };
 }

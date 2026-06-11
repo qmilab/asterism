@@ -337,7 +337,12 @@ describe("audit bridge — trust-gate decisions become events", () => {
     const evt = store.events.tail(alice.id, {
       type: "action.awaiting_confirmation",
     })[0];
-    expect(evt?.payload).toEqual({ capability: "shell", effect: "destructive" });
+    const payload = evt?.payload as { capability: string; effect: string; fingerprint: string };
+    expect(payload.capability).toBe("shell");
+    expect(payload.effect).toBe("destructive");
+    // A pause also carries a non-reversible arguments fingerprint (a reference, not
+    // the args) so an out-of-band resume can bind a confirmation to this exact call.
+    expect(payload.fingerprint).toMatch(/^[0-9a-f]{32}$/);
   });
 
   test("the audit bridge preserves base hooks (composed, not replaced)", async () => {

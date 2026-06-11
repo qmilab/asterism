@@ -11,7 +11,10 @@
 // persists to the event log must record references, never the arguments a model
 // produced — those can carry a live secret value. So the payload here is the
 // capability key plus the *effective* effect class (after destructive
-// escalation) and nothing else. `action.args` is never written.
+// escalation). `action.args` is never written. The one addition is on a pause: a
+// non-reversible `fingerprint` of the args (a one-way digest — a reference to the
+// invocation, not a path back to its arguments), which the out-of-band resume uses
+// to bind a confirmation to the exact paused action. It reveals no argument value.
 //
 // This module depends on `trust` and the event repository; nothing depends on it.
 // It deliberately does NOT know about the store or run-status transitions: the
@@ -20,7 +23,7 @@
 // passes them in to be preserved alongside the audit writes.
 
 import type { Action, TrustHooks } from "./trust.js";
-import { classifyEffect } from "./trust.js";
+import { actionFingerprint, classifyEffect } from "./trust.js";
 import type { EventRepository } from "./repositories/events.js";
 
 /** Run context stamped onto every audit event so the log ties back to a run. */
@@ -47,11 +50,11 @@ export function auditTrustHooks(
   base: TrustHooks = {},
 ): TrustHooks {
   const { runId } = context;
-  const record = (type: string, action: Action): void => {
+  const record = (type: string, action: Action, extra?: Record<string, unknown>): void => {
     events.append(agentId, {
       type,
       ...(runId !== undefined ? { runId } : {}),
-      payload: { capability: action.capability, effect: classifyEffect(action) },
+      payload: { capability: action.capability, effect: classifyEffect(action), ...extra },
     });
   };
   return {
@@ -65,7 +68,12 @@ export function auditTrustHooks(
       base.onWithhold?.(action);
     },
     onAwaitConfirmation: (action) => {
-      record("action.awaiting_confirmation", action);
+      // The pause carries a non-reversible `fingerprint` of the arguments (a
+      // reference, never the args) so an out-of-band resume can bind a human's
+      // confirmation to THIS exact invocation, not just its capability.
+      record("action.awaiting_confirmation", action, {
+        fingerprint: actionFingerprint(action.args),
+      });
       base.onAwaitConfirmation?.(action);
     },
   };

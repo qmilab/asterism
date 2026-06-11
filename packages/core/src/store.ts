@@ -187,13 +187,21 @@ export class AsterismStore {
 
   /**
    * Resume a run that paused at `awaiting_confirmation` after an explicit
-   * out-of-band confirmation. Flips the run back to `running` and records the
-   * resume as `run.resumed`, carrying the destructive capabilities the human
-   * confirmed — REFERENCES ONLY (capability keys, never the action's args, which
-   * can hold a live secret). The dedicated event (not a bare `run.status_changed`)
-   * is the audit record the trust model needs: it names exactly which destructive
-   * capabilities this run is now permitted to execute, and that a human granted
-   * them. A cross-agent or unknown run touches nothing and emits nothing.
+   * out-of-band confirmation. ATOMICALLY claims the run — a single compare-and-set
+   * from `awaiting_confirmation` to `running` — and, only if THIS call won the
+   * claim, records the resume as `run.resumed`, carrying the destructive
+   * capabilities the human confirmed (REFERENCES ONLY: capability keys, never the
+   * action's args). The claim and the event ride one transaction, so the audit can
+   * never show a resume that did not happen.
+   *
+   * Returns the now-`running` run to the winner, or undefined to a caller that did
+   * NOT claim it — the run was unknown, already terminal, or already claimed by a
+   * concurrent confirm. That single-winner guarantee is what stops two racing
+   * confirm requests from both re-entering the loop and executing the confirmed
+   * destructive action twice. The dedicated `run.resumed` event (not a bare
+   * `run.status_changed`) is the audit record the trust model needs: it names which
+   * destructive capabilities this run is now permitted to execute, and that a human
+   * granted them.
    */
   recordRunResumed(
     agentId: string,
@@ -201,10 +209,14 @@ export class AsterismStore {
     confirmed: readonly string[],
   ): Run | undefined {
     return this.driver.transaction(() => {
-      const from = this.runs.get(agentId, runId)?.status ?? null;
-      const run = this.runs.setStatus(agentId, runId, "running");
+      const run = this.runs.claimForResume(agentId, runId);
       if (run) {
-        this.emit(agentId, "run.resumed", { runId, from, confirmed }, runId);
+        this.emit(
+          agentId,
+          "run.resumed",
+          { runId, from: "awaiting_confirmation", confirmed },
+          runId,
+        );
       }
       return run;
     });

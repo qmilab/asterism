@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { confirmationBudget, executeRun, resumeRun } from "./run.js";
+import { executeRun, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
@@ -487,7 +487,6 @@ test("a confirmed resume re-enters the loop, executes the action, and finishes d
     capabilities: [deleteFilesCapability()],
   });
   expect(parked.status).toBe("awaiting_confirmation");
-  expect(confirmationBudget(store, agent.id, parked.run.id).get("delete_files")).toBe(1);
 
   // Confirming resumes the SAME run and lets the pending capability through.
   const outcome = await resumeRun(store, agent, parked.run.id, {
@@ -530,7 +529,6 @@ test("a resume approves only the pending capability; a different destructive act
     capabilities: [deleteFilesCapability(), dropTableCapability()],
   });
   expect(parked.status).toBe("awaiting_confirmation");
-  expect([...confirmationBudget(store, agent.id, parked.run.id)]).toEqual([["delete_files", 1]]);
 
   // Confirming the delete lets it through — but the drop is a different capability
   // the human never confirmed, so the gate pauses the run again rather than
@@ -542,12 +540,6 @@ test("a resume approves only the pending capability; a different destructive act
   expect(first.kind).toBe("resumed");
   if (first.kind !== "resumed") return;
   expect(first.result.status).toBe("awaiting_confirmation");
-  // delete_files ran; drop_table has now been gated on too, so the budget a further
-  // confirm applies has grown to include it (one invocation each).
-  expect([...confirmationBudget(store, agent.id, parked.run.id)]).toEqual([
-    ["delete_files", 1],
-    ["drop_table", 1],
-  ]);
 
   // Confirming again converges: the second pending capability now runs and the run
   // completes.
@@ -592,7 +584,6 @@ test("a resume approves only the count confirmed, not every call of a capability
   });
   expect(parked.status).toBe("awaiting_confirmation");
   expect(deleted).toEqual([]); // parked before anything was deleted
-  expect(confirmationBudget(store, agent.id, parked.run.id).get("delete_files")).toBe(1);
 
   // First confirm clears exactly one delete; the second re-pauses.
   const first = await resumeRun(store, agent, parked.run.id, {
@@ -603,7 +594,6 @@ test("a resume approves only the count confirmed, not every call of a capability
   if (first.kind !== "resumed") return;
   expect(first.result.status).toBe("awaiting_confirmation");
   expect(deleted).toEqual(["dist"]); // ONLY the confirmed delete ran — never cache
-  expect(confirmationBudget(store, agent.id, parked.run.id).get("delete_files")).toBe(2);
 
   // Confirming again clears the second delete and the run completes. The replay
   // re-ran the first delete (a documented re-execution cost); what matters is that
@@ -616,6 +606,128 @@ test("a resume approves only the count confirmed, not every call of a capability
   if (second.kind !== "resumed") return;
   expect(second.result.status).toBe("done");
   expect(deleted).toEqual(["dist", "dist", "cache"]);
+});
+
+test("a resume binds approval to the exact action: a reordered same-capability target re-pauses", async () => {
+  // The replay is not guaranteed to reproduce the original order. Here the agent
+  // paused on a delete of `dist`, but on resume the replay tries `cache` FIRST — a
+  // target the human never confirmed. The grant is fingerprinted to `dist`, so the
+  // gate must NOT spend it on `cache`; `cache` re-pauses and is never deleted.
+  const deleted: string[] = [];
+  const recordingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete a path",
+      inputSchema: { type: "object", properties: {} },
+      execute: (inv) => {
+        const path = (inv.args as { path?: string } | undefined)?.path ?? "?";
+        deleted.push(path);
+        return { output: `deleted ${path}` };
+      },
+    },
+  };
+  // Invocation 0 (initial run) deletes dist; invocation 1+ (resume) reorders to cache-first.
+  let invocation = 0;
+  const reorderingAdapter: RuntimeAdapter = {
+    run(request) {
+      const calls =
+        invocation++ === 0
+          ? [{ path: "dist" }]
+          : [{ path: "cache" }, { path: "dist" }];
+      const output = (async (): Promise<RunOutput> => {
+        const texts: string[] = [];
+        for (const args of calls) {
+          if (request.signal?.aborted) break;
+          const tool = request.tools.list().find((t) => t.name === "delete_files");
+          if (!tool) continue;
+          const result = await tool.execute({ args }, request.signal);
+          texts.push(result.output);
+          if (result.isError) break;
+        }
+        return { status: "done", text: texts.join("\n") };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const parked = await executeRun(store, agent, "delete dist (cache comes later)", {
+    adapter: reorderingAdapter,
+    capabilities: [recordingDelete],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual([]);
+
+  // Confirm the `dist` pause. The replay reorders to `cache` first — but that is a
+  // different invocation than was confirmed, so the gate pauses on it.
+  const resumed = await resumeRun(store, agent, parked.run.id, {
+    adapter: reorderingAdapter,
+    capabilities: [recordingDelete],
+  });
+  expect(resumed.kind).toBe("resumed");
+  if (resumed.kind !== "resumed") return;
+  expect(resumed.result.status).toBe("awaiting_confirmation");
+  // The unconfirmed target was NOT deleted — the approval did not transfer to it.
+  expect(deleted).not.toContain("cache");
+  expect(deleted).toEqual([]);
+});
+
+test("recordRunResumed is an atomic claim: a second confirm on a claimed run loses", async () => {
+  // The store-level guard behind concurrent-confirm safety. Two confirms racing the
+  // same parked run must not both proceed: the compare-and-set lets exactly one flip
+  // awaiting_confirmation → running.
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // First claim wins and flips the run to running.
+  const won = store.recordRunResumed(agent.id, parked.run.id, ["delete_files"]);
+  expect(won?.status).toBe("running");
+  // A second claim on the now-running run claims nothing.
+  const lost = store.recordRunResumed(agent.id, parked.run.id, ["delete_files"]);
+  expect(lost).toBeUndefined();
+  // Exactly one run.resumed was recorded — the resume that actually happened.
+  expect(
+    store.events.tail(agent.id, { type: "run.resumed" }),
+  ).toHaveLength(1);
+});
+
+test("resumeRun treats a lost claim as not_paused and never re-runs the loop", async () => {
+  const ran: string[] = [];
+  const spyDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        ran.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [spyDelete],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // A concurrent confirm already claimed the run (it is now `running`).
+  store.recordRunResumed(agent.id, parked.run.id, ["delete_files"]);
+  // This confirm must NOT execute the destructive action a second time.
+  const outcome = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [spyDelete],
+  });
+  expect(outcome.kind).toBe("not_paused");
+  expect(ran).toEqual([]);
 });
 
 test("resume never crosses agents: one agent cannot confirm another's parked run", async () => {

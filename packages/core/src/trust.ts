@@ -23,6 +23,8 @@
 // Nothing here imports Pi or any adapter. Core owns the policy; the adapter only
 // ever sees the wrapped tools this module produces.
 
+import { createHash } from "node:crypto";
+
 import type {
   ScopedTool,
   ToolInvocation,
@@ -213,6 +215,42 @@ export function classifyEffect(action: Action): EffectClass {
 /** Convenience predicate over {@link classifyEffect}. */
 export function isDestructive(action: Action): boolean {
   return classifyEffect(action) === "destructive";
+}
+
+/**
+ * Serialize a value with object keys sorted at every level, so two structurally
+ * equal arguments produce the same string regardless of key order. Array order is
+ * preserved (it is semantically significant); object key order is not.
+ */
+function stableStringify(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) as string;
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+    .join(",")}}`;
+}
+
+/**
+ * A stable, NON-REVERSIBLE fingerprint of an action's arguments — a short digest
+ * that identifies *which* invocation a destructive action is, without recording the
+ * arguments themselves. The out-of-band resume path uses it to bind a human's
+ * confirmation to the exact paused action: two calls of the same capability with
+ * different arguments (deleting `dist` vs `cache`) have different fingerprints, so a
+ * confirmation for one never clears the other.
+ *
+ * It is a one-way digest — a REFERENCE to the action, never a path back to its
+ * arguments — so it is safe to record on the event log alongside the capability and
+ * effect, preserving the log's references-only guarantee (the arguments, which can
+ * carry a live secret value, are still never written). Phase 0's gated tools take
+ * paths and command strings, not secrets; a future destructive capability that
+ * accepts secret-bearing arguments should fingerprint under a stored salt so the
+ * digest cannot be confirmed by guessing.
+ */
+export function actionFingerprint(args: unknown): string {
+  return createHash("sha256").update(stableStringify(args)).digest("hex").slice(0, 32);
 }
 
 // ---------------------------------------------------------------------------
