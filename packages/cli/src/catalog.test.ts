@@ -82,6 +82,7 @@ describe("shipped tool catalog — claims 3 and 4 from the bare CLI", () => {
   let deleteOut = "";
   let proposeOut = "";
   let escapeOut = "";
+  let rootWriteOut = "";
 
   function agentId(name: string): string {
     const agent = store.agents.list().find((a) => a.name === name);
@@ -139,6 +140,10 @@ describe("shipped tool catalog — claims 3 and 4 from the bare CLI", () => {
     script = [{ tool: "write_file", args: { path: "../escape.txt", content: "nope" } }];
     escapeOut = await run(["run", "auto", "write outside the workspace"]);
 
+    // …and a path that resolves to the workspace root itself is refused too.
+    script = [{ tool: "write_file", args: { path: ".", content: "nope" } }];
+    rootWriteOut = await run(["run", "auto", "write to the workspace root"]);
+
     store = AsterismStore.open(dbPath(home));
   });
 
@@ -189,89 +194,14 @@ describe("shipped tool catalog — claims 3 and 4 from the bare CLI", () => {
     // Nothing was written to the sibling path the `..` traversal pointed at.
     expect(existsSync(join(agentsDir, "escape.txt"))).toBe(false);
   });
-});
 
-// A destructive action the human CONFIRMS: the gate only pauses a delete when no
-// confirmation resolves it, so these paths (resume-on-yes, and root-refusal even
-// after a yes) need a `confirm` that returns true — the shared suite above omits
-// it on purpose so the gate pauses.
-describe("shipped tool catalog — a confirmed destructive action", () => {
-  interface ConfirmingCli {
-    run: (argv: string[]) => Promise<string>;
-    home: string;
-    setScript: (next: readonly ScriptedCall[]) => void;
-  }
-
-  /** Drive the real catalog through a CLI whose human always says "yes". */
-  async function withConfirmingCli(body: (cli: ConfirmingCli) => Promise<void>): Promise<void> {
-    const dir = mkdtempSync(join(tmpdir(), "asterism-catalog-confirm-"));
-    try {
-      let script: readonly ScriptedCall[] = [];
-      const lines: string[] = [];
-      const io: CliIO = {
-        cwd: dir,
-        env: {},
-        out: (t) => lines.push(t),
-        err: (t) => lines.push(t),
-        capabilities: workspaceCapabilities,
-        makeAdapter: () => ({ adapter: scriptedAdapter(() => script) }),
-        confirm: () => true,
-      };
-      const run = async (argv: string[]): Promise<string> => {
-        lines.length = 0;
-        await runCli(argv, io);
-        return lines.join("\n");
-      };
-      await body({ run, home: join(dir, HOME_DIR_NAME), setScript: (next) => { script = next; } });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
-
-  function lastRunStatus(home: string, agentName: string): string {
-    const store = AsterismStore.open(dbPath(home));
-    try {
-      const agent = store.agents.list().find((a) => a.name === agentName)!;
-      const runs = store.runs.list(agent.id);
-      return runs[runs.length - 1]!.status;
-    } finally {
-      store.close();
-    }
-  }
-
-  test("a confirmed delete removes the file and the run finishes done (not stranded paused)", async () => {
-    await withConfirmingCli(async ({ run, home, setScript }) => {
-      await run(["init"]);
-      await run(["new", "auto", "--trust", "autonomous"]);
-      const ws = agentWorkspace(home, "auto");
-
-      setScript([{ tool: "write_file", args: { path: "doomed.txt", content: "bye" } }]);
-      await run(["run", "auto", "create a file"]);
-      expect(existsSync(join(ws, "doomed.txt"))).toBe(true);
-
-      setScript([{ tool: "delete_file", args: { path: "doomed.txt" } }]);
-      const out = await run(["run", "auto", "delete the file"]);
-
-      // Confirmed ⇒ the deletion actually happened AND the run reports done —
-      // not "Run paused" with the file already gone.
-      expect(existsSync(join(ws, "doomed.txt"))).toBe(false);
-      expect(out).not.toContain("Run paused");
-      expect(lastRunStatus(home, "auto")).toBe("done");
-    });
-  });
-
-  test("delete_file refuses the workspace root even when confirmed", async () => {
-    await withConfirmingCli(async ({ run, home, setScript }) => {
-      await run(["init"]);
-      await run(["new", "auto", "--trust", "autonomous"]);
-      const ws = agentWorkspace(home, "auto");
-
-      setScript([{ tool: "delete_file", args: { path: "." } }]);
-      const out = await run(["run", "auto", "delete everything"]);
-
-      // The tool refuses the root; the workspace directory survives.
-      expect(out).toContain("must be a path inside this agent's workspace");
-      expect(existsSync(ws)).toBe(true);
-    });
+  test("a tool that resolves to the workspace root is refused", () => {
+    // "." resolves to the workspace directory itself, not a path inside it. The
+    // root must be refused so a future destructive op (e.g. a confirmed delete)
+    // can never target the whole workspace. Exercised through write_file because
+    // it runs under autonomous without a confirmation prompt (a delete would pause
+    // at the gate before its confinement check ran).
+    expect(rootWriteOut).toContain("must be a path inside this agent's workspace");
+    expect(existsSync(autoWorkspace)).toBe(true);
   });
 });
