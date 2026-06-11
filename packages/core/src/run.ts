@@ -196,49 +196,53 @@ export async function executeRun(
     capabilities: capabilities.map((c) => c.key),
   });
   // Accumulate the run's gate decisions for the post-run summary, sourced from the
-  // same hooks that feed the event log. A destructive action that pauses is held in
-  // `pendingPause` until its fate is known: the *same* action's later `onExecute`
-  // (the human confirmed) reclassifies it as executed; if the run ends with it
-  // still pending, the gate aborted it and it is recorded as `paused`.
+  // same hooks that feed the event log. EVERY decision is pushed into `actions` in
+  // the order it happened — a pause included, recorded the moment it occurs rather
+  // than appended at the end — so the summary is "one entry per gate decision, in
+  // order" no matter how many actions overlap.
   //
-  // Resolution is keyed on the action's IDENTITY, not "the next execute": one
-  // `gateTool.execute` call creates the action once and hands that same object to
-  // both `onAwaitConfirmation` and its own `onExecute`, so reference equality
-  // pinpoints the confirmed action. Without that, a tool call the substrate had
-  // already started concurrently could execute after the pause and wrongly clear
-  // it — dropping the very action that required confirmation from the summary (and
-  // un-pausing the run). Aborting the run does not retract calls already in flight.
+  // A paused destructive action may later be confirmed and run. To reflect that as
+  // ONE entry (executed, not paused-then-executed) without losing its position, we
+  // keep its already-positioned record by the action OBJECT and reclassify it in
+  // place when that same action executes. Keying on identity is exact: one
+  // `gateTool.execute` call builds the action once and hands that same object to
+  // both `onAwaitConfirmation` and its own `onExecute`. A per-action map (not a
+  // single slot) is required because the substrate may start several destructive
+  // calls before the first aborts — a shared slot would drop all but the last, and
+  // aborting the run does not retract calls already in flight.
   const actions: ActionRecord[] = [];
-  let pendingPause: { action: Action; record: ActionRecord } | undefined;
+  const pausedByAction = new Map<Action, ActionRecord>();
   const record = (action: Action, decision: ActionRecord["decision"]): ActionRecord => ({
     capability: action.capability,
     effect: classifyEffect(action),
     decision,
   });
-  const collectActions = (): readonly ActionRecord[] =>
-    pendingPause ? [...actions, pendingPause.record] : actions;
+  const collectActions = (): readonly ActionRecord[] => actions;
 
   const baseHooks: TrustHooks = {
     onAwaitConfirmation: (action) => {
       store.setRunStatus(agent.id, run.id, "awaiting_confirmation");
-      pendingPause = { action, record: record(action, "paused") };
+      // Record the pause in order immediately; keep the entry so the same action's
+      // later execute can reclassify it in place.
+      const paused = record(action, "paused");
+      actions.push(paused);
+      pausedByAction.set(action, paused);
     },
     onExecute: (action) => {
-      // Does this execute resolve a pause? Only if it is the very action that
-      // paused (same object) — a different, concurrently-started action must not.
-      const resolvesPause = pendingPause?.action === action;
-      if (resolvesPause) {
-        // A destructive action the human *confirmed* executes here: the gate flipped
-        // the run to `awaiting_confirmation` before prompting, then fell through to
-        // run it. Flip the status back to `running` so the confirmed action lets the
-        // run finish `done`, instead of stranding it non-terminal with the side
-        // effect already performed (the gate's documented "resume" semantics).
-        // Guarded on the transition, so it never writes a redundant status event.
+      const paused = pausedByAction.get(action);
+      if (paused) {
+        // This execute resolves the pause THIS action triggered (same object): the
+        // human confirmed it. Flip the run back to `running` so the confirmed action
+        // lets it finish `done` instead of stranding it non-terminal with the side
+        // effect already performed (the gate's documented "resume" semantics) —
+        // guarded on the transition, so it never writes a redundant status event.
         if (store.runs.get(agent.id, run.id)?.status === "awaiting_confirmation") {
           store.setRunStatus(agent.id, run.id, "running");
         }
-        // The pause is resolved: this action counts as executed, not paused.
-        pendingPause = undefined;
+        // Reclassify the already-positioned record in place — not a second entry.
+        paused.decision = "executed";
+        pausedByAction.delete(action);
+        return;
       }
       actions.push(record(action, "executed"));
     },

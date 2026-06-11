@@ -81,6 +81,20 @@ function deleteFilesCapability(): Capability {
   };
 }
 
+/** A second destructive capability, so two destructive calls can overlap in one run. */
+function dropTableCapability(): Capability {
+  return {
+    key: "drop_table",
+    effect: "destructive",
+    tool: {
+      name: "drop_table",
+      description: "drop a database table",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "dropped" }),
+    },
+  };
+}
+
 /** An ordinary side-effecting capability — executes under notify/autonomous, withheld under propose. */
 function writeFileCapability(): Capability {
   return {
@@ -383,6 +397,39 @@ test("a concurrently-started action does not drop the paused destructive one", a
     effect: "write",
     decision: "executed",
   });
+});
+
+test("two destructive actions that pause concurrently are both kept, in order", async () => {
+  // The substrate starts two destructive calls before either aborts. The summary
+  // must keep BOTH paused gate decisions (a single pending slot would drop the
+  // first), in the order they occurred.
+  const twoDestructiveAdapter: RuntimeAdapter = {
+    run(request) {
+      const tools = request.tools.list();
+      const del = tools.find((t) => t.name === "delete_files");
+      const drop = tools.find((t) => t.name === "drop_table");
+      const output = (async (): Promise<RunOutput> => {
+        await Promise.allSettled([
+          del?.execute({ args: { command: "rm -rf dist" } }, request.signal),
+          drop?.execute({ args: { command: "DROP TABLE users" } }, request.signal),
+        ]);
+        return { status: "done", text: "ran" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const result = await executeRun(store, agent, "delete dist and drop the table", {
+    adapter: twoDestructiveAdapter,
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+
+  expect(result.status).toBe("awaiting_confirmation");
+  expect(result.actions).toEqual([
+    { capability: "delete_files", effect: "destructive", decision: "paused" },
+    { capability: "drop_table", effect: "destructive", decision: "paused" },
+  ]);
 });
 
 test("a run completes even if the adapter never closes its event stream", async () => {
