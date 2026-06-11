@@ -75,6 +75,23 @@ export class RunRepository {
   }
 
   /**
+   * The agent's most recent run by start time, whatever its status — the "last
+   * active" signal a roster shows. Scoped like every read; ties on start time
+   * break by insertion order (rowid), so this never reorders within a millisecond.
+   */
+  latest(agentId: string): Run | undefined {
+    requireAgentId(agentId);
+    const row = this.driver
+      .prepare(
+        `SELECT * FROM runs WHERE agent_id = ?
+           ORDER BY started_at DESC, rowid DESC
+           LIMIT 1`,
+      )
+      .get([agentId]);
+    return row ? mapRun(row) : undefined;
+  }
+
+  /**
    * The agent's most recent run that produced output — the default target for
    * reflection. Scoped like every read; runs with no output (or only whitespace)
    * are excluded so a caller never reflects on a run with nothing to learn from.

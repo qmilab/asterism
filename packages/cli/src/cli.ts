@@ -453,7 +453,14 @@ async function cmdList(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   return withHomeStore(io, (store) => {
-    io.out(formatAgentList(store.agents.list()));
+    // Pair each agent with its last-run time for the roster's "last active"
+    // line. Per-agent lookup is fine at this scale; the kernel does the scoping
+    // (`latest` asserts the agentId), so this surface only assembles the view.
+    const entries = store.agents.list().map((agent) => {
+      const last = store.runs.latest(agent.id);
+      return last ? { agent, lastRunAt: last.startedAt } : { agent };
+    });
+    io.out(formatAgentList(entries));
     return 0;
   });
 }

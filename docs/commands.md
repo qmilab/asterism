@@ -78,9 +78,9 @@ Created agent "writer" (notify) — soul: careful-consultant
 asterism list
 ```
 
-Show every agent in this workspace — its name, how much it may do on its own, and
-the one line it is responsible for. Reads the roster only; it never reaches into
-any agent's memory, secrets, or files.
+Show every agent in this workspace — its name, how much it may do on its own, the
+one line it is responsible for, and when it last ran. Reads the roster only; it
+never reaches into any agent's memory, secrets, or files.
 
 ```console
 $ asterism list
@@ -88,8 +88,10 @@ Agents (2):
 
 • writer · autonomous
   role: tightens blog drafts
+  last run 2026-06-10T12:01:00.000Z
 • work · propose
   role: client-facing consultant
+  never run
 ```
 
 Before any agent exists it prints `No agents yet. Create one with: asterism new

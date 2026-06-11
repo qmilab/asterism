@@ -70,9 +70,9 @@ ${AUTONOMY_HELP}`,
 
   list: `asterism list
 
-Show every agent in this workspace — its name, how much it may do on its own, and
-what it is responsible for. Reads the roster only; it never reaches into any
-agent's memory, secrets, or files.`,
+Show every agent in this workspace — its name, how much it may do on its own, what
+it is responsible for, and when it last ran. Reads the roster only; it never
+reaches into any agent's memory, secrets, or files.`,
 
   trust: `asterism trust <agent> <level>
 

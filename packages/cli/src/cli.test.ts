@@ -284,6 +284,20 @@ test("list shows the roster with each agent's name, trust, and role", async () =
   expect(out).toContain("personal · autonomous");
   expect(out).toContain("role: personal helper");
   expect(out).toContain("work · propose");
+  // Neither agent has run yet.
+  expect(out).toContain("never run");
+});
+
+test("list reports each agent's last-run time once it has run", async () => {
+  const h = harness();
+  await withFinishedRun(h, "personal"); // inits, creates, and runs `personal`
+  await runCli(["new", "idle"], h.io);
+  const out: string[] = [];
+  await runCli(["list"], { ...h.io, out: (t) => out.push(t) });
+  const text = out.join("\n");
+  // `personal` carries a concrete last-run timestamp; `idle` has never run.
+  expect(text).toMatch(/personal · autonomous[\s\S]*last run \d{4}-\d\d-\d\dT/);
+  expect(text).toMatch(/idle · propose[\s\S]*never run/);
 });
 
 test("list needs an initialized workspace", async () => {

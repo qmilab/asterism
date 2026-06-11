@@ -18,20 +18,28 @@ function summarizePayload(payload: unknown): string {
   }
 }
 
+/** One row of the `list` roster: an agent and when it last ran (if ever). */
+export interface AgentRosterEntry {
+  agent: Agent;
+  /** Start time of the agent's most recent run; absent if it has never run. */
+  lastRunAt?: string;
+}
+
 /**
  * Render the agent roster for `list`. The headline carries the two facts that
  * matter at a glance — who exists and how much each may do on its own — with the
- * one-line role beneath. This is the registry, not agent-scoped data, so it
- * takes no agent name.
+ * role and last-active time beneath. This is the registry, not agent-scoped data,
+ * so it takes no agent name.
  */
-export function formatAgentList(agents: readonly Agent[]): string {
-  if (agents.length === 0) {
+export function formatAgentList(entries: readonly AgentRosterEntry[]): string {
+  if (entries.length === 0) {
     return "No agents yet. Create one with: asterism new <name>";
   }
-  const lines: string[] = [`Agents (${agents.length}):`, ""];
-  for (const a of agents) {
-    lines.push(`• ${a.name} · ${a.trustLevel}`);
-    if (a.role) lines.push(`  role: ${a.role}`);
+  const lines: string[] = [`Agents (${entries.length}):`, ""];
+  for (const { agent, lastRunAt } of entries) {
+    lines.push(`• ${agent.name} · ${agent.trustLevel}`);
+    if (agent.role) lines.push(`  role: ${agent.role}`);
+    lines.push(`  ${lastRunAt ? `last run ${lastRunAt}` : "never run"}`);
     lines.push("");
   }
   return lines.join("\n").trimEnd();
