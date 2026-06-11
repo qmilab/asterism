@@ -201,14 +201,17 @@ export class AsterismStore {
    * concurrent confirm. That single-winner guarantee is what stops two racing
    * confirm requests from both re-entering the loop and executing the confirmed
    * destructive action twice. The dedicated `run.resumed` event (not a bare
-   * `run.status_changed`) is the audit record the trust model needs: it names which
-   * destructive capabilities this run is now permitted to execute, and that a human
-   * granted them.
+   * `run.status_changed`) is the audit record the trust model needs: `confirmed`
+   * names the destructive capabilities this resume permits (for a human reading the
+   * log), and `granted` carries the same as per-action references (capability + a
+   * one-way arguments fingerprint) that the NEXT confirm reads back to know what is
+   * already approved. Both are references only — never the action's args.
    */
   recordRunResumed(
     agentId: string,
     runId: string,
     confirmed: readonly string[],
+    granted: readonly { capability: string; fingerprint: string }[],
   ): Run | undefined {
     return this.driver.transaction(() => {
       const run = this.runs.claimForResume(agentId, runId);
@@ -216,7 +219,7 @@ export class AsterismStore {
         this.emit(
           agentId,
           "run.resumed",
-          { runId, from: "awaiting_confirmation", confirmed },
+          { runId, from: "awaiting_confirmation", confirmed, granted },
           runId,
         );
       }

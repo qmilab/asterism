@@ -255,7 +255,9 @@ Confirming approves **only** the action the run paused on — nothing else is
 unlocked, and the grant applies to this run alone. The approval is bounded, not a
 blanket on the capability: confirming a delete of `dist` clears that delete, but a
 later delete of `cache` (the same kind of action, a new target) pauses again for
-its own `confirm`, as does any other destructive step. Because resuming re-runs the
+its own `confirm`, as does any other destructive step. If a run stopped on several
+destructive actions at once, you clear them one confirm at a time — a single `yes`
+never approves several distinct actions together. Because resuming re-runs the
 task from the start, any ordinary writes the agent had already made happen again —
 but the destructive action it paused on had not run yet, so confirming it does not
 double it. Requires a [configured model](./installation.md#configuring-a-model) —
