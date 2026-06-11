@@ -145,6 +145,16 @@ The edit ran; the deletion did **not**. The run is parked at
 irreversible step — and there it waited for an explicit yes. That gate is the
 same at `notify` and `autonomous`; trust level does not switch it off.
 
+As it runs, the agent streams its activity, and because it can act on its own it
+ends with a summary of what it did and what it paused on — printed to standard
+error, so the `Run paused` line above (on standard out) stays the only thing you'd
+pipe:
+
+```text
+  ✓ executed write_file (write)
+  ⏸ paused   delete_file (destructive)
+```
+
 ## Claim 5 — reflection proposes, you decide
 
 ```console

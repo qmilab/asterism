@@ -35,9 +35,11 @@ import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
 import {
+  formatActionSummary,
   formatAgentList,
   formatEventList,
   formatMemoryList,
+  formatRunActivity,
   formatRunList,
   shortId,
 } from "./format.js";
@@ -427,9 +429,24 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     const result = await executeRun(store, agent, task, {
       adapter: made.adapter,
       readFile: (p) => readFileSync(p, "utf8"),
+      // Stream the run's activity as it happens. It goes to stderr so the agent's
+      // own output on stdout stays clean and pipeable; a tool line per execution
+      // is enough to watch progress without flooding the terminal.
+      onEvent: (event) => {
+        const line = formatRunActivity(event);
+        if (line) io.err(line);
+      },
       ...(io.confirm ? { confirm: io.confirm } : {}),
       ...(capabilities ? { capabilities } : {}),
     });
+
+    // After a run that can act on its own, surface what it actually did — the gate
+    // decisions, to stderr. This is "notify finally notifies": the middle level's
+    // promise to show each action afterward, now kept. `propose` returns its plan
+    // as the run output, so it needs no separate summary.
+    if (agent.trustLevel !== "propose" && result.actions.length > 0) {
+      for (const line of formatActionSummary(result.actions)) io.err(line);
+    }
 
     if (result.status === "awaiting_confirmation") {
       io.out("Run paused: a destructive action needs your confirmation before it can proceed.");

@@ -192,10 +192,23 @@ A run ends in one of three ways:
   never auto-approves and stays paused.
 - **failed** — an error is printed and the command exits `1`.
 
+The run's activity streams as it happens, and an agent that can act on its own
+(`notify` or `autonomous`) ends with a short summary of what it did, withheld, or
+paused on — the `notify` level's promise to show you each action, kept. Both the
+live activity and the summary go to **standard error**, so the agent's own output
+on **standard out** stays clean to pipe or redirect:
+
 ```console
 $ asterism run writer "tighten the intro in posts/launch.md"
+  → write_file
+  ✓ write_file
+Actions (1 executed):
+  ✓ executed write_file (write)
 <the agent's response>
 ```
+
+(The arrowed lines and the `Actions` summary are on stderr; only `<the agent's
+response>` lands on stdout.)
 
 > **Tools:** the shipped CLI registers a default catalog of workspace-scoped file
 > tools — `read_file`, `write_file`, and `delete_file` — behind the trust gate.

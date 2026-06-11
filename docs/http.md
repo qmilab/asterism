@@ -42,13 +42,14 @@ curl -s -X POST http://127.0.0.1:4831/agents/writer/runs \
 ```
 
 On success the run executes and returns `201` with the run resource, its final
-status, and the agent's output:
+status, the agent's output, and a reference-only summary of the actions it took:
 
 ```json
 {
   "run": { "id": "…", "agentId": "…", "input": "…", "status": "done", "startedAt": "…", "finishedAt": "…" },
   "status": "done",
-  "output": "…the agent's response…"
+  "output": "…the agent's response…",
+  "actions": [ { "capability": "write_file", "effect": "write", "decision": "executed" } ]
 }
 ```
 
@@ -57,6 +58,36 @@ is at a keyboard to confirm, a destructive action does **not** execute over
 HTTP — the run comes back `awaiting_confirmation` and nothing destructive
 happened. The destructive-action gate fires here exactly as it does on the
 command line, at every trust level.
+
+`actions` carries one entry per gate decision — `executed`, `withheld`, or
+`paused` — with the capability key and its classified effect. **References only:**
+like the event log, it never contains an argument value.
+
+#### Watching a run live (Server-Sent Events)
+
+Send `Accept: text/event-stream` to watch the run as it happens instead of
+waiting for the single blob. The response is an SSE stream: an `activity` frame
+per lifecycle event, then a terminal `result` frame carrying the same payload the
+buffered response returns above.
+
+```bash
+curl -N -X POST http://127.0.0.1:4831/agents/writer/runs \
+  -H 'content-type: application/json' \
+  -H 'accept: text/event-stream' \
+  -d '{"input":"tighten the intro in posts/launch.md"}'
+```
+
+```text
+event: activity
+data: {"type":"tool_execution_start","payload":{"tool":"write_file"}}
+
+event: result
+data: {"run":{…},"status":"done","output":"…","actions":[…]}
+```
+
+The run executes identically either way — only the framing differs. A destructive
+action still parks the run; the stream simply ends with a `result` frame whose
+`status` is `awaiting_confirmation`.
 
 ### `GET /agents/<agent>/runs` — list runs
 
@@ -94,7 +125,7 @@ a response.
 
 | Code | When |
 |---|---|
-| `200` | A successful `GET`. |
+| `200` | A successful `GET`, or a streaming `POST` (`Accept: text/event-stream`) — the outcome arrives in the terminal `result` frame. |
 | `201` | A run was created and executed (check `status` in the body for the outcome). |
 | `400` | Malformed request — body is not JSON, `input` missing/empty, or a bad `limit`. |
 | `404` | Unknown path, or a `:agent` that is not the served agent. |

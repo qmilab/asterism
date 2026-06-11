@@ -2,6 +2,7 @@
 //
 // Phase 0 endpoints, each scoped to ONE served agent:
 //   POST /agents/:agent/runs    start a run; body { "input": "<task>" }
+//                               Accept: text/event-stream ⇒ live SSE activity
 //   GET  /agents/:agent/runs    list the agent's runs
 //   GET  /agents/:agent/events  read the agent's event log (with tail params)
 //
@@ -125,23 +126,92 @@ async function startRun(deps: ServerDeps, req: Request): Promise<Response> {
     // model is configured. The reason mirrors what `asterism run` would print.
     return fail(503, deps.adapterReason ?? "No model is configured, so runs cannot execute.");
   }
+  // Capture the now-resolved adapter so it narrows inside the streaming closure
+  // below (TS does not carry the `!deps.adapter` guard across a nested function).
+  const adapter = deps.adapter;
+
+  // A client that asks for an event stream watches the run live; everyone else
+  // gets the single JSON blob after it settles. Same kernel call either way — the
+  // run executes identically, only the wire framing differs.
+  if ((req.headers.get("accept") ?? "").includes("text/event-stream")) {
+    return streamRun(deps, adapter, input);
+  }
 
   // The kernel owns the run. No `confirm` is supplied: over HTTP a destructive
   // action takes the safe default and the run returns `awaiting_confirmation`
   // rather than executing without a human.
   const result = await executeRun(deps.store, deps.agent, input, {
-    adapter: deps.adapter,
+    adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
     ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
   });
 
   // 201: the run resource was created and executed. `status` conveys
-  // done / failed / awaiting_confirmation; `output` is the agent's text.
+  // done / failed / awaiting_confirmation; `output` is the agent's text; `actions`
+  // is the run's gate-decision summary (references only).
   return json(201, {
     run: result.run,
     status: result.status,
     output: result.output,
+    actions: result.actions,
     ...(result.error !== undefined ? { error: result.error } : {}),
+  });
+}
+
+/** Serialize one Server-Sent Event frame: a named event with a JSON data line. */
+function sseFrame(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/**
+ * Run the agent and stream it as Server-Sent Events: an `activity` frame per
+ * lifecycle event as it arrives, then a terminal `result` frame carrying the same
+ * payload the buffered POST returns — so a streaming client ends up with the
+ * identical result, just live. The destructive-action gate is unchanged: with no
+ * `confirm` over HTTP a destructive action still parks the run, and the stream
+ * simply ends with a `result` frame whose status is `awaiting_confirmation`.
+ *
+ * Built on web-standard `ReadableStream`/`TextEncoder`, so it stays runtime-neutral
+ * (Bun today, Node 20+ later) like the rest of `handleRequest`.
+ */
+function streamRun(deps: ServerDeps, adapter: RuntimeAdapter, input: string): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown): void => {
+        controller.enqueue(encoder.encode(sseFrame(event, data)));
+      };
+      try {
+        const result = await executeRun(deps.store, deps.agent, input, {
+          adapter,
+          ...(deps.readFile ? { readFile: deps.readFile } : {}),
+          ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+          onEvent: (runEvent) => send("activity", runEvent),
+        });
+        send("result", {
+          run: result.run,
+          status: result.status,
+          output: result.output,
+          actions: result.actions,
+          ...(result.error !== undefined ? { error: result.error } : {}),
+        });
+      } catch {
+        // `executeRun` drives the run to a terminal state itself and does not throw
+        // for run failures, so a throw here is an unexpected internal error. Emit a
+        // generic error frame rather than leaving the stream hung — and never leak
+        // an internal message, matching the buffered path's 500.
+        send("error", { error: "Internal server error." });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+    },
   });
 }
 

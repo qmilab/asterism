@@ -102,6 +102,10 @@ The agent can read, write, and delete files in its own workspace. Reading and
 writing run according to its autonomy level; deleting is destructive and pauses
 for your confirmation at every level.
 
+Activity streams as it happens, and a run that can act on its own ends with a
+short summary of what it did, withheld, or paused on. (Progress goes to standard
+error, so the agent's own output on standard out stays clean to pipe.)
+
 Configure a model with the ASTERISM_MODEL_ID environment variable (and an API key,
 e.g. OPENAI_API_KEY) before running.`,
 
@@ -139,6 +143,7 @@ run, since there is no one at the keyboard to confirm.
 
 Endpoints (with <agent> fixed to the one you serve):
   POST /agents/<agent>/runs     start a run; JSON body {"input":"<task>"}
+                                send Accept: text/event-stream to watch it live
   GET  /agents/<agent>/runs     list the agent's runs
   GET  /agents/<agent>/events   review the agent's activity
 

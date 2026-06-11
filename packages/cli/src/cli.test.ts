@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { AsterismStore } from "@qmilab/asterism-core";
 import type {
+  Capability,
   ProposedMemory,
   ReflectionProvider,
   RuntimeAdapter,
@@ -771,4 +772,75 @@ test("serve rejects a non-numeric or out-of-range --port instead of binding the 
   expect(await runCli(["serve", "personal", "--port", "99999"], { ...h.io, ...serveOverrides })).toBe(1);
   expect(h.err.join("\n")).toContain("between 0 and 65535");
   expect(started).toBe(false);
+});
+
+// --- run streaming + action summary (#16) --------------------------------
+
+/** A capability whose tool the streaming adapter below drives. */
+function writeCapability(): Capability {
+  return {
+    key: "fs.write",
+    effect: "write",
+    tool: {
+      name: "fs.write",
+      description: "write a file",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "written" }),
+    },
+  };
+}
+
+/** A substrate stand-in that emits a tool lifecycle event AND drives the named tool. */
+function streamingToolAdapter(toolName: string): RuntimeAdapter {
+  return {
+    run(request) {
+      const events = (async function* () {
+        yield { type: "tool_execution_start", payload: { tool: toolName } } as const;
+        yield { type: "tool_execution_end", payload: { tool: toolName, isError: false } } as const;
+      })();
+      const output = (async () => {
+        const tool = request.tools.list().find((t) => t.name === toolName);
+        if (tool) await tool.execute({ args: { path: "notes.md" } }, request.signal);
+        return { status: "done" as const, text: "the agent's answer" };
+      })();
+      return { events, output };
+    },
+  };
+}
+
+test("run streams activity and a summary to stderr, keeping stdout to the agent's output", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: streamingToolAdapter("fs.write") });
+  h.io.capabilities = () => [writeCapability()];
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  h.out.length = 0;
+  h.err.length = 0;
+
+  expect(await runCli(["run", "personal", "write a note"], h.io)).toBe(0);
+
+  // stdout carries only the agent's own output — clean to pipe.
+  expect(h.out.join("\n")).toBe("the agent's answer");
+  expect(h.out.join("\n")).not.toContain("Actions");
+
+  // Live activity and the after-the-fact summary are on stderr.
+  const err = h.err.join("\n");
+  expect(err).toContain("→ fs.write");
+  expect(err).toContain("✓ fs.write");
+  expect(err).toContain("Actions (1 executed):");
+  expect(err).toContain("✓ executed fs.write (write)");
+});
+
+test("a propose run prints no action summary — its output is the plan", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: streamingToolAdapter("fs.write") });
+  h.io.capabilities = () => [writeCapability()];
+  await runCli(["init"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  h.out.length = 0;
+  h.err.length = 0;
+
+  expect(await runCli(["run", "work", "write a note"], h.io)).toBe(0);
+  // No summary block for propose, even though the write was withheld.
+  expect(h.err.join("\n")).not.toContain("Actions (");
 });
