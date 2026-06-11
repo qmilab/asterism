@@ -124,6 +124,11 @@ function readMaybe(
  * stream nor a sink that throws may fail the run or mask its real output. A
  * faulty sink is guarded per event so one bad call cannot stop the rest of the
  * stream. With no sink there is nothing to forward, so we never iterate at all.
+ *
+ * Resolves only when the stream CLOSES. The {@link RunHandle} contract settles
+ * output and events independently, so the caller must not let this gate the run's
+ * result (see {@link flushEvents}) — a non-conforming adapter could leave its
+ * stream open forever.
  */
 async function drainEvents(
   events: AsyncIterable<RunEvent>,
@@ -141,6 +146,24 @@ async function drainEvents(
   } catch {
     // The stream itself errored — ignore; the real result travels via `output`.
   }
+}
+
+/** Resolves on the next macrotask — after every currently-pending microtask. */
+function nextMacrotask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Wait for the event drain to finish, but never let it gate the run's result. By
+ * the time this is called the run's output has already settled, so a conforming
+ * adapter has closed its stream and `drained` resolves within microtasks — winning
+ * this race, so every event is flushed before the surface formats its result. A
+ * non-conforming adapter that leaves its stream open loses to the macrotask tick,
+ * so it cannot hang the kernel past the run's completion; its late events are
+ * dropped, which the contract permits (events are progress, not the outcome).
+ */
+function flushEvents(drained: Promise<void>): Promise<void> {
+  return Promise.race([drained, nextMacrotask()]);
 }
 
 /**
@@ -173,40 +196,50 @@ export async function executeRun(
     capabilities: capabilities.map((c) => c.key),
   });
   // Accumulate the run's gate decisions for the post-run summary, sourced from the
-  // same hooks that feed the event log. A destructive action that pauses is held
-  // in `pendingPause` until its fate is known: a following `onExecute` (the human
-  // confirmed) reclassifies it as executed; if the run ends with it still pending,
-  // the gate aborted it and it is recorded as `paused`. At most one can be pending
-  // — an unconfirmed pause aborts the whole run, so the loop never reaches a second.
+  // same hooks that feed the event log. A destructive action that pauses is held in
+  // `pendingPause` until its fate is known: the *same* action's later `onExecute`
+  // (the human confirmed) reclassifies it as executed; if the run ends with it
+  // still pending, the gate aborted it and it is recorded as `paused`.
+  //
+  // Resolution is keyed on the action's IDENTITY, not "the next execute": one
+  // `gateTool.execute` call creates the action once and hands that same object to
+  // both `onAwaitConfirmation` and its own `onExecute`, so reference equality
+  // pinpoints the confirmed action. Without that, a tool call the substrate had
+  // already started concurrently could execute after the pause and wrongly clear
+  // it — dropping the very action that required confirmation from the summary (and
+  // un-pausing the run). Aborting the run does not retract calls already in flight.
   const actions: ActionRecord[] = [];
-  let pendingPause: ActionRecord | undefined;
+  let pendingPause: { action: Action; record: ActionRecord } | undefined;
   const record = (action: Action, decision: ActionRecord["decision"]): ActionRecord => ({
     capability: action.capability,
     effect: classifyEffect(action),
     decision,
   });
   const collectActions = (): readonly ActionRecord[] =>
-    pendingPause ? [...actions, pendingPause] : actions;
+    pendingPause ? [...actions, pendingPause.record] : actions;
 
   const baseHooks: TrustHooks = {
     onAwaitConfirmation: (action) => {
       store.setRunStatus(agent.id, run.id, "awaiting_confirmation");
-      pendingPause = record(action, "paused");
+      pendingPause = { action, record: record(action, "paused") };
     },
     onExecute: (action) => {
-      // A destructive action the human *confirmed* executes here: the gate flipped
-      // the run to `awaiting_confirmation` before prompting, then fell through to
-      // run it. Flip the status back to `running` so a confirmed action lets the
-      // run finish `done`, instead of stranding it non-terminal with the side
-      // effect already performed (the gate's documented "resume" semantics). Guarded
-      // on the transition, so an ordinary action — which runs while already
-      // `running` — never triggers a redundant write or status event.
-      if (store.runs.get(agent.id, run.id)?.status === "awaiting_confirmation") {
-        store.setRunStatus(agent.id, run.id, "running");
+      // Does this execute resolve a pause? Only if it is the very action that
+      // paused (same object) — a different, concurrently-started action must not.
+      const resolvesPause = pendingPause?.action === action;
+      if (resolvesPause) {
+        // A destructive action the human *confirmed* executes here: the gate flipped
+        // the run to `awaiting_confirmation` before prompting, then fell through to
+        // run it. Flip the status back to `running` so the confirmed action lets the
+        // run finish `done`, instead of stranding it non-terminal with the side
+        // effect already performed (the gate's documented "resume" semantics).
+        // Guarded on the transition, so it never writes a redundant status event.
+        if (store.runs.get(agent.id, run.id)?.status === "awaiting_confirmation") {
+          store.setRunStatus(agent.id, run.id, "running");
+        }
+        // The pause is resolved: this action counts as executed, not paused.
+        pendingPause = undefined;
       }
-      // This execute is the resolution of any pending pause (the confirm was
-      // approved), so the action counts as executed, not paused — clear it.
-      pendingPause = undefined;
       actions.push(record(action, "executed"));
     },
     onWithhold: (action) => {
@@ -248,12 +281,13 @@ export async function executeRun(
   // itself stays INSIDE the guard, not just the `await`.
   //
   // `streamed` is the event-drain promise: starts as a resolved no-op so the catch
-  // can await it unconditionally even when the substrate threw before handing back
+  // can flush it unconditionally even when the substrate threw before handing back
   // a handle (nothing was ever streamed in that case), and is reassigned the moment
   // we have a handle. Forwarding is kicked off NOW (not awaited yet) so activity
-  // streams while the run is in flight; it is awaited at each exit below so the
-  // stream is fully flushed before the surface formats its result. The kernel is
-  // the single consumer and only forwards — it never acts on an event.
+  // streams while the run is in flight; it is flushed (NOT blindly awaited — see
+  // `flushEvents`) at each exit below so the stream is drained before the surface
+  // formats its result without a non-closing stream being able to hang the run. The
+  // kernel is the single consumer and only forwards — it never acts on an event.
   let output: RunOutput;
   let streamed: Promise<void> = Promise.resolve();
   try {
@@ -261,7 +295,7 @@ export async function executeRun(
     streamed = drainEvents(handle.events, options.onEvent);
     output = await handle.output;
   } catch (err) {
-    await streamed;
+    await flushEvents(streamed);
     // A gate pause aborts the run via the signal, which some adapters surface as a
     // rejection. If the gate paused it, preserve `awaiting_confirmation` rather
     // than masking it as a failure; otherwise the substrate genuinely failed.
@@ -278,7 +312,7 @@ export async function executeRun(
       actions: collectActions(),
     };
   }
-  await streamed;
+  await flushEvents(streamed);
 
   // If a destructive action paused the run, the gate already flipped it to
   // awaiting_confirmation — leave it there rather than forcing a terminal state,

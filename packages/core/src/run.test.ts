@@ -342,3 +342,70 @@ test("a run that takes no actions has an empty summary", async () => {
   });
   expect(result.actions).toEqual([]);
 });
+
+test("a concurrently-started action does not drop the paused destructive one", async () => {
+  // The substrate had a write call already in flight when a destructive call
+  // paused the run. The write's `onExecute` fires after the pause, but it must NOT
+  // clear it — the summary has to keep the action that actually required
+  // confirmation. (Aborting the run cannot retract a call already started.)
+  const concurrentAdapter: RuntimeAdapter = {
+    run(request) {
+      const tools = request.tools.list();
+      const del = tools.find((t) => t.name === "delete_files");
+      const write = tools.find((t) => t.name === "write_file");
+      const output = (async (): Promise<RunOutput> => {
+        // del.execute pauses + aborts; write.execute (already in flight) still runs.
+        await Promise.allSettled([
+          del?.execute({ args: { command: "rm -rf dist" } }, request.signal),
+          write?.execute({ args: { path: "notes.md" } }, request.signal),
+        ]);
+        return { status: "done", text: "ran" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const result = await executeRun(store, agent, "tidy and delete dist", {
+    adapter: concurrentAdapter,
+    capabilities: [deleteFilesCapability(), writeFileCapability()],
+  });
+
+  // The destructive action paused the run, and the concurrent write did not undo it.
+  expect(result.status).toBe("awaiting_confirmation");
+  expect(result.actions).toContainEqual({
+    capability: "delete_files",
+    effect: "destructive",
+    decision: "paused",
+  });
+  expect(result.actions).toContainEqual({
+    capability: "write_file",
+    effect: "write",
+    decision: "executed",
+  });
+});
+
+test("a run completes even if the adapter never closes its event stream", async () => {
+  // The RunHandle contract settles output and events independently. An adapter that
+  // resolves output but leaves its event stream open forever must not hang the run:
+  // once output settles the kernel stops waiting on the stream.
+  const neverClosingAdapter: RuntimeAdapter = {
+    run() {
+      async function* events() {
+        yield { type: "agent_start", payload: {} } as const;
+        await new Promise<void>(() => {}); // never resolves ⇒ stream never closes
+      }
+      return { events: events(), output: Promise.resolve({ status: "done", text: "ok" }) };
+    },
+  };
+
+  const result = await executeRun(store, agent, "do it", {
+    adapter: neverClosingAdapter,
+    onEvent: () => {
+      // A sink is present, so the stream is actually consumed (and would hang here
+      // without the bound).
+    },
+  });
+  expect(result.status).toBe("done");
+  expect(result.output).toBe("ok");
+});
