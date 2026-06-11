@@ -116,6 +116,27 @@ test("latestWithOutput returns the most recent run that has non-empty output", (
   }
 });
 
+test("latest returns the most recent run by start time, regardless of status", () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    expect(store.runs.latest(agent.id)).toBeUndefined();
+
+    const r1 = store.startRun(agent.id, { input: "first" });
+    store.finishRun(agent.id, r1.id, "done output", "done");
+    // The newest run need not have output (or even be finished) to count as latest.
+    const r2 = store.startRun(agent.id, { input: "second" });
+
+    expect(store.runs.latest(agent.id)?.id).toBe(r2.id);
+
+    // Scoped: another agent's runs are never returned.
+    const other = makeAgent(store, "work");
+    expect(store.runs.latest(other.id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
 test("listActiveAccepted returns only active, accepted memories", () => {
   const store = freshStore();
   try {

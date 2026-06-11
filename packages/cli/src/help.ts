@@ -27,10 +27,12 @@ Usage:
 Commands:
   init                              Set up Asterism in the current directory
   new <agent>                       Create a new agent with a separate life
+  list                              Show every agent and how much it may do
   trust <agent> <level>             Set how much an agent may do on its own
   secrets add <agent> <KEY> [value] Give an agent a private credential
   skill add <agent> <file.md>       Teach an agent a skill from a markdown file
   run <agent> "<task>"              Put an agent to work on a task
+  runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
   events tail <agent>               Review what an agent has done
   reflect <agent> --review          Review memories an agent proposes to keep
@@ -66,6 +68,12 @@ Options:
 
 ${AUTONOMY_HELP}`,
 
+  list: `asterism list
+
+Show every agent in this workspace — its name, how much it may do on its own, what
+it is responsible for, and when it last ran. Reads the roster only; it never
+reaches into any agent's memory, secrets, or files.`,
+
   trust: `asterism trust <agent> <level>
 
 Set how much an agent may do on its own: propose, notify, or autonomous.
@@ -96,6 +104,12 @@ for your confirmation at every level.
 
 Configure a model with the ASTERISM_MODEL_ID environment variable (and an API key,
 e.g. OPENAI_API_KEY) before running.`,
+
+  runs: `asterism runs <agent>
+
+Review one agent's run history — each run's short id, status, what it was asked to
+do, and when it started and finished. Shows only the named agent's runs, oldest
+first.`,
 
   memory: `asterism memory inspect <agent>
 
