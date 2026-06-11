@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { confirmedCapabilities, executeRun, resumeRun } from "./run.js";
+import { confirmationBudget, executeRun, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
@@ -487,7 +487,7 @@ test("a confirmed resume re-enters the loop, executes the action, and finishes d
     capabilities: [deleteFilesCapability()],
   });
   expect(parked.status).toBe("awaiting_confirmation");
-  expect(confirmedCapabilities(store, agent.id, parked.run.id)).toEqual(["delete_files"]);
+  expect(confirmationBudget(store, agent.id, parked.run.id).get("delete_files")).toBe(1);
 
   // Confirming resumes the SAME run and lets the pending capability through.
   const outcome = await resumeRun(store, agent, parked.run.id, {
@@ -530,7 +530,7 @@ test("a resume approves only the pending capability; a different destructive act
     capabilities: [deleteFilesCapability(), dropTableCapability()],
   });
   expect(parked.status).toBe("awaiting_confirmation");
-  expect(confirmedCapabilities(store, agent.id, parked.run.id)).toEqual(["delete_files"]);
+  expect([...confirmationBudget(store, agent.id, parked.run.id)]).toEqual([["delete_files", 1]]);
 
   // Confirming the delete lets it through — but the drop is a different capability
   // the human never confirmed, so the gate pauses the run again rather than
@@ -542,11 +542,11 @@ test("a resume approves only the pending capability; a different destructive act
   expect(first.kind).toBe("resumed");
   if (first.kind !== "resumed") return;
   expect(first.result.status).toBe("awaiting_confirmation");
-  // delete_files ran; drop_table has now been gated on too, so the grant a further
-  // confirm applies has grown to include it (cumulative across the replay).
-  expect(confirmedCapabilities(store, agent.id, parked.run.id)).toEqual([
-    "delete_files",
-    "drop_table",
+  // delete_files ran; drop_table has now been gated on too, so the budget a further
+  // confirm applies has grown to include it (one invocation each).
+  expect([...confirmationBudget(store, agent.id, parked.run.id)]).toEqual([
+    ["delete_files", 1],
+    ["drop_table", 1],
   ]);
 
   // Confirming again converges: the second pending capability now runs and the run
@@ -559,6 +559,63 @@ test("a resume approves only the pending capability; a different destructive act
   if (second.kind !== "resumed") return;
   expect(second.result.status).toBe("done");
   expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("done");
+});
+
+test("a resume approves only the count confirmed, not every call of a capability", async () => {
+  // Two deletes through the SAME capability with different targets. The run parks on
+  // the first; confirming it must clear ONLY that one — the second is a distinct
+  // destructive action and pauses on its own. A capability-blanket grant would
+  // wrongly delete the second, unconfirmed target too.
+  const deleted: string[] = [];
+  const recordingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete a path",
+      inputSchema: { type: "object", properties: {} },
+      execute: (inv) => {
+        const path = (inv.args as { path?: string } | undefined)?.path ?? "?";
+        deleted.push(path);
+        return { output: `deleted ${path}` };
+      },
+    },
+  };
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { path: "dist" } },
+    { tool: "delete_files", args: { path: "cache" } },
+  ]);
+
+  const parked = await executeRun(store, agent, "delete dist and cache", {
+    adapter,
+    capabilities: [recordingDelete],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual([]); // parked before anything was deleted
+  expect(confirmationBudget(store, agent.id, parked.run.id).get("delete_files")).toBe(1);
+
+  // First confirm clears exactly one delete; the second re-pauses.
+  const first = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [recordingDelete],
+  });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual(["dist"]); // ONLY the confirmed delete ran — never cache
+  expect(confirmationBudget(store, agent.id, parked.run.id).get("delete_files")).toBe(2);
+
+  // Confirming again clears the second delete and the run completes. The replay
+  // re-ran the first delete (a documented re-execution cost); what matters is that
+  // `cache` was never deleted without its own confirmation.
+  const second = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [recordingDelete],
+  });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(deleted).toEqual(["dist", "dist", "cache"]);
 });
 
 test("resume never crosses agents: one agent cannot confirm another's parked run", async () => {

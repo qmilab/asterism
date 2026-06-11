@@ -102,7 +102,7 @@ export type {
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
-export { executeRun, resumeRun, confirmedCapabilities } from "./run.js";
+export { executeRun, resumeRun, confirmationBudget } from "./run.js";
 export type {
   ExecuteRunOptions,
   ExecuteRunResult,

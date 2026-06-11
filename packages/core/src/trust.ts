@@ -330,6 +330,27 @@ export interface TrustHooks {
    */
   confirm?: (action: Action) => boolean | Promise<boolean>;
   /**
+   * A STANDING, BOUNDED pre-approval for a destructive action — the seam a resume
+   * (`resumeRun`) uses to honor an out-of-band confirmation without re-prompting.
+   * Consulted for a destructive action BEFORE the confirmation pause; returning
+   * true clears it to execute with no `onAwaitConfirmation` firing (so a consumed
+   * approval leaves no awaiting-confirmation event and the run never churns through
+   * `awaiting_confirmation`).
+   *
+   * It is STATEFUL and CONSUMING: each call that returns true spends one unit of the
+   * grant. That makes it a per-capability *count*, never a blanket allow — a
+   * destructive invocation beyond the number a human actually confirmed still pauses
+   * here. Re-entering the loop on resume replays every earlier destructive call, so
+   * the budget is sized to clear exactly those the human confirmed and stop at the
+   * first un-confirmed one. Absent ⇒ no standing approval (every destructive action
+   * pauses — the safe default).
+   *
+   * This is deliberately separate from a {@link TrustProfile}'s permanent
+   * `autoApprove` allow-list, which is an unbounded, *configured* grant for a
+   * capability. A one-time human confirmation must not become that.
+   */
+  claimPreApproval?: (action: Action) => boolean;
+  /**
    * The run's abort controller. When a destructive action is paused without
    * approval, the gate aborts it — a *real* stop signal, not just a refused tool
    * result. The {@link RuntimeAdapter} honors `request.signal`, so aborting here
@@ -403,19 +424,29 @@ function gateTool(
       }
 
       if (decision === "confirm") {
-        hooks.onAwaitConfirmation?.(action);
-        const approved = hooks.confirm ? await hooks.confirm(action) : false;
-        if (!approved) {
-          // Not a refused-but-continuable result: stop the run. Aborting the
-          // controller suspends the agent loop so it cannot proceed to other
-          // side-effecting tools while the action waits on a human.
-          hooks.abortController?.abort(
-            new Error(`destructive action requires confirmation: ${key}`),
-          );
-          return awaitingConfirmationResult(key);
+        // A standing, bounded pre-approval (a resume's per-capability budget) can
+        // clear this destructive action without a fresh pause. Consulted FIRST so a
+        // consumed approval emits no awaiting-confirmation event and the run does not
+        // churn through `awaiting_confirmation`. It is a COUNT, not a blanket: once
+        // the budget for this capability is spent, a further destructive invocation
+        // falls through to the pause below — so confirming a `dist` delete never also
+        // green-lights a later, unconfirmed `cache` delete on the same capability.
+        const preApproved = hooks.claimPreApproval?.(action) ?? false;
+        if (!preApproved) {
+          hooks.onAwaitConfirmation?.(action);
+          const approved = hooks.confirm ? await hooks.confirm(action) : false;
+          if (!approved) {
+            // Not a refused-but-continuable result: stop the run. Aborting the
+            // controller suspends the agent loop so it cannot proceed to other
+            // side-effecting tools while the action waits on a human.
+            hooks.abortController?.abort(
+              new Error(`destructive action requires confirmation: ${key}`),
+            );
+            return awaitingConfirmationResult(key);
+          }
         }
-        // Explicitly confirmed: fall through to execute. The audit hook still
-        // fires so the now-permitted destructive action is recorded.
+        // Pre-approved or explicitly confirmed: fall through to execute. The audit
+        // hook still fires so the now-permitted destructive action is recorded.
       }
 
       hooks.onExecute?.(action);

@@ -251,14 +251,15 @@ Deleted 'dist'.
 A bare `asterism confirm e5f6a7b8` works too when the id is unambiguous across your
 agents.
 
-Confirming approves **only** the capability the run stopped on — nothing else is
-unlocked, and the grant applies to this run alone. The agent re-takes the task with
-that one capability allowed; if it then reaches a *different* destructive action,
-the run pauses again for a fresh `confirm`. Because resuming re-runs the task from
-the start, any ordinary writes the agent had already made happen again — but the
-destructive action it paused on had not run yet, so it never doubles. Requires a
-[configured model](./installation.md#configuring-a-model) — the same one the run
-started with.
+Confirming approves **only** the action the run paused on — nothing else is
+unlocked, and the grant applies to this run alone. The approval is bounded, not a
+blanket on the capability: confirming a delete of `dist` clears that delete, but a
+later delete of `cache` (the same kind of action, a new target) pauses again for
+its own `confirm`, as does any other destructive step. Because resuming re-runs the
+task from the start, any ordinary writes the agent had already made happen again —
+but the destructive action it paused on had not run yet, so confirming it does not
+double it. Requires a [configured model](./installation.md#configuring-a-model) —
+the same one the run started with.
 
 ---
 

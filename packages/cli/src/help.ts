@@ -124,9 +124,11 @@ agent name too if the same short id could mean different runs:
   asterism confirm personal 3f9c1a2b
   asterism confirm 3f9c1a2b            (when it is unambiguous)
 
-You are approving only the action it stopped on — nothing else is unlocked. If the
-run then reaches a different destructive action, it pauses again for a fresh
-confirmation. Approving is always explicit; nothing destructive runs unattended.
+You approve only the action it paused on — nothing else is unlocked. A further
+destructive step pauses again for its own confirmation, including the same kind of
+action aimed at a new target (confirming a delete of \`dist\` does not also clear a
+delete of \`cache\`). Approving is always explicit; nothing destructive runs
+unattended.
 
 Configure a model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY) — the run
 resumes through the same model that started it.`,

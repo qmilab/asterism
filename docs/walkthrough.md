@@ -147,9 +147,9 @@ irreversible step — and there it waited for an explicit yes. That gate is the
 same at `notify` and `autonomous`; trust level does not switch it off.
 
 When you're ready, [`asterism confirm personal a1b2c3d4`](./commands.md#confirm)
-resumes the run and carries out exactly that deletion — approving only the
-capability it stopped on, and recording the grant as `run.resumed`. Until then,
-nothing irreversible has happened.
+resumes the run and carries out exactly that deletion — approving only the action
+it stopped on (a bounded grant, not a blanket on deletes), and recording it as
+`run.resumed`. Until then, nothing irreversible has happened.
 
 As it runs, the agent streams its activity, and because it can act on its own it
 ends with a summary of what it did and what it paused on — printed to standard

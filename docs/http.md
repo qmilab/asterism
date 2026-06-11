@@ -101,7 +101,7 @@ it with this request. No body is required.
 curl -s -X POST http://127.0.0.1:4831/agents/writer/runs/<run-id>/confirm
 ```
 
-On success the run re-enters the loop with **only the capability it paused on**
+On success the run re-enters the loop with **only the action it paused on**
 approved, runs to completion, and returns `200` with the same shape the start
 endpoint returns — the confirmed action now shows as `executed`:
 
@@ -114,10 +114,12 @@ endpoint returns — the confirmed action now shows as `executed`:
 }
 ```
 
-The grant is per-capability and scoped to this one run; the gate is not widened. If
-the resumed run reaches a *different* destructive action it parks again
-(`awaiting_confirmation`), and you confirm that one in turn. The resume is recorded
-on the event log as `run.resumed`, naming the capabilities it granted.
+The grant is bounded to that action and scoped to this one run; the gate is not
+widened into a blanket on the capability. If the resumed run reaches a further
+destructive action — a different capability, or the same one aimed at a new target
+— it parks again (`awaiting_confirmation`), and you confirm that one in turn. The
+resume is recorded on the event log as `run.resumed`, naming the capabilities it
+granted.
 
 | Outcome | Code | Meaning |
 |---|---|---|
