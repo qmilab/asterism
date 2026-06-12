@@ -19,6 +19,7 @@
     "directory": "packages/cli"
   },
   "engines": {
+    "node": ">=20.0.0",
     "bun": ">=1.1.0"
   },
   "publishConfig": {

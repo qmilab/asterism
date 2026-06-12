@@ -1,9 +1,16 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 // The `asterism` executable. This module has side effects (it runs a command and
 // calls process.exit), so it is kept SEPARATE from the package's importable entry
 // (`index.ts`): `package.json` points `bin` here and `main`/`exports` at the
 // import-safe library surface, so `import "@qmilab/asterism"` never executes the
 // CLI against the host's argv.
+//
+// The shebang names `node` — the compatibility floor every install has — so
+// `npx`/`npm`/`pnpm`/`yarn` users (and a bare `asterism` on `PATH`) run it without
+// Bun. It runs identically under Bun, but Bun honors the shebang too: force Bun's
+// runtime with `bunx --bun @qmilab/asterism` or `bun run --bun` (or run the file
+// directly, `bun bin.js`). No code path below touches a Bun-only global (see
+// `runtime.ts`), so the runtime that wins the shebang race never matters.
 //
 // Thin by design: wire the real outside world (stdin/stdout/env/cwd and an
 // interactive confirmation prompt) into `runCli`, then translate its return value
@@ -13,6 +20,7 @@
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision } from "./cli.js";
 import { workspaceCapabilities } from "./capabilities.js";
+import { ask, readPipedStdin } from "./runtime.js";
 import type { Action } from "@qmilab/asterism-core";
 
 const io: CliIO = {
@@ -29,10 +37,10 @@ const io: CliIO = {
   err: (text) => {
     process.stderr.write(`${text}\n`);
   },
-  // Destructive actions pause for an explicit yes. Non-interactive (piped) runs
-  // never auto-approve — the safe default is to stay paused.
-  confirm: (action: Action) => {
-    if (!process.stdin.isTTY) return false;
+  // Destructive actions pause for an explicit yes. `ask` returns undefined for a
+  // non-interactive (piped) session, so a run with no human present never
+  // auto-approves — the safe default is to stay paused.
+  confirm: async (action: Action) => {
     // Show the action's arguments (e.g. the path a delete targets) so the human is
     // approving a specific operation, not a bare capability name — the difference
     // between confirming one file and confirming a whole directory. `JSON.stringify`
@@ -42,33 +50,26 @@ const io: CliIO = {
       const rendered = JSON.stringify(action.args);
       if (rendered) detail = rendered.length > 200 ? ` ${rendered.slice(0, 200)}…` : ` ${rendered}`;
     }
-    const answer = prompt(`Confirm destructive action '${action.capability}'${detail}? [y/N]`);
-    return answer !== null && /^y(es)?$/i.test(answer.trim());
+    const answer = await ask(`Confirm destructive action '${action.capability}'${detail}? [y/N]`);
+    return answer !== undefined && /^y(es)?$/i.test(answer);
   },
-  // Only consume stdin when it is piped, so an interactive session is not blocked
-  // waiting on input that will never come. The value is returned VERBATIM — inline
-  // and environment secrets are stored exactly as given, and a piped secret (PEM /
-  // private-key material, intentionally padded tokens) must not be normalized.
-  // Callers that want a trailing newline dropped can pipe with `printf`/`echo -n`.
-  readStdin: async () => {
-    if (process.stdin.isTTY) return undefined;
-    return Bun.stdin.text();
-  },
+  // Only consume stdin when it is piped (see `readPipedStdin`): the value is
+  // returned VERBATIM so a piped secret is stored exactly as given.
+  readStdin: readPipedStdin,
   // `reflect --review`: the kernel proposes typed memories and prints each one; the
   // human decides its fate here. Nothing is saved without an explicit accept, and a
   // non-interactive (piped) session saves nothing — the safe default, mirroring the
   // destructive-action prompt above. The proposal text is already printed by the
   // command, so this only collects the decision.
-  review: (): ReviewDecision => {
-    if (!process.stdin.isTTY) return { kind: "reject" };
-    const answer = prompt("  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject):");
-    const choice = (answer ?? "").trim().toLowerCase();
+  review: async (): Promise<ReviewDecision> => {
+    const answer = await ask("  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject):");
+    const choice = (answer ?? "").toLowerCase();
     if (choice === "a" || choice === "accept" || choice === "y" || choice === "yes") {
       return { kind: "accept" };
     }
     if (choice === "e" || choice === "edit") {
-      const edited = prompt("  New content:");
-      const content = (edited ?? "").trim();
+      const edited = await ask("  New content:");
+      const content = edited ?? "";
       return content.length > 0 ? { kind: "edit", content } : { kind: "reject" };
     }
     return { kind: "reject" };

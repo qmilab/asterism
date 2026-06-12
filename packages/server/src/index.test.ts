@@ -276,7 +276,7 @@ test("host capabilities reach HTTP runs, and the gate still pauses destructive a
 test("serve() binds a real socket: a run can be triggered and events read over HTTP", async () => {
   // The real Bun.serve binding (port 0 ⇒ OS-assigned, so no conflict), exercised
   // over a genuine HTTP round-trip rather than handleRequest directly.
-  const running = serve({
+  const running = await serve({
     store,
     agent: personal,
     adapter: cannedAdapter({ status: "done", text: "hello over http" }),

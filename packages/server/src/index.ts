@@ -30,8 +30,9 @@
 // not this surface, enforces it on the initial run and on every resume.
 //
 // The request handler is written against the web-standard `Request`/`Response`, so
-// it is runtime-agnostic and testable without binding a socket; `serve()` is the
-// only Bun-specific line (it wraps `handleRequest` in `Bun.serve`).
+// it is runtime-agnostic and testable without binding a socket. `serve()` is the
+// only runtime-specific seam: it wraps `handleRequest` in `Bun.serve` under Bun
+// and in `node:http` off Bun (Node 20+) — see `serve-node.ts`.
 
 import { executeRun, resumeRun } from "@qmilab/asterism-core";
 import type {
@@ -258,7 +259,7 @@ function sseFrame(event: string, data: unknown): string {
  * guarantees the stream is closed, and turns any unexpected throw into a generic
  * `error` frame (never leaking an internal message, matching the buffered 500).
  * Shared by the start and confirm endpoints so their streaming framing is
- * identical, and runtime-neutral (Bun today, Node 20+ later) like the rest of
+ * identical, and runtime-neutral (Bun and Node 20+) like the rest of
  * `handleRequest`.
  */
 function sseResponse(
@@ -392,28 +393,33 @@ export interface RunningServer {
 }
 
 /**
- * Bind the HTTP endpoint with `Bun.serve` and start listening. The only
- * Bun-specific code in the package; everything else routes through the
+ * Bind the HTTP endpoint and start listening. The single runtime seam in the
+ * package: under Bun it binds with `Bun.serve`; off Bun (Node 20+) it binds with
+ * `node:http` via {@link serveNode}. Everything else routes through the
  * runtime-agnostic {@link handleRequest}. Returns a handle with the resolved
  * port/host (useful when binding port 0) and a `stop()`.
  */
-export function serve(options: ServeOptions): RunningServer {
+export async function serve(options: ServeOptions): Promise<RunningServer> {
   const { port, hostname, ...deps } = options;
   const boundHost = hostname ?? DEFAULT_HOSTNAME;
-  const server = Bun.serve({
-    port: port ?? DEFAULT_PORT,
-    hostname: boundHost,
-    fetch: (req) => handleRequest(deps, req),
-  });
-  // `server.port` is the source of truth (it reflects the OS-assigned port when 0
-  // was requested); fall back only if the runtime leaves it unset.
-  const boundPort = server.port ?? port ?? DEFAULT_PORT;
-  return {
-    port: boundPort,
-    hostname: boundHost,
-    url: `http://${boundHost}:${boundPort}`,
-    // Return Bun's drain promise so callers can await a clean shutdown — in-flight
-    // requests finish before the server is torn down.
-    stop: () => server.stop(),
-  };
+  const boundPort = port ?? DEFAULT_PORT;
+  const handler = (req: Request): Promise<Response> => handleRequest(deps, req);
+
+  if (typeof Bun !== "undefined" && typeof Bun.serve === "function") {
+    const server = Bun.serve({ port: boundPort, hostname: boundHost, fetch: handler });
+    // `server.port` is the source of truth (it reflects the OS-assigned port when 0
+    // was requested); fall back only if the runtime leaves it unset.
+    const resolvedPort = server.port ?? boundPort;
+    return {
+      port: resolvedPort,
+      hostname: boundHost,
+      url: `http://${boundHost}:${resolvedPort}`,
+      // Bun's drain promise: in-flight requests finish before teardown.
+      stop: () => server.stop(),
+    };
+  }
+
+  // Off Bun: bind with node:http. Imported lazily so the Bun path never loads it.
+  const { serveNode } = await import("./serve-node.js");
+  return serveNode({ port: boundPort, hostname: boundHost }, handler);
 }
