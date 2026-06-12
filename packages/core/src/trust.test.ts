@@ -465,30 +465,41 @@ describe("resolveToolRegistry — exposure filter + the gate, end to end", () =>
     expect(awaited).toHaveLength(1);
   });
 
-  test("a failed execution is not surfaced as executed (so a resume re-runs it)", async () => {
-    // `onExecute` is what the audit counts to decide what a resume skips, so it must
-    // fire only when the tool actually SUCCEEDED — a failed destructive action stays
-    // un-counted and re-runs on resume instead of being skipped with a fake success.
-    const executed: Action[] = [];
-    const failing: ScopedTool = {
+  test("a destructive attempt counts even on error; an ordinary failure does not", async () => {
+    // `onExecute` is what the audit counts to decide what a resume skips. A
+    // DESTRUCTIVE action is irreversible and `isError` cannot tell us whether its
+    // side effect happened, so the attempt is recorded regardless of the result —
+    // a resume treats it as done and never repeats it. An ordinary (write) failure
+    // is recorded only on success, so it simply re-runs.
+    const destructiveExec: Action[] = [];
+    const failingDelete: ScopedTool = {
       name: "delete",
       description: "delete",
       inputSchema: {},
+      execute: () => ({ output: "ambiguous", isError: true }),
+    };
+    const delReg = resolveToolRegistry(
+      trustProfile({ level: "autonomous", capabilities: ["fs.delete"], autoApprove: ["fs.delete"] }),
+      [capability("fs.delete", "destructive", failingDelete)],
+      { onExecute: (a) => destructiveExec.push(a) },
+    );
+    expect(await invoke(delReg, "delete", { path: "x" })).toBe("ambiguous");
+    expect(destructiveExec).toHaveLength(1); // counted despite the error — never repeated
+
+    const writeExec: Action[] = [];
+    const failingWrite: ScopedTool = {
+      name: "write",
+      description: "write",
+      inputSchema: {},
       execute: () => ({ output: "boom", isError: true }),
     };
-    const registry = resolveToolRegistry(
-      trustProfile({
-        level: "autonomous",
-        capabilities: ["fs.delete"],
-        autoApprove: ["fs.delete"],
-      }),
-      [capability("fs.delete", "destructive", failing)],
-      { onExecute: (a) => executed.push(a) },
+    const writeReg = resolveToolRegistry(
+      trustProfile({ level: "autonomous", capabilities: ["fs.write"] }),
+      [capability("fs.write", "write", failingWrite)],
+      { onExecute: (a) => writeExec.push(a) },
     );
-
-    const out = await invoke(registry, "delete", { path: "x" });
-    expect(out).toBe("boom"); // the failure result is returned to the model
-    expect(executed).toHaveLength(0); // but the action is NOT recorded as executed
+    expect(await invoke(writeReg, "write", { path: "n" })).toBe("boom");
+    expect(writeExec).toHaveLength(0); // a failed write is not counted (it re-runs)
   });
 
   test("a confirm hook resumes a paused destructive action; absence keeps it paused", async () => {

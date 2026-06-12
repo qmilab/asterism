@@ -655,13 +655,14 @@ test("a multi-step run does not re-execute an already-confirmed destructive acti
   expect(executed).toEqual(["delete_files", "drop_table"]); // delete_files ran exactly once
 });
 
-test("a failed destructive action is re-attempted on resume, not skipped as already done", async () => {
-  // The first attempt at delete_files FAILS — it must NOT be recorded as executed,
-  // so a later resume re-runs it (rather than skipping it with a fake success and
-  // diverging the agent's trajectory). Here the retry succeeds.
+test("a confirmed destructive action that returned an error is not repeated on resume", async () => {
+  // A destructive tool can perform its irreversible side effect yet return `isError`
+  // (the API timed out, the response failed to parse). `isError` does not tell us
+  // whether the effect happened, so the attempt is counted and a later resume must
+  // NOT repeat it — at most once, or it could double-charge / double-delete.
   let deleteAttempts = 0;
   const succeeded: string[] = [];
-  const flakyDelete: Capability = {
+  const erroringDelete: Capability = {
     key: "delete_files",
     effect: "destructive",
     tool: {
@@ -669,10 +670,10 @@ test("a failed destructive action is re-attempted on resume, not skipped as alre
       description: "delete",
       inputSchema: { type: "object", properties: {} },
       execute: () => {
+        // Every attempt reports an error (the ambiguous case), so a re-run would be
+        // observable as a second attempt.
         deleteAttempts += 1;
-        if (deleteAttempts === 1) return { output: "transient failure", isError: true };
-        succeeded.push("delete_files");
-        return { output: "deleted" };
+        return { output: "ambiguous timeout", isError: true };
       },
     },
   };
@@ -710,7 +711,7 @@ test("a failed destructive action is re-attempted on resume, not skipped as alre
       return { events: noEvents(), output };
     },
   };
-  const caps = [flakyDelete, drop];
+  const caps = [erroringDelete, drop];
 
   const parked = await executeRun(store, agent, "delete then drop", {
     adapter,
@@ -718,22 +719,21 @@ test("a failed destructive action is re-attempted on resume, not skipped as alre
   });
   expect(parked.status).toBe("awaiting_confirmation");
 
-  // Confirm 1: delete_files runs but FAILS; the run reaches drop_table and pauses.
+  // Confirm 1: delete_files is attempted (errors); the run reaches drop_table and pauses.
   const first = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
   expect(first.kind).toBe("resumed");
   if (first.kind !== "resumed") return;
   expect(first.result.status).toBe("awaiting_confirmation");
-  expect(deleteAttempts).toBe(1); // attempted once
-  expect(succeeded).toEqual([]); // nothing succeeded yet
+  expect(deleteAttempts).toBe(1);
 
-  // Confirm 2: delete_files is RE-ATTEMPTED — the failure was not counted as done —
-  // succeeds this time, and drop_table runs. The run completes.
+  // Confirm 2: delete_files is SKIPPED — its irreversible effect may have happened,
+  // so it is not retried; drop_table runs and the run completes.
   const second = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
   expect(second.kind).toBe("resumed");
   if (second.kind !== "resumed") return;
   expect(second.result.status).toBe("done");
-  expect(deleteAttempts).toBe(2); // re-attempted, NOT skipped
-  expect(succeeded).toEqual(["delete_files", "drop_table"]);
+  expect(deleteAttempts).toBe(1); // NOT repeated, despite the error
+  expect(succeeded).toEqual(["drop_table"]);
 });
 
 test("a confirm clears one concurrently-paused action at a time, not all at once", async () => {

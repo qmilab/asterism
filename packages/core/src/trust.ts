@@ -528,13 +528,23 @@ function gateTool(
         // `onAwaitConfirmation` or `onExecute`, never both.
       }
 
-      // Run the tool, then surface/audit the execution ONLY if it actually
-      // succeeded. A destructive action that FAILED must not be recorded as
-      // executed: a resume counts `onExecute` to decide what to skip, so counting a
-      // failed action would make the replay skip it (returning a fake success) and
-      // the agent would never retry it — diverging from its original trajectory. An
-      // un-counted failure simply re-runs (and likely re-fails) on resume, exactly
-      // as it did the first time.
+      // Record the execution for the resume's skip-accounting, with the timing the
+      // action's reversibility demands:
+      //
+      //   - A DESTRUCTIVE action is recorded as executed UP FRONT — before running
+      //     it, and regardless of the result. Its side effect is irreversible, and a
+      //     tool's `isError` does NOT tell us whether that effect happened (a
+      //     payment/delete can succeed while the response times out or fails to
+      //     parse). So a resume must treat any *attempt* as done and never repeat it
+      //     — at most once — or it could double-charge / double-delete. Recording
+      //     before the call also covers a throw or a crash mid-action.
+      //   - An ordinary (read/write) action is recorded ONLY on success, so a
+      //     transient failure simply re-runs. It is reversible, and resume never
+      //     skips it anyway (only destructive invocations are gated/skipped).
+      if (classifyEffect(action) === "destructive") {
+        hooks.onExecute?.(action);
+        return tool.execute(invocation, signal);
+      }
       const result = await tool.execute(invocation, signal);
       if (!result.isError) hooks.onExecute?.(action);
       return result;
