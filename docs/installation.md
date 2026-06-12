@@ -6,8 +6,10 @@ computer unless you configure a model that does.
 
 ## Prerequisites
 
-- **[Bun](https://bun.sh) 1.1.0 or newer** (recommended runtime). The `asterism`
-  command runs on Bun. Install it with:
+- **A JavaScript runtime — [Node](https://nodejs.org) 20 or newer, or
+  [Bun](https://bun.sh) 1.1.0 or newer.** The `asterism` command runs on either.
+  Bun is the recommended runtime; Node 20+ is a fully supported floor. To install
+  Bun:
 
   ```bash
   curl -fsSL https://bun.sh/install | bash
@@ -18,29 +20,33 @@ computer unless you configure a model that does.
   work with no model configured. You only need one once you want an agent to
   actually do a task. See [Configuring a model](#configuring-a-model).
 
-> **Node compatibility.** The library packages target Node 20+ as a tested
-> floor, but the `asterism` CLI itself uses Bun for its command line, standard
-> input, and local HTTP endpoint. Run the CLI with Bun.
+> **Runtimes.** The same install runs on both: under Bun the local store uses the
+> built-in `bun:sqlite`; under Node it uses `better-sqlite3`, a native module that
+> ships prebuilt binaries for common platforms (no compiler needed in the usual
+> case). Nothing else differs between the two.
 
 ## Install
 
-The fastest way to try Asterism is without installing anything permanently:
+The fastest way to try Asterism is without installing anything permanently — use
+your runtime's package runner:
 
 ```bash
-bunx @qmilab/asterism init
+npx  @qmilab/asterism init     # Node
+bunx @qmilab/asterism init     # Bun
 ```
 
-`bunx` fetches the latest published version and runs it. To get the `asterism`
+That fetches the latest published version and runs it. To get the `asterism`
 command on your `PATH`, install it globally:
 
 ```bash
-bun add --global @qmilab/asterism
+npm install --global @qmilab/asterism     # Node
+bun add --global @qmilab/asterism          # Bun
 asterism --version
 ```
 
-The rest of this documentation writes commands as `asterism …`. If you prefer
-not to install globally, prefix any command with `bunx @qmilab/`:
-`bunx @qmilab/asterism new writer`.
+The rest of this documentation writes commands as `asterism …`. If you prefer not
+to install globally, prefix any command with `npx @qmilab/` or `bunx @qmilab/`:
+`npx @qmilab/asterism new writer`.
 
 ## Initialize a workspace
 

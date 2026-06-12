@@ -1,21 +1,21 @@
 import type { SqlDriver } from "./driver.js";
 import { BunSqlDriver } from "./bun-driver.js";
+import { NodeSqlDriver } from "./node-driver.js";
 
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./driver.js";
 
 /**
  * Open a local SQLite database. Defaults to an in-memory database.
  *
- * Bun-first: Phase 0 uses the `bun:sqlite` driver. A Node-floor driver
- * (node:sqlite / better-sqlite3) implementing the same `SqlDriver` interface
- * slots in here; nothing else in core touches a concrete binding.
+ * Runtime-neutral: under Bun it uses the built-in `bun:sqlite` driver; off Bun
+ * (Node 20+) it uses the `better-sqlite3` driver. Both implement the same
+ * `SqlDriver`, so nothing else in core depends on which runtime opened the
+ * database. Each concrete binding is loaded lazily inside its own driver, so
+ * importing this module never pulls a binding the current runtime will not use.
  */
 export function openDatabase(path = ":memory:"): SqlDriver {
-  if (typeof Bun === "undefined") {
-    throw new Error(
-      "No SQLite driver available for this runtime. Phase 0 ships the bun:sqlite " +
-        "driver; run under Bun, or provide a Node SqlDriver implementation.",
-    );
+  if (typeof Bun !== "undefined") {
+    return new BunSqlDriver(path);
   }
-  return new BunSqlDriver(path);
+  return new NodeSqlDriver(path);
 }
