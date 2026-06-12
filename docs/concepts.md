@@ -85,6 +85,13 @@ the network or from a pipe. Either way you approve **only** the action it stoppe
 on, for that one run — a bounded grant, not a blanket on the capability, so a
 further destructive step (even the same kind aimed at a new target) pauses again.
 
+A run that paused without you re-runs from the start when you confirm it — but a
+destructive action you have already approved is carried out **at most once**, never
+repeated, even if a parallel step interrupted it or its tool reported an ambiguous
+error. So you can clear a multi-step run one confirmation at a time without ever
+double-charging or double-deleting. Reversible work it had already done (an ordinary
+file edit, say) may simply be redone as it picks the task back up.
+
 ## Memory
 
 Each agent accumulates **memory** — typed, scoped to that agent, and yours to
