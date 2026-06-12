@@ -52,6 +52,12 @@ export const PROVIDER_DEFAULTS: Readonly<Record<string, ProviderDefaults>> = {
   anthropic: { baseUrl: "https://api.anthropic.com", api: "anthropic-messages" },
 };
 
+/**
+ * The provider assumed when none is named — both for filling defaults and for
+ * deciding which provider an endpoint set without a provider belongs to.
+ */
+const DEFAULT_PROVIDER = "openai";
+
 export interface ModelConfigResult {
   model?: PiModelConfig;
   /** When `model` is absent, a user-facing explanation of what to configure. */
@@ -98,23 +104,27 @@ function settingsFromEnv(env: Env): ModelSettings {
  *
  * `baseUrl` and `api` are coupled to the provider they were configured for, so a
  * plain field-wise merge is wrong: when a higher layer names a DIFFERENT provider
- * than one a lower layer already resolved, the endpoint/protocol inherited from
- * that lower layer belonged to the old provider and must be dropped — otherwise an
- * agent override of `--provider anthropic` over an install default that set an
- * OpenRouter base URL would call Anthropic at the OpenRouter endpoint. Dropping
- * them lets resolution fall back to the new provider's defaults.
+ * than the one a lower layer's endpoint belongs to, that endpoint/protocol must be
+ * dropped — otherwise an agent override of `--provider anthropic` over an install
+ * default that set an OpenRouter (or local OpenAI-compatible) base URL would call
+ * Anthropic at the wrong endpoint. Dropping them lets resolution fall back to the
+ * new provider's defaults.
  *
- * The drop fires only on a genuine provider CHANGE: a layer that re-states the
- * same provider keeps a lower layer's custom endpoint, and a layer with no
- * provider is a provider-agnostic endpoint override that rides along to whatever
- * provider is in effect.
+ * The owning provider of an endpoint is the provider in effect at the layer that
+ * set it: an explicit provider, or — when none was named — the DEFAULT_PROVIDER.
+ * So the drop fires on any genuine provider CHANGE, including switching away from
+ * the implicit default. A layer that re-states the same (or implied) provider
+ * keeps a lower layer's custom endpoint.
  */
 function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
   const out: ModelSettings = {};
   for (const layer of layers) {
     if (layer.id !== undefined) out.id = layer.id;
     if (layer.provider !== undefined) {
-      if (out.provider !== undefined && layer.provider !== out.provider) {
+      // The provider the accumulated endpoint belongs to: the last explicit one,
+      // else the default (a bare base-url is an endpoint for the default provider).
+      const owningProvider = out.provider ?? DEFAULT_PROVIDER;
+      if (layer.provider !== owningProvider) {
         delete out.baseUrl;
         delete out.api;
       }
@@ -152,7 +162,7 @@ export function resolveModelConfig(env: Env, context: ModelResolutionContext = {
         "before running an agent.",
     };
   }
-  const provider = merged.provider ?? "openai";
+  const provider = merged.provider ?? DEFAULT_PROVIDER;
   const defaults = PROVIDER_DEFAULTS[provider];
   const baseUrl = merged.baseUrl ?? defaults?.baseUrl;
   if (!baseUrl) {

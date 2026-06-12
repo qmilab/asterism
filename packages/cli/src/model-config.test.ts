@@ -147,9 +147,9 @@ test("a custom endpoint for the SAME provider survives a model-only override", (
   });
 });
 
-test("a provider-agnostic base-url rides along to a same-provider override", () => {
-  // A bare base-url (no provider) overrides the endpoint of whatever provider is in
-  // effect — here the default openai — and is NOT dropped by a same-provider pin.
+test("a bare base-url survives an override that keeps the implied (default) provider", () => {
+  // A base-url with no provider belongs to the default provider (openai). An agent
+  // that pins openai explicitly matches that, so the custom endpoint is preserved.
   const config: AsterismConfig = {
     model: { baseUrl: "https://gateway.internal/v1" },
     agents: { work: { model: { id: "gpt-4o", provider: "openai" } } },
@@ -159,6 +159,23 @@ test("a provider-agnostic base-url rides along to a same-provider override", () 
     provider: "openai",
     id: "gpt-4o",
     baseUrl: "https://gateway.internal/v1",
+  });
+});
+
+test("a bare base-url belongs to the default provider and is dropped on a switch", () => {
+  // `config set gpt-4o --base-url <local>` is an OpenAI-compatible endpoint (no
+  // provider ⇒ the default, openai). An agent that switches to anthropic must NOT
+  // inherit that local OpenAI endpoint/protocol — it falls back to anthropic's.
+  const config: AsterismConfig = {
+    model: { id: "gpt-4o", baseUrl: "http://localhost:1234/v1" },
+    agents: { work: { model: { id: "claude-opus-4-8", provider: "anthropic" } } },
+  };
+  const { model } = resolveModelConfig({}, { config, agentName: "work" });
+  expect(model).toEqual({
+    provider: "anthropic",
+    id: "claude-opus-4-8",
+    baseUrl: "https://api.anthropic.com",
+    api: "anthropic-messages",
   });
 });
 
