@@ -93,12 +93,33 @@ function settingsFromEnv(env: Env): ModelSettings {
   return s;
 }
 
-/** Merge layers low → high precedence: each set field overrides the ones before it. */
+/**
+ * Merge layers low → high precedence: each set field overrides the ones before it.
+ *
+ * `baseUrl` and `api` are coupled to the provider they were configured for, so a
+ * plain field-wise merge is wrong: when a higher layer names a DIFFERENT provider
+ * than one a lower layer already resolved, the endpoint/protocol inherited from
+ * that lower layer belonged to the old provider and must be dropped — otherwise an
+ * agent override of `--provider anthropic` over an install default that set an
+ * OpenRouter base URL would call Anthropic at the OpenRouter endpoint. Dropping
+ * them lets resolution fall back to the new provider's defaults.
+ *
+ * The drop fires only on a genuine provider CHANGE: a layer that re-states the
+ * same provider keeps a lower layer's custom endpoint, and a layer with no
+ * provider is a provider-agnostic endpoint override that rides along to whatever
+ * provider is in effect.
+ */
 function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
   const out: ModelSettings = {};
   for (const layer of layers) {
     if (layer.id !== undefined) out.id = layer.id;
-    if (layer.provider !== undefined) out.provider = layer.provider;
+    if (layer.provider !== undefined) {
+      if (out.provider !== undefined && layer.provider !== out.provider) {
+        delete out.baseUrl;
+        delete out.api;
+      }
+      out.provider = layer.provider;
+    }
     if (layer.baseUrl !== undefined) out.baseUrl = layer.baseUrl;
     if (layer.api !== undefined) out.api = layer.api;
   }
