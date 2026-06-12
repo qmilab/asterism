@@ -51,7 +51,11 @@ function toWebRequest(req: IncomingMessage, boundHost: string): Request {
  * `event:`/`data:` frame must flush to the client as the run produces it, not
  * after the run settles.
  */
-function writeWebResponse(res: ServerResponse, web: Response): void {
+function writeWebResponse(
+  res: ServerResponse,
+  web: Response,
+  liveStreams: Set<ServerResponse>,
+): void {
   const headers: Record<string, string> = {};
   web.headers.forEach((value, key) => {
     headers[key] = value;
@@ -62,10 +66,20 @@ function writeWebResponse(res: ServerResponse, web: Response): void {
     res.end();
     return;
   }
+
+  // A Server-Sent Events response is long-lived: it streams frames until the run
+  // settles and never ends on its own. Track it so shutdown can force-close it —
+  // a buffered response is NOT tracked, so it is left to drain (see `stop` below).
+  const isStream = (headers["content-type"] ?? "").includes("text/event-stream");
+  if (isStream) liveStreams.add(res);
+
   const body = Readable.fromWeb(web.body as ReadableStream<Uint8Array>);
-  // If the client hangs up (closes an SSE connection), stop pulling from the
-  // — possibly endless — source stream.
-  res.on("close", () => body.destroy());
+  res.on("close", () => {
+    liveStreams.delete(res);
+    // If the client hangs up (closes an SSE connection), stop pulling from the
+    // — possibly endless — source stream.
+    body.destroy();
+  });
   body.on("error", () => res.destroy());
   body.pipe(res);
 }
@@ -79,10 +93,14 @@ export function serveNode(
   opts: { port: number; hostname: string },
   handler: (req: Request) => Promise<Response>,
 ): Promise<RunningServer> {
+  // The SSE connections currently open. Only these are force-closed on shutdown;
+  // in-flight buffered requests are left to finish.
+  const liveStreams = new Set<ServerResponse>();
+
   const server = createServer((req, res) => {
     void (async () => {
       try {
-        writeWebResponse(res, await handler(toWebRequest(req, opts.hostname)));
+        writeWebResponse(res, await handler(toWebRequest(req, opts.hostname)), liveStreams);
       } catch {
         // `handleRequest` catches its own errors and answers with a Response, so a
         // throw here is a last-resort failure building the Request or writing the
@@ -104,14 +122,19 @@ export function serveNode(
         port: boundPort,
         hostname: opts.hostname,
         url: `http://${opts.hostname}:${boundPort}`,
-        // close() stops accepting and drains in-flight requests; on Node 20+ it
-        // also closes idle keep-alive sockets. closeAllConnections() then drops any
-        // lingering long-lived connection (e.g. an attached SSE reader) so a
-        // shutdown on Ctrl+C does not hang waiting on a stream that never ends.
+        // Graceful shutdown. `close()` stops accepting and resolves only once every
+        // ACTIVE request has finished — so a buffered run/confirm in flight drains
+        // and the caller (the CLI) tears down the store only after stop() resolves.
+        // `closeIdleConnections()` drops idle keep-alive sockets that would
+        // otherwise hold close() open, and the tracked SSE streams are force-closed
+        // because they would never end on their own. In-flight buffered requests are
+        // deliberately left untouched.
         stop: () =>
           new Promise<void>((done) => {
             server.close(() => done());
-            server.closeAllConnections?.();
+            server.closeIdleConnections?.();
+            for (const res of [...liveStreams]) res.destroy();
+            liveStreams.clear();
           }),
       });
     });

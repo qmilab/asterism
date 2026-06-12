@@ -94,6 +94,48 @@ test("serveNode streams SSE frames as the run unfolds", async () => {
   }
 });
 
+test("serveNode drains an in-flight buffered run on stop() instead of aborting it", async () => {
+  // A controllable substrate: it signals when the run reaches it, then blocks on a
+  // gate so the request is provably in flight when we call stop().
+  let runReached!: () => void;
+  const reached = new Promise<void>((r) => {
+    runReached = r;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const adapter: RuntimeAdapter = {
+    run() {
+      runReached();
+      async function* noEvents() {}
+      return { events: noEvents(), output: gate.then(() => ({ status: "done" as const, text: "drained cleanly" })) };
+    },
+  };
+
+  const running = await bind(adapter);
+
+  // Fire a buffered run but do not await it yet.
+  const inflight = fetch(`${running.url}/agents/personal/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "slow" }),
+  });
+  await reached; // the handler is now mid-run — the request is genuinely active
+
+  // Begin shutdown while the run is still executing, then let it finish.
+  const stopped = running.stop();
+  release();
+
+  // The request was drained, not aborted: it still returns its real result.
+  const res = await inflight;
+  expect(res.status).toBe(201);
+  expect(((await res.json()) as { output: string }).output).toBe("drained cleanly");
+
+  // And stop() only resolves once that in-flight run has drained.
+  await stopped;
+});
+
 test("serveNode answers a malformed body with a clean 400, not a crash", async () => {
   const running = await bind(eventEmittingAdapter({ status: "done", text: "x" }));
   try {
