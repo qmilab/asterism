@@ -138,6 +138,65 @@ async function part2ServerUnderNode() {
   }
 }
 
+async function part3DrainUnderNode() {
+  console.log(`\n[3] Graceful shutdown under Node — an in-flight SSE run drains, not torn down`);
+  const dir = mkdtempSync(join(tmpdir(), "asterism-node-drain-"));
+  const store = AsterismStore.open(join(dir, "asterism.db"));
+  const agent = store.createAgent({
+    name: "personal",
+    role: "personal helper",
+    soulRef: "casual-helper",
+    workspaceDir: join(dir, "personal"),
+    trustLevel: "autonomous",
+  });
+
+  // A run that reaches the substrate, then blocks until released — so it is
+  // provably mid-flight when shutdown begins.
+  let runReached;
+  const reached = new Promise((r) => {
+    runReached = r;
+  });
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const adapter = {
+    run() {
+      runReached();
+      async function* events() {
+        yield { type: "tool_execution_start", payload: { tool: "fs.write" } };
+      }
+      return { events: events(), output: gate.then(() => ({ status: "done", text: "drained on node" })) };
+    },
+  };
+
+  const running = await serve({ store, agent, adapter, port: 0 });
+  try {
+    const inflight = fetch(`${running.url}/agents/personal/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ input: "slow stream" }),
+    });
+    await reached; // the SSE producer is mid-run
+
+    // Begin shutdown while the run is still executing, then let it finish.
+    const stopped = running.stop();
+    release();
+
+    const body = await (await inflight).text();
+    check("SSE run drained to its result frame on shutdown", body.includes("event: result") && body.includes("drained on node"));
+    await stopped; // resolves only after the in-flight run drained
+
+    // The run reached the store before it was torn down (no write-after-close).
+    const events = store.events.tail(agent.id, {});
+    check("drained run persisted run.started before store close", events.some((e) => e.type === "run.started"));
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 await part1CliUnderNode();
 await part2ServerUnderNode();
+await part3DrainUnderNode();
 console.log(`\nPASS — ${passed} checks green on Node ${process.version}.`);

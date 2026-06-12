@@ -51,11 +51,7 @@ function toWebRequest(req: IncomingMessage, boundHost: string): Request {
  * `event:`/`data:` frame must flush to the client as the run produces it, not
  * after the run settles.
  */
-function writeWebResponse(
-  res: ServerResponse,
-  web: Response,
-  liveStreams: Set<ServerResponse>,
-): void {
+function writeWebResponse(res: ServerResponse, web: Response): void {
   const headers: Record<string, string> = {};
   web.headers.forEach((value, key) => {
     headers[key] = value;
@@ -67,19 +63,10 @@ function writeWebResponse(
     return;
   }
 
-  // A Server-Sent Events response is long-lived: it streams frames until the run
-  // settles and never ends on its own. Track it so shutdown can force-close it —
-  // a buffered response is NOT tracked, so it is left to drain (see `stop` below).
-  const isStream = (headers["content-type"] ?? "").includes("text/event-stream");
-  if (isStream) liveStreams.add(res);
-
   const body = Readable.fromWeb(web.body as ReadableStream<Uint8Array>);
-  res.on("close", () => {
-    liveStreams.delete(res);
-    // If the client hangs up (closes an SSE connection), stop pulling from the
-    // — possibly endless — source stream.
-    body.destroy();
-  });
+  // If the CLIENT hangs up (closes an SSE connection early), stop pulling from the
+  // source stream. This is per-connection cleanup only; it does not affect shutdown.
+  res.on("close", () => body.destroy());
   body.on("error", () => res.destroy());
   body.pipe(res);
 }
@@ -93,14 +80,10 @@ export function serveNode(
   opts: { port: number; hostname: string },
   handler: (req: Request) => Promise<Response>,
 ): Promise<RunningServer> {
-  // The SSE connections currently open. Only these are force-closed on shutdown;
-  // in-flight buffered requests are left to finish.
-  const liveStreams = new Set<ServerResponse>();
-
   const server = createServer((req, res) => {
     void (async () => {
       try {
-        writeWebResponse(res, await handler(toWebRequest(req, opts.hostname)), liveStreams);
+        writeWebResponse(res, await handler(toWebRequest(req, opts.hostname)));
       } catch {
         // `handleRequest` catches its own errors and answers with a Response, so a
         // throw here is a last-resort failure building the Request or writing the
@@ -122,19 +105,20 @@ export function serveNode(
         port: boundPort,
         hostname: opts.hostname,
         url: `http://${opts.hostname}:${boundPort}`,
-        // Graceful shutdown. `close()` stops accepting and resolves only once every
-        // ACTIVE request has finished — so a buffered run/confirm in flight drains
-        // and the caller (the CLI) tears down the store only after stop() resolves.
-        // `closeIdleConnections()` drops idle keep-alive sockets that would
-        // otherwise hold close() open, and the tracked SSE streams are force-closed
-        // because they would never end on their own. In-flight buffered requests are
-        // deliberately left untouched.
+        // Graceful shutdown. `close()` stops accepting new connections and resolves
+        // only once every ACTIVE request has finished. That covers BOTH buffered
+        // runs and SSE runs: an SSE response's lifetime is bounded by its run
+        // settling — the producer always ends with `controller.close()` — so it
+        // drains like any other request rather than being force-closed while its
+        // `executeRun` is still writing. The caller (the CLI) tears down the store
+        // only after stop() resolves, so a run is never persisting into a closing
+        // database. `closeIdleConnections()` drops idle keep-alive sockets that
+        // would otherwise hold close() open. (A genuinely hung run blocks graceful
+        // stop, as it would a buffered one; the CLI's second interrupt forces exit.)
         stop: () =>
           new Promise<void>((done) => {
             server.close(() => done());
             server.closeIdleConnections?.();
-            for (const res of [...liveStreams]) res.destroy();
-            liveStreams.clear();
           }),
       });
     });

@@ -136,6 +136,51 @@ test("serveNode drains an in-flight buffered run on stop() instead of aborting i
   await stopped;
 });
 
+test("serveNode drains an in-flight SSE run on stop() instead of tearing it down", async () => {
+  // The SSE body is produced by a still-running executeRun; shutdown must let it
+  // settle (and emit its result frame) rather than destroying the socket while the
+  // producer is mid-run, which would let stop() resolve and the store close under it.
+  let runReached!: () => void;
+  const reached = new Promise<void>((r) => {
+    runReached = r;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const adapter: RuntimeAdapter = {
+    run() {
+      runReached();
+      async function* events() {
+        yield { type: "tool_execution_start" as const, payload: { tool: "fs.write" } };
+      }
+      return { events: events(), output: gate.then(() => ({ status: "done" as const, text: "sse drained" })) };
+    },
+  };
+
+  const running = await bind(adapter);
+
+  const inflight = fetch(`${running.url}/agents/personal/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify({ input: "slow stream" }),
+  });
+  await reached; // the SSE producer is mid-run
+
+  // Shut down while the stream's run is still executing, then let it finish.
+  const stopped = running.stop();
+  release();
+
+  // The stream was drained to completion: it still delivers its terminal result.
+  const res = await inflight;
+  const body = await res.text();
+  expect(body).toContain("event: result");
+  expect(body).toContain("sse drained");
+
+  // stop() resolves only after that in-flight SSE run drained.
+  await stopped;
+});
+
 test("serveNode answers a malformed body with a clean 400, not a crash", async () => {
   const running = await bind(eventEmittingAdapter({ status: "done", text: "x" }));
   try {
