@@ -14,6 +14,7 @@ import {
 } from "@qmilab/asterism-reflect";
 import type { ReflectionProvider } from "@qmilab/asterism-core";
 
+import type { ModelResolutionContext } from "./model-config.js";
 import {
   providerKeyEnvVar,
   resolveApiKey,
@@ -29,12 +30,16 @@ export interface ReflectionProviderResult {
 type Env = Record<string, string | undefined>;
 
 /**
- * Build the reflection provider from environment configuration, or return a
- * `reason` explaining what to set. Needs the same ASTERISM_MODEL_ID as `run`, plus
- * a provider API key — reflection calls a hosted model directly over HTTP.
+ * Build the reflection provider from the resolved model configuration, or return
+ * a `reason` explaining what to set. Resolves the model the same way `run` does
+ * (config file, env, the agent's own override), so reflecting on an agent uses
+ * that agent's model; the provider API key is read from the environment.
  */
-export function buildReflectionProviderFromEnv(env: Env): ReflectionProviderResult {
-  const { model, reason } = resolveModelConfig(env);
+export function buildReflectionProvider(
+  env: Env,
+  context: ModelResolutionContext = {},
+): ReflectionProviderResult {
+  const { model, reason } = resolveModelConfig(env, context);
   if (!model) {
     return reason !== undefined ? { reason } : {};
   }

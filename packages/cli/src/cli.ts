@@ -36,6 +36,8 @@ import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
 
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
+import type { AsterismConfig, ModelSettings } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
 import {
   formatActionSummary,
   formatAgentList,
@@ -46,8 +48,11 @@ import {
   shortId,
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
+import type { ModelResolutionContext } from "./model-config.js";
+import { resolveModelConfig } from "./model-config.js";
 import {
   agentWorkspace,
+  configPath,
   createHome,
   dbPath,
   findHome,
@@ -101,13 +106,25 @@ export interface CliIO {
   capabilities?: (workspaceDir: string) => readonly Capability[];
   /** Read piped standard input (for `secrets add` without an inline value). */
   readStdin?: () => Promise<string | undefined>;
-  /** Build the run adapter. Absent ⇒ the default wiring reads it from the environment. */
-  makeAdapter?: (env: CliIO["env"]) => {
+  /**
+   * Build the run adapter. Absent ⇒ the default wiring resolves the model from the
+   * config file, the environment, and the agent's own override (the `context`).
+   */
+  makeAdapter?: (
+    env: CliIO["env"],
+    context: ModelResolutionContext,
+  ) => {
     adapter?: RuntimeAdapter;
     reason?: string;
   };
-  /** Build the reflection provider. Absent ⇒ the default wiring reads it from the environment. */
-  makeReflectionProvider?: (env: CliIO["env"]) => {
+  /**
+   * Build the reflection provider. Absent ⇒ the default wiring resolves the model
+   * the same way `run` does, including the agent's own override (the `context`).
+   */
+  makeReflectionProvider?: (
+    env: CliIO["env"],
+    context: ModelResolutionContext,
+  ) => {
     provider?: ReflectionProvider;
     reason?: string;
   };
@@ -175,17 +192,22 @@ function noAgent(io: CliIO, name: string): number {
 }
 
 /**
- * Build the run substrate from the IO's override or, lazily, from the environment.
- * The single seam either run-bearing command (`run`, `serve`) reaches the model
- * through, so the two cannot drift in how it is wired — the same reason the run
- * flow itself lives in one kernel call.
+ * Build the run substrate from the IO's override or, lazily, from the resolved
+ * model. The single seam either run-bearing command (`run`, `serve`) reaches the
+ * model through, so the two cannot drift in how it is wired — the same reason the
+ * run flow itself lives in one kernel call. The agent's name (with the loaded
+ * config) lets the model resolve per agent, so different agents can run on
+ * different models.
  */
 async function resolveAdapter(
   io: CliIO,
+  home: string,
+  agentName: string,
 ): Promise<{ adapter?: RuntimeAdapter; reason?: string }> {
+  const context: ModelResolutionContext = { config: loadConfig(home), agentName };
   return io.makeAdapter
-    ? io.makeAdapter(io.env)
-    : (await import("./model.js")).buildAdapterFromEnv(io.env);
+    ? io.makeAdapter(io.env, context)
+    : (await import("./model.js")).buildAdapter(io.env, context);
 }
 
 // --- init ------------------------------------------------------------------
@@ -214,6 +236,40 @@ async function cmdInit(args: string[], io: CliIO): Promise<number> {
   }
 }
 
+// --- model configuration ---------------------------------------------------
+
+/** The value-bearing model flags shared by `new` and `config set`. */
+const MODEL_FLAGS = ["model", "provider", "base-url", "api"] as const;
+
+/**
+ * Read the model flags (`--model`/`--provider`/`--base-url`/`--api`) into a
+ * {@link ModelSettings}, with only the flags that were given set. Maps `--model`
+ * to `id`. There is deliberately NO key flag — API keys stay in the environment,
+ * never the config file.
+ */
+function modelSettingsFromFlags(parsed: ParsedArgs): ModelSettings {
+  const settings: ModelSettings = {};
+  const id = stringFlag(parsed.flags.model);
+  if (id !== undefined) settings.id = id;
+  const provider = stringFlag(parsed.flags.provider);
+  if (provider !== undefined) settings.provider = provider;
+  const baseUrl = stringFlag(parsed.flags["base-url"]);
+  if (baseUrl !== undefined) settings.baseUrl = baseUrl;
+  const api = stringFlag(parsed.flags.api);
+  if (api !== undefined) settings.api = api;
+  return settings;
+}
+
+/** A one-line, human description of a model's coordinates for confirmations and `config`. */
+function describeModel(settings: ModelSettings): string {
+  const extra: string[] = [];
+  if (settings.provider !== undefined) extra.push(`provider: ${settings.provider}`);
+  if (settings.baseUrl !== undefined) extra.push(`base url: ${settings.baseUrl}`);
+  if (settings.api !== undefined) extra.push(`api: ${settings.api}`);
+  const head = settings.id ?? "(model id inherited)";
+  return extra.length > 0 ? `${head} (${extra.join(", ")})` : head;
+}
+
 // --- new -------------------------------------------------------------------
 
 async function cmdNew(args: string[], io: CliIO): Promise<number> {
@@ -236,7 +292,7 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
   // A value-bearing flag given with no value parses as boolean `true`. Reject it
   // rather than silently falling back to a default — `new bot --trust` must not
   // quietly create a `propose` agent the user did not ask for.
-  for (const flag of ["soul", "role", "trust"] as const) {
+  for (const flag of ["soul", "role", "trust", ...MODEL_FLAGS] as const) {
     if (parsed.flags[flag] === true) {
       io.err(`The --${flag} option needs a value.`);
       return 1;
@@ -244,6 +300,10 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
   }
   const role = stringFlag(parsed.flags.role) ?? "";
   const trustLevel = stringFlag(parsed.flags.trust) ?? "propose";
+  // An optional per-agent model pin, written to the config file after the agent
+  // is created. The kernel never learns the model — it stays surface config.
+  const modelSettings = modelSettingsFromFlags(parsed);
+  const hasModel = Object.keys(modelSettings).length > 0;
 
   // Resolve the soul reference now, while we still know the directory the user
   // invoked from. A built-in name is stored verbatim; anything else is a file
@@ -280,6 +340,17 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
     io.out(`Created agent "${agent.name}" (${agent.trustLevel}) — soul: ${agent.soulRef}`);
     if (agent.role) io.out(`  role: ${agent.role}`);
     io.out(`  workspace: ${agent.workspaceDir}`);
+    // Persist the per-agent model pin only after the agent itself is committed, so
+    // a write failure here leaves a usable agent (recoverable with `config set`),
+    // never a config entry pointing at an agent that does not exist.
+    if (hasModel) {
+      const config = loadConfig(home);
+      const agents = { ...(config.agents ?? {}) };
+      agents[name] = { model: modelSettings };
+      config.agents = agents;
+      saveConfig(home, config);
+      io.out(`  model: ${describeModel(modelSettings)}`);
+    }
     if (soulNote) io.out(soulNote);
     return 0;
   });
@@ -406,14 +477,15 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     return 1;
   }
 
-  return withHomeStore(io, async (store) => {
+  return withHomeStore(io, async (store, home) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
 
     // Resolve the adapter only after the workspace and agent check out, so an
     // uninitialized workspace or unknown agent fails like every other command
-    // (and no adapter is constructed for a run that cannot proceed).
-    const made = await resolveAdapter(io);
+    // (and no adapter is constructed for a run that cannot proceed). The agent's
+    // name resolves its own model override, if it has one.
+    const made = await resolveAdapter(io, home, agent.name);
     if (!made.adapter) {
       io.err(made.reason ?? "No model configured.");
       return 1;
@@ -522,7 +594,7 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
     return 1;
   }
 
-  return withHomeStore(io, async (store) => {
+  return withHomeStore(io, async (store, home) => {
     const resolved = resolveRunRef(store, parsed.positionals);
     if (resolved.kind === "no_agent") return noAgent(io, resolved.name);
     if (resolved.kind === "ambiguous") {
@@ -545,7 +617,9 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
 
-    const made = await resolveAdapter(io);
+    // The resume runs through the same model that started it — resolve it for the
+    // owning agent so a per-agent model is honored on resume too.
+    const made = await resolveAdapter(io, home, agent.name);
     if (!made.adapter) {
       io.err(made.reason ?? "No model configured.");
       return 1;
@@ -716,7 +790,7 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     return 1;
   }
 
-  return withHomeStore(io, async (store) => {
+  return withHomeStore(io, async (store, home) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
 
@@ -734,10 +808,12 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     const transcript = { runId: target.id, input: target.input, output: target.output };
 
     // Build the reflection provider (a hosted model) the same way `run` builds its
-    // adapter — only after the agent and a reflectable run check out.
+    // adapter — only after the agent and a reflectable run check out. Resolves this
+    // agent's own model, if it has one.
+    const context: ModelResolutionContext = { config: loadConfig(home), agentName: agent.name };
     const made = io.makeReflectionProvider
-      ? io.makeReflectionProvider(io.env)
-      : (await import("./reflect-model.js")).buildReflectionProviderFromEnv(io.env);
+      ? io.makeReflectionProvider(io.env, context)
+      : (await import("./reflect-model.js")).buildReflectionProvider(io.env, context);
     if (!made.provider) {
       io.err(made.reason ?? "No model configured for reflection.");
       return 1;
@@ -877,6 +953,158 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
   });
 }
 
+// --- config ----------------------------------------------------------------
+
+/** The ASTERISM_MODEL_* variables, in field order, for the env-override notice. */
+const MODEL_ENV_VARS = [
+  "ASTERISM_MODEL_ID",
+  "ASTERISM_MODEL_PROVIDER",
+  "ASTERISM_MODEL_BASE_URL",
+  "ASTERISM_MODEL_API",
+] as const;
+
+/** Whether a settings object has any field set. */
+function hasSettings(settings: ModelSettings | undefined): settings is ModelSettings {
+  return settings !== undefined && Object.keys(settings).length > 0;
+}
+
+async function cmdConfig(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.config!);
+    return 0;
+  }
+  const sub = parsed.positionals[0];
+  if (sub === undefined || sub === "show") return cmdConfigShow(io);
+  if (sub === "set") return cmdConfigSet(parsed, io);
+  if (sub === "unset") return cmdConfigUnset(parsed, io);
+  io.err(`Unknown subcommand: config ${sub}`);
+  io.out(COMMAND_HELP.config!);
+  return 1;
+}
+
+/** `asterism config` / `config show` — the effective configuration, per agent. */
+function cmdConfigShow(io: CliIO): Promise<number> {
+  return withHomeStore(io, (store, home) => {
+    const config = loadConfig(home);
+    io.out(`Configuration  (${configPath(home)})`);
+    io.out("");
+    io.out(
+      hasSettings(config.model)
+        ? `Install default model: ${describeModel(config.model)}`
+        : "Install default model: (none set)",
+    );
+
+    const envSet = MODEL_ENV_VARS.filter((k) => io.env[k] !== undefined);
+    if (envSet.length > 0) {
+      io.out(`Environment override:  ${envSet.join(", ")} set — overrides the config file.`);
+    }
+
+    io.out("");
+    io.out("Per-agent model:");
+    const agents = store.agents.list();
+    if (agents.length === 0) {
+      io.out("  (no agents yet)");
+    } else {
+      for (const agent of agents) {
+        const override = config.agents?.[agent.name]?.model;
+        const { model } = resolveModelConfig(io.env, { config, agentName: agent.name });
+        const resolved = model ? `${model.id} (provider: ${model.provider})` : "(no model — set one)";
+        // Name the source of the resolved id — the headline coordinate.
+        const source = hasSettings(override) && override.id !== undefined
+          ? "agent override"
+          : io.env.ASTERISM_MODEL_ID !== undefined
+            ? "environment"
+            : config.model?.id !== undefined
+              ? "install default"
+              : "unset";
+        io.out(`  ${agent.name}  →  ${resolved}  [${source}]`);
+      }
+    }
+
+    io.out("");
+    io.out("API keys are never stored here — set them in the environment (e.g. OPENAI_API_KEY).");
+    return 0;
+  });
+}
+
+/** `asterism config set <id> [flags] [--agent <name>]` — write a default or override. */
+function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  for (const flag of ["agent", ...MODEL_FLAGS] as const) {
+    if (parsed.flags[flag] === true) {
+      io.err(`The --${flag} option needs a value.`);
+      return Promise.resolve(1);
+    }
+  }
+  // The model id may be given positionally (`config set gpt-4o`) or via --model;
+  // the positional is the ergonomic form. Other coordinates are flags only.
+  const settings = modelSettingsFromFlags(parsed);
+  const positionalId = parsed.positionals[1];
+  if (positionalId !== undefined) settings.id = positionalId;
+  if (!hasSettings(settings)) {
+    io.err(
+      "Usage: asterism config set <model-id> [--provider <p>] [--base-url <url>] " +
+        "[--api <protocol>] [--agent <name>]",
+    );
+    return Promise.resolve(1);
+  }
+  const agentName = stringFlag(parsed.flags.agent);
+
+  return withHomeStore(io, (store, home) => {
+    // A per-agent override is keyed by agent name; require the agent to exist so a
+    // typo'd name does not become a silently useless entry.
+    if (agentName !== undefined && !findAgentByName(store, agentName)) {
+      return noAgent(io, agentName);
+    }
+    const config = loadConfig(home);
+    if (agentName !== undefined) {
+      const agents = { ...(config.agents ?? {}) };
+      agents[agentName] = { model: settings };
+      config.agents = agents;
+    } else {
+      config.model = settings;
+    }
+    saveConfig(home, config);
+    const where = agentName !== undefined ? `agent "${agentName}"` : "the install default";
+    io.out(`Set the model for ${where}: ${describeModel(settings)}.`);
+    io.out("API keys are never stored here — keep them in the environment (e.g. OPENAI_API_KEY).");
+    return 0;
+  });
+}
+
+/** `asterism config unset [--agent <name>]` — clear a default or override. */
+function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (parsed.flags.agent === true) {
+    io.err("The --agent option needs a value.");
+    return Promise.resolve(1);
+  }
+  const agentName = stringFlag(parsed.flags.agent);
+
+  return withHomeStore(io, (_store, home) => {
+    const config = loadConfig(home);
+    if (agentName !== undefined) {
+      if (config.agents?.[agentName] === undefined) {
+        io.out(`No model override set for agent "${agentName}".`);
+        return 0;
+      }
+      const agents = { ...config.agents };
+      delete agents[agentName];
+      config.agents = agents;
+      saveConfig(home, config);
+      io.out(`Cleared the model override for agent "${agentName}".`);
+      return 0;
+    }
+    if (config.model === undefined) {
+      io.out("No install default model set.");
+      return 0;
+    }
+    delete config.model;
+    saveConfig(home, config);
+    io.out("Cleared the install default model.");
+    return 0;
+  });
+}
+
 async function cmdServe(args: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(args, ["help", "h"]);
   if (helpRequested(parsed)) {
@@ -915,14 +1143,15 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
   }
   const startServer = io.startServer;
 
-  return withHomeStore(io, async (store) => {
+  return withHomeStore(io, async (store, home) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
 
-    // Build the substrate the same way `run` does. A missing model is not fatal
-    // for serving: the read endpoints work regardless, and a run started without
-    // one is declined with a clear message rather than failing to serve at all.
-    const made = await resolveAdapter(io);
+    // Build the substrate the same way `run` does, resolving this agent's own
+    // model. A missing model is not fatal for serving: the read endpoints work
+    // regardless, and a run started without one is declined with a clear message
+    // rather than failing to serve at all.
+    const made = await resolveAdapter(io, home, agent.name);
 
     // Built once for the served agent, the same way `run` builds it — so a run
     // started over HTTP sees the identical tool catalog, confined to this agent's
@@ -1026,6 +1255,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdList(rest, io);
     case "reflect":
       return cmdReflect(rest, io);
+    case "config":
+      return cmdConfig(rest, io);
     case "serve":
       return cmdServe(rest, io);
     case "secrets":

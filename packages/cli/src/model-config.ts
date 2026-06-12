@@ -1,14 +1,35 @@
-// Pure model-configuration resolution for `run`. Kept free of any runtime Pi
-// import (the `PiModelConfig` import is type-only and erased), so it is unit
-// testable without loading the substrate; `model.ts` adds the adapter on top.
+// Pure model-configuration resolution for `run` and `reflect`. Kept free of any
+// runtime Pi import (the `PiModelConfig` import is type-only and erased), so it is
+// unit testable without loading the substrate; `model.ts` adds the adapter on top.
 //
-// Each supported provider carries its own protocol (`api`) and default endpoint,
-// so naming a provider is enough — a user does not have to also know the wire
-// format. Explicit ASTERISM_MODEL_* overrides always win over these defaults.
+// Resolution layers a config file, the environment, and a per-agent override.
+// Precedence, most specific first:
+//   1. the agent's own model override (config file `agents.<name>.model`)
+//   2. ASTERISM_MODEL_* environment variables
+//   3. the install-wide default (config file `model`)
+//   4. built-in provider defaults (endpoint + wire protocol)
+// Each field resolves independently, so an override may set just `id` and inherit
+// the endpoint/protocol from a lower layer. Each supported provider carries its
+// own protocol (`api`) and default endpoint, so naming a provider is enough — a
+// user does not have to also know the wire format.
 
 import type { PiModelConfig } from "@qmilab/asterism-adapter-pi";
 
+import type { AsterismConfig, ModelSettings } from "./config.js";
+
 type Env = Record<string, string | undefined>;
+
+/**
+ * The sources resolution draws on beyond the environment: the loaded config file
+ * and which agent (by name) the model is being resolved for. Both optional — with
+ * neither, resolution is environment-only, exactly as it was before the config
+ * file existed. Shared as the wiring context passed to `buildAdapter` /
+ * `buildReflectionProvider`.
+ */
+export interface ModelResolutionContext {
+  config?: AsterismConfig;
+  agentName?: string;
+}
 
 interface ProviderDefaults {
   /** Default base URL for the provider's API. */
@@ -62,32 +83,66 @@ export function resolveApiKey(env: Env, provider: string): string | undefined {
   return env[providerKeyEnvVar(provider)] ?? env.ASTERISM_API_KEY;
 }
 
+/** The model coordinates carried by the ASTERISM_MODEL_* environment variables. */
+function settingsFromEnv(env: Env): ModelSettings {
+  const s: ModelSettings = {};
+  if (env.ASTERISM_MODEL_ID !== undefined) s.id = env.ASTERISM_MODEL_ID;
+  if (env.ASTERISM_MODEL_PROVIDER !== undefined) s.provider = env.ASTERISM_MODEL_PROVIDER;
+  if (env.ASTERISM_MODEL_BASE_URL !== undefined) s.baseUrl = env.ASTERISM_MODEL_BASE_URL;
+  if (env.ASTERISM_MODEL_API !== undefined) s.api = env.ASTERISM_MODEL_API;
+  return s;
+}
+
+/** Merge layers low → high precedence: each set field overrides the ones before it. */
+function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
+  const out: ModelSettings = {};
+  for (const layer of layers) {
+    if (layer.id !== undefined) out.id = layer.id;
+    if (layer.provider !== undefined) out.provider = layer.provider;
+    if (layer.baseUrl !== undefined) out.baseUrl = layer.baseUrl;
+    if (layer.api !== undefined) out.api = layer.api;
+  }
+  return out;
+}
+
 /**
- * Resolve the model config from the environment, applying provider defaults.
- * Required: `ASTERISM_MODEL_ID`. Optional: `ASTERISM_MODEL_PROVIDER`
- * (default "openai"), `ASTERISM_MODEL_BASE_URL`, `ASTERISM_MODEL_API` — each
- * overrides the provider default when set.
+ * Resolve the model config from the config file, environment, and a per-agent
+ * override, then apply provider defaults. See the module header for the
+ * precedence order. A resolved model needs at minimum an `id`; an endpoint comes
+ * from a built-in provider default or must be supplied. Pass only `env` for
+ * environment-only resolution.
  */
-export function resolveModelConfig(env: Env): ModelConfigResult {
-  const id = env.ASTERISM_MODEL_ID;
+export function resolveModelConfig(env: Env, context: ModelResolutionContext = {}): ModelConfigResult {
+  const { config, agentName } = context;
+  const agentSettings = agentName ? config?.agents?.[agentName]?.model : undefined;
+  // Low → high precedence: install default, environment, per-agent override.
+  const merged = mergeSettings([
+    config?.model ?? {},
+    settingsFromEnv(env),
+    agentSettings ?? {},
+  ]);
+
+  const id = merged.id;
   if (!id) {
     return {
       reason:
-        "No model configured. Set ASTERISM_MODEL_ID (and an API key, e.g. " +
-        "OPENAI_API_KEY) before running an agent.",
+        "No model configured. Set one with `asterism config set <model-id>` or the " +
+        "ASTERISM_MODEL_ID environment variable, plus an API key (e.g. OPENAI_API_KEY), " +
+        "before running an agent.",
     };
   }
-  const provider = env.ASTERISM_MODEL_PROVIDER ?? "openai";
+  const provider = merged.provider ?? "openai";
   const defaults = PROVIDER_DEFAULTS[provider];
-  const baseUrl = env.ASTERISM_MODEL_BASE_URL ?? defaults?.baseUrl;
+  const baseUrl = merged.baseUrl ?? defaults?.baseUrl;
   if (!baseUrl) {
     return {
       reason:
-        `No endpoint for provider "${provider}". Set ASTERISM_MODEL_BASE_URL to ` +
-        "the provider's base URL.",
+        `No endpoint for provider "${provider}". Set a base URL ` +
+        `(asterism config set ${id} --provider ${provider} --base-url <url>, or ` +
+        "ASTERISM_MODEL_BASE_URL).",
     };
   }
-  const api = env.ASTERISM_MODEL_API ?? defaults?.api;
+  const api = merged.api ?? defaults?.api;
   const model: PiModelConfig = {
     provider,
     id,

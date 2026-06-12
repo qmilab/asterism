@@ -46,6 +46,7 @@ Create your first agent:  asterism new <name> --role "..." --trust propose
 
 ```
 asterism new <agent> [--soul <name|path>] [--role "<text>"] [--trust <level>]
+              [--model <id>] [--provider <name>] [--base-url <url>] [--api <protocol>]
 ```
 
 Create a new agent with its own memory, secrets, skills, and workspace, kept
@@ -56,6 +57,7 @@ separate from every other agent.
 | `--soul <name\|path>` | `casual-helper` | The agent's character. A built-in name (`casual-helper`, `careful-consultant`) or a path to your own Markdown file. |
 | `--role "<text>"` | *(none)* | One line describing what the agent is responsible for. |
 | `--trust <level>` | `propose` | `propose`, `notify`, or `autonomous`. See [trust levels](./concepts.md#trust-levels). |
+| `--model <id>` | *(install default)* | Pin this agent to a specific model. Combine with `--provider`/`--base-url`/`--api` for a non-default provider. Stored as a per-agent override in [`config`](#config); change it later there. No API key goes here. |
 
 An agent name must be a single safe path segment: letters, digits, dot, dash, or
 underscore — no spaces or slashes, up to 64 characters. A flag given with no
@@ -382,6 +384,61 @@ Done — 1 saved, 1 rejected.
 
 If a proposal trips the memory firewall it is flagged with a `⚠`; if you accept
 a flagged one anyway, the firewall still refuses to save it (`⛔ blocked`).
+
+---
+
+## `config`
+
+```
+asterism config
+asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
+asterism config unset [--agent <name>]
+```
+
+Choose the model your agents run on. Set one install-wide default, and give any
+single agent its own model when you want it to run on something different. The
+settings live in `.asterism/config.json` and hold **only** which model to use —
+never an API key (keys stay in the [environment](./installation.md#api-keys)).
+
+| Form | What it does |
+|---|---|
+| `config` (or `config show`) | Show the saved settings and the model each agent resolves to. |
+| `config set <id>` | Set the install-wide default model. |
+| `config set <id> --agent <name>` | Pin one agent to its own model. |
+| `config unset` | Clear the install default. |
+| `config unset --agent <name>` | Clear one agent's override. |
+
+| Option (for `set`) | Description |
+|---|---|
+| `--provider <name>` | Provider name. Built-in: `openai`, `anthropic`. Default: `openai`. |
+| `--base-url <url>` | The provider's API base URL (needed for providers other than the built-ins). |
+| `--api <protocol>` | The wire protocol, when it differs from the provider default. |
+| `--agent <name>` | Apply to this one agent instead of the install default. The agent must already exist. |
+
+**Where a model comes from**, most specific first: an agent's own model →
+`ASTERISM_MODEL_*` environment variables → the install default → built-in
+provider settings. So an environment variable overrides the saved default, and an
+agent's own model overrides everything.
+
+```console
+$ asterism config set gpt-4o-mini --provider openai
+Set the model for the install default: gpt-4o-mini (provider: openai).
+API keys are never stored here — keep them in the environment (e.g. OPENAI_API_KEY).
+
+$ asterism config set claude-opus-4-8 --provider anthropic --agent work
+Set the model for agent "work": claude-opus-4-8 (provider: anthropic).
+
+$ asterism config
+Configuration  (/home/you/project/.asterism/config.json)
+
+Install default model: gpt-4o-mini (provider: openai)
+
+Per-agent model:
+  work  →  claude-opus-4-8 (provider: anthropic)  [agent override]
+  personal  →  gpt-4o-mini (provider: openai)  [install default]
+
+API keys are never stored here — set them in the environment (e.g. OPENAI_API_KEY).
+```
 
 ---
 

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import type { AsterismConfig } from "./config.ts";
 import { resolveModelConfig } from "./model-config.ts";
 
 test("openai is the default provider with its OpenAI endpoint", () => {
@@ -42,7 +43,69 @@ test("explicit overrides beat the provider defaults", () => {
 test("a missing model id is explained, not silently accepted", () => {
   const { model, reason } = resolveModelConfig({});
   expect(model).toBeUndefined();
+  // The message names both ways to set a model: the config command and the env var.
+  expect(reason).toContain("asterism config set");
   expect(reason).toContain("ASTERISM_MODEL_ID");
+});
+
+// --- config file + per-agent layering --------------------------------------
+
+test("the config file supplies the model when no env var is set", () => {
+  const config: AsterismConfig = { model: { id: "gpt-4o", provider: "openai" } };
+  const { model } = resolveModelConfig({}, { config });
+  expect(model).toEqual({
+    provider: "openai",
+    id: "gpt-4o",
+    baseUrl: "https://api.openai.com/v1",
+  });
+});
+
+test("an env var overrides the config-file default", () => {
+  const config: AsterismConfig = { model: { id: "gpt-4o" } };
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o-mini" }, { config });
+  expect(model?.id).toBe("gpt-4o-mini");
+});
+
+test("a per-agent override beats both the env var and the config default", () => {
+  const config: AsterismConfig = {
+    model: { id: "gpt-4o" },
+    agents: { work: { model: { id: "claude-opus-4-8", provider: "anthropic" } } },
+  };
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o-mini" }, { config, agentName: "work" });
+  expect(model).toEqual({
+    provider: "anthropic",
+    id: "claude-opus-4-8",
+    baseUrl: "https://api.anthropic.com",
+    api: "anthropic-messages",
+  });
+});
+
+test("a per-agent override is field-level: it can change just the id", () => {
+  // The agent sets only `id`; `provider` falls through to the install default.
+  const config: AsterismConfig = {
+    model: { id: "claude-sonnet-4-6", provider: "anthropic" },
+    agents: { work: { model: { id: "claude-opus-4-8" } } },
+  };
+  const { model } = resolveModelConfig({}, { config, agentName: "work" });
+  expect(model).toEqual({
+    provider: "anthropic",
+    id: "claude-opus-4-8",
+    baseUrl: "https://api.anthropic.com",
+    api: "anthropic-messages",
+  });
+});
+
+test("an agent without its own override falls back to env, then config", () => {
+  const config: AsterismConfig = {
+    model: { id: "gpt-4o" },
+    agents: { work: { model: { id: "claude-opus-4-8", provider: "anthropic" } } },
+  };
+  // `personal` has no override, so it resolves to the install default.
+  const fromConfig = resolveModelConfig({}, { config, agentName: "personal" });
+  expect(fromConfig.model?.id).toBe("gpt-4o");
+  // ...and an env var still overrides that default for the un-pinned agent.
+  const fromEnv = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o-mini" }, { config, agentName: "personal" });
+  expect(fromEnv.model?.id).toBe("gpt-4o-mini");
 });
 
 test("an unknown provider needs an explicit base URL", () => {

@@ -12,6 +12,7 @@
 import { PiAdapter } from "@qmilab/asterism-adapter-pi";
 import type { RuntimeAdapter } from "@qmilab/asterism-core";
 
+import type { ModelResolutionContext } from "./model-config.js";
 import { resolveApiKey, resolveModelConfig } from "./model-config.js";
 
 export interface AdapterResult {
@@ -23,13 +24,14 @@ export interface AdapterResult {
 type Env = Record<string, string | undefined>;
 
 /**
- * Build the run adapter from environment configuration, or return a `reason`
- * explaining what to set. Configuration (provider defaults included) is resolved
- * by {@link resolveModelConfig}; the API key is read per provider
- * (OPENAI_API_KEY / ANTHROPIC_API_KEY) or from ASTERISM_API_KEY.
+ * Build the run adapter from the resolved model configuration, or return a
+ * `reason` explaining what to set. Configuration (config file, env, per-agent
+ * override, provider defaults) is resolved by {@link resolveModelConfig}; the API
+ * key is read per provider (OPENAI_API_KEY / ANTHROPIC_API_KEY) or from
+ * ASTERISM_API_KEY — keys stay in the environment, never the config file.
  */
-export function buildAdapterFromEnv(env: Env): AdapterResult {
-  const { model, reason } = resolveModelConfig(env);
+export function buildAdapter(env: Env, context: ModelResolutionContext = {}): AdapterResult {
+  const { model, reason } = resolveModelConfig(env, context);
   if (!model) {
     return reason !== undefined ? { reason } : {};
   }
