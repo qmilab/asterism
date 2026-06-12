@@ -16,6 +16,7 @@ test("usage lists every command in the surface", () => {
     "memory inspect",
     "events tail",
     "reflect",
+    "config",
     "serve",
   ]) {
     expect(USAGE).toContain(command);

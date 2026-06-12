@@ -37,6 +37,7 @@ Commands:
   memory inspect <agent>            Review what an agent remembers
   events tail <agent>               Review what an agent has done
   reflect <agent> --review          Review memories an agent proposes to keep
+  config                            Show or change the model agents run on
   serve <agent>                     Offer an agent over a local HTTP endpoint
 
 Options:
@@ -54,6 +55,7 @@ Set up Asterism in the current directory. Creates a local \`.asterism/\` home th
 holds every agent's separate store and workspace. Safe to re-run.`,
 
   new: `asterism new <agent> [--soul <name|path>] [--role "<text>"] [--trust <level>]
+              [--model <id>] [--provider <name>] [--base-url <url>] [--api <protocol>]
 
 Create a new agent with its own memory, secrets, skills, and workspace — kept
 separate from every other agent.
@@ -66,6 +68,10 @@ Options:
   --trust <level>      propose | notify | autonomous. Default: propose.
                        'notify' acts on its own, then notifies you — it does not
                        ask first.
+  --model <id>         Pin this agent to a specific model, overriding the install
+                       default. With --provider/--base-url/--api for a provider
+                       other than the default. Change it later with \`asterism
+                       config\`. No API key goes here — keep keys in the environment.
 
 ${AUTONOMY_HELP}`,
 
@@ -110,8 +116,9 @@ error, so the agent's own output on standard out stays clean to pipe.)
 When a destructive action pauses a run, confirm it later with \`asterism confirm\`
 — the run picks up and finishes the action you approved.
 
-Configure a model with the ASTERISM_MODEL_ID environment variable (and an API key,
-e.g. OPENAI_API_KEY) before running.`,
+Choose a model with \`asterism config\` (or the ASTERISM_MODEL_ID environment
+variable), and set an API key in the environment (e.g. OPENAI_API_KEY), before
+running.`,
 
   confirm: `asterism confirm [<agent>] <run>
 
@@ -131,8 +138,8 @@ of \`cache\`), and, when a run stopped on several actions at once, each of those
 — you clear them one confirm at a time. Approving is always explicit; nothing
 destructive runs unattended.
 
-Configure a model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY) — the run
-resumes through the same model that started it.`,
+Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
+OPENAI_API_KEY) — the run resumes through the same model that started it.`,
 
   runs: `asterism runs <agent>
 
@@ -156,8 +163,37 @@ Look back over an agent's latest work and review the memories it proposes to kee
 Nothing is saved without your approval — you accept, edit, or reject each one, and
 anything that looks unsafe to remember is flagged for you.
 
-Uses your configured model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY)
-to draft the proposals.`,
+Uses the agent's configured model (\`asterism config\` or ASTERISM_MODEL_ID, and an
+API key, e.g. OPENAI_API_KEY) to draft the proposals.`,
+
+  config: `asterism config
+asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
+asterism config unset [--agent <name>]
+
+Choose the model your agents run on. Set one install-wide default, and give any
+single agent its own model when you want it to run on something different.
+
+  asterism config                       Show the current setup and the model each
+                                        agent resolves to.
+  asterism config set <model-id>        Set the install-wide default model.
+  asterism config set <model-id> --agent <name>
+                                        Pin one agent to its own model.
+  asterism config unset [--agent <name>]
+                                        Clear the default, or one agent's override.
+
+Where a model comes from, most specific first: an agent's own model, then the
+ASTERISM_MODEL_* environment variables, then the install default, then built-in
+provider settings. So an environment variable overrides the saved default, and an
+agent's own model overrides everything.
+
+Options for \`set\`:
+  --provider <name>   Provider name. Built-in: openai, anthropic. Default: openai.
+  --base-url <url>    The provider's API base URL (needed for other providers).
+  --api <protocol>    The wire protocol, when it differs from the provider default.
+  --agent <name>      Apply to this one agent instead of the install default.
+
+API keys are never stored here. Keep them in the environment (e.g. OPENAI_API_KEY)
+— this configuration holds only which model to use, and is safe to share.`,
 
   serve: `asterism serve <agent> [--port <n>] [--host <addr>]
 
@@ -179,6 +215,7 @@ Options:
   --port <n>      Port to listen on. Default 4831.
   --host <addr>   Address to bind. Default 127.0.0.1 (this machine only).
 
-Configure a model (ASTERISM_MODEL_ID and an API key, e.g. OPENAI_API_KEY) to start
-runs; without one, the read endpoints still work. Press Ctrl+C to stop.`,
+Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
+OPENAI_API_KEY) to start runs; without one, the read endpoints still work. Press
+Ctrl+C to stop.`,
 };

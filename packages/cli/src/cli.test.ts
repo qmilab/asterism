@@ -17,6 +17,8 @@ import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
 import { workspaceCapabilities } from "./capabilities.ts";
 import { runCli } from "./cli.ts";
 import type { CliIO, ReviewDecision, ReviewItem } from "./cli.ts";
+import { loadConfig } from "./config.ts";
+import type { ModelResolutionContext } from "./model-config.ts";
 import { dbPath, HOME_DIR_NAME } from "./paths.ts";
 import { VERSION } from "./version.ts";
 
@@ -1046,4 +1048,124 @@ test("confirm authorizes only the paused action; a new destructive action re-pau
   expect(existsSync(join(workspace, "cache"))).toBe(true);
   expect(confirmCalls.length).toBe(callsAfterRun);
   expect(h.out.join("\n")).toContain("paused again");
+});
+
+// --- config command + per-agent model --------------------------------------
+
+/** The install's config home for a harness (the `.asterism/` under its cwd). */
+function homeOf(h: Harness): string {
+  return join(h.dir, HOME_DIR_NAME);
+}
+
+test("config set writes an install default, and config show reports it", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "set", "gpt-4o", "--provider", "openai"], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h))).toEqual({ model: { id: "gpt-4o", provider: "openai" } });
+
+  h.out.length = 0;
+  expect(await runCli(["config"], h.io)).toBe(0);
+  const shown = h.out.join("\n");
+  expect(shown).toContain("Install default model: gpt-4o");
+  expect(shown).toContain("OPENAI_API_KEY"); // the keys-stay-in-env reminder
+});
+
+test("config set --agent pins one agent and requires it to exist", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+
+  // Unknown agent: refused, nothing written.
+  expect(await runCli(["config", "set", "claude-opus-4-8", "--agent", "ghost"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("ghost");
+  expect(loadConfig(homeOf(h)).agents).toBeUndefined();
+
+  // Known agent: written under agents.<name>.model.
+  expect(
+    await runCli(["config", "set", "claude-opus-4-8", "--provider", "anthropic", "--agent", "work"], h.io),
+  ).toBe(0);
+  expect(loadConfig(homeOf(h)).agents).toEqual({
+    work: { model: { id: "claude-opus-4-8", provider: "anthropic" } },
+  });
+});
+
+test("config never stores an API key (no flag for it)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["config", "set", "gpt-4o"], h.io);
+  // Whatever shape config takes, the serialized file must carry no secret material.
+  const raw = JSON.stringify(loadConfig(homeOf(h)));
+  expect(raw.toLowerCase()).not.toContain("api_key");
+  expect(raw).not.toContain("sk-");
+});
+
+test("config unset clears the default and a per-agent override", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+  await runCli(["config", "set", "gpt-4o"], h.io);
+  await runCli(["config", "set", "claude-opus-4-8", "--agent", "work"], h.io);
+
+  expect(await runCli(["config", "unset", "--agent", "work"], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).agents).toEqual({});
+
+  expect(await runCli(["config", "unset"], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).model).toBeUndefined();
+
+  // Clearing what is not set is a no-op success, reported plainly.
+  h.out.length = 0;
+  expect(await runCli(["config", "unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("No install default");
+});
+
+test("config set rejects a value-bearing flag given with no value", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "set", "gpt-4o", "--provider"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("--provider");
+});
+
+test("new --model pins the agent's model in the config file", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(
+    await runCli(["new", "work", "--model", "claude-opus-4-8", "--provider", "anthropic"], h.io),
+  ).toBe(0);
+  expect(h.out.join("\n")).toContain("model: claude-opus-4-8");
+  expect(loadConfig(homeOf(h)).agents).toEqual({
+    work: { model: { id: "claude-opus-4-8", provider: "anthropic" } },
+  });
+});
+
+test("run resolves each agent's own model through the adapter seam", async () => {
+  const h = harness();
+  // Capture the resolution context the run-bearing command hands the seam.
+  const seen: ModelResolutionContext[] = [];
+  h.io.makeAdapter = (_env, context) => {
+    seen.push(context);
+    return { adapter: fakeAdapter };
+  };
+  await runCli(["init"], h.io);
+  await runCli(["new", "work", "--trust", "autonomous", "--model", "claude-opus-4-8", "--provider", "anthropic"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["run", "work", "do it"], h.io)).toBe(0);
+  expect(await runCli(["run", "personal", "do it"], h.io)).toBe(0);
+
+  // `work` carried its own override; `personal` carried none — both resolved by name.
+  const work = seen[0]!;
+  expect(work.agentName).toBe("work");
+  expect(work.config?.agents?.work?.model).toEqual({ id: "claude-opus-4-8", provider: "anthropic" });
+  const personal = seen[1]!;
+  expect(personal.agentName).toBe("personal");
+  expect(personal.config?.agents?.personal).toBeUndefined();
+});
+
+test("config without a model default and no env explains how to set one", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work", "--trust", "autonomous"], h.io);
+  // No adapter override and no model configured: run is declined with guidance.
+  expect(await runCli(["run", "work", "do it"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("asterism config set");
 });

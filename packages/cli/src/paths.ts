@@ -18,10 +18,21 @@ export const HOME_DIR_NAME = ".asterism";
 export const DB_FILE_NAME = "asterism.db";
 /** Subdirectory holding per-agent workspace directories. */
 export const AGENTS_DIR_NAME = "agents";
+/**
+ * The CLI's configuration file inside the home (model/provider defaults and
+ * per-agent overrides). Surface-owned and substrate-free: the kernel never reads
+ * it. Holds only model coordinates — never an API key.
+ */
+export const CONFIG_FILE_NAME = "config.json";
 
 /** Absolute path to the database file given an install's home directory. */
 export function dbPath(home: string): string {
   return join(home, DB_FILE_NAME);
+}
+
+/** Absolute path to the config file given an install's home directory. */
+export function configPath(home: string): string {
+  return join(home, CONFIG_FILE_NAME);
 }
 
 /** A given agent's confined workspace directory inside the home. */

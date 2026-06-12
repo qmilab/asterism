@@ -80,16 +80,46 @@ delete the `.asterism/` directory.
 
 ## Configuring a model
 
-`asterism run` and `asterism reflect` need a model. Asterism reads its model
-configuration from environment variables, so you can point it at any provider
-you have a key for.
+`asterism run` and `asterism reflect` need a model. You can set one two ways, and
+mix them freely:
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `ASTERISM_MODEL_ID` | **Yes** | The model identifier, e.g. `gpt-4o` or `claude-sonnet-4-6`. |
-| `ASTERISM_MODEL_PROVIDER` | No | Provider name. Default: `openai`. Built-in: `openai`, `anthropic`. |
-| `ASTERISM_MODEL_BASE_URL` | No | Override the provider's API base URL (required for providers other than the built-ins). |
-| `ASTERISM_MODEL_API` | No | Override the wire protocol when it differs from the provider default. |
+- **A saved default** with [`asterism config`](./commands.md#config) — written to
+  `.asterism/config.json`, so it persists without exporting anything.
+- **Environment variables** — handy for a one-off session or CI, and they
+  override the saved default.
+
+### A saved default
+
+```bash
+asterism config set gpt-4o                       # install-wide default
+asterism config set claude-sonnet-4-6 --provider anthropic
+asterism config                                  # show what each agent resolves to
+```
+
+You can also give one agent its own model, so different agents run on different
+models — without touching the others:
+
+```bash
+asterism config set claude-opus-4-8 --provider anthropic --agent work
+# or pin it when you create the agent:
+asterism new work --model claude-opus-4-8 --provider anthropic
+```
+
+The config file holds only **which** model to use — never an API key. Keys stay
+in the environment (below).
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `ASTERISM_MODEL_ID` | The model identifier, e.g. `gpt-4o` or `claude-sonnet-4-6`. |
+| `ASTERISM_MODEL_PROVIDER` | Provider name. Default: `openai`. Built-in: `openai`, `anthropic`. |
+| `ASTERISM_MODEL_BASE_URL` | Override the provider's API base URL (required for providers other than the built-ins). |
+| `ASTERISM_MODEL_API` | Override the wire protocol when it differs from the provider default. |
+
+These override the saved default. **Where a model comes from**, most specific
+first: an agent's own model → `ASTERISM_MODEL_*` → the saved install default →
+built-in provider settings.
 
 ### API keys
 
@@ -133,7 +163,8 @@ export OPENROUTER_API_KEY=sk-or-...
 ```
 
 If no model is configured, `run` and `reflect` print a clear message telling you
-which variable to set, and exit without doing anything.
+how to set one (`asterism config set` or the environment variable), and exit
+without doing anything.
 
 ## Verify
 
