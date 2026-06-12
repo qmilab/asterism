@@ -736,6 +736,79 @@ test("a confirmed destructive action that returned an error is not repeated on r
   expect(succeeded).toEqual(["drop_table"]);
 });
 
+test("a confirmed destructive action runs to completion even if a concurrent sibling aborts the run first", async () => {
+  // On resume the substrate fires the confirmed delete and an unconfirmed drop at
+  // once. The drop pauses and aborts the shared signal BEFORE the delete runs. The
+  // delete's tool honors cancellation — but because it is confirmed it must still
+  // run (and be counted once), not bail on the sibling's abort and be lost.
+  const deleted: string[] = [];
+  const signalHonoringDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: (_inv, signal) => {
+        if (signal?.aborted) return { output: "skipped: aborted", isError: true };
+        deleted.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  const drop: Capability = {
+    key: "drop_table",
+    effect: "destructive",
+    tool: {
+      name: "drop_table",
+      description: "drop",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "dropped" }),
+    },
+  };
+  let invocation = 0;
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const n = invocation++;
+      const output = (async (): Promise<RunOutput> => {
+        const tools = request.tools.list();
+        const del = tools.find((t) => t.name === "delete_files");
+        const dropTool = tools.find((t) => t.name === "drop_table");
+        if (n === 0) {
+          // Initial run pauses on the delete (the first destructive action).
+          await del?.execute({ args: { path: "dist" } }, request.signal);
+        } else {
+          // Resume: fire the drop FIRST (it pauses + aborts the signal), then the
+          // now-confirmed delete — which must still run.
+          await Promise.allSettled([
+            dropTool?.execute({ args: { command: "DROP TABLE t" } }, request.signal),
+            del?.execute({ args: { path: "dist" } }, request.signal),
+          ]);
+        }
+        return { status: "done", text: "" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const caps = [signalHonoringDelete, drop];
+
+  const parked = await executeRun(store, agent, "delete then maybe drop", {
+    adapter,
+    capabilities: caps,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual([]);
+
+  // Confirm the delete. On the replay the drop aborts first, but the confirmed
+  // delete still runs to completion (it ignores the sibling's abort) and is counted.
+  const first = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(deleted).toEqual(["delete_files"]); // ran despite the abort — not lost
+  expect(first.result.status).toBe("awaiting_confirmation"); // re-paused on the drop
+});
+
 test("a confirm clears one concurrently-paused action at a time, not all at once", async () => {
   // A substrate that fires two destructive calls before the abort lands, so the run
   // pauses on BOTH at once. A single confirm must approve only ONE of them — the

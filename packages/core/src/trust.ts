@@ -538,12 +538,21 @@ function gateTool(
       //     parse). So a resume must treat any *attempt* as done and never repeat it
       //     — at most once — or it could double-charge / double-delete. Recording
       //     before the call also covers a throw or a crash mid-action.
+      //
+      //     It also runs WITHOUT the run's abort signal. On a resume the substrate
+      //     may fire several tool calls at once; an unconfirmed sibling that pauses
+      //     aborts the shared signal, and a confirmed irreversible action that
+      //     honored that signal would do nothing yet still be counted as executed —
+      //     and then be skipped on the next confirm, lost forever. A confirmed action
+      //     is approved; it must run to completion, not be cancelled by a sibling's
+      //     pause. (The substrate still sees the aborted signal and stops issuing
+      //     further calls; only THIS confirmed tool is allowed to finish.)
       //   - An ordinary (read/write) action is recorded ONLY on success, so a
-      //     transient failure simply re-runs. It is reversible, and resume never
-      //     skips it anyway (only destructive invocations are gated/skipped).
+      //     transient failure simply re-runs. It is reversible, resume never skips it
+      //     anyway, and it still honors the abort signal like any cancellable work.
       if (classifyEffect(action) === "destructive") {
         hooks.onExecute?.(action);
-        return tool.execute(invocation, signal);
+        return tool.execute(invocation);
       }
       const result = await tool.execute(invocation, signal);
       if (!result.isError) hooks.onExecute?.(action);
