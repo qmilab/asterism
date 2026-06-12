@@ -5,10 +5,12 @@
 // import-safe library surface, so `import "@qmilab/asterism"` never executes the
 // CLI against the host's argv.
 //
-// The shebang names `node` — the documented compatibility floor every install has
-// — so `npx`/`npm`/`pnpm`/`yarn` users run it without Bun. It runs identically
-// under Bun (`bunx asterism` / `bun run`); no code path below touches a Bun-only
-// global (see `runtime.ts`).
+// The shebang names `node` — the compatibility floor every install has — so
+// `npx`/`npm`/`pnpm`/`yarn` users (and a bare `asterism` on `PATH`) run it without
+// Bun. It runs identically under Bun, but Bun honors the shebang too: force Bun's
+// runtime with `bunx --bun @qmilab/asterism` or `bun run --bun` (or run the file
+// directly, `bun bin.js`). No code path below touches a Bun-only global (see
+// `runtime.ts`), so the runtime that wins the shebang race never matters.
 //
 // Thin by design: wire the real outside world (stdin/stdout/env/cwd and an
 // interactive confirmation prompt) into `runCli`, then translate its return value

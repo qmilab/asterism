@@ -32,7 +32,7 @@ Unlike multi-agent *orchestration* frameworks — which coordinate agents to fin
 ## Quickstart
 
 ```bash
-npx @qmilab/asterism init     # Node 20+   (or: bunx @qmilab/asterism init)
+npx @qmilab/asterism init     # Node 20+   (Bun: bunx --bun @qmilab/asterism init)
 
 # create two agents with distinct souls and autonomy
 asterism new writer  --soul casual-helper       --trust autonomous

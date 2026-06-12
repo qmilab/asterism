@@ -7,9 +7,8 @@ computer unless you configure a model that does.
 ## Prerequisites
 
 - **A JavaScript runtime — [Node](https://nodejs.org) 20 or newer, or
-  [Bun](https://bun.sh) 1.1.0 or newer.** The `asterism` command runs on either.
-  Bun is the recommended runtime; Node 20+ is a fully supported floor. To install
-  Bun:
+  [Bun](https://bun.sh) 1.1.0 or newer.** The `asterism` command runs on either;
+  Node 20+ is the floor every install can rely on. To install Bun:
 
   ```bash
   curl -fsSL https://bun.sh/install | bash
@@ -20,33 +19,36 @@ computer unless you configure a model that does.
   work with no model configured. You only need one once you want an agent to
   actually do a task. See [Configuring a model](#configuring-a-model).
 
-> **Runtimes.** The same install runs on both: under Bun the local store uses the
-> built-in `bun:sqlite`; under Node it uses `better-sqlite3`, a native module that
-> ships prebuilt binaries for common platforms (no compiler needed in the usual
-> case). Nothing else differs between the two.
-
 ## Install
 
 The fastest way to try Asterism is without installing anything permanently — use
 your runtime's package runner:
 
 ```bash
-npx  @qmilab/asterism init     # Node
-bunx @qmilab/asterism init     # Bun
+npx @qmilab/asterism init           # Node 20+
+bunx --bun @qmilab/asterism init    # Bun
 ```
 
 That fetches the latest published version and runs it. To get the `asterism`
-command on your `PATH`, install it globally:
+command on your `PATH`, install it globally with Node:
 
 ```bash
-npm install --global @qmilab/asterism     # Node
-bun add --global @qmilab/asterism          # Bun
+npm install --global @qmilab/asterism
 asterism --version
 ```
 
 The rest of this documentation writes commands as `asterism …`. If you prefer not
-to install globally, prefix any command with `npx @qmilab/` or `bunx @qmilab/`:
-`npx @qmilab/asterism new writer`.
+to install globally, prefix any command with `npx @qmilab/` (or
+`bunx --bun @qmilab/`): `npx @qmilab/asterism new writer`.
+
+> **Which runtime runs it.** The published `asterism` binary carries a `node`
+> shebang, so a bare `asterism` — and `npx @qmilab/asterism` — runs under Node,
+> the floor every install has. Bun runs the same code: `bunx --bun` forces Bun's
+> runtime (plain `bunx`, like the shebang, looks for Node on your `PATH`; pass
+> `--bun` to use Bun instead). The only thing that differs by runtime is the local
+> store: under Bun it uses the built-in `bun:sqlite`; under Node it uses
+> `better-sqlite3`, a native module that ships prebuilt binaries for common
+> platforms (no compiler needed in the usual case).
 
 ## Initialize a workspace
 
