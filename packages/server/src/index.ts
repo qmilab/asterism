@@ -1,15 +1,18 @@
 // @qmilab/asterism-server — a thin local HTTP endpoint over the kernel.
 //
 // Phase 0 endpoints, each scoped to ONE served agent:
-//   POST /agents/:agent/runs    start a run; body { "input": "<task>" }
-//                               Accept: text/event-stream ⇒ live SSE activity
-//   GET  /agents/:agent/runs    list the agent's runs
-//   GET  /agents/:agent/events  read the agent's event log (with tail params)
+//   POST /agents/:agent/runs              start a run; body { "input": "<task>" }
+//                                         Accept: text/event-stream ⇒ live SSE activity
+//   POST /agents/:agent/runs/:run/confirm approve a paused run and let it finish
+//                                         (same Accept header streams the resume)
+//   GET  /agents/:agent/runs              list the agent's runs
+//   GET  /agents/:agent/events            read the agent's event log (tail params)
 //
 // Thin by mandate (CLAUDE.md): the handler parses the request, calls ONE kernel
 // operation, and serializes the result. No trust reasoning, no scoping decisions,
-// no run orchestration live here — `executeRun` and the agent-scoped repositories
-// own all of that, so the HTTP surface inherits the CLI's exact guarantees.
+// no run orchestration live here — `executeRun` / `resumeRun` and the agent-scoped
+// repositories own all of that, so the HTTP surface inherits the CLI's exact
+// guarantees.
 //
 // One agent per server. A server instance is bound to the single agent that
 // `asterism serve <agent>` named; the `:agent` segment must match that name, and
@@ -18,20 +21,26 @@
 // not only in storage. (The REST path keeps `:agent` for forward-compatibility;
 // in Phase 0 it is pinned to the served agent.)
 //
-// No interactive confirmation exists over HTTP, so a destructive action takes the
-// safe default: it stays paused and the run returns `awaiting_confirmation` rather
-// than executing unattended. The destructive-action gate fires at every trust
-// level (golden rule 4); the kernel, not this surface, enforces it.
+// No interactive confirmation exists mid-run over HTTP, so a destructive action
+// takes the safe default: it stays paused and the run returns
+// `awaiting_confirmation` rather than executing unattended. The confirm endpoint is
+// how that pause is cleared out of band — an explicit, separate request that
+// re-enters the loop with only the capability it stopped on approved. The
+// destructive-action gate fires at every trust level (golden rule 4); the kernel,
+// not this surface, enforces it on the initial run and on every resume.
 //
 // The request handler is written against the web-standard `Request`/`Response`, so
 // it is runtime-agnostic and testable without binding a socket; `serve()` is the
 // only Bun-specific line (it wraps `handleRequest` in `Bun.serve`).
 
-import { executeRun } from "@qmilab/asterism-core";
+import { executeRun, resumeRun } from "@qmilab/asterism-core";
 import type {
   Agent,
   AsterismStore,
   Capability,
+  ExecuteRunOptions,
+  ExecuteRunResult,
+  ResumeOutcome,
   RuntimeAdapter,
   TailOptions,
 } from "@qmilab/asterism-core";
@@ -109,6 +118,36 @@ function listEvents(deps: ServerDeps, url: URL): Response {
   return json(200, { events: deps.store.events.tail(deps.agent.id, options) });
 }
 
+/**
+ * The wire body for a settled run — the shape EVERY run-bearing path returns, in
+ * one place so the buffered and streamed paths (start AND confirm) can never drift.
+ * References only: `actions` carries capability keys and effects, never an action's
+ * args. `status` conveys done / failed / awaiting_confirmation.
+ */
+function runResultBody(result: ExecuteRunResult): Record<string, unknown> {
+  return {
+    run: result.run,
+    status: result.status,
+    output: result.output,
+    actions: result.actions,
+    ...(result.error !== undefined ? { error: result.error } : {}),
+  };
+}
+
+/**
+ * The substrate-side host concerns the run-bearing endpoints forward to the kernel
+ * — built once so `start` and `confirm` hand the run the SAME soul/skill reader and
+ * tool catalog (no per-endpoint drift). The kernel still does the trust scoping and
+ * gating; this only carries the host's seams.
+ */
+function runOptions(deps: ServerDeps, adapter: RuntimeAdapter): ExecuteRunOptions {
+  return {
+    adapter,
+    ...(deps.readFile ? { readFile: deps.readFile } : {}),
+    ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+  };
+}
+
 /** POST /agents/:agent/runs — execute a run through the kernel; body { input }. */
 async function startRun(deps: ServerDeps, req: Request): Promise<Response> {
   let body: unknown;
@@ -134,28 +173,77 @@ async function startRun(deps: ServerDeps, req: Request): Promise<Response> {
   // gets the single JSON blob after it settles. Same kernel call either way — the
   // run executes identically, only the wire framing differs.
   if ((req.headers.get("accept") ?? "").includes("text/event-stream")) {
-    return streamRun(deps, adapter, input);
+    return sseResponse(async (send) => {
+      const result = await executeRun(deps.store, deps.agent, input, {
+        ...runOptions(deps, adapter),
+        onEvent: (runEvent) => send("activity", runEvent),
+      });
+      send("result", runResultBody(result));
+    });
   }
 
   // The kernel owns the run. No `confirm` is supplied: over HTTP a destructive
   // action takes the safe default and the run returns `awaiting_confirmation`
-  // rather than executing without a human.
-  const result = await executeRun(deps.store, deps.agent, input, {
-    adapter,
-    ...(deps.readFile ? { readFile: deps.readFile } : {}),
-    ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
-  });
+  // rather than executing without a human — cleared later via the confirm endpoint.
+  const result = await executeRun(deps.store, deps.agent, input, runOptions(deps, adapter));
 
-  // 201: the run resource was created and executed. `status` conveys
-  // done / failed / awaiting_confirmation; `output` is the agent's text; `actions`
-  // is the run's gate-decision summary (references only).
-  return json(201, {
-    run: result.run,
-    status: result.status,
-    output: result.output,
-    actions: result.actions,
-    ...(result.error !== undefined ? { error: result.error } : {}),
-  });
+  // 201: the run resource was created and executed.
+  return json(201, runResultBody(result));
+}
+
+/**
+ * POST /agents/:agent/runs/:run/confirm — clear a gate pause out of band. The run
+ * the model could not finish unattended (it parked at `awaiting_confirmation` with
+ * no one to confirm) is re-entered with only the capability it stopped on approved.
+ * The gate is not weakened: `resumeRun` grants per-capability, scoped to this one
+ * run, and records the grant; a different destructive action pauses the run again.
+ *
+ * Buffered: 200 with the settled run, 404 for an unknown run, 409 for a run that
+ * is not awaiting confirmation, 503 when no model is configured. Streaming (Accept:
+ * text/event-stream) frames the resume live, then a terminal `result` (or `error`).
+ */
+async function confirmRun(deps: ServerDeps, req: Request, runId: string): Promise<Response> {
+  if (!deps.adapter) {
+    return fail(503, deps.adapterReason ?? "No model is configured, so runs cannot resume.");
+  }
+  const adapter = deps.adapter;
+
+  if ((req.headers.get("accept") ?? "").includes("text/event-stream")) {
+    return sseResponse(async (send) => {
+      const outcome = await resumeRun(deps.store, deps.agent, runId, {
+        ...runOptions(deps, adapter),
+        onEvent: (runEvent) => send("activity", runEvent),
+      });
+      if (outcome.kind === "resumed") {
+        send("result", runResultBody(outcome.result));
+      } else {
+        // SSE carries the refusal as a frame — the response status is already 200.
+        send("error", confirmRefusal(outcome));
+      }
+    });
+  }
+
+  const outcome = await resumeRun(deps.store, deps.agent, runId, runOptions(deps, adapter));
+  if (outcome.kind === "not_found") {
+    return fail(404, "No such run for this agent.");
+  }
+  if (outcome.kind === "not_paused") {
+    // 409 Conflict: the run exists but is not awaiting confirmation, so there is
+    // nothing to confirm. The current status is returned so the client can see why.
+    return json(409, { ...confirmRefusal(outcome), run: outcome.run });
+  }
+  return json(200, runResultBody(outcome.result));
+}
+
+/** The error body for a confirm that could not resume (unknown / not-paused run). */
+function confirmRefusal(
+  outcome: Exclude<ResumeOutcome, { kind: "resumed" }>,
+): { error: string; status?: string } {
+  if (outcome.kind === "not_found") return { error: "No such run for this agent." };
+  return {
+    error: `Run is ${outcome.run.status}, not awaiting confirmation.`,
+    status: outcome.run.status,
+  };
 }
 
 /** Serialize one Server-Sent Event frame: a named event with a JSON data line. */
@@ -164,17 +252,18 @@ function sseFrame(event: string, data: unknown): string {
 }
 
 /**
- * Run the agent and stream it as Server-Sent Events: an `activity` frame per
- * lifecycle event as it arrives, then a terminal `result` frame carrying the same
- * payload the buffered POST returns — so a streaming client ends up with the
- * identical result, just live. The destructive-action gate is unchanged: with no
- * `confirm` over HTTP a destructive action still parks the run, and the stream
- * simply ends with a `result` frame whose status is `awaiting_confirmation`.
- *
- * Built on web-standard `ReadableStream`/`TextEncoder`, so it stays runtime-neutral
- * (Bun today, Node 20+ later) like the rest of `handleRequest`.
+ * Frame an async run-bearing operation as Server-Sent Events: the `produce`
+ * callback emits `activity`/`result`/`error` frames as the operation unfolds;
+ * this wraps it in the web-standard `ReadableStream`/`TextEncoder` plumbing,
+ * guarantees the stream is closed, and turns any unexpected throw into a generic
+ * `error` frame (never leaking an internal message, matching the buffered 500).
+ * Shared by the start and confirm endpoints so their streaming framing is
+ * identical, and runtime-neutral (Bun today, Node 20+ later) like the rest of
+ * `handleRequest`.
  */
-function streamRun(deps: ServerDeps, adapter: RuntimeAdapter, input: string): Response {
+function sseResponse(
+  produce: (send: (event: string, data: unknown) => void) => Promise<void>,
+): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -182,24 +271,10 @@ function streamRun(deps: ServerDeps, adapter: RuntimeAdapter, input: string): Re
         controller.enqueue(encoder.encode(sseFrame(event, data)));
       };
       try {
-        const result = await executeRun(deps.store, deps.agent, input, {
-          adapter,
-          ...(deps.readFile ? { readFile: deps.readFile } : {}),
-          ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
-          onEvent: (runEvent) => send("activity", runEvent),
-        });
-        send("result", {
-          run: result.run,
-          status: result.status,
-          output: result.output,
-          actions: result.actions,
-          ...(result.error !== undefined ? { error: result.error } : {}),
-        });
+        await produce(send);
       } catch {
-        // `executeRun` drives the run to a terminal state itself and does not throw
-        // for run failures, so a throw here is an unexpected internal error. Emit a
-        // generic error frame rather than leaving the stream hung — and never leak
-        // an internal message, matching the buffered path's 500.
+        // The kernel drives a run to a terminal state itself and does not throw for
+        // run failures, so a throw here is an unexpected internal error.
         send("error", { error: "Internal server error." });
       } finally {
         controller.close();
@@ -225,8 +300,11 @@ export async function handleRequest(deps: ServerDeps, req: Request): Promise<Res
     const url = new URL(req.url);
     const segments = url.pathname.split("/").filter((s) => s.length > 0);
 
-    // The only shape we serve is /agents/:agent/(runs|events).
-    if (segments.length !== 3 || segments[0] !== "agents") {
+    // The shapes we serve, all rooted at /agents/:agent:
+    //   /agents/:agent/runs            (GET list, POST start)
+    //   /agents/:agent/events          (GET tail)
+    //   /agents/:agent/runs/:run/confirm  (POST resume a paused run)
+    if (segments[0] !== "agents" || (segments.length !== 3 && segments.length !== 5)) {
       return fail(404, "Not found.");
     }
     // A malformed percent-encoding (e.g. `/agents/%/runs`) makes decodeURIComponent
@@ -238,7 +316,6 @@ export async function handleRequest(deps: ServerDeps, req: Request): Promise<Res
     } catch {
       return fail(404, `This endpoint serves only the agent "${deps.agent.name}".`);
     }
-    const resource = segments[2]!;
 
     // One agent per server: any name but the served one is not found here. This is
     // the network-edge expression of "no shared state across agents" — a server
@@ -247,6 +324,22 @@ export async function handleRequest(deps: ServerDeps, req: Request): Promise<Res
       return fail(404, `This endpoint serves only the agent "${deps.agent.name}".`);
     }
 
+    // /agents/:agent/runs/:run/confirm — the only 5-segment route.
+    if (segments.length === 5) {
+      if (segments[2] !== "runs" || segments[4] !== "confirm") {
+        return fail(404, "Not found.");
+      }
+      let runId: string;
+      try {
+        runId = decodeURIComponent(segments[3]!);
+      } catch {
+        return fail(404, "Not found.");
+      }
+      if (req.method === "POST") return confirmRun(deps, req, runId);
+      return fail(405, "Method not allowed.");
+    }
+
+    const resource = segments[2]!;
     if (resource === "runs") {
       if (req.method === "GET") return listRuns(deps);
       if (req.method === "POST") return startRun(deps, req);

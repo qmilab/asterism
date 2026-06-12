@@ -43,6 +43,7 @@ export type {
   TrustProfile,
   TrustProfileInput,
   TrustHooks,
+  PreApprovalVerdict,
 } from "./trust.js";
 
 // The memory firewall — screens every inbound memory write for injection /
@@ -66,7 +67,12 @@ export type {
 
 // The local secret store — holds credential plaintext behind a scoped `read`;
 // the credentials table stores only the `valueRef` into it.
-export { SecretStore, secretValueRef } from "./secrets.js";
+export {
+  SecretStore,
+  secretValueRef,
+  RESERVED_SECRET_PREFIX,
+  isReservedSecretKey,
+} from "./secrets.js";
 export type { SecretRef } from "./secrets.js";
 
 // The ReflectionProvider contract — the kernel/reflection seam. Core defines it
@@ -102,8 +108,13 @@ export type {
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
-export { executeRun } from "./run.js";
-export type { ExecuteRunOptions, ExecuteRunResult, ActionRecord } from "./run.js";
+export { executeRun, resumeRun } from "./run.js";
+export type {
+  ExecuteRunOptions,
+  ExecuteRunResult,
+  ActionRecord,
+  ResumeOutcome,
+} from "./run.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The
 // kernel's run-orchestration surfaces compose this around their own hooks.

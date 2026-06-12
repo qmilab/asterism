@@ -137,6 +137,7 @@ Same tools, same task shape — the difference is entirely the trust level.
 ```console
 $ asterism run personal "update my blog draft and delete the generated files in dist/"
 Run paused: a destructive action needs your confirmation before it can proceed.
+Confirm it to continue:  asterism confirm personal a1b2c3d4
 ```
 
 The edit ran; the deletion did **not**. The run is parked at
@@ -144,6 +145,11 @@ The edit ran; the deletion did **not**. The run is parked at
 `action.awaiting_confirmation`. An autonomous agent acted freely right up to the
 irreversible step — and there it waited for an explicit yes. That gate is the
 same at `notify` and `autonomous`; trust level does not switch it off.
+
+When you're ready, [`asterism confirm personal a1b2c3d4`](./commands.md#confirm)
+resumes the run and carries out exactly that deletion — approving only the action
+it stopped on (a bounded grant, not a blanket on deletes), and recording it as
+`run.resumed`. Until then, nothing irreversible has happened.
 
 As it runs, the agent streams its activity, and because it can act on its own it
 ends with a summary of what it did and what it paused on — printed to standard

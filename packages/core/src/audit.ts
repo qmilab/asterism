@@ -11,7 +11,14 @@
 // persists to the event log must record references, never the arguments a model
 // produced — those can carry a live secret value. So the payload here is the
 // capability key plus the *effective* effect class (after destructive
-// escalation) and nothing else. `action.args` is never written.
+// escalation). `action.args` is never written. The one addition, on both a pause
+// (`action.awaiting_confirmation`) and an execution (`action.executed`), is a
+// keyed-HMAC `fingerprint` of the args — a reference to the invocation, not a path
+// back to its arguments, and not guessable without the agent's secret key. The
+// out-of-band resume uses it to bind a confirmation to the exact paused action AND
+// to count how many times each invocation has already executed (so a re-run skips
+// the ones already done). It reveals no argument value, even to a reader who can
+// dictionary-attack a bare hash.
 //
 // This module depends on `trust` and the event repository; nothing depends on it.
 // It deliberately does NOT know about the store or run-status transitions: the
@@ -20,12 +27,21 @@
 // passes them in to be preserved alongside the audit writes.
 
 import type { Action, TrustHooks } from "./trust.js";
-import { classifyEffect } from "./trust.js";
+import { actionFingerprint, classifyEffect } from "./trust.js";
 import type { EventRepository } from "./repositories/events.js";
 
 /** Run context stamped onto every audit event so the log ties back to a run. */
 export interface AuditContext {
   runId?: string;
+  /**
+   * The agent's secret key for fingerprinting a paused action's arguments. When
+   * present, `action.awaiting_confirmation` carries a keyed-HMAC `fingerprint`
+   * (a reference an out-of-band resume binds a confirmation to). Absent ⇒ no
+   * fingerprint is recorded, so a resume cannot match a specific invocation and
+   * every destructive action re-pauses — the safe default. The real run path always
+   * supplies it; only ancillary callers omit it.
+   */
+  fingerprintKey?: string;
 }
 
 /**
@@ -46,18 +62,27 @@ export function auditTrustHooks(
   context: AuditContext = {},
   base: TrustHooks = {},
 ): TrustHooks {
-  const { runId } = context;
-  const record = (type: string, action: Action): void => {
+  const { runId, fingerprintKey } = context;
+  const record = (type: string, action: Action, extra?: Record<string, unknown>): void => {
     events.append(agentId, {
       type,
       ...(runId !== undefined ? { runId } : {}),
-      payload: { capability: action.capability, effect: classifyEffect(action) },
+      payload: { capability: action.capability, effect: classifyEffect(action), ...extra },
     });
   };
   return {
     ...base,
     onExecute: (action) => {
-      record("action.executed", action);
+      // `action.executed` carries the same keyed fingerprint as a pause, so a resume
+      // can count how many times each exact invocation has ALREADY run and skip those
+      // on replay rather than repeating a confirmed destructive action.
+      record(
+        "action.executed",
+        action,
+        fingerprintKey !== undefined
+          ? { fingerprint: actionFingerprint(action.args, fingerprintKey) }
+          : undefined,
+      );
       base.onExecute?.(action);
     },
     onWithhold: (action) => {
@@ -65,7 +90,17 @@ export function auditTrustHooks(
       base.onWithhold?.(action);
     },
     onAwaitConfirmation: (action) => {
-      record("action.awaiting_confirmation", action);
+      // The pause carries a keyed-HMAC `fingerprint` of the arguments (a reference,
+      // never the args, and not guessable without the agent's key) so an out-of-band
+      // resume can bind a human's confirmation to THIS exact invocation, not just its
+      // capability. Omitted when no key is supplied (a resume then re-pauses — safe).
+      record(
+        "action.awaiting_confirmation",
+        action,
+        fingerprintKey !== undefined
+          ? { fingerprint: actionFingerprint(action.args, fingerprintKey) }
+          : undefined,
+      );
       base.onAwaitConfirmation?.(action);
     },
   };

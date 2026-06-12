@@ -109,6 +109,34 @@ export class RunRepository {
     return row ? mapRun(row) : undefined;
   }
 
+  /**
+   * Atomically claim a paused run for resume: flip `awaiting_confirmation` →
+   * `running` in a SINGLE compare-and-set. The status precondition lives in the
+   * UPDATE's WHERE clause, so two concurrent confirms cannot both win — the first
+   * flips the row and the second's `status = 'awaiting_confirmation'` no longer
+   * matches, updating nothing. Returns the now-`running` run to the caller that won
+   * the claim, or undefined to every other caller (the run was unknown, already
+   * claimed, or not paused). This is what keeps a confirmed destructive action from
+   * executing twice when two confirm requests race over the same parked run.
+   */
+  claimForResume(agentId: string, id: string): Run | undefined {
+    requireAgentId(agentId);
+    // Also CLEAR `output`: the run is being re-executed from the start, so the
+    // transcript persisted at the previous pause is stale. Leaving it would let a
+    // resume that re-pauses before producing new text keep the old attempt's text
+    // on the row (and `reflect` could pick it up via `latestWithOutput`). A re-run
+    // that completes or re-pauses with text overwrites this NULL; one that produces
+    // nothing honestly has no transcript.
+    const row = this.driver
+      .prepare(
+        `UPDATE runs SET status = 'running', finished_at = NULL, output = NULL
+          WHERE id = ? AND agent_id = ? AND status = 'awaiting_confirmation'
+          RETURNING *`,
+      )
+      .get([id, agentId]);
+    return row ? mapRun(row) : undefined;
+  }
+
   setStatus(agentId: string, id: string, status: RunStatus): Run | undefined {
     requireAgentId(agentId);
     validateEnum(status, RUN_STATUSES, "run status");

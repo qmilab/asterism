@@ -23,6 +23,8 @@
 // Nothing here imports Pi or any adapter. Core owns the policy; the adapter only
 // ever sees the wrapped tools this module produces.
 
+import { createHmac } from "node:crypto";
+
 import type {
   ScopedTool,
   ToolInvocation,
@@ -215,6 +217,44 @@ export function isDestructive(action: Action): boolean {
   return classifyEffect(action) === "destructive";
 }
 
+/**
+ * Serialize a value with object keys sorted at every level, so two structurally
+ * equal arguments produce the same string regardless of key order. Array order is
+ * preserved (it is semantically significant); object key order is not.
+ */
+function stableStringify(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) as string;
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+    .join(",")}}`;
+}
+
+/**
+ * A stable, NON-REVERSIBLE fingerprint of an action's arguments — a short digest
+ * that identifies *which* invocation a destructive action is, without recording the
+ * arguments themselves. The out-of-band resume path uses it to bind a human's
+ * confirmation to the exact paused action: two calls of the same capability with
+ * different arguments (deleting `dist` vs `cache`) have different fingerprints, so a
+ * confirmation for one never clears the other.
+ *
+ * It is a KEYED HMAC, not a bare hash. `key` is the agent's secret action-
+ * fingerprint key ({@link AsterismStore.actionFingerprintKey}); without it, an
+ * attacker who can read the event log (e.g. over the HTTP events endpoint) could
+ * dictionary-attack a bare digest of low-entropy arguments like `{ path: "dist" }`
+ * and recover what the log deliberately never stores. Keying defeats that: the
+ * digest is a REFERENCE to the action, never a path back to its arguments, so it is
+ * safe to record alongside the capability and effect while preserving the event
+ * log's references-only guarantee. The recording side (`audit.ts`) and the matching
+ * side (the resume's `preApproval`) pass the same key, so their fingerprints agree.
+ */
+export function actionFingerprint(args: unknown, key: string): string {
+  return createHmac("sha256", key).update(stableStringify(args)).digest("hex").slice(0, 32);
+}
+
 // ---------------------------------------------------------------------------
 // 2. Trust profile + decision.
 // ---------------------------------------------------------------------------
@@ -305,6 +345,14 @@ export function decideGate(profile: TrustProfile, action: Action): GateDecision 
 // ---------------------------------------------------------------------------
 
 /**
+ * What a resume's standing disposition says about a destructive action — see
+ * {@link TrustHooks.preApproval}. `skip`: already executed on an earlier resume,
+ * do not repeat; `run`: confirmed and not yet executed, run it; `gate`: undecided,
+ * fall through to the confirmation pause.
+ */
+export type PreApprovalVerdict = "skip" | "run" | "gate";
+
+/**
  * Side channels the kernel wires around the gate. All are optional; their absence
  * yields the safe default (a destructive action pauses and is never auto-run).
  * Handlers receive the {@link Action}, which carries `args` — a handler that
@@ -329,6 +377,31 @@ export interface TrustHooks {
    * a CLI/HTTP surface uses to ask the human and resume.
    */
   confirm?: (action: Action) => boolean | Promise<boolean>;
+  /**
+   * The standing disposition for a destructive action on a RESUME — the seam
+   * `resumeRun` uses to honor an out-of-band confirmation without re-prompting,
+   * while re-executing the agent loop from the start. Consulted for a destructive
+   * action BEFORE the confirmation pause, and STATEFUL (it counts occurrences of
+   * each invocation within the replay). Returns:
+   *
+   * - `"skip"`  — this exact invocation ALREADY executed on an earlier resume cycle.
+   *   Re-running the loop replays it, but it must NOT happen twice — a confirmed
+   *   payment/delete is not repeated. The gate returns an "already performed" result
+   *   without executing or pausing, so the loop continues to the next action.
+   * - `"run"`   — this invocation is confirmed and has not executed yet. It runs.
+   * - `"gate"`  — no standing decision: consult `confirm`, and pause if denied.
+   *
+   * Absent ⇒ always `"gate"` (a fresh run: nothing pre-approved, nothing already
+   * executed). Re-entering the loop replays every earlier destructive call, so this
+   * skips the ones already run, runs exactly the next one a human confirmed, and
+   * gates the rest — never re-executing a confirmed action and never auto-running an
+   * unconfirmed one.
+   *
+   * Deliberately separate from a {@link TrustProfile}'s permanent `autoApprove`
+   * allow-list, which is an unbounded, *configured* grant. A one-time confirmation
+   * must not become that.
+   */
+  preApproval?: (action: Action) => PreApprovalVerdict;
   /**
    * The run's abort controller. When a destructive action is paused without
    * approval, the gate aborts it — a *real* stop signal, not just a refused tool
@@ -362,6 +435,22 @@ function awaitingConfirmationResult(capability: string): ToolResult {
       `[awaiting confirmation] '${capability}' is a destructive action and ` +
       `requires explicit human confirmation before it can run. It has not been executed.`,
     isError: true,
+  };
+}
+
+/**
+ * ToolResult returned when a resume's replay reaches a destructive action that
+ * ALREADY executed on an earlier confirmation of this run. Re-running the loop
+ * re-issues it, but the gate does not let it happen twice — it reports the prior
+ * effect as a success (so the model continues to the next step) without repeating
+ * it. Marked `isError: false`: from the model's view the action is done.
+ */
+function alreadyPerformedResult(capability: string): ToolResult {
+  return {
+    output:
+      `[already performed] '${capability}' ran on an earlier confirmation of this ` +
+      `run; it was not repeated.`,
+    isError: false,
   };
 }
 
@@ -403,23 +492,71 @@ function gateTool(
       }
 
       if (decision === "confirm") {
-        hooks.onAwaitConfirmation?.(action);
-        const approved = hooks.confirm ? await hooks.confirm(action) : false;
-        if (!approved) {
-          // Not a refused-but-continuable result: stop the run. Aborting the
-          // controller suspends the agent loop so it cannot proceed to other
-          // side-effecting tools while the action waits on a human.
-          hooks.abortController?.abort(
-            new Error(`destructive action requires confirmation: ${key}`),
-          );
-          return awaitingConfirmationResult(key);
+        // A resume's standing disposition decides this destructive action without a
+        // fresh pause. Consulted FIRST so a confirmed action emits no awaiting-
+        // confirmation event and the run does not churn through `awaiting_confirmation`.
+        const verdict = hooks.preApproval?.(action) ?? "gate";
+        if (verdict === "skip") {
+          // Already executed on an earlier confirmation of this run — re-running the
+          // loop must not repeat it. Report the prior effect as done, without
+          // executing or pausing, so the loop continues to the next action.
+          return alreadyPerformedResult(key);
         }
-        // Explicitly confirmed: fall through to execute. The audit hook still
-        // fires so the now-permitted destructive action is recorded.
+        if (verdict === "gate") {
+          // Consult the (possibly interactive, blocking) confirmation FIRST, then
+          // record the pause only if it is denied. `onAwaitConfirmation` is what
+          // persists `awaiting_confirmation`, so deferring it past the prompt means a
+          // run sitting at a live `[y/N]` stays `running` — an out-of-band confirm
+          // therefore cannot claim a still-attended run and double-execute the action.
+          // The status flips to `awaiting_confirmation` only when the action truly
+          // parks (no one approved it).
+          const approved = hooks.confirm ? await hooks.confirm(action) : false;
+          if (!approved) {
+            hooks.onAwaitConfirmation?.(action);
+            // Not a refused-but-continuable result: stop the run. Aborting the
+            // controller suspends the agent loop so it cannot proceed to other
+            // side-effecting tools while the action waits on a human.
+            hooks.abortController?.abort(
+              new Error(`destructive action requires confirmation: ${key}`),
+            );
+            return awaitingConfirmationResult(key);
+          }
+        }
+        // verdict === "run", or "gate" + explicitly confirmed: fall through to
+        // execute. With the pause recorded only on denial, an action reaches
+        // `onExecute` ONLY when it was never paused — so a given invocation triggers
+        // `onAwaitConfirmation` or `onExecute`, never both.
       }
 
-      hooks.onExecute?.(action);
-      return tool.execute(invocation, signal);
+      // Record the execution for the resume's skip-accounting, with the timing the
+      // action's reversibility demands:
+      //
+      //   - A DESTRUCTIVE action is recorded as executed UP FRONT — before running
+      //     it, and regardless of the result. Its side effect is irreversible, and a
+      //     tool's `isError` does NOT tell us whether that effect happened (a
+      //     payment/delete can succeed while the response times out or fails to
+      //     parse). So a resume must treat any *attempt* as done and never repeat it
+      //     — at most once — or it could double-charge / double-delete. Recording
+      //     before the call also covers a throw or a crash mid-action.
+      //
+      //     It also runs WITHOUT the run's abort signal. On a resume the substrate
+      //     may fire several tool calls at once; an unconfirmed sibling that pauses
+      //     aborts the shared signal, and a confirmed irreversible action that
+      //     honored that signal would do nothing yet still be counted as executed —
+      //     and then be skipped on the next confirm, lost forever. A confirmed action
+      //     is approved; it must run to completion, not be cancelled by a sibling's
+      //     pause. (The substrate still sees the aborted signal and stops issuing
+      //     further calls; only THIS confirmed tool is allowed to finish.)
+      //   - An ordinary (read/write) action is recorded ONLY on success, so a
+      //     transient failure simply re-runs. It is reversible, resume never skips it
+      //     anyway, and it still honors the abort signal like any cancellable work.
+      if (classifyEffect(action) === "destructive") {
+        hooks.onExecute?.(action);
+        return tool.execute(invocation);
+      }
+      const result = await tool.execute(invocation, signal);
+      if (!result.isError) hooks.onExecute?.(action);
+      return result;
     },
   };
 }

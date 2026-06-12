@@ -59,6 +59,7 @@ export const EVENT_TYPES = [
   "agent.trust_changed",
   "run.started",
   "run.status_changed",
+  "run.resumed",
   "memory.recorded",
   "memory.blocked",
   "skill.attached",

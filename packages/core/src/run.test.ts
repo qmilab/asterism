@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { executeRun } from "./run.js";
+import { executeRun, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
@@ -222,11 +222,11 @@ test("a destructive action pauses an autonomous run at awaiting_confirmation", a
   expect(types).toContain("run.status_changed");
 });
 
-test("a confirmed destructive action resumes and finishes done, not stranded paused", async () => {
-  // `confirm` resolves truthy ⇒ the gate pauses, gets its yes, and runs the
-  // action. The run must then finish `done` — the confirmed side effect actually
-  // happened, so leaving it stuck at `awaiting_confirmation` would misreport a
-  // completed deletion as still pending (the gate's "resume" contract).
+test("a confirmed destructive action runs inline and finishes done, never persisting a pause", async () => {
+  // `confirm` resolves truthy ⇒ the gate asks, gets its yes, and runs the action
+  // WITHOUT first persisting `awaiting_confirmation`. The run finishes `done`, and —
+  // because the pause is recorded only on denial — the run never momentarily looked
+  // parked, so a concurrent out-of-band confirm could not have raced this live one.
   const result = await executeRun(store, agent, "delete the dist files", {
     adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
     capabilities: [deleteFilesCapability()],
@@ -241,10 +241,11 @@ test("a confirmed destructive action resumes and finishes done, not stranded pau
   expect(result.output).not.toContain("awaiting confirmation");
   expect(store.runs.get(agent.id, result.run.id)?.status).toBe("done");
 
-  // The record shows confirmation was required AND then the action executed.
+  // The destructive action is on the record as executed; an inline yes leaves no
+  // `awaiting_confirmation` event (the run never parked).
   const types = store.events.tail(agent.id).map((e) => e.type);
-  expect(types).toContain("action.awaiting_confirmation");
   expect(types).toContain("action.executed");
+  expect(types).not.toContain("action.awaiting_confirmation");
 });
 
 // --- streaming + action summary (#16) ------------------------------------
@@ -430,6 +431,746 @@ test("two destructive actions that pause concurrently are both kept, in order", 
     { capability: "delete_files", effect: "destructive", decision: "paused" },
     { capability: "drop_table", effect: "destructive", decision: "paused" },
   ]);
+});
+
+// --- resume a gate-paused run out-of-band (#17) --------------------------
+
+/**
+ * A substrate stand-in that drives a sequence of tools in order, stopping the
+ * moment one returns an error (the gate's awaiting-confirmation result) or the run
+ * is aborted — exactly like a real loop. Re-invoked on resume, it replays the same
+ * sequence, so a now-approved destructive tool gets past the gate this time.
+ */
+function sequenceAdapter(steps: readonly { tool: string; args: unknown }[]): RuntimeAdapter {
+  return {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const texts: string[] = [];
+        for (const step of steps) {
+          if (request.signal?.aborted) break;
+          const tool = request.tools.list().find((t) => t.name === step.tool);
+          if (!tool) continue;
+          const result = await tool.execute({ args: step.args }, request.signal);
+          texts.push(result.output);
+          if (result.isError) break;
+        }
+        return { status: "done", text: texts.join("\n") };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+}
+
+test("resumeRun reports not_found for an unknown run", async () => {
+  const outcome = await resumeRun(store, agent, "no-such-run", {
+    adapter: cannedAdapter({ status: "done", text: "x" }),
+  });
+  expect(outcome.kind).toBe("not_found");
+});
+
+test("resumeRun reports not_paused for a run that already finished", async () => {
+  const done = await executeRun(store, agent, "just answer", {
+    adapter: cannedAdapter({ status: "done", text: "answered" }),
+  });
+  const outcome = await resumeRun(store, agent, done.run.id, {
+    adapter: cannedAdapter({ status: "done", text: "again" }),
+  });
+  expect(outcome.kind).toBe("not_paused");
+  if (outcome.kind === "not_paused") expect(outcome.run.status).toBe("done");
+});
+
+test("a confirmed resume re-enters the loop, executes the action, and finishes done", async () => {
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  // First run parks: no confirm, so the destructive action stops the run.
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // Confirming resumes the SAME run and lets the pending capability through.
+  const outcome = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(outcome.kind).toBe("resumed");
+  if (outcome.kind !== "resumed") return;
+  expect(outcome.result.status).toBe("done");
+  expect(outcome.result.output).toBe("deleted");
+  // Same run row, now terminal — not a new run.
+  expect(outcome.result.run.id).toBe(parked.run.id);
+  expect(store.runs.list(agent.id)).toHaveLength(1);
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("done");
+
+  // The resume is on the record: the grant (run.resumed, naming the confirmed
+  // capability) precedes the action it permitted (action.executed).
+  const types = store.events.tail(agent.id).map((e) => e.type);
+  expect(types).toContain("run.resumed");
+  const resumed = store.events
+    .tail(agent.id)
+    .find((e) => e.type === "run.resumed");
+  expect((resumed?.payload as { confirmed: string[] }).confirmed).toEqual(["delete_files"]);
+  // The summary counts ONE executed action, not a pause-then-execute pair.
+  expect(outcome.result.actions).toEqual([
+    { capability: "delete_files", effect: "destructive", decision: "executed" },
+  ]);
+});
+
+test("a resume approves only the pending capability; a different destructive action re-pauses", async () => {
+  // The agent deletes (the pending action) and then drops a table (a NEW
+  // destructive action). The first run parks on the delete before it ever reaches
+  // the drop.
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { command: "rm -rf dist" } },
+    { tool: "drop_table", args: { command: "DROP TABLE users" } },
+  ]);
+  const parked = await executeRun(store, agent, "delete dist then drop the table", {
+    adapter,
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // Confirming the delete lets it through — but the drop is a different capability
+  // the human never confirmed, so the gate pauses the run again rather than
+  // auto-running it. The confirmation did NOT become a blanket destructive grant.
+  const first = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+
+  // Confirming again converges: the second pending capability now runs and the run
+  // completes.
+  const second = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("done");
+});
+
+test("a resume approves only the count confirmed, not every call of a capability", async () => {
+  // Two deletes through the SAME capability with different targets. The run parks on
+  // the first; confirming it must clear ONLY that one — the second is a distinct
+  // destructive action and pauses on its own. A capability-blanket grant would
+  // wrongly delete the second, unconfirmed target too.
+  const deleted: string[] = [];
+  const recordingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete a path",
+      inputSchema: { type: "object", properties: {} },
+      execute: (inv) => {
+        const path = (inv.args as { path?: string } | undefined)?.path ?? "?";
+        deleted.push(path);
+        return { output: `deleted ${path}` };
+      },
+    },
+  };
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { path: "dist" } },
+    { tool: "delete_files", args: { path: "cache" } },
+  ]);
+
+  const parked = await executeRun(store, agent, "delete dist and cache", {
+    adapter,
+    capabilities: [recordingDelete],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual([]); // parked before anything was deleted
+
+  // First confirm clears exactly one delete; the second re-pauses.
+  const first = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [recordingDelete],
+  });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual(["dist"]); // ONLY the confirmed delete ran — never cache
+
+  // Confirming again clears the second delete and the run completes. The replay
+  // re-runs the task from the start, but the already-confirmed `dist` delete is
+  // SKIPPED (not repeated), so each delete happens exactly once.
+  const second = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [recordingDelete],
+  });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(deleted).toEqual(["dist", "cache"]);
+});
+
+test("a multi-step run does not re-execute an already-confirmed destructive action", async () => {
+  // Confirm A, then the run reaches B; confirming B re-runs the task from the start,
+  // but A — already confirmed and executed — must NOT run a second time.
+  const executed: string[] = [];
+  const cap = (key: string): Capability => ({
+    key,
+    effect: "destructive",
+    tool: {
+      name: key,
+      description: key,
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        executed.push(key);
+        return { output: `${key} ran` };
+      },
+    },
+  });
+  // Sequential: the run pauses on `delete_files` first; once that is confirmed it
+  // reaches `drop_table`.
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { path: "dist" } },
+    { tool: "drop_table", args: { command: "DROP TABLE t" } },
+  ]);
+  const caps = [cap("delete_files"), cap("drop_table")];
+
+  const parked = await executeRun(store, agent, "delete then drop", {
+    adapter,
+    capabilities: caps,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // Confirm 1: delete_files runs; drop_table pauses.
+  const first = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(executed).toEqual(["delete_files"]);
+
+  // Confirm 2: drop_table runs — and delete_files is SKIPPED, not executed again.
+  const second = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(executed).toEqual(["delete_files", "drop_table"]); // delete_files ran exactly once
+});
+
+test("a confirmed destructive action that returned an error is not repeated on resume", async () => {
+  // A destructive tool can perform its irreversible side effect yet return `isError`
+  // (the API timed out, the response failed to parse). `isError` does not tell us
+  // whether the effect happened, so the attempt is counted and a later resume must
+  // NOT repeat it — at most once, or it could double-charge / double-delete.
+  let deleteAttempts = 0;
+  const succeeded: string[] = [];
+  const erroringDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        // Every attempt reports an error (the ambiguous case), so a re-run would be
+        // observable as a second attempt.
+        deleteAttempts += 1;
+        return { output: "ambiguous timeout", isError: true };
+      },
+    },
+  };
+  const drop: Capability = {
+    key: "drop_table",
+    effect: "destructive",
+    tool: {
+      name: "drop_table",
+      description: "drop",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        succeeded.push("drop_table");
+        return { output: "dropped" };
+      },
+    },
+  };
+  // A loop that, unlike `sequenceAdapter`, does NOT stop on a tool error (a failure
+  // is not a pause) — it continues to the next call, the way a real agent loop that
+  // saw an error and pressed on would. It stops only when the run is aborted (a pause).
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const steps = [
+        { tool: "delete_files", args: { path: "dist" } },
+        { tool: "drop_table", args: { command: "DROP TABLE t" } },
+      ];
+      const output = (async (): Promise<RunOutput> => {
+        for (const step of steps) {
+          if (request.signal?.aborted) break;
+          const tool = request.tools.list().find((t) => t.name === step.tool);
+          await tool?.execute({ args: step.args }, request.signal);
+        }
+        return { status: "done", text: "" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const caps = [erroringDelete, drop];
+
+  const parked = await executeRun(store, agent, "delete then drop", {
+    adapter,
+    capabilities: caps,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // Confirm 1: delete_files is attempted (errors); the run reaches drop_table and pauses.
+  const first = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(deleteAttempts).toBe(1);
+
+  // Confirm 2: delete_files is SKIPPED — its irreversible effect may have happened,
+  // so it is not retried; drop_table runs and the run completes.
+  const second = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(deleteAttempts).toBe(1); // NOT repeated, despite the error
+  expect(succeeded).toEqual(["drop_table"]);
+});
+
+test("a confirmed destructive action runs to completion even if a concurrent sibling aborts the run first", async () => {
+  // On resume the substrate fires the confirmed delete and an unconfirmed drop at
+  // once. The drop pauses and aborts the shared signal BEFORE the delete runs. The
+  // delete's tool honors cancellation — but because it is confirmed it must still
+  // run (and be counted once), not bail on the sibling's abort and be lost.
+  const deleted: string[] = [];
+  const signalHonoringDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: (_inv, signal) => {
+        if (signal?.aborted) return { output: "skipped: aborted", isError: true };
+        deleted.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  const drop: Capability = {
+    key: "drop_table",
+    effect: "destructive",
+    tool: {
+      name: "drop_table",
+      description: "drop",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "dropped" }),
+    },
+  };
+  let invocation = 0;
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const n = invocation++;
+      const output = (async (): Promise<RunOutput> => {
+        const tools = request.tools.list();
+        const del = tools.find((t) => t.name === "delete_files");
+        const dropTool = tools.find((t) => t.name === "drop_table");
+        if (n === 0) {
+          // Initial run pauses on the delete (the first destructive action).
+          await del?.execute({ args: { path: "dist" } }, request.signal);
+        } else {
+          // Resume: fire the drop FIRST (it pauses + aborts the signal), then the
+          // now-confirmed delete — which must still run.
+          await Promise.allSettled([
+            dropTool?.execute({ args: { command: "DROP TABLE t" } }, request.signal),
+            del?.execute({ args: { path: "dist" } }, request.signal),
+          ]);
+        }
+        return { status: "done", text: "" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const caps = [signalHonoringDelete, drop];
+
+  const parked = await executeRun(store, agent, "delete then maybe drop", {
+    adapter,
+    capabilities: caps,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual([]);
+
+  // Confirm the delete. On the replay the drop aborts first, but the confirmed
+  // delete still runs to completion (it ignores the sibling's abort) and is counted.
+  const first = await resumeRun(store, agent, parked.run.id, { adapter, capabilities: caps });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(deleted).toEqual(["delete_files"]); // ran despite the abort — not lost
+  expect(first.result.status).toBe("awaiting_confirmation"); // re-paused on the drop
+});
+
+test("a confirm clears one concurrently-paused action at a time, not all at once", async () => {
+  // A substrate that fires two destructive calls before the abort lands, so the run
+  // pauses on BOTH at once. A single confirm must approve only ONE of them — the
+  // other re-pauses and needs its own confirm. One "yes" never green-lights both.
+  const executed: string[] = [];
+  const recording = (key: string): Capability => ({
+    key,
+    effect: "destructive",
+    tool: {
+      name: key,
+      description: key,
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        executed.push(key);
+        return { output: `${key} ran` };
+      },
+    },
+  });
+  const concurrentAdapter: RuntimeAdapter = {
+    run(request) {
+      const tools = request.tools.list();
+      const del = tools.find((t) => t.name === "delete_files");
+      const drop = tools.find((t) => t.name === "drop_table");
+      const output = (async (): Promise<RunOutput> => {
+        await Promise.allSettled([
+          del?.execute({ args: { command: "rm -rf dist" } }, request.signal),
+          drop?.execute({ args: { command: "DROP TABLE users" } }, request.signal),
+        ]);
+        return { status: "done", text: "ran" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const caps = [recording("delete_files"), recording("drop_table")];
+  const parked = await executeRun(store, agent, "delete dist and drop the table", {
+    adapter: concurrentAdapter,
+    capabilities: caps,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(executed).toEqual([]); // both paused, nothing ran
+
+  // First confirm: exactly ONE of the two concurrently-paused actions runs.
+  const first = await resumeRun(store, agent, parked.run.id, {
+    adapter: concurrentAdapter,
+    capabilities: caps,
+  });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(executed).toHaveLength(1); // only one — a single confirm did not approve both
+
+  // A second confirm clears the other; now both have run and the run completes.
+  const second = await resumeRun(store, agent, parked.run.id, {
+    adapter: concurrentAdapter,
+    capabilities: caps,
+  });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(new Set(executed)).toEqual(new Set(["delete_files", "drop_table"]));
+});
+
+test("a resume binds approval to the exact action: a reordered same-capability target re-pauses", async () => {
+  // The replay is not guaranteed to reproduce the original order. Here the agent
+  // paused on a delete of `dist`, but on resume the replay tries `cache` FIRST — a
+  // target the human never confirmed. The grant is fingerprinted to `dist`, so the
+  // gate must NOT spend it on `cache`; `cache` re-pauses and is never deleted.
+  const deleted: string[] = [];
+  const recordingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete a path",
+      inputSchema: { type: "object", properties: {} },
+      execute: (inv) => {
+        const path = (inv.args as { path?: string } | undefined)?.path ?? "?";
+        deleted.push(path);
+        return { output: `deleted ${path}` };
+      },
+    },
+  };
+  // Invocation 0 (initial run) deletes dist; invocation 1+ (resume) reorders to cache-first.
+  let invocation = 0;
+  const reorderingAdapter: RuntimeAdapter = {
+    run(request) {
+      const calls =
+        invocation++ === 0
+          ? [{ path: "dist" }]
+          : [{ path: "cache" }, { path: "dist" }];
+      const output = (async (): Promise<RunOutput> => {
+        const texts: string[] = [];
+        for (const args of calls) {
+          if (request.signal?.aborted) break;
+          const tool = request.tools.list().find((t) => t.name === "delete_files");
+          if (!tool) continue;
+          const result = await tool.execute({ args }, request.signal);
+          texts.push(result.output);
+          if (result.isError) break;
+        }
+        return { status: "done", text: texts.join("\n") };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const parked = await executeRun(store, agent, "delete dist (cache comes later)", {
+    adapter: reorderingAdapter,
+    capabilities: [recordingDelete],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(deleted).toEqual([]);
+
+  // Confirm the `dist` pause. The replay reorders to `cache` first — but that is a
+  // different invocation than was confirmed, so the gate pauses on it.
+  const resumed = await resumeRun(store, agent, parked.run.id, {
+    adapter: reorderingAdapter,
+    capabilities: [recordingDelete],
+  });
+  expect(resumed.kind).toBe("resumed");
+  if (resumed.kind !== "resumed") return;
+  expect(resumed.result.status).toBe("awaiting_confirmation");
+  // The unconfirmed target was NOT deleted — the approval did not transfer to it.
+  expect(deleted).not.toContain("cache");
+  expect(deleted).toEqual([]);
+});
+
+test("a resume that re-pauses with no new text does not keep the prior attempt's transcript", async () => {
+  // The first pause persisted a transcript. The resume re-runs from the start and
+  // pauses again before producing any text; the row must not still carry the stale
+  // first-attempt transcript (which `reflect` could otherwise pick up).
+  let invocation = 0;
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const n = invocation++;
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "delete_files");
+        if (n === 0) {
+          await tool?.execute({ args: { path: "dist" } }, request.signal);
+          return { status: "done", text: "STALE-FIRST-ATTEMPT" };
+        }
+        // On resume the replay reaches a NEW destructive target first, which has no
+        // budget, so it pauses again — and this attempt produced no text.
+        await tool?.execute({ args: { path: "cache" } }, request.signal);
+        return { status: "done", text: "" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const parked = await executeRun(store, agent, "delete dist", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(store.runs.get(agent.id, parked.run.id)?.output).toBe("STALE-FIRST-ATTEMPT");
+
+  const resumed = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(resumed.kind).toBe("resumed");
+  if (resumed.kind !== "resumed") return;
+  expect(resumed.result.status).toBe("awaiting_confirmation");
+  // The re-run cleared the stale transcript; nothing for `reflect` to pick up.
+  expect(store.runs.get(agent.id, parked.run.id)?.output ?? "").not.toContain("STALE-FIRST-ATTEMPT");
+});
+
+test("claimRunForResume is an atomic claim: a second confirm on a claimed run loses", async () => {
+  // The store-level guard behind concurrent-confirm safety. Two confirms racing the
+  // same parked run must not both proceed: the compare-and-set lets exactly one flip
+  // awaiting_confirmation → running.
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // First claim wins and flips the run to running.
+  const won = store.claimRunForResume(agent.id, parked.run.id);
+  expect(won?.status).toBe("running");
+  // A second claim on the now-running run claims nothing.
+  const lost = store.claimRunForResume(agent.id, parked.run.id);
+  expect(lost).toBeUndefined();
+});
+
+test("resumeRun treats a lost claim as not_paused and never re-runs the loop", async () => {
+  const ran: string[] = [];
+  const spyDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        ran.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [spyDelete],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // A concurrent confirm already claimed the run (it is now `running`).
+  store.claimRunForResume(agent.id, parked.run.id);
+  // This confirm must NOT execute the destructive action a second time.
+  const outcome = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [spyDelete],
+  });
+  expect(outcome.kind).toBe("not_paused");
+  expect(ran).toEqual([]);
+});
+
+test("a live confirm prompt keeps the run running, so a concurrent confirm cannot double-run it", async () => {
+  // Stand in for an interactive run blocked at its [y/N] prompt. While it blocks, the
+  // run must NOT be `awaiting_confirmation` — otherwise a separate out-of-band confirm
+  // could claim it, start a second loop, and the destructive action would run twice.
+  const ran: string[] = [];
+  const recordingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        ran.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  // A confirm hook we can hold open at the "prompt".
+  let reachPrompt!: () => void;
+  let answer!: (approved: boolean) => void;
+  const reached = new Promise<void>((r) => (reachPrompt = r));
+  const answered = new Promise<boolean>((r) => (answer = r));
+  const confirm = (): Promise<boolean> => {
+    reachPrompt();
+    return answered;
+  };
+
+  const runPromise = executeRun(store, agent, "delete the dist files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [recordingDelete],
+    confirm,
+  });
+
+  await reached; // the run is now blocked inside confirm, as if at the prompt
+  const runId = store.runs.list(agent.id)[0]!.id;
+  // The run is still `running` while the prompt is live — it has not parked.
+  expect(store.runs.get(agent.id, runId)?.status).toBe("running");
+  // So a concurrent out-of-band confirm finds nothing to claim.
+  const concurrent = await resumeRun(store, agent, runId, {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [recordingDelete],
+  });
+  expect(concurrent.kind).toBe("not_paused");
+
+  // Answer yes; the original run executes the action exactly once.
+  answer(true);
+  const result = await runPromise;
+  expect(result.status).toBe("done");
+  expect(ran).toEqual(["delete_files"]); // ran once — never twice
+});
+
+test("a run paused on two identical destructive invocations can be fully confirmed", async () => {
+  // Both calls are the SAME capability AND args (same fingerprint). The grant tracks
+  // multiplicity: one confirm clears one, a second clears the other — they do not
+  // collapse into a single approval the replay consumes once, stranding the second.
+  const executed: string[] = [];
+  const recordingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        executed.push("delete_files");
+        return { output: "deleted" };
+      },
+    },
+  };
+  const twiceAdapter: RuntimeAdapter = {
+    run(request) {
+      const tool = request.tools.list().find((t) => t.name === "delete_files");
+      const output = (async (): Promise<RunOutput> => {
+        await Promise.allSettled([
+          tool?.execute({ args: { path: "dist" } }, request.signal),
+          tool?.execute({ args: { path: "dist" } }, request.signal), // identical args
+        ]);
+        return { status: "done", text: "ran" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const parked = await executeRun(store, agent, "delete dist (twice)", {
+    adapter: twiceAdapter,
+    capabilities: [recordingDelete],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(executed).toEqual([]);
+
+  // First confirm clears exactly one of the two identical deletes; the other re-pauses.
+  const first = await resumeRun(store, agent, parked.run.id, {
+    adapter: twiceAdapter,
+    capabilities: [recordingDelete],
+  });
+  expect(first.kind).toBe("resumed");
+  if (first.kind !== "resumed") return;
+  expect(first.result.status).toBe("awaiting_confirmation");
+  expect(executed).toHaveLength(1);
+
+  // A second confirm clears the second identical delete; the run completes — it is
+  // not stranded re-pausing on the duplicate forever.
+  const second = await resumeRun(store, agent, parked.run.id, {
+    adapter: twiceAdapter,
+    capabilities: [recordingDelete],
+  });
+  expect(second.kind).toBe("resumed");
+  if (second.kind !== "resumed") return;
+  expect(second.result.status).toBe("done");
+  expect(executed.length).toBeGreaterThanOrEqual(2);
+});
+
+test("resume never crosses agents: one agent cannot confirm another's parked run", async () => {
+  const other = store.createAgent({
+    name: "work",
+    role: "careful consultant",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "autonomous",
+  });
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  // `work` resuming `personal`'s run id finds nothing — the lookup is agent-scoped,
+  // so a foreign run is indistinguishable from a missing one.
+  const outcome = await resumeRun(store, other, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(outcome.kind).toBe("not_found");
+  // personal's run is untouched — still parked, never resumed by another agent.
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("awaiting_confirmation");
 });
 
 test("a run completes even if the adapter never closes its event stream", async () => {

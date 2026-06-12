@@ -3,6 +3,7 @@ import type { ScopedTool, ToolInvocation } from "./adapter";
 import { AsterismStore } from "./store";
 import {
   DESTRUCTIVE_COMMAND_RULES,
+  actionFingerprint,
   classifyEffect,
   decideGate,
   isDestructive,
@@ -10,7 +11,7 @@ import {
   resolveToolRegistry,
   trustProfile,
 } from "./trust";
-import type { Action, Capability, EffectClass, TrustHooks } from "./trust";
+import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust";
 
 // --- helpers ---------------------------------------------------------------
 
@@ -240,6 +241,20 @@ describe("classifyEffect — explicit, escalate-only classification", () => {
     expect(matchDestructiveCommand("git push origin main")).toBeUndefined();
   });
 
+  test("actionFingerprint is keyed, stable, and order-insensitive over object keys", () => {
+    const args = { path: "dist" };
+    // Keyed: the SAME args under different keys differ — so a reader of the event
+    // log cannot dictionary-attack a paused action's arguments without the key.
+    expect(actionFingerprint(args, "key-a")).not.toBe(actionFingerprint(args, "key-b"));
+    // Stable: same key + same args always match, so a resume's recompute lines up
+    // with what the pause recorded.
+    expect(actionFingerprint(args, "key-a")).toBe(actionFingerprint(args, "key-a"));
+    // Different arguments under one key differ — `dist` never matches `cache`.
+    expect(actionFingerprint({ path: "dist" }, "k")).not.toBe(actionFingerprint({ path: "cache" }, "k"));
+    // Object key order is not significant; array order is preserved elsewhere.
+    expect(actionFingerprint({ a: 1, b: 2 }, "k")).toBe(actionFingerprint({ b: 2, a: 1 }, "k"));
+  });
+
   test("isDestructive agrees with classifyEffect", () => {
     expect(isDestructive({ capability: "shell", effect: "write", args: "rm x" })).toBe(
       true,
@@ -412,6 +427,79 @@ describe("resolveToolRegistry — exposure filter + the gate, end to end", () =>
     const out = await invoke(registry, "delete", { path: "dist/" });
     expect(del.calls).toHaveLength(1);
     expect(out).toBe("delete ran");
+  });
+
+  test("preApproval drives the gate: skip (no repeat), run, or gate (pause)", async () => {
+    // The resume seam returns one of three verdicts per destructive action. `run`
+    // executes without a pause; `skip` reports a prior effect as done WITHOUT
+    // re-executing (so a confirmed action never runs twice); `gate` falls through to
+    // the confirmation pause.
+    const del = spyTool("delete");
+    const awaited: Action[] = [];
+    const verdicts: PreApprovalVerdict[] = ["run", "skip", "gate"];
+    let i = 0;
+    const hooks: TrustHooks = {
+      onAwaitConfirmation: (a) => awaited.push(a),
+      preApproval: () => verdicts[i++]!,
+    };
+    const registry = resolveToolRegistry(
+      trustProfile({ level: "autonomous", capabilities: ["fs.delete"] }),
+      [capability("fs.delete", "destructive", del.tool)],
+      hooks,
+    );
+
+    // "run": executes, no pause.
+    expect(await invoke(registry, "delete", { path: "a" })).toBe("delete ran");
+    expect(del.calls).toHaveLength(1);
+    expect(awaited).toHaveLength(0);
+
+    // "skip": already performed on an earlier resume — reported done, NOT re-run.
+    const skipped = await invoke(registry, "delete", { path: "a" });
+    expect(skipped).toContain("[already performed]");
+    expect(del.calls).toHaveLength(1); // not executed a second time
+    expect(awaited).toHaveLength(0);
+
+    // "gate": falls through to the pause (no confirm hook here ⇒ stays paused).
+    expect(await invoke(registry, "delete", { path: "b" })).toContain("[awaiting confirmation]");
+    expect(del.calls).toHaveLength(1);
+    expect(awaited).toHaveLength(1);
+  });
+
+  test("a destructive attempt counts even on error; an ordinary failure does not", async () => {
+    // `onExecute` is what the audit counts to decide what a resume skips. A
+    // DESTRUCTIVE action is irreversible and `isError` cannot tell us whether its
+    // side effect happened, so the attempt is recorded regardless of the result —
+    // a resume treats it as done and never repeats it. An ordinary (write) failure
+    // is recorded only on success, so it simply re-runs.
+    const destructiveExec: Action[] = [];
+    const failingDelete: ScopedTool = {
+      name: "delete",
+      description: "delete",
+      inputSchema: {},
+      execute: () => ({ output: "ambiguous", isError: true }),
+    };
+    const delReg = resolveToolRegistry(
+      trustProfile({ level: "autonomous", capabilities: ["fs.delete"], autoApprove: ["fs.delete"] }),
+      [capability("fs.delete", "destructive", failingDelete)],
+      { onExecute: (a) => destructiveExec.push(a) },
+    );
+    expect(await invoke(delReg, "delete", { path: "x" })).toBe("ambiguous");
+    expect(destructiveExec).toHaveLength(1); // counted despite the error — never repeated
+
+    const writeExec: Action[] = [];
+    const failingWrite: ScopedTool = {
+      name: "write",
+      description: "write",
+      inputSchema: {},
+      execute: () => ({ output: "boom", isError: true }),
+    };
+    const writeReg = resolveToolRegistry(
+      trustProfile({ level: "autonomous", capabilities: ["fs.write"] }),
+      [capability("fs.write", "write", failingWrite)],
+      { onExecute: (a) => writeExec.push(a) },
+    );
+    expect(await invoke(writeReg, "write", { path: "n" })).toBe("boom");
+    expect(writeExec).toHaveLength(0); // a failed write is not counted (it re-runs)
   });
 
   test("a confirm hook resumes a paused destructive action; absence keeps it paused", async () => {

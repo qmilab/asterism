@@ -188,8 +188,10 @@ A run ends in one of three ways:
 - **done** — the agent's output is printed.
 - **paused** — a destructive action needs confirmation: `Run paused: a
   destructive action needs your confirmation before it can proceed.` In an
-  interactive terminal you are prompted `[y/N]`; a non-interactive (piped) run
-  never auto-approves and stays paused.
+  interactive terminal you are prompted `[y/N]` to approve it right away. Otherwise
+  the run stays paused — it also prints the exact command to resume it later
+  (`asterism confirm <agent> <id>`; see [`confirm`](#confirm)). A non-interactive
+  (piped) run never auto-approves.
 - **failed** — an error is printed and the command exits `1`.
 
 The run's activity streams as it happens, and an agent that can act on its own
@@ -220,6 +222,50 @@ response>` lands on stdout.)
 
 ---
 
+## `confirm`
+
+```
+asterism confirm [<agent>] <run>
+```
+
+Confirm the destructive action a run paused on, and let the run finish. This is how
+you clear a pause from anywhere — including a run that stopped with nobody at the
+prompt, like one started over the [HTTP endpoint](./http.md) or from a pipe.
+
+Identify the run by the short id shown when it paused (or by [`runs`](#runs)). Name
+the agent too when the same short id could mean different runs:
+
+```console
+$ asterism run writer "delete the generated files in dist/"
+Run paused: a destructive action needs your confirmation before it can proceed.
+Confirm it to continue:  asterism confirm writer e5f6a7b8
+
+$ asterism confirm writer e5f6a7b8
+  → delete_file
+  ✓ delete_file
+Actions (1 executed):
+  ✓ executed fs.delete (destructive)
+Deleted 'dist'.
+```
+
+A bare `asterism confirm e5f6a7b8` works too when the id is unambiguous across your
+agents.
+
+Confirming approves **only** the action the run paused on — nothing else is
+unlocked, and the grant applies to this run alone. The approval is bounded, not a
+blanket on the capability: confirming a delete of `dist` clears that delete, but a
+later delete of `cache` (the same kind of action, a new target) pauses again for
+its own `confirm`, as does any other destructive step. If a run stopped on several
+destructive actions at once, you clear them one confirm at a time — a single `yes`
+never approves several distinct actions together. Resuming re-runs the task from the
+start, so any ordinary writes the agent had already made happen again; but a
+destructive action you already confirmed is **not** repeated — the run recognizes it
+as done and moves on — so confirming step by step never double-charges or
+double-deletes. Requires a [configured model](./installation.md#configuring-a-model)
+— the same one the run started with.
+
+---
+
 ## `runs`
 
 ```
@@ -242,7 +288,8 @@ Runs for writer (2):
   started 2026-06-10T12:05:00.000Z
 ```
 
-An agent with no runs prints `writer has no runs yet.`
+A run shown as `awaiting_confirmation` is waiting for you — resume it with
+[`confirm`](#confirm). An agent with no runs prints `writer has no runs yet.`
 
 ---
 
@@ -357,16 +404,18 @@ to reach another.
 $ asterism serve writer
 Serving agent "writer" at http://127.0.0.1:4831
   POST http://127.0.0.1:4831/agents/writer/runs    start a run  (JSON body: {"input":"<task>"})
+  POST http://127.0.0.1:4831/agents/writer/runs/<run>/confirm    approve a paused run
   GET  http://127.0.0.1:4831/agents/writer/runs    list runs
   GET  http://127.0.0.1:4831/agents/writer/events  review activity
 Press Ctrl+C to stop.
 ```
 
 Without a configured model the read endpoints still work; starting a run is
-declined until a model is set. Over HTTP there is no one to confirm a
-destructive action, so a run that would pause is declined rather than run
-unattended. See the [HTTP reference](./http.md) for full request/response
-details.
+declined until a model is set. A destructive action has no one at the keyboard to
+confirm it, so the run **pauses and waits** rather than running unattended — you
+clear it out of band by POSTing to the run's confirm endpoint (or with
+[`confirm`](#confirm)). See the [HTTP reference](./http.md) for full
+request/response details.
 
 ---
 

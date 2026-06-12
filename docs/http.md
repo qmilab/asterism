@@ -54,9 +54,10 @@ status, the agent's output, and a reference-only summary of the actions it took:
 ```
 
 `status` is one of `done`, `failed`, or `awaiting_confirmation`. Because no one
-is at a keyboard to confirm, a destructive action does **not** execute over
-HTTP — the run comes back `awaiting_confirmation` and nothing destructive
-happened. The destructive-action gate fires here exactly as it does on the
+is at a keyboard to confirm mid-run, a destructive action does **not** execute
+over HTTP on the initial request — the run comes back `awaiting_confirmation` and
+nothing destructive happened. Clear that pause out of band with the **confirm**
+endpoint below. The destructive-action gate fires here exactly as it does on the
 command line, at every trust level.
 
 `actions` carries one entry per gate decision — `executed`, `withheld`, or
@@ -88,6 +89,48 @@ data: {"run":{…},"status":"done","output":"…","actions":[…]}
 The run executes identically either way — only the framing differs. A destructive
 action still parks the run; the stream simply ends with a `result` frame whose
 `status` is `awaiting_confirmation`.
+
+### `POST /agents/<agent>/runs/<run>/confirm` — confirm a paused run
+
+Resume a run that came back `awaiting_confirmation`. This is the out-of-band
+counterpart to the command line's [`confirm`](./commands.md#confirm): there is no
+one to confirm mid-run over HTTP, so the action waits until you explicitly approve
+it with this request. No body is required.
+
+```bash
+curl -s -X POST http://127.0.0.1:4831/agents/writer/runs/<run-id>/confirm
+```
+
+On success the run re-enters the loop with **only the action it paused on**
+approved, runs to completion, and returns `200` with the same shape the start
+endpoint returns — the confirmed action now shows as `executed`:
+
+```json
+{
+  "run": { "id": "…", "status": "done", "finishedAt": "…", … },
+  "status": "done",
+  "output": "…",
+  "actions": [ { "capability": "delete_files", "effect": "destructive", "decision": "executed" } ]
+}
+```
+
+The grant is bounded to that action and scoped to this one run; the gate is not
+widened into a blanket on the capability. If the resumed run reaches a further
+destructive action — a different capability, or the same one aimed at a new target
+— it parks again (`awaiting_confirmation`), and you confirm that one in turn. The
+resume is recorded on the event log as `run.resumed`, naming the capabilities it
+granted.
+
+| Outcome | Code | Meaning |
+|---|---|---|
+| Resumed | `200` | The run was paused and has now run to a terminal (or re-paused) state. |
+| Unknown run | `404` | No such run for this agent. |
+| Not paused | `409` | The run exists but is not `awaiting_confirmation` — nothing to confirm. The body carries its current `status`. |
+| No model | `503` | A model is needed to resume; none is configured. |
+
+Add `Accept: text/event-stream` to stream the resume live, exactly like the start
+endpoint — `activity` frames then a terminal `result`. A run that cannot be resumed
+(unknown, or not paused) is reported as an `error` frame instead.
 
 ### `GET /agents/<agent>/runs` — list runs
 
@@ -128,9 +171,10 @@ a response.
 | `200` | A successful `GET`, or a streaming `POST` (`Accept: text/event-stream`) — the outcome arrives in the terminal `result` frame. |
 | `201` | A run was created and executed (check `status` in the body for the outcome). |
 | `400` | Malformed request — body is not JSON, `input` missing/empty, or a bad `limit`. |
-| `404` | Unknown path, or a `:agent` that is not the served agent. |
+| `404` | Unknown path, a `:agent` that is not the served agent, or a confirm for an unknown run. |
 | `405` | Known path, wrong method (e.g. `DELETE /…/runs`). |
-| `503` | No model is configured, so a run cannot execute. Reads still work. |
+| `409` | A confirm for a run that is not `awaiting_confirmation` — nothing to confirm. |
+| `503` | No model is configured, so a run cannot execute or resume. Reads still work. |
 | `500` | An unexpected internal error (message is generic — internals never leak to the client). |
 
 ## Security notes

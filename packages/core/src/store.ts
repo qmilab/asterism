@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import type { SqlDriver } from "./db/driver.js";
 import { openDatabase } from "./db/index.js";
 import { SCHEMA } from "./db/schema.js";
@@ -21,7 +23,7 @@ import type {
   TrustLevel,
 } from "./types.js";
 import { EventRepository } from "./repositories/events.js";
-import { SecretStore, secretValueRef } from "./secrets.js";
+import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError } from "./firewall.js";
 
 /**
@@ -186,6 +188,49 @@ export class AsterismStore {
   }
 
   /**
+   * Atomically CLAIM a paused run for resume — a single compare-and-set from
+   * `awaiting_confirmation` to `running` (see {@link RunRepository.claimForResume}).
+   * Returns the now-`running` run to the caller that won the claim, or undefined to
+   * one that did NOT — the run was unknown, already terminal, or already claimed by
+   * a concurrent confirm. That single-winner guarantee SERIALIZES confirms: only the
+   * owner re-enters the loop, so two racing confirms can never both execute the
+   * confirmed destructive action.
+   *
+   * A resume claims BEFORE reconstructing its approval state, so the reconstruction
+   * reads the event log under exclusive ownership — after any prior confirm's
+   * executions have committed — and so can never act on stale counts. The grant
+   * itself is recorded separately via {@link recordRunResumed} once reconstructed.
+   */
+  claimRunForResume(agentId: string, runId: string): Run | undefined {
+    return this.driver.transaction(() => this.runs.claimForResume(agentId, runId));
+  }
+
+  /**
+   * Record a resume's grant as `run.resumed`, once the caller has CLAIMED the run
+   * (via {@link claimRunForResume}) and reconstructed what it authorizes. The
+   * dedicated event (not a bare `run.status_changed`) is the audit record the trust
+   * model needs: `confirmed` names the destructive capabilities this resume permits
+   * (for a human reading the log), and `granted` carries the same as per-invocation
+   * references (capability + a one-way arguments fingerprint + how many) that the
+   * NEXT confirm reads back to know what is already approved. Both are references
+   * only — never the action's args. The caller already owns the run, so this just
+   * appends the audit record.
+   */
+  recordRunResumed(
+    agentId: string,
+    runId: string,
+    confirmed: readonly string[],
+    granted: readonly { capability: string; fingerprint: string; count: number }[],
+  ): void {
+    this.emit(
+      agentId,
+      "run.resumed",
+      { runId, from: "awaiting_confirmation", confirmed, granted },
+      runId,
+    );
+  }
+
+  /**
    * Record a memory through the firewall, logging the outcome either way. On
    * success: `memory.recorded` (references only — id/type/reviewState, never the
    * content). On a firewall refusal: `memory.blocked` (the findings, never the
@@ -327,6 +372,27 @@ export class AsterismStore {
       });
       return true;
     });
+  }
+
+  /**
+   * The agent-scoped key for fingerprinting destructive-action arguments on a
+   * pause (see `audit.ts` and `resumeRun`). Lazily generated and held in the
+   * agent's secret store, so the fingerprint recorded on an `action.awaiting_
+   * confirmation` event is a KEYED HMAC, not a bare hash: the event log can carry
+   * it as a reference to the paused invocation without it becoming a dictionary
+   * oracle on low-entropy arguments (a reader cannot hash candidate paths/commands
+   * and match, because they lack this key). A reserved internal key, never a user
+   * credential; reading it is the kernel using its own key, not surfacing a value
+   * to the substrate. Its key sits in the kernel-reserved secret namespace, so a
+   * user `secrets add` cannot rotate it and invalidate a paused run's fingerprints
+   * (only `ensure`, used here, may write there — `issue` rejects reserved keys).
+   */
+  actionFingerprintKey(agentId: string): string {
+    return this.secrets.ensure(
+      agentId,
+      `${RESERVED_SECRET_PREFIX}action_fingerprint_key`,
+      randomBytes(32).toString("hex"),
+    );
   }
 
   /** Open a store backed by a local SQLite database (in-memory by default). */

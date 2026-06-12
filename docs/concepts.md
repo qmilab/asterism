@@ -78,6 +78,13 @@ When the classification is in doubt, it errs toward destructive. This gate is
 the difference between "a local database of agents" and agents you can actually
 let act on their own.
 
+Confirming is always an explicit, separate act — an inline `[y/N]` in an
+interactive run, or [`asterism confirm`](./commands.md#confirm) (and the matching
+HTTP endpoint) for a run that paused with no one watching, such as one started over
+the network or from a pipe. Either way you approve **only** the action it stopped
+on, for that one run — a bounded grant, not a blanket on the capability, so a
+further destructive step (even the same kind aimed at a new target) pauses again.
+
 ## Memory
 
 Each agent accumulates **memory** — typed, scoped to that agent, and yours to
@@ -124,6 +131,7 @@ The event types you will see:
 | `agent.created` | The agent was created. |
 | `agent.trust_changed` | Its trust level was changed. |
 | `run.started` / `run.status_changed` | A run began / changed status. |
+| `run.resumed` | A paused run was confirmed and re-entered, naming the capabilities granted. |
 | `action.executed` | A side-effecting action ran. |
 | `action.withheld` | A side effect was withheld (returned as a plan under `propose`). |
 | `action.awaiting_confirmation` | A destructive action paused for confirmation. |
