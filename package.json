@@ -15,6 +15,7 @@
     "typecheck": "tsc -b",
     "test": "bun test",
     "verify:node": "tsc -b && node scripts/node-acceptance.mjs",
+    "verify:deno": "tsc -b && deno run -A scripts/deno-acceptance.mjs",
     "asterism": "bun run packages/cli/src/bin.ts"
   },
   "devDependencies": {

@@ -7,7 +7,7 @@
 *Distinct AI agents from one local install — each with its own soul, memory, secrets, skills, workspace, and autonomy. Nothing leaks between them.*
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
-[![Runtime](https://img.shields.io/badge/runtime-Node%2020%2B%20%7C%20Bun-000000)](#quickstart)
+[![Runtime](https://img.shields.io/badge/runtime-Node%2020%2B%20%7C%20Bun%20%7C%20Deno-000000)](#quickstart)
 [![Tests](https://img.shields.io/badge/tests-passing-22c55e)](#)
 [![Status](https://img.shields.io/badge/status-Phase%200-6366f1)](#status)
 
@@ -32,7 +32,7 @@ Unlike multi-agent *orchestration* frameworks — which coordinate agents to fin
 ## Quickstart
 
 ```bash
-npx @qmilab/asterism init     # Node 20+   (Bun: bunx --bun @qmilab/asterism init)
+npx @qmilab/asterism init     # Node 20+   (Bun: bunx --bun @qmilab/asterism init · Deno: deno run -A npm:@qmilab/asterism init)
 
 # create two agents with distinct souls and autonomy
 asterism new writer  --soul casual-helper       --trust autonomous

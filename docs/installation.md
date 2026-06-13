@@ -6,9 +6,10 @@ computer unless you configure a model that does.
 
 ## Prerequisites
 
-- **A JavaScript runtime — [Node](https://nodejs.org) 20 or newer, or
-  [Bun](https://bun.sh) 1.1.0 or newer.** The `asterism` command runs on either;
-  Node 20+ is the floor every install can rely on. To install Bun:
+- **A JavaScript runtime — [Node](https://nodejs.org) 20 or newer,
+  [Bun](https://bun.sh) 1.1.0 or newer, or [Deno](https://deno.com) 2 or newer.**
+  The `asterism` command runs on all three; Node 20+ is the floor every install
+  can rely on. To install Bun:
 
   ```bash
   curl -fsSL https://bun.sh/install | bash
@@ -21,34 +22,90 @@ computer unless you configure a model that does.
 
 ## Install
 
-The fastest way to try Asterism is without installing anything permanently — use
-your runtime's package runner:
+You don't have to install anything permanently to try Asterism — every common
+package manager can fetch and run it in one step. Pick the tool you already use;
+each command below is a tested path.
+
+| Tool | Run Asterism |
+|---|---|
+| **npm** | `npx @qmilab/asterism init` — or install the command: `npm install --global @qmilab/asterism` |
+| **pnpm** | `pnpm add --global @qmilab/asterism` *(then approve the build — see below)* |
+| **yarn** | `yarn global add @qmilab/asterism` |
+| **Bun** | `bunx --bun @qmilab/asterism init` |
+| **Deno** | `deno run -A npm:@qmilab/asterism init` *(add a `deno.json` — see below)* |
+
+After a global install, `asterism --version` should print the version. The rest of
+this documentation writes commands as `asterism …`; if you didn't install
+globally, prefix them with your runner — `npx @qmilab/asterism new writer`,
+`bunx --bun @qmilab/asterism new writer`, or `deno run -A npm:@qmilab/asterism new
+writer`.
+
+### Which runtime runs it, and which SQLite it uses
+
+Worth understanding up front, because it's why two of the tools need an extra
+step. The published `asterism` binary carries a `node` shebang, so a **bare
+`asterism` on your `PATH` always runs under Node** — whichever tool installed it —
+and Node's store driver is `better-sqlite3`, a native module. The other two
+runtimes you reach explicitly, and each brings its own built-in SQLite:
+
+- **`bunx --bun @qmilab/asterism …`** forces **Bun**, which uses the built-in
+  `bun:sqlite`. (Plain `bunx`, like the shebang, looks for Node; pass `--bun` to
+  use Bun.)
+- **`deno run -A npm:@qmilab/asterism …`** runs under **Deno**, which uses the
+  built-in `node:sqlite`.
+
+`bun:sqlite` and `node:sqlite` need no native build and no compiler.
+`better-sqlite3` (the Node path) ships prebuilt binaries for common platforms,
+fetched by an install script — which npm and yarn run automatically, but **pnpm
+and Bun skip dependency build scripts by default**. Whichever runtime opens it,
+the on-disk database is the same.
+
+### pnpm: approve the native build
+
+Because a global `asterism` runs under Node, pnpm needs `better-sqlite3`'s build
+script — and pnpm does not run a dependency's install scripts unless you approve
+them. Until you do, the first command that opens the store fails with a clear
+*"could not load better-sqlite3"* message. Approve it once:
 
 ```bash
-npx @qmilab/asterism init           # Node 20+
-bunx --bun @qmilab/asterism init    # Bun
+pnpm add --global @qmilab/asterism
+pnpm approve-builds --global          # then select better-sqlite3
 ```
 
-That fetches the latest published version and runs it. To get the `asterism`
-command on your `PATH`, install it globally with Node:
+For a project-local install, run `pnpm approve-builds` (no `--global`), or add
+`better-sqlite3` to `onlyBuiltDependencies` in your `package.json` and reinstall.
+This is a one-time-per-machine step.
 
-```bash
-npm install --global @qmilab/asterism
-asterism --version
+### Bun: use `bunx --bun`
+
+`bunx --bun @qmilab/asterism …` is the simplest Bun path — it runs under Bun on
+`bun:sqlite`, so there's no native build to approve. For a persistent command,
+alias that invocation. (A global `bun add` install would instead leave a bare
+`asterism` that runs under **Node**, which then needs `better-sqlite3`'s build —
+the same gate as pnpm above — so `bunx --bun` is the cleaner choice.)
+
+### Deno: enable a node_modules directory
+
+Deno runs Asterism on its built-in `node:sqlite`, so it needs **no** native build
+and **no** compiler. It does want a `node_modules` directory for the dependency
+graph — add a `deno.json` beside where you run, with one line:
+
+```json
+{ "nodeModulesDir": "auto" }
 ```
 
-The rest of this documentation writes commands as `asterism …`. If you prefer not
-to install globally, prefix any command with `npx @qmilab/` (or
-`bunx --bun @qmilab/`): `npx @qmilab/asterism new writer`.
+Then `deno run -A npm:@qmilab/asterism init` works. Deno may print a one-time
+notice that it skipped `better-sqlite3`'s build script — that's expected and
+harmless: Deno never loads `better-sqlite3` (it can't — its native-addon ABI
+isn't exposed to Deno) and uses `node:sqlite` instead. `-A` grants all
+permissions; for everything except `run` and `serve` you can narrow it to
+`--allow-read --allow-write --allow-env`, and add `--allow-net` for those two so
+the agent can reach your model.
 
-> **Which runtime runs it.** The published `asterism` binary carries a `node`
-> shebang, so a bare `asterism` — and `npx @qmilab/asterism` — runs under Node,
-> the floor every install has. Bun runs the same code: `bunx --bun` forces Bun's
-> runtime (plain `bunx`, like the shebang, looks for Node on your `PATH`; pass
-> `--bun` to use Bun instead). The only thing that differs by runtime is the local
-> store: under Bun it uses the built-in `bun:sqlite`; under Node it uses
-> `better-sqlite3`, a native module that ships prebuilt binaries for common
-> platforms (no compiler needed in the usual case).
+To get a shorter command, alias `deno run -A npm:@qmilab/asterism`, or install a
+persistent one with `deno install -gAf -n asterism npm:@qmilab/asterism`. Either
+way Deno still wants the `deno.json` above (the `node_modules` directory) in the
+working directory, so the alias is usually the simpler choice.
 
 ## Initialize a workspace
 
