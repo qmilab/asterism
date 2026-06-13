@@ -458,6 +458,40 @@ test("events tail --follow streams new events, then stops on request", async () 
   expect(text.indexOf("streamed.1")).toBeLessThan(text.indexOf("streamed.2"));
 });
 
+test("events tail --follow --limit 0 streams only new events, never replays the log", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  const store = openHomeStore(h);
+  const personal = agentNamed(store, "personal");
+  // Pre-existing history. With --limit 0 the backlog is intentionally empty, but
+  // this must NOT be replayed when streaming begins.
+  store.events.append(personal.id, { type: "old.event", payload: {} });
+
+  const lines: string[] = [];
+  let ticks = 0;
+  const io: CliIO = {
+    ...h.io,
+    out: (t) => lines.push(t),
+    openStore: () => store,
+    followTick: async () => {
+      if (ticks >= 1) return false;
+      ticks++;
+      store.events.append(personal.id, { type: "new.event", payload: {} });
+      return true;
+    },
+  };
+
+  const code = await runCli(["events", "tail", "personal", "--follow", "--limit", "0"], io);
+  expect(code).toBe(0);
+  const text = lines.join("\n");
+  // The pre-existing log is anchored as the high-water mark, not streamed...
+  expect(text).not.toContain("old.event");
+  expect(text).not.toContain("agent.created");
+  // ...only the event that arrived after following began is shown.
+  expect(text).toContain("new.event");
+});
+
 test("events tail --follow without follow support shows the backlog once", async () => {
   const h = harness();
   await runCli(["init"], h.io);

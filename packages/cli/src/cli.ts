@@ -919,16 +919,28 @@ async function followEvents(
   const tick = io.followTick;
   if (!tick) return 0;
 
-  // Walk forward strictly after the last event already shown; if the backlog was
-  // empty, resume from the caller's `--since` cursor (or the very beginning).
-  let cursor =
-    backlog.length > 0 ? backlog[backlog.length - 1]!.id : options.sinceId;
   // The live stream keeps the type/run filters but drops `limit` — that bounded the
   // backlog, not the tail — and advances by cursor.
   const streamBase: TailOptions = {
     ...(options.type !== undefined ? { type: options.type } : {}),
     ...(options.runId !== undefined ? { runId: options.runId } : {}),
   };
+  // Walk forward strictly after the last event already shown. The cursor must be a
+  // genuine high-water mark, or pre-existing history replays on the first poll:
+  //   - backlog non-empty ⇒ its last row is the newest matching event.
+  //   - backlog empty WITH `--since` ⇒ honor that cursor (it sits at/after the end).
+  //   - backlog empty otherwise (`--limit 0` to watch only the future, or no events
+  //     yet) ⇒ anchor on the newest event that currently matches the filter, so the
+  //     existing log is not streamed; only the genuine beginning leaves it undefined.
+  let cursor: string | undefined;
+  if (backlog.length > 0) {
+    cursor = backlog[backlog.length - 1]!.id;
+  } else if (options.sinceId !== undefined) {
+    cursor = options.sinceId;
+  } else {
+    const latest = store.events.tail(agent.id, { ...streamBase, limit: 1 });
+    cursor = latest.length > 0 ? latest[latest.length - 1]!.id : undefined;
+  }
 
   while (await tick()) {
     const fresh = store.events.tail(agent.id, {
