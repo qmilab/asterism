@@ -925,22 +925,16 @@ async function followEvents(
     ...(options.type !== undefined ? { type: options.type } : {}),
     ...(options.runId !== undefined ? { runId: options.runId } : {}),
   };
-  // Walk forward strictly after the last event already shown. The cursor must be a
-  // genuine high-water mark, or pre-existing history replays on the first poll:
-  //   - backlog non-empty ⇒ its last row is the newest matching event.
-  //   - backlog empty WITH `--since` ⇒ honor that cursor (it sits at/after the end).
-  //   - backlog empty otherwise (`--limit 0` to watch only the future, or no events
-  //     yet) ⇒ anchor on the newest event that currently matches the filter, so the
-  //     existing log is not streamed; only the genuine beginning leaves it undefined.
-  let cursor: string | undefined;
-  if (backlog.length > 0) {
-    cursor = backlog[backlog.length - 1]!.id;
-  } else if (options.sinceId !== undefined) {
-    cursor = options.sinceId;
-  } else {
-    const latest = store.events.tail(agent.id, { ...streamBase, limit: 1 });
-    cursor = latest.length > 0 ? latest[latest.length - 1]!.id : undefined;
-  }
+  // Anchor the stream on the newest event that currently matches the filter — NOT
+  // the backlog's last row, which is the latest only when the backlog is the full
+  // tail. A `--limit` cap, a `--since` page smaller than its history, or a `--limit
+  // 0`/empty backlog all end before (or without) the latest event, so trusting the
+  // last shown row would replay the uncapped remainder as "live" on the first poll.
+  // The newest match is a true high-water mark: nothing matching is newer than it,
+  // so no pre-existing event can ever stream. With no match yet, fall back to the
+  // `--since` cursor, else the genuine beginning (undefined).
+  const latest = store.events.tail(agent.id, { ...streamBase, limit: 1 });
+  let cursor: string | undefined = latest.length > 0 ? latest[0]!.id : options.sinceId;
 
   while (await tick()) {
     const fresh = store.events.tail(agent.id, {

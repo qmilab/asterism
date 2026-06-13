@@ -492,6 +492,48 @@ test("events tail --follow --limit 0 streams only new events, never replays the 
   expect(text).toContain("new.event");
 });
 
+test("events tail --follow --since with a small --limit never replays the uncapped tail", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  const store = openHomeStore(h);
+  const personal = agentNamed(store, "personal");
+  // A cursor, then more events after it than the --limit will show. The capped
+  // backlog ends before the latest event; the rest must not stream as "live".
+  const anchor = store.events.append(personal.id, { type: "anchor", payload: {} });
+  store.events.append(personal.id, { type: "after.1", payload: {} });
+  store.events.append(personal.id, { type: "after.2", payload: {} });
+  store.events.append(personal.id, { type: "after.3", payload: {} });
+
+  const lines: string[] = [];
+  let ticks = 0;
+  const io: CliIO = {
+    ...h.io,
+    out: (t) => lines.push(t),
+    openStore: () => store,
+    followTick: async () => {
+      if (ticks >= 1) return false;
+      ticks++;
+      store.events.append(personal.id, { type: "live.event", payload: {} });
+      return true;
+    },
+  };
+
+  const code = await runCli(
+    ["events", "tail", "personal", "--follow", "--since", anchor.id, "--limit", "1"],
+    io,
+  );
+  expect(code).toBe(0);
+  const text = lines.join("\n");
+  // The capped backlog shows the first page after the cursor...
+  expect(text).toContain("after.1");
+  // ...but the pre-existing events beyond the cap never stream as if new...
+  expect(text).not.toContain("after.2");
+  expect(text).not.toContain("after.3");
+  // ...only the event that genuinely arrived after following began.
+  expect(text).toContain("live.event");
+});
+
 test("events tail --follow without follow support shows the backlog once", async () => {
   const h = harness();
   await runCli(["init"], h.io);
