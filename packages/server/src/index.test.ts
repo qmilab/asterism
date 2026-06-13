@@ -114,6 +114,33 @@ test("GET /agents/:agent/events returns the agent's log and honors tail params",
   expect(limitedJson.events).toHaveLength(1);
 });
 
+test("GET /agents/:agent/events ?run= filters to one run and stays agent-scoped", async () => {
+  // Give personal a run to filter on, and give work its own run — whose id must
+  // never address personal's log.
+  const personalRun = store.startRun(personal.id, { input: "personal task" });
+  const workRun = store.startRun(work.id, { input: "work task" });
+
+  const mine = await handleRequest(
+    deps(),
+    get(`/agents/personal/events?run=${personalRun.id}`),
+  );
+  expect(mine.status).toBe(200);
+  const mineJson = (await mine.json()) as { events: { type: string; runId?: string }[] };
+  expect(mineJson.events.length).toBeGreaterThan(0);
+  expect(mineJson.events.every((e) => e.runId === personalRun.id)).toBe(true);
+  // agent.created carries no runId, so a run filter excludes it.
+  expect(mineJson.events.some((e) => e.type === "agent.created")).toBe(false);
+
+  // work's run id, ANDed with personal's scope, matches nothing — never work's log.
+  const foreign = await handleRequest(
+    deps(),
+    get(`/agents/personal/events?run=${workRun.id}`),
+  );
+  expect(foreign.status).toBe(200);
+  const foreignJson = (await foreign.json()) as { events: unknown[] };
+  expect(foreignJson.events).toEqual([]);
+});
+
 test("a server bound to one agent 404s any other agent name", async () => {
   // `work` exists in the store, but this server serves only `personal`. It must
   // not be a back door to another agent's runs or events.
@@ -177,6 +204,11 @@ test("an empty filter param means 'no filter', not an empty result", async () =>
   const emptySince = await handleRequest(deps(), get("/agents/personal/events?since="));
   const sinceEv = (await emptySince.json()) as { events: unknown[] };
   expect(sinceEv.events.length).toBeGreaterThan(0);
+
+  // ?run= (empty) returns the whole log rather than filtering on run_id=''.
+  const emptyRun = await handleRequest(deps(), get("/agents/personal/events?run="));
+  const runEv = (await emptyRun.json()) as { events: unknown[] };
+  expect(runEv.events.length).toBeGreaterThan(0);
 
   // ?limit= (empty) is ignored, not a 400.
   const emptyLimit = await handleRequest(deps(), get("/agents/personal/events?limit="));

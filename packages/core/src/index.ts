@@ -130,7 +130,7 @@ export type { CreateAgentInput } from "./repositories/agents.js";
 export { RunRepository } from "./repositories/runs.js";
 export type { CreateRunInput } from "./repositories/runs.js";
 export { MemoryRepository } from "./repositories/memories.js";
-export type { CreateMemoryInput } from "./repositories/memories.js";
+export type { CreateMemoryInput, MemoryQuery } from "./repositories/memories.js";
 export { SkillRepository } from "./repositories/skills.js";
 export type { CreateSkillInput } from "./repositories/skills.js";
 export { CredentialRepository } from "./repositories/credentials.js";

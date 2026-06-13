@@ -112,6 +112,28 @@ describe("event log — ordering", () => {
       "a",
     ]);
   });
+
+  test("tail({ runId }) filters to one run's events", () => {
+    const r1 = store.startRun(alice.id, { input: "one" });
+    const r2 = store.startRun(alice.id, { input: "two" });
+    const forR1 = store.events.tail(alice.id, { runId: r1.id });
+    expect(forR1.length).toBeGreaterThan(0);
+    expect(forR1.every((e) => e.runId === r1.id)).toBe(true);
+    // r2's events never bleed into r1's view, and vice versa.
+    expect(store.events.tail(alice.id, { runId: r2.id }).some((e) => e.runId === r1.id)).toBe(
+      false,
+    );
+    // The un-run-stamped agent.created is excluded by a runId filter.
+    expect(forR1.map((e) => e.type)).not.toContain("agent.created");
+  });
+
+  test("tail({ runId, type }) combines the two filters", () => {
+    const run = store.startRun(alice.id, { input: "x" });
+    store.setRunStatus(alice.id, run.id, "done");
+    const out = store.events.tail(alice.id, { runId: run.id, type: "run.status_changed" });
+    expect(out.map((e) => e.type)).toEqual(["run.status_changed"]);
+    expect(out.every((e) => e.runId === run.id)).toBe(true);
+  });
 });
 
 describe("event log — scoping (the agent is the boundary)", () => {
@@ -126,6 +148,13 @@ describe("event log — scoping (the agent is the boundary)", () => {
     expect(store.events.tail(alice.id).map((e) => e.type)).not.toContain(
       "bob.event",
     );
+  });
+
+  test("a runId from another agent's run matches nothing", () => {
+    const aliceRun = store.startRun(alice.id, { input: "alice work" });
+    // Bob filtering by alice's run id sees none of alice's events — the runId is
+    // ANDed with bob's own agent scope.
+    expect(store.events.tail(bob.id, { runId: aliceRun.id })).toEqual([]);
   });
 
   test("a cursor from another agent cannot leak the tail", () => {

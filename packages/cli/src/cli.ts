@@ -14,8 +14,10 @@ import {
   BUILTIN_SOULS,
   executeRun,
   isReflectionMemoryType,
+  MEMORY_TYPES,
   MemoryFirewallError,
   resumeRun,
+  REVIEW_STATES,
   screenMemory,
   TRUST_LEVELS,
   validateEnum,
@@ -25,6 +27,7 @@ import type {
   Agent,
   Capability,
   FirewallFinding,
+  MemoryQuery,
   ProposedMemory,
   ReflectionProvider,
   Run,
@@ -41,6 +44,7 @@ import { loadConfig, saveConfig } from "./config.js";
 import {
   formatActionSummary,
   formatAgentList,
+  formatEventLines,
   formatEventList,
   formatMemoryList,
   formatRunActivity,
@@ -148,6 +152,15 @@ export interface CliIO {
    * SIGINT/SIGTERM.
    */
   waitForShutdown?: () => Promise<void>;
+  /**
+   * Pace the `events tail --follow` loop. Resolves `true` when it is time to poll
+   * for new events again (the default wiring waits a short interval), or `false`
+   * when a stop was requested (Ctrl+C) so the loop ends cleanly. Absent ⇒
+   * `--follow` degrades to a single read of the backlog: a non-interactive
+   * embedding has nothing to stream to and no interrupt to wait on, so it must not
+   * loop forever.
+   */
+  followTick?: () => Promise<boolean>;
 }
 
 function errorMessage(err: unknown): string {
@@ -560,6 +573,25 @@ function matchRuns(store: AsterismStore, agent: Agent, ref: string): Run[] {
   return store.runs.list(agent.id).filter((r) => r.id.startsWith(ref));
 }
 
+/**
+ * Resolve a run reference — a full id or a unique short-id prefix, the same short
+ * id the views print — to one run within a SINGLE agent's scope. Used by the
+ * `--run` filters on `memory inspect` and `events tail`: resolution runs entirely
+ * through `store.runs` (agent-scoped), so a `--run` value can only ever name one of
+ * this agent's own runs, never reach across agents.
+ */
+type AgentRunMatch =
+  | { kind: "ok"; run: Run }
+  | { kind: "not_found" }
+  | { kind: "ambiguous" };
+
+function matchAgentRun(store: AsterismStore, agent: Agent, ref: string): AgentRunMatch {
+  const runs = matchRuns(store, agent, ref);
+  if (runs.length === 0) return { kind: "not_found" };
+  if (runs.length > 1) return { kind: "ambiguous" };
+  return { kind: "ok", run: runs[0]! };
+}
+
 function resolveRunRef(store: AsterismStore, positionals: string[]): RunResolution {
   // `<agent> <run>`: resolve within the named agent only.
   if (positionals.length >= 2) {
@@ -730,13 +762,62 @@ async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
   }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism memory inspect <agent>");
+    io.err(
+      "Usage: asterism memory inspect <agent> [--type <type>] [--review-state <state>] [--run <run>]",
+    );
     return 1;
   }
+  // A value-bearing flag given with no value parses as boolean `true`. Reject it
+  // rather than silently dropping the filter and showing the unfiltered view.
+  for (const flag of ["type", "review-state", "run"] as const) {
+    if (parsed.flags[flag] === true) {
+      io.err(`The --${flag} option needs a value.`);
+      return 1;
+    }
+  }
+  const typeRaw = stringFlag(parsed.flags.type);
+  const reviewRaw = stringFlag(parsed.flags["review-state"]);
+  const runRef = stringFlag(parsed.flags.run);
+
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    io.out(formatMemoryList(store.memories.list(agent.id), agent.name));
+
+    // Validate the closed-enum filters through the kernel's chokepoint, so a typo
+    // is a clear error rather than a silent empty result.
+    const memoryType =
+      typeRaw !== undefined ? validateEnum(typeRaw, MEMORY_TYPES, "memory type") : undefined;
+    const reviewState =
+      reviewRaw !== undefined ? validateEnum(reviewRaw, REVIEW_STATES, "review state") : undefined;
+
+    // Resolve `--run` to one of this agent's own runs (a short id is enough), so the
+    // source-run filter is scoped and a bad reference is reported, not ignored.
+    let sourceRunId: string | undefined;
+    if (runRef !== undefined) {
+      const match = matchAgentRun(store, agent, runRef);
+      if (match.kind === "not_found") {
+        io.err(`No run matching "${runRef}" for ${name}.`);
+        return 1;
+      }
+      if (match.kind === "ambiguous") {
+        io.err(`"${runRef}" matches more than one of ${name}'s runs — use a longer id.`);
+        return 1;
+      }
+      sourceRunId = match.run.id;
+    }
+
+    const query: MemoryQuery = {
+      ...(memoryType !== undefined ? { memoryType } : {}),
+      ...(reviewState !== undefined ? { reviewState } : {}),
+      ...(sourceRunId !== undefined ? { sourceRunId } : {}),
+    };
+    const notes: string[] = [];
+    if (memoryType !== undefined) notes.push(`type=${memoryType}`);
+    if (reviewState !== undefined) notes.push(`review-state=${reviewState}`);
+    if (sourceRunId !== undefined) notes.push(`run=${shortId(sourceRunId)}`);
+    const filterNote = notes.length > 0 ? notes.join(", ") : undefined;
+
+    io.out(formatMemoryList(store.memories.list(agent.id, query), agent.name, filterNote));
     return 0;
   });
 }
@@ -744,30 +825,120 @@ async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
 // --- events tail -----------------------------------------------------------
 
 async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, ["help", "h", "follow"]);
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.events!);
     return 0;
   }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism events tail <agent> [--limit <n>] [--type <type>] [--since <id>]");
+    io.err(
+      "Usage: asterism events tail <agent> [--limit <n>] [--type <type>] [--run <run>] [--since <id>] [--follow]",
+    );
     return 1;
   }
-  const limit = intFlag(parsed.flags.limit);
+  // A value-bearing flag given with no value parses as boolean `true`. Reject it
+  // rather than silently dropping the filter. (`--follow` is a genuine boolean.)
+  for (const flag of ["limit", "type", "run", "since"] as const) {
+    if (parsed.flags[flag] === true) {
+      io.err(`The --${flag} option needs a value.`);
+      return 1;
+    }
+  }
+  // A `--limit` that is not a non-negative integer is an error, not a silently
+  // ignored value that would show the whole log instead of the cap asked for.
+  let limit: number | undefined;
+  if (typeof parsed.flags.limit === "string") {
+    limit = intFlag(parsed.flags.limit);
+    if (limit === undefined) {
+      io.err("The --limit option must be a whole number.");
+      return 1;
+    }
+  }
   const type = stringFlag(parsed.flags.type);
   const sinceId = stringFlag(parsed.flags.since);
-  const options: TailOptions = {
-    ...(limit !== undefined ? { limit } : {}),
-    ...(type !== undefined ? { type } : {}),
-    ...(sinceId !== undefined ? { sinceId } : {}),
-  };
-  return withHomeStore(io, (store) => {
+  const runRef = stringFlag(parsed.flags.run);
+  const follow = parsed.flags.follow === true;
+
+  return withHomeStore(io, async (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    io.out(formatEventList(store.events.tail(agent.id, options), agent.name));
+
+    // Resolve `--run` to one of this agent's own runs (a short id is enough), so the
+    // filter is scoped and a bad reference is reported, not ignored.
+    let runId: string | undefined;
+    if (runRef !== undefined) {
+      const match = matchAgentRun(store, agent, runRef);
+      if (match.kind === "not_found") {
+        io.err(`No run matching "${runRef}" for ${name}.`);
+        return 1;
+      }
+      if (match.kind === "ambiguous") {
+        io.err(`"${runRef}" matches more than one of ${name}'s runs — use a longer id.`);
+        return 1;
+      }
+      runId = match.run.id;
+    }
+
+    const options: TailOptions = {
+      ...(limit !== undefined ? { limit } : {}),
+      ...(type !== undefined ? { type } : {}),
+      ...(sinceId !== undefined ? { sinceId } : {}),
+      ...(runId !== undefined ? { runId } : {}),
+    };
+    const notes: string[] = [];
+    if (type !== undefined) notes.push(`type=${type}`);
+    if (runId !== undefined) notes.push(`run=${shortId(runId)}`);
+    const filterNote = notes.length > 0 ? notes.join(", ") : undefined;
+
+    if (follow) return followEvents(store, agent, io, options, filterNote);
+
+    io.out(formatEventList(store.events.tail(agent.id, options), agent.name, filterNote));
     return 0;
   });
+}
+
+/**
+ * Live `events tail --follow`: print the backlog the one-shot view would show, then
+ * stream each new event as it lands until a stop is requested. The store stays open
+ * for the whole loop (`withHomeStore` closes it when this resolves). Reads are
+ * agent-scoped like every other, so a live tail can no more cross agents than a
+ * static one. Without an {@link CliIO.followTick} (a non-interactive embedding) this
+ * shows the backlog once and returns — it never loops with nothing able to stop it.
+ */
+async function followEvents(
+  store: AsterismStore,
+  agent: Agent,
+  io: CliIO,
+  options: TailOptions,
+  filterNote?: string,
+): Promise<number> {
+  const backlog = store.events.tail(agent.id, options);
+  io.out(formatEventList(backlog, agent.name, filterNote));
+
+  const tick = io.followTick;
+  if (!tick) return 0;
+
+  // Walk forward strictly after the last event already shown; if the backlog was
+  // empty, resume from the caller's `--since` cursor (or the very beginning).
+  let cursor =
+    backlog.length > 0 ? backlog[backlog.length - 1]!.id : options.sinceId;
+  // The live stream keeps the type/run filters but drops `limit` — that bounded the
+  // backlog, not the tail — and advances by cursor.
+  const streamBase: TailOptions = {
+    ...(options.type !== undefined ? { type: options.type } : {}),
+    ...(options.runId !== undefined ? { runId: options.runId } : {}),
+  };
+
+  while (await tick()) {
+    const fresh = store.events.tail(agent.id, {
+      ...streamBase,
+      ...(cursor !== undefined ? { sinceId: cursor } : {}),
+    });
+    for (const e of fresh) for (const line of formatEventLines(e)) io.out(line);
+    if (fresh.length > 0) cursor = fresh[fresh.length - 1]!.id;
+  }
+  return 0;
 }
 
 // --- reflect (review loop) / serve (local HTTP endpoint) -------------------

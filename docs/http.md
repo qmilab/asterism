@@ -151,7 +151,13 @@ parameters:
 |---|---|
 | `limit` | Cap the number of events. Must be a non-negative integer. |
 | `type` | Filter to one event type, e.g. `?type=action.executed`. |
+| `run` | Filter to one run's events. Use a full run id (from `GET …/runs`); it is scoped to this agent, so an unknown or foreign id simply returns `[]`. |
 | `since` | Page forward from an event id. |
+
+`run` and `since` take a **full id** here, where the CLI also accepts a short
+prefix — an API client already holds the full id from `GET …/runs`. There is no
+`--follow` equivalent; for live activity, watch a run with the
+[SSE stream](#watching-a-run-live-server-sent-events).
 
 ```bash
 curl -s 'http://127.0.0.1:4831/agents/writer/events?type=action.executed&limit=10'

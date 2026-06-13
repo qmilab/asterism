@@ -71,15 +71,27 @@ export function formatRunList(
   return lines.join("\n").trimEnd();
 }
 
-/** Render an agent's scoped memory for `memory inspect`. */
+/**
+ * Render an agent's scoped memory for `memory inspect`. `filterNote` (e.g.
+ * `type=semantic, review-state=proposed`) describes any active filter so the
+ * header and the empty-result message tell the reader they are looking at a
+ * narrowed view, not the whole memory — the difference between "nothing remembered"
+ * and "nothing matches this filter".
+ */
 export function formatMemoryList(
   memories: readonly Memory[],
   agentName: string,
+  filterNote?: string,
 ): string {
   if (memories.length === 0) {
-    return `${agentName} has no memories yet.`;
+    return filterNote
+      ? `${agentName} has no memories matching ${filterNote}.`
+      : `${agentName} has no memories yet.`;
   }
-  const lines: string[] = [`Memory for ${agentName} (${memories.length}):`, ""];
+  const heading = filterNote
+    ? `Memory for ${agentName} (${memories.length} matching ${filterNote}):`
+    : `Memory for ${agentName} (${memories.length}):`;
+  const lines: string[] = [heading, ""];
   for (const m of memories) {
     const archived = m.status === "archived" ? " · archived" : "";
     lines.push(
@@ -87,7 +99,7 @@ export function formatMemoryList(
     );
     lines.push(`  ${m.content}`);
     const source = m.sourceRunId ? ` · from run ${shortId(m.sourceRunId)}` : "";
-    lines.push(`  ${m.createdAt}${source}`);
+    lines.push(`  recorded ${m.createdAt}${source}`);
     lines.push("");
   }
   return lines.join("\n").trimEnd();
@@ -149,20 +161,39 @@ export function formatActionSummary(actions: readonly ActionRecord[]): string[] 
   return lines;
 }
 
-/** Render an agent's event log for `events tail`. */
+/**
+ * Render ONE event as its display lines: a time/type/run header line, and an
+ * indented references-only payload line when there is one worth showing. Shared by
+ * the one-shot {@link formatEventList} and the live `--follow` loop, so a streamed
+ * event renders identically to one printed in the initial batch.
+ */
+export function formatEventLines(event: Event): string[] {
+  const run = event.runId ? `  run=${shortId(event.runId)}` : "";
+  const lines = [`${event.createdAt}  ${event.type}${run}`];
+  const payload = summarizePayload(event.payload);
+  if (payload && payload !== "{}") lines.push(`  ${payload}`);
+  return lines;
+}
+
+/**
+ * Render an agent's event log for `events tail`. `filterNote` (e.g.
+ * `type=action.executed, run=a1b2c3d4`) names any active filter in the header and
+ * the empty-result message, so a narrowed view never reads as the whole log.
+ */
 export function formatEventList(
   events: readonly Event[],
   agentName: string,
+  filterNote?: string,
 ): string {
   if (events.length === 0) {
-    return `${agentName} has no recorded activity yet.`;
+    return filterNote
+      ? `${agentName} has no activity matching ${filterNote}.`
+      : `${agentName} has no recorded activity yet.`;
   }
-  const lines: string[] = [`Activity for ${agentName} (${events.length}):`, ""];
-  for (const e of events) {
-    const run = e.runId ? `  run=${shortId(e.runId)}` : "";
-    lines.push(`${e.createdAt}  ${e.type}${run}`);
-    const payload = summarizePayload(e.payload);
-    if (payload && payload !== "{}") lines.push(`  ${payload}`);
-  }
+  const heading = filterNote
+    ? `Activity for ${agentName} (${events.length}, ${filterNote}):`
+    : `Activity for ${agentName} (${events.length}):`;
+  const lines: string[] = [heading, ""];
+  for (const e of events) lines.push(...formatEventLines(e));
   return lines.join("\n").trimEnd();
 }

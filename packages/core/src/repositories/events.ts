@@ -24,6 +24,12 @@ export interface TailOptions {
   sinceId?: string;
   /** Return only events of this exact `type`. */
   type?: string;
+  /**
+   * Return only events stamped with this exact `runId`. Combined with the agent
+   * scope, so it can only narrow to one of the agent's own runs — never reach a
+   * run belonging to another agent.
+   */
+  runId?: string;
 }
 
 function mapEvent(row: SqlRow): Event {
@@ -109,19 +115,23 @@ export class EventRepository {
    *                            still returned oldest-first.
    *   - neither              — the whole log oldest-first.
    *
-   * `type` filters by exact event type in every shape. Ordering is `created_at`
-   * then `rowid`, so events written within the same millisecond keep their true
-   * insertion order — the same total order {@link list} guarantees.
+   * `type` and `runId` filter by exact match in every shape. Ordering is
+   * `created_at` then `rowid`, so events written within the same millisecond keep
+   * their true insertion order — the same total order {@link list} guarantees.
    */
   tail(agentId: string, options: TailOptions = {}): Event[] {
     requireAgentId(agentId);
-    const { limit, sinceId, type } = options;
+    const { limit, sinceId, type, runId } = options;
 
     const clauses = ["agent_id = ?"];
     const params: SqlValue[] = [agentId];
     if (type !== undefined) {
       clauses.push("type = ?");
       params.push(type);
+    }
+    if (runId !== undefined) {
+      clauses.push("run_id = ?");
+      params.push(runId);
     }
     if (sinceId !== undefined) {
       // Strictly-after the cursor by rowid (a monotonic insertion order), with the

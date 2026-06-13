@@ -91,6 +91,18 @@ async function capture(argv: string[], io: CliIO): Promise<string> {
   return lines.join("\n");
 }
 
+/** Open the install's kernel store directly — for seeding memories/runs in tests. */
+function openHomeStore(h: Harness): AsterismStore {
+  return AsterismStore.open(dbPath(join(h.dir, HOME_DIR_NAME)));
+}
+
+/** The agent row of a given name from a store (seeding helper). */
+function agentNamed(store: AsterismStore, name: string) {
+  const agent = store.agents.list().find((a) => a.name === name);
+  if (!agent) throw new Error(`no agent named ${name}`);
+  return agent;
+}
+
 test("init creates a workspace and is idempotent", async () => {
   const h = harness();
   expect(await runCli(["init"], h.io)).toBe(0);
@@ -280,6 +292,179 @@ test("events tail shows the kernel's own lifecycle log", async () => {
   await runCli(["new", "personal"], h.io);
   expect(await runCli(["events", "tail", "personal"], h.io)).toBe(0);
   expect(h.out.join("\n")).toContain("agent.created");
+});
+
+test("memory inspect filters by --type and --review-state", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  const store = openHomeStore(h);
+  const personal = agentNamed(store, "personal");
+  store.recordMemory(personal.id, {
+    memoryType: "semantic",
+    content: "a semantic fact",
+    reviewState: "accepted",
+    status: "active",
+  });
+  store.recordMemory(personal.id, {
+    memoryType: "procedural",
+    content: "a procedure to follow",
+    reviewState: "proposed",
+    status: "active",
+  });
+  store.close();
+
+  const byType = await capture(["memory", "inspect", "personal", "--type", "semantic"], h.io);
+  expect(byType).toContain("a semantic fact");
+  expect(byType).not.toContain("a procedure to follow");
+  expect(byType).toContain("type=semantic");
+
+  const byState = await capture(
+    ["memory", "inspect", "personal", "--review-state", "proposed"],
+    h.io,
+  );
+  expect(byState).toContain("a procedure to follow");
+  expect(byState).not.toContain("a semantic fact");
+});
+
+test("memory inspect rejects an unknown filter and reports an empty filtered view", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  const store = openHomeStore(h);
+  store.recordMemory(agentNamed(store, "personal").id, {
+    memoryType: "semantic",
+    content: "the only memory",
+    reviewState: "accepted",
+    status: "active",
+  });
+  store.close();
+
+  // An unknown --type is a clean error, not a silent empty list.
+  expect(await runCli(["memory", "inspect", "personal", "--type", "bogus"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("invalid memory type");
+
+  // A value-less filter flag is rejected, not silently dropped.
+  expect(await runCli(["memory", "inspect", "personal", "--type"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("The --type option needs a value");
+
+  // A valid but non-matching filter names what was filtered, so it never reads as
+  // "nothing remembered".
+  const out = await capture(["memory", "inspect", "personal", "--review-state", "proposed"], h.io);
+  expect(out).toContain("no memories matching review-state=proposed");
+});
+
+test("memory inspect --run filters by source run, scoped to the agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  await runCli(["new", "work"], h.io);
+  const store = openHomeStore(h);
+  const personal = agentNamed(store, "personal");
+  const work = agentNamed(store, "work");
+  const pRun = store.startRun(personal.id, { input: "personal task" });
+  store.recordMemory(personal.id, {
+    memoryType: "semantic",
+    content: "learned during the personal run",
+    sourceRunId: pRun.id,
+    reviewState: "accepted",
+    status: "active",
+  });
+  store.recordMemory(personal.id, {
+    memoryType: "semantic",
+    content: "an unattached memory",
+    reviewState: "accepted",
+    status: "active",
+  });
+  const wRun = store.startRun(work.id, { input: "work task" });
+  store.close();
+
+  const mine = await capture(
+    ["memory", "inspect", "personal", "--run", pRun.id.slice(0, 8)],
+    h.io,
+  );
+  expect(mine).toContain("learned during the personal run");
+  expect(mine).not.toContain("an unattached memory");
+
+  // Filtering personal's memory by WORK's run id is rejected — that run is not
+  // personal's, so the filter can never reach across agents.
+  expect(
+    await runCli(["memory", "inspect", "personal", "--run", wRun.id.slice(0, 8)], h.io),
+  ).toBe(1);
+  expect(h.err.join("\n")).toContain("No run matching");
+});
+
+test("events tail --run filters to one run and rejects another agent's run", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  await runCli(["new", "work"], h.io);
+  const store = openHomeStore(h);
+  const pRun = store.startRun(agentNamed(store, "personal").id, { input: "p" });
+  const wRun = store.startRun(agentNamed(store, "work").id, { input: "w" });
+  store.close();
+
+  const out = await capture(["events", "tail", "personal", "--run", pRun.id.slice(0, 8)], h.io);
+  expect(out).toContain("run.started");
+  expect(out).toContain(`run=${pRun.id.slice(0, 8)}`);
+  // agent.created carries no runId, so a run filter excludes it.
+  expect(out).not.toContain("agent.created");
+
+  expect(
+    await runCli(["events", "tail", "personal", "--run", wRun.id.slice(0, 8)], h.io),
+  ).toBe(1);
+  expect(h.err.join("\n")).toContain("No run matching");
+});
+
+test("events tail rejects a non-numeric --limit", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  expect(await runCli(["events", "tail", "personal", "--limit", "abc"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("--limit option must be a whole number");
+});
+
+test("events tail --follow streams new events, then stops on request", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  // Share ONE store between the test and the CLI via the openStore seam, so events
+  // appended during the loop are immediately visible to the follow reads.
+  const store = openHomeStore(h);
+  const personal = agentNamed(store, "personal");
+
+  const lines: string[] = [];
+  let ticks = 0;
+  const io: CliIO = {
+    ...h.io,
+    out: (t) => lines.push(t),
+    openStore: () => store,
+    // Each tick: a new event has "arrived"; after two, ask the loop to stop.
+    followTick: async () => {
+      if (ticks >= 2) return false;
+      ticks++;
+      store.events.append(personal.id, { type: `streamed.${ticks}`, payload: { n: ticks } });
+      return true;
+    },
+  };
+
+  const code = await runCli(["events", "tail", "personal", "--follow"], io);
+  expect(code).toBe(0);
+  const text = lines.join("\n");
+  // The backlog (agent.created) is shown first, then each streamed event in order.
+  expect(text).toContain("agent.created");
+  expect(text).toContain("streamed.1");
+  expect(text).toContain("streamed.2");
+  expect(text.indexOf("streamed.1")).toBeLessThan(text.indexOf("streamed.2"));
+});
+
+test("events tail --follow without follow support shows the backlog once", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  // h.io has no followTick → follow degrades to a single read rather than looping.
+  const out = await capture(["events", "tail", "personal", "--follow"], h.io);
+  expect(out).toContain("agent.created");
 });
 
 test("list reports an empty roster before any agent exists", async () => {

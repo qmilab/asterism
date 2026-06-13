@@ -113,6 +113,13 @@ function listEvents(deps: ServerDeps, url: URL): Response {
   }
   const type = url.searchParams.get("type");
   if (type) options.type = type;
+  // `run` filters to one run's events. Exact match (a full run id, as `GET /runs`
+  // returns) and ANDed with the agent scope by `tail`, so an unknown or foreign run
+  // id simply matches nothing — never another agent's log. This mirrors the CLI's
+  // `--run`; the CLI additionally resolves a short-id prefix and reports a miss,
+  // human affordances an API client does not need (it holds the full id already).
+  const run = url.searchParams.get("run");
+  if (run) options.runId = run;
   const since = url.searchParams.get("since");
   if (since) options.sinceId = since;
 
