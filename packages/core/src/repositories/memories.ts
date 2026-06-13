@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SqlDriver, SqlRow } from "../db/driver.js";
+import type { SqlDriver, SqlRow, SqlValue } from "../db/driver.js";
 import type { Memory, MemoryStatus, MemoryType, ReviewState } from "../types.js";
 import {
   MEMORY_STATUSES,
@@ -17,6 +17,23 @@ export interface CreateMemoryInput {
   sourceRunId?: string;
   status?: MemoryStatus;
   reviewState?: ReviewState;
+}
+
+/**
+ * Filters for {@link MemoryRepository.list}. All optional and AND-combined; with
+ * none given, `list` returns the agent's whole memory oldest-first. Every shape is
+ * still scoped to the `agentId` — a filter narrows within one agent's memory, it
+ * never reaches across agents. The enum-valued fields are validated on the read
+ * path the same way the write path validates them, so a bad value is a clear error
+ * rather than a silent empty result.
+ */
+export interface MemoryQuery {
+  /** Only memories of this exact type. */
+  memoryType?: MemoryType;
+  /** Only memories in this review state (e.g. `proposed`). */
+  reviewState?: ReviewState;
+  /** Only memories proposed from this source run. Matched exactly within scope. */
+  sourceRunId?: string;
 }
 
 function mapMemory(row: SqlRow): Memory {
@@ -80,13 +97,39 @@ export class MemoryRepository {
     return row ? mapMemory(row) : undefined;
   }
 
-  list(agentId: string): Memory[] {
+  /**
+   * The agent's memories, oldest-first. With a {@link MemoryQuery} the result is
+   * narrowed by type / review state / source run — every filter AND-combined and
+   * scoped to `agentId`, so a filter only ever narrows within this agent's own
+   * memory. The enum-valued filters are validated here (the same chokepoint the
+   * write path uses), so an invalid value throws rather than silently matching
+   * nothing. Ordering is `created_at` then `rowid`, the same total order across all
+   * shapes.
+   */
+  list(agentId: string, query: MemoryQuery = {}): Memory[] {
     requireAgentId(agentId);
+    const clauses = ["agent_id = ?"];
+    const params: SqlValue[] = [agentId];
+    if (query.memoryType !== undefined) {
+      validateEnum(query.memoryType, MEMORY_TYPES, "memoryType");
+      clauses.push("memory_type = ?");
+      params.push(query.memoryType);
+    }
+    if (query.reviewState !== undefined) {
+      validateEnum(query.reviewState, REVIEW_STATES, "memory reviewState");
+      clauses.push("review_state = ?");
+      params.push(query.reviewState);
+    }
+    if (query.sourceRunId !== undefined) {
+      clauses.push("source_run_id = ?");
+      params.push(query.sourceRunId);
+    }
+    const where = clauses.join(" AND ");
     return this.driver
       .prepare(
-        `SELECT * FROM memories WHERE agent_id = ? ORDER BY created_at ASC, rowid ASC`,
+        `SELECT * FROM memories WHERE ${where} ORDER BY created_at ASC, rowid ASC`,
       )
-      .all([agentId])
+      .all(params)
       .map(mapMemory);
   }
 

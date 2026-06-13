@@ -24,6 +24,12 @@ export interface TailOptions {
   sinceId?: string;
   /** Return only events of this exact `type`. */
   type?: string;
+  /**
+   * Return only events stamped with this exact `runId`. Combined with the agent
+   * scope, so it can only narrow to one of the agent's own runs — never reach a
+   * run belonging to another agent.
+   */
+  runId?: string;
 }
 
 function mapEvent(row: SqlRow): Event {
@@ -109,19 +115,23 @@ export class EventRepository {
    *                            still returned oldest-first.
    *   - neither              — the whole log oldest-first.
    *
-   * `type` filters by exact event type in every shape. Ordering is `created_at`
-   * then `rowid`, so events written within the same millisecond keep their true
-   * insertion order — the same total order {@link list} guarantees.
+   * `type` and `runId` filter by exact match in every shape. Ordering is
+   * `created_at` then `rowid`, so events written within the same millisecond keep
+   * their true insertion order — the same total order {@link list} guarantees.
    */
   tail(agentId: string, options: TailOptions = {}): Event[] {
     requireAgentId(agentId);
-    const { limit, sinceId, type } = options;
+    const { limit, sinceId, type, runId } = options;
 
     const clauses = ["agent_id = ?"];
     const params: SqlValue[] = [agentId];
     if (type !== undefined) {
       clauses.push("type = ?");
       params.push(type);
+    }
+    if (runId !== undefined) {
+      clauses.push("run_id = ?");
+      params.push(runId);
     }
     if (sinceId !== undefined) {
       // Strictly-after the cursor by rowid (a monotonic insertion order), with the
@@ -155,6 +165,51 @@ export class EventRepository {
       )
       .all(finalParams)
       .map(mapEvent);
+  }
+
+  /**
+   * Read a live tail's starting state in ONE consistent snapshot: the initial
+   * backlog (identical to {@link tail} with the same options) AND the cursor to
+   * stream strictly after. `cursor` is the id of the newest event matching the
+   * type/run filter as of the same snapshot — a true high-water mark over the whole
+   * matching log, not just the displayed page, so a capped `--limit`/`--since`
+   * backlog still resumes from the latest event rather than replaying its tail.
+   * `cursor` falls back to `sinceId` (then undefined) when nothing matches yet.
+   *
+   * Both reads run in one transaction precisely to close a TOCTOU race: taking the
+   * backlog and the high-water as SEPARATE reads lets a concurrent append land
+   * between them — newer than the backlog yet counted by the high-water — which
+   * would advance the cursor past an event that was never printed and silently drop
+   * it from the stream. Scoped to `agentId` like every other read.
+   */
+  followSnapshot(
+    agentId: string,
+    options: TailOptions = {},
+  ): { events: Event[]; cursor: string | undefined } {
+    requireAgentId(agentId);
+    return this.driver.transaction(() => {
+      const events = this.tail(agentId, options);
+      // The newest event matching the type/run filter as of this same snapshot.
+      // Deliberately ignores limit/since: the high-water spans the whole matching
+      // log, so the stream resumes past every pre-existing event, shown or capped.
+      const clauses = ["agent_id = ?"];
+      const params: SqlValue[] = [agentId];
+      if (options.type !== undefined) {
+        clauses.push("type = ?");
+        params.push(options.type);
+      }
+      if (options.runId !== undefined) {
+        clauses.push("run_id = ?");
+        params.push(options.runId);
+      }
+      const row = this.driver
+        .prepare(
+          `SELECT id FROM events WHERE ${clauses.join(" AND ")}
+             ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+        )
+        .get(params);
+      return { events, cursor: row ? String(row.id) : options.sinceId };
+    });
   }
 
   /** How many events the agent's log holds. Scoped like every other read. */

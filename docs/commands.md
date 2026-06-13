@@ -298,41 +298,55 @@ A run shown as `awaiting_confirmation` is waiting for you — resume it with
 ## `memory inspect`
 
 ```
-asterism memory inspect <agent>
+asterism memory inspect <agent> [--type <type>] [--review-state <state>] [--run <run>]
 ```
 
-Show everything one agent remembers — what it has accepted, what is still
-proposed for review, and where each memory came from. Only ever shows the named
-agent's memory.
+Show what one agent remembers — what it has accepted, what is still proposed for
+review, and where each memory came from. Only ever shows the named agent's
+memory.
+
+| Option | Description |
+|---|---|
+| `--type <type>` | One memory type: `semantic`, `procedural`, `convention`, `negative`, `episodic`. |
+| `--review-state <state>` | One review state: `proposed`, `accepted`, `rejected`. |
+| `--run <run>` | Only what was learned from one run (its short id, e.g. `a1b2c3d4`). |
+
+Filters AND-combine and stay scoped to this agent — a `--run` value can only name
+one of *its own* runs, never reach another agent's. An unknown `--type` or
+`--review-state` is a clear error, not a silent empty list.
 
 ```console
-$ asterism memory inspect writer
-Memory for writer (1):
+$ asterism memory inspect writer --review-state proposed
+Memory for writer (1 matching review-state=proposed):
 
-• convention · accepted · confidence 0.86
+• convention · proposed · confidence 0.86
   This blog uses sentence case in headings.
-  2026-06-10T12:00:00.000Z · from run a1b2c3d4
+  recorded 2026-06-10T12:00:00.000Z · from run a1b2c3d4
 ```
 
-An agent with no memories prints `writer has no memories yet.`
+An agent with no memories prints `writer has no memories yet.` A filter that
+matches nothing names what was filtered, e.g.
+`writer has no memories matching type=negative.`
 
 ---
 
 ## `events tail`
 
 ```
-asterism events tail <agent> [--limit <n>] [--type <type>] [--since <id>]
+asterism events tail <agent> [--limit <n>] [--type <type>] [--run <run>] [--since <id>] [--follow]
 ```
 
 Review what an agent has done — an append-only record of its consequential
 actions ([event types](./concepts.md#event-log)). The log holds references
-only, never secret values.
+only, never secret values. Only ever shows the named agent's activity.
 
 | Option | Description |
 |---|---|
 | `--limit <n>` | Cap the number of events shown. |
 | `--type <type>` | Show only events of one type, e.g. `--type action.executed`. |
+| `--run <run>` | Show only one run's activity (its short id). |
 | `--since <id>` | Page forward — show events after the given event id. |
+| `--follow` | Keep watching and print new events as they happen. `Ctrl+C` to stop. |
 
 ```console
 $ asterism events tail writer --limit 3
@@ -345,6 +359,10 @@ Activity for writer (3):
 2026-06-10T12:01:02.000Z  action.executed  run=a1b2c3d4
   {"capability":"edit_files","effect":"write"}
 ```
+
+`--follow` prints the current backlog (after any `--limit`/`--type`/`--run`
+filter), then streams each new event as it lands until you stop it. Like every
+other read, a live tail is scoped to the one agent.
 
 ---
 

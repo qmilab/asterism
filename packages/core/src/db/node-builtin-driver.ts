@@ -96,9 +96,11 @@ export class NodeBuiltinSqlDriver implements SqlDriver {
 
   // `node:sqlite` exposes no transaction helper (unlike better-sqlite3 and
   // bun:sqlite), so drive BEGIN/COMMIT by hand and roll back on throw. The kernel
-  // never nests `transaction()` calls (store methods wrap only repository writes,
-  // and repositories open no transactions of their own), so a flat BEGIN/COMMIT —
-  // which cannot nest — is sufficient here.
+  // never nests `transaction()` calls — store methods wrap repository writes, and
+  // the one repository method that opens its own transaction
+  // (`EventRepository.followSnapshot`, a read for a consistent backlog+cursor) is
+  // only ever called on its own — so a flat BEGIN/COMMIT, which cannot nest, is
+  // sufficient here.
   transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN");
     try {

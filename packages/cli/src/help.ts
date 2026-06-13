@@ -147,15 +147,34 @@ Review one agent's run history — each run's short id, status, what it was aske
 do, and when it started and finished. Shows only the named agent's runs, oldest
 first.`,
 
-  memory: `asterism memory inspect <agent>
+  memory: `asterism memory inspect <agent> [--type <type>] [--review-state <state>] [--run <run>]
 
-Show everything one agent remembers — what it has accepted, what is still proposed
-for review, and where each memory came from.`,
+Show what one agent remembers — what it has accepted, what is still proposed for
+review, and where each memory came from. Only ever the named agent's memory.
 
-  events: `asterism events tail <agent> [--limit <n>] [--type <type>] [--since <id>]
+Options:
+  --type <type>            Show only one kind of memory: semantic, procedural,
+                           convention, negative, or episodic.
+  --review-state <state>   Show only proposed, accepted, or rejected memories —
+                           e.g. --review-state proposed to see what is awaiting you.
+  --run <run>              Show only what was learned from one run (its short id).
+
+A filter only ever narrows within this agent's own memory — never another's.`,
+
+  events: `asterism events tail <agent> [--limit <n>] [--type <type>] [--run <run>] [--since <id>] [--follow]
 
 Review what an agent has done — an append-only record of its consequential
-actions. Filter with --type, page forward with --since, or cap with --limit.`,
+actions. Only ever the named agent's activity.
+
+Options:
+  --limit <n>     Show only the most recent n events.
+  --type <type>   Show only one event type, e.g. --type action.executed.
+  --run <run>     Show only one run's activity (its short id).
+  --since <id>    Page forward — show only events after the given event id.
+  --follow        Keep watching and print new events as they happen. Press Ctrl+C
+                  to stop.
+
+Every filter narrows within this agent's own activity — never another's.`,
 
   reflect: `asterism reflect <agent> --review
 

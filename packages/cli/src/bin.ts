@@ -86,6 +86,26 @@ const io: CliIO = {
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
     }),
+  // Pace `events tail --follow`: wait a beat between polls, but resolve `false` the
+  // moment an interrupt arrives so the loop ends and the process exits cleanly
+  // (rather than the default hard kill). Listeners and the timer are torn down on
+  // each tick, so repeated polling never accumulates handlers.
+  followTick: () =>
+    new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+        resolve(value);
+      };
+      const stop = (): void => finish(false);
+      const timer = setTimeout(() => finish(true), 1000);
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    }),
 };
 
 const code = await runCli(process.argv.slice(2), io);

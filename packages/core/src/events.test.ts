@@ -112,6 +112,79 @@ describe("event log — ordering", () => {
       "a",
     ]);
   });
+
+  test("tail({ runId }) filters to one run's events", () => {
+    const r1 = store.startRun(alice.id, { input: "one" });
+    const r2 = store.startRun(alice.id, { input: "two" });
+    const forR1 = store.events.tail(alice.id, { runId: r1.id });
+    expect(forR1.length).toBeGreaterThan(0);
+    expect(forR1.every((e) => e.runId === r1.id)).toBe(true);
+    // r2's events never bleed into r1's view, and vice versa.
+    expect(store.events.tail(alice.id, { runId: r2.id }).some((e) => e.runId === r1.id)).toBe(
+      false,
+    );
+    // The un-run-stamped agent.created is excluded by a runId filter.
+    expect(forR1.map((e) => e.type)).not.toContain("agent.created");
+  });
+
+  test("tail({ runId, type }) combines the two filters", () => {
+    const run = store.startRun(alice.id, { input: "x" });
+    store.setRunStatus(alice.id, run.id, "done");
+    const out = store.events.tail(alice.id, { runId: run.id, type: "run.status_changed" });
+    expect(out.map((e) => e.type)).toEqual(["run.status_changed"]);
+    expect(out.every((e) => e.runId === run.id)).toBe(true);
+  });
+});
+
+describe("event log — followSnapshot (backlog + race-free cursor)", () => {
+  test("returns the backlog and the newest matching event as the cursor", () => {
+    store.events.append(alice.id, { type: "x", payload: {} });
+    const newest = store.events.append(alice.id, { type: "x", payload: {} });
+    const snap = store.events.followSnapshot(alice.id, { type: "x", limit: 1 });
+    // The backlog is the most recent 1 (the capped view)...
+    expect(snap.events.map((e) => e.id)).toEqual([newest.id]);
+    // ...and the cursor is the newest matching event.
+    expect(snap.cursor).toBe(newest.id);
+  });
+
+  test("cursor is the true high-water even when the backlog is a capped --since page", () => {
+    const anchor = store.events.append(alice.id, { type: "t", payload: {} });
+    store.events.append(alice.id, { type: "t", payload: {} }); // after.1
+    const last = store.events.append(alice.id, { type: "t", payload: {} }); // after.2
+    const snap = store.events.followSnapshot(alice.id, {
+      type: "t",
+      sinceId: anchor.id,
+      limit: 1,
+    });
+    // The displayed backlog is the FIRST page after the anchor (one event)...
+    expect(snap.events).toHaveLength(1);
+    // ...but the cursor is the newest matching event, so the stream never replays
+    // the uncapped remainder.
+    expect(snap.cursor).toBe(last.id);
+  });
+
+  test("an empty --limit 0 backlog still yields the newest event as the cursor", () => {
+    store.events.append(alice.id, { type: "x", payload: {} });
+    const newest = store.events.append(alice.id, { type: "x", payload: {} });
+    const snap = store.events.followSnapshot(alice.id, { limit: 0 });
+    expect(snap.events).toEqual([]);
+    expect(snap.cursor).toBe(newest.id);
+  });
+
+  test("cursor honors the filter and falls back to sinceId when nothing matches", () => {
+    store.events.append(alice.id, { type: "other", payload: {} });
+    const snap = store.events.followSnapshot(alice.id, { type: "nope", sinceId: "anchor-id" });
+    expect(snap.events).toEqual([]);
+    expect(snap.cursor).toBe("anchor-id");
+  });
+
+  test("followSnapshot is agent-scoped and requires an agentId", () => {
+    const aliceEvt = store.events.append(alice.id, { type: "a", payload: {} });
+    // Bob's snapshot never sees alice's event, and his cursor is his own.
+    const bobSnap = store.events.followSnapshot(bob.id);
+    expect(bobSnap.events.map((e) => e.id)).not.toContain(aliceEvt.id);
+    expect(() => store.events.followSnapshot("")).toThrow();
+  });
 });
 
 describe("event log — scoping (the agent is the boundary)", () => {
@@ -126,6 +199,13 @@ describe("event log — scoping (the agent is the boundary)", () => {
     expect(store.events.tail(alice.id).map((e) => e.type)).not.toContain(
       "bob.event",
     );
+  });
+
+  test("a runId from another agent's run matches nothing", () => {
+    const aliceRun = store.startRun(alice.id, { input: "alice work" });
+    // Bob filtering by alice's run id sees none of alice's events — the runId is
+    // ANDed with bob's own agent scope.
+    expect(store.events.tail(bob.id, { runId: aliceRun.id })).toEqual([]);
   });
 
   test("a cursor from another agent cannot leak the tail", () => {
