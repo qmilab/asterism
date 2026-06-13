@@ -778,6 +778,13 @@ async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
   const typeRaw = stringFlag(parsed.flags.type);
   const reviewRaw = stringFlag(parsed.flags["review-state"]);
   const runRef = stringFlag(parsed.flags.run);
+  // An empty `--run=` (e.g. an unset shell variable) must be rejected like a missing
+  // value, not treated as a prefix — every run id begins with "", so it would
+  // silently match the sole run or trip an ambiguity error on several.
+  if (runRef !== undefined && runRef.trim() === "") {
+    io.err("The --run option needs a value.");
+    return 1;
+  }
 
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
@@ -859,6 +866,12 @@ async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
   const sinceId = stringFlag(parsed.flags.since);
   const runRef = stringFlag(parsed.flags.run);
   const follow = parsed.flags.follow === true;
+  // An empty `--run=` (e.g. an unset shell variable) must be rejected like a missing
+  // value, not treated as a prefix that matches every run id.
+  if (runRef !== undefined && runRef.trim() === "") {
+    io.err("The --run option needs a value.");
+    return 1;
+  }
 
   return withHomeStore(io, async (store) => {
     const agent = findAgentByName(store, name);

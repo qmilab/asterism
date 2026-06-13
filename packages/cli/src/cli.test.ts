@@ -416,6 +416,25 @@ test("events tail --run filters to one run and rejects another agent's run", asy
   expect(h.err.join("\n")).toContain("No run matching");
 });
 
+test("memory inspect and events tail reject an empty --run value", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  // Seed exactly one run, so an empty prefix WOULD silently match it (the bug guarded).
+  const store = openHomeStore(h);
+  store.startRun(agentNamed(store, "personal").id, { input: "the only run" });
+  store.close();
+
+  // `--run=` (e.g. from an unset shell variable) is rejected like a missing value,
+  // not treated as a prefix that matches every run id.
+  expect(await runCli(["memory", "inspect", "personal", "--run="], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("The --run option needs a value");
+
+  h.err.length = 0;
+  expect(await runCli(["events", "tail", "personal", "--run="], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("The --run option needs a value");
+});
+
 test("events tail rejects a non-numeric --limit", async () => {
   const h = harness();
   await runCli(["init"], h.io);
