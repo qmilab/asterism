@@ -55,11 +55,26 @@ let DatabaseCtor: NativeConstructor | undefined;
 function loadDatabaseCtor(): NativeConstructor {
   if (DatabaseCtor === undefined) {
     const require = createRequire(import.meta.url);
+    let ctor: NativeConstructor;
     try {
-      DatabaseCtor = require("better-sqlite3") as NativeConstructor;
+      ctor = require("better-sqlite3") as NativeConstructor;
     } catch (cause) {
       throw new Error(BETTER_SQLITE3_LOAD_HELP, { cause });
     }
+    // better-sqlite3 loads its native binding lazily, at the FIRST construction —
+    // not at require — so a skipped/unbuilt `.node` only surfaces when a Database
+    // is opened. Force that load now with an in-memory probe: a `:memory:` open
+    // touches no filesystem, so a failure here can only be the binding failing to
+    // load (missing/unbuilt binary, ABI mismatch), never a path/permission error.
+    // That keeps the friendly message scoped to genuine load failures and lets the
+    // real `new Database(path)` surface ordinary open errors (e.g. SQLITE_CANTOPEN
+    // for a missing directory) unchanged.
+    try {
+      new ctor(":memory:").close();
+    } catch (cause) {
+      throw new Error(BETTER_SQLITE3_LOAD_HELP, { cause });
+    }
+    DatabaseCtor = ctor;
   }
   return DatabaseCtor;
 }
@@ -92,16 +107,12 @@ export class NodeSqlDriver implements SqlDriver {
   private readonly db: NativeDatabase;
 
   constructor(path: string) {
+    // loadDatabaseCtor has already proven the native binding loads (via an
+    // in-memory probe), so any throw from this open is a real database error —
+    // a bad path, a missing directory, denied permissions — and must surface
+    // unchanged rather than be masked as a build problem.
     const Database = loadDatabaseCtor();
-    // better-sqlite3 resolves its native binding HERE, not at require time, so an
-    // install that fetched the JS but never built/downloaded the `.node` (a skipped
-    // build script) surfaces as a raw "Could not locate the bindings file" on this
-    // line. Translate it into the same actionable message as a missing package.
-    try {
-      this.db = new Database(path);
-    } catch (cause) {
-      throw new Error(BETTER_SQLITE3_LOAD_HELP, { cause });
-    }
+    this.db = new Database(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
   }
