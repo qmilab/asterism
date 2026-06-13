@@ -136,6 +136,57 @@ describe("event log — ordering", () => {
   });
 });
 
+describe("event log — followSnapshot (backlog + race-free cursor)", () => {
+  test("returns the backlog and the newest matching event as the cursor", () => {
+    store.events.append(alice.id, { type: "x", payload: {} });
+    const newest = store.events.append(alice.id, { type: "x", payload: {} });
+    const snap = store.events.followSnapshot(alice.id, { type: "x", limit: 1 });
+    // The backlog is the most recent 1 (the capped view)...
+    expect(snap.events.map((e) => e.id)).toEqual([newest.id]);
+    // ...and the cursor is the newest matching event.
+    expect(snap.cursor).toBe(newest.id);
+  });
+
+  test("cursor is the true high-water even when the backlog is a capped --since page", () => {
+    const anchor = store.events.append(alice.id, { type: "t", payload: {} });
+    store.events.append(alice.id, { type: "t", payload: {} }); // after.1
+    const last = store.events.append(alice.id, { type: "t", payload: {} }); // after.2
+    const snap = store.events.followSnapshot(alice.id, {
+      type: "t",
+      sinceId: anchor.id,
+      limit: 1,
+    });
+    // The displayed backlog is the FIRST page after the anchor (one event)...
+    expect(snap.events).toHaveLength(1);
+    // ...but the cursor is the newest matching event, so the stream never replays
+    // the uncapped remainder.
+    expect(snap.cursor).toBe(last.id);
+  });
+
+  test("an empty --limit 0 backlog still yields the newest event as the cursor", () => {
+    store.events.append(alice.id, { type: "x", payload: {} });
+    const newest = store.events.append(alice.id, { type: "x", payload: {} });
+    const snap = store.events.followSnapshot(alice.id, { limit: 0 });
+    expect(snap.events).toEqual([]);
+    expect(snap.cursor).toBe(newest.id);
+  });
+
+  test("cursor honors the filter and falls back to sinceId when nothing matches", () => {
+    store.events.append(alice.id, { type: "other", payload: {} });
+    const snap = store.events.followSnapshot(alice.id, { type: "nope", sinceId: "anchor-id" });
+    expect(snap.events).toEqual([]);
+    expect(snap.cursor).toBe("anchor-id");
+  });
+
+  test("followSnapshot is agent-scoped and requires an agentId", () => {
+    const aliceEvt = store.events.append(alice.id, { type: "a", payload: {} });
+    // Bob's snapshot never sees alice's event, and his cursor is his own.
+    const bobSnap = store.events.followSnapshot(bob.id);
+    expect(bobSnap.events.map((e) => e.id)).not.toContain(aliceEvt.id);
+    expect(() => store.events.followSnapshot("")).toThrow();
+  });
+});
+
 describe("event log — scoping (the agent is the boundary)", () => {
   test("tail and count are scoped; one agent never sees another's events", () => {
     store.events.append(alice.id, { type: "alice.secret", payload: {} });

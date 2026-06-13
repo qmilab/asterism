@@ -913,28 +913,27 @@ async function followEvents(
   options: TailOptions,
   filterNote?: string,
 ): Promise<number> {
-  const backlog = store.events.tail(agent.id, options);
+  // Backlog and the resume cursor come from ONE atomic snapshot, so a concurrent
+  // append can never slip between them and be dropped — the kernel computes the
+  // cursor as the newest matching event as of that snapshot (the true high-water,
+  // not the backlog's last row, which lags behind a capped `--limit`/`--since`
+  // page or an empty `--limit 0` view).
+  const { events: backlog, cursor: initialCursor } = store.events.followSnapshot(
+    agent.id,
+    options,
+  );
   io.out(formatEventList(backlog, agent.name, filterNote));
 
   const tick = io.followTick;
   if (!tick) return 0;
 
   // The live stream keeps the type/run filters but drops `limit` — that bounded the
-  // backlog, not the tail — and advances by cursor.
+  // backlog, not the tail — and advances by cursor from the snapshot's high-water.
+  let cursor = initialCursor;
   const streamBase: TailOptions = {
     ...(options.type !== undefined ? { type: options.type } : {}),
     ...(options.runId !== undefined ? { runId: options.runId } : {}),
   };
-  // Anchor the stream on the newest event that currently matches the filter — NOT
-  // the backlog's last row, which is the latest only when the backlog is the full
-  // tail. A `--limit` cap, a `--since` page smaller than its history, or a `--limit
-  // 0`/empty backlog all end before (or without) the latest event, so trusting the
-  // last shown row would replay the uncapped remainder as "live" on the first poll.
-  // The newest match is a true high-water mark: nothing matching is newer than it,
-  // so no pre-existing event can ever stream. With no match yet, fall back to the
-  // `--since` cursor, else the genuine beginning (undefined).
-  const latest = store.events.tail(agent.id, { ...streamBase, limit: 1 });
-  let cursor: string | undefined = latest.length > 0 ? latest[0]!.id : options.sinceId;
 
   while (await tick()) {
     const fresh = store.events.tail(agent.id, {
