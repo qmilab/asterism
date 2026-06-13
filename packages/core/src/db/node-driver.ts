@@ -36,6 +36,20 @@ interface NativeConstructor {
   new (path: string): NativeDatabase;
 }
 
+// One message for every way better-sqlite3 can fail to load — covering both the
+// "not installed at all" case (the require throws) and the more common "installed
+// but its native binary was never built" case (the require succeeds, then `new
+// Database` throws "Could not locate the bindings file"). The latter is what
+// package managers that skip dependency build scripts by default — pnpm, Bun —
+// leave behind, so the fix is named explicitly rather than left as a raw bindings
+// error the user has to decode.
+const BETTER_SQLITE3_LOAD_HELP =
+  "Asterism's Node SQLite driver could not load the native package 'better-sqlite3' — " +
+  "it is either not installed or its native binary was not built for this platform. Some " +
+  "package managers (pnpm, Bun) skip dependencies' build scripts by default: approve the " +
+  "build (e.g. `pnpm approve-builds`) and reinstall so the prebuilt binary is fetched. " +
+  "Or run Asterism under Bun or Deno, which use a built-in SQLite and need no native build.";
+
 /** Resolve better-sqlite3's Database constructor once, on first use (off Bun only). */
 let DatabaseCtor: NativeConstructor | undefined;
 function loadDatabaseCtor(): NativeConstructor {
@@ -44,12 +58,7 @@ function loadDatabaseCtor(): NativeConstructor {
     try {
       DatabaseCtor = require("better-sqlite3") as NativeConstructor;
     } catch (cause) {
-      throw new Error(
-        "The Node SQLite driver needs the native package 'better-sqlite3', which is " +
-          "not installed or failed to build for this platform. Reinstall dependencies, " +
-          "or run Asterism under Bun (which uses the built-in bun:sqlite driver).",
-        { cause },
-      );
+      throw new Error(BETTER_SQLITE3_LOAD_HELP, { cause });
     }
   }
   return DatabaseCtor;
@@ -84,7 +93,15 @@ export class NodeSqlDriver implements SqlDriver {
 
   constructor(path: string) {
     const Database = loadDatabaseCtor();
-    this.db = new Database(path);
+    // better-sqlite3 resolves its native binding HERE, not at require time, so an
+    // install that fetched the JS but never built/downloaded the `.node` (a skipped
+    // build script) surfaces as a raw "Could not locate the bindings file" on this
+    // line. Translate it into the same actionable message as a missing package.
+    try {
+      this.db = new Database(path);
+    } catch (cause) {
+      throw new Error(BETTER_SQLITE3_LOAD_HELP, { cause });
+    }
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
   }
