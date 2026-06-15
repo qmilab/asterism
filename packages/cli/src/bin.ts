@@ -17,6 +17,9 @@
 // into a process exit code. All parsing, kernel calls, and formatting live in
 // `cli.ts`; the concrete adapter is wired lazily there from the environment.
 
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision } from "./cli.js";
 import { workspaceCapabilities } from "./capabilities.js";
@@ -112,6 +115,29 @@ const io: CliIO = {
       const timer = setTimeout(() => finish(true), 1000);
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
+    }),
+  // `service`: which OS service manager to target, and how to re-launch this CLI
+  // from inside a generated service. Absolute paths only — a launchd/systemd
+  // service runs with a minimal PATH and cannot rely on `asterism` being found.
+  platform: process.platform,
+  selfInvocation: [process.execPath, fileURLToPath(import.meta.url)],
+  // Run `launchctl`/`systemctl` for `service`. A non-zero exit is captured and
+  // returned (not thrown) so a status probe can read state from the exit code.
+  runCommand: (command, args) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d: Buffer) => {
+        stdout += d.toString();
+      });
+      child.stderr.on("data", (d: Buffer) => {
+        stderr += d.toString();
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        resolve({ code: code ?? 0, stdout, stderr });
+      });
     }),
 };
 

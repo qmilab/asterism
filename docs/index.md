@@ -28,6 +28,7 @@ New here? Read in this order:
 | Look up a command | [Command reference](./commands.md) |
 | See the separation guarantees proven | [Walkthrough](./walkthrough.md) |
 | Call an agent over HTTP | [HTTP endpoint](./http.md) |
+| Keep an agent running in the background | [Run as a service](./service.md) |
 
 ## About this phase
 
