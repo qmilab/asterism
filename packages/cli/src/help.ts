@@ -40,6 +40,7 @@ Commands:
   config                            Show or change the model agents run on
   serve <agent>                     Offer an agent over a local HTTP endpoint
   channel telegram <agent>          Reach an agent from a Telegram chat
+  channel discord <agent>           Reach an agent from a Discord channel
 
 Options:
   -h, --help                        Show help
@@ -239,26 +240,36 @@ Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
 OPENAI_API_KEY) to start runs; without one, the read endpoints still work. Press
 Ctrl+C to stop.`,
 
-  channel: `asterism channel telegram <agent> [--allow <chat-id>[,<chat-id>...]]
+  channel: `asterism channel <telegram|discord> <agent> [--allow <id>[,<id>...]]
 
-Reach one agent from a Telegram chat, with the same separation guarantees as the
-command line. The bot drives only this agent — it is never a way to reach another.
+Reach one agent from a chat app, with the same separation guarantees as the command
+line. The bot drives only this agent — it is never a way to reach another.
 
-Only the chats you allow can use the bot. A message from anyone else is refused and
-told its own chat id, so you can decide whether to allow it. A destructive action
-still pauses for your confirmation: the bot asks in the chat, and you reply
-\`/confirm\` to approve just that action — the same gate you get at the keyboard.
+Only the chats you allow can use the bot. A message from anywhere else is refused and
+told its own id, so you can decide whether to allow it. A destructive action still
+pauses for your confirmation: the bot asks in the chat, and you reply \`/confirm\` to
+approve just that action — the same gate you get at the keyboard.
 
-Getting started:
+Telegram:
   1. Create a bot with @BotFather in Telegram and copy its token.
   2. export ASTERISM_TELEGRAM_TOKEN=<token>
   3. Start the channel, then message the bot — it replies with your chat id.
   4. Re-run with --allow <that-id> so your chat can put the agent to work.
 
+Discord:
+  1. Create an app and bot in the Discord Developer Portal, copy the bot token, and
+     turn on the MESSAGE CONTENT intent (Bot -> Privileged Gateway Intents).
+  2. export ASTERISM_DISCORD_TOKEN=<token>
+  3. Invite the bot to a server then @mention it in a channel (or just DM it) — it
+     replies with the channel id. Needs a WebSocket runtime: Node 22+ or Bun.
+  4. Re-run with --allow <that-id> so that channel can put the agent to work. In a
+     server the bot acts only when @mentioned; a DM needs no mention.
+
 Options:
-  --allow <id,...>   Chat ids allowed to use the bot, comma-separated. You can also
-                     set ASTERISM_TELEGRAM_ALLOW; the two are combined. With none,
-                     the bot starts but only hands out chat ids until you add one.
+  --allow <id,...>   Ids allowed to use the bot, comma-separated. You can also set
+                     ASTERISM_TELEGRAM_ALLOW / ASTERISM_DISCORD_ALLOW; each is
+                     combined with its --allow. With none, the bot starts but only
+                     hands out ids until you add one.
 
 Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
 OPENAI_API_KEY) before starting — the bot needs one to run tasks. Press Ctrl+C to

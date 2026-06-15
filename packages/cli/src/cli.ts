@@ -36,7 +36,7 @@ import type {
   TrustLevel,
 } from "@qmilab/asterism-core";
 import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
-import type { ChannelHandle, TelegramOptions } from "@qmilab/asterism-channels";
+import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
@@ -155,6 +155,14 @@ export interface CliIO {
    * {@link CliIO.waitForShutdown} resolves.
    */
   startTelegram?: (options: TelegramOptions) => ChannelHandle | Promise<ChannelHandle>;
+  /**
+   * Start a Discord chat channel for `channel discord`. Absent ⇒ chat channels are
+   * unavailable in this embedding (the default wiring in `bin.ts` supplies the real
+   * transport). The same contract as {@link CliIO.startTelegram}: the store stays
+   * open for the channel's lifetime, so the handler returns only after
+   * {@link CliIO.waitForShutdown} resolves.
+   */
+  startDiscord?: (options: DiscordOptions) => ChannelHandle | Promise<ChannelHandle>;
   /**
    * Block until a shutdown is requested (e.g. Ctrl+C). Absent ⇒ returns at once,
    * so a non-interactive caller does not hang. The default wiring waits on
@@ -1503,6 +1511,127 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
   });
 }
 
+// --- channel discord (chat-app front door) ---------------------------------
+
+/** The env var holding the Discord bot token. Secrets stay out of config/flags. */
+const DISCORD_TOKEN_ENV = "ASTERISM_DISCORD_TOKEN";
+/** The env var holding a comma-separated allow-list, combined with `--allow`. */
+const DISCORD_ALLOW_ENV = "ASTERISM_DISCORD_ALLOW";
+
+async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.channel!);
+    return 0;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism channel discord <agent> [--allow <channel-id>[,<channel-id>...]]");
+    return 1;
+  }
+  // A value-bearing flag given bare parses as boolean `true`; reject it rather than
+  // silently treating "--allow" as no allow-list.
+  if (parsed.flags.allow === true) {
+    io.err("The --allow option needs a value (a comma-separated list of channel ids).");
+    return 1;
+  }
+
+  if (!io.startDiscord) {
+    io.err("Chat channels are not available in this embedding.");
+    return 1;
+  }
+  const startDiscord = io.startDiscord;
+
+  // The bot token is a secret: it comes from the environment, never config or a flag.
+  const token = io.env[DISCORD_TOKEN_ENV];
+  if (!token) {
+    io.err(
+      `Set ${DISCORD_TOKEN_ENV} to your bot token (create one in the Discord Developer Portal) before starting the channel.`,
+    );
+    return 1;
+  }
+
+  // The allow-list is the channel's access boundary — the Discord channels (a DM
+  // channel or a server channel) permitted to drive the agent. The flag and the env
+  // var are combined. An empty list is allowed: the bot starts in discovery mode (it
+  // refuses every message but replies with the sender's channel id), so you can learn
+  // the id and re-run with --allow. Nothing the agent can do is exposed to an
+  // unauthorized channel either way.
+  const allow = new Set<string>([
+    ...parseAllowList(stringFlag(parsed.flags.allow)),
+    ...parseAllowList(io.env[DISCORD_ALLOW_ENV]),
+  ]);
+
+  return withHomeStore(io, async (store, home) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    // Like Telegram, a chat channel has no value without a model — every message is
+    // a task. Require it, and decline clearly rather than starting an idle bot.
+    const made = await resolveAdapter(io, home, agent.name);
+    if (!made.adapter) {
+      io.err(made.reason ?? "No model configured.");
+      return 1;
+    }
+    const adapter = made.adapter;
+
+    // Built the same way `run`/`serve`/`channel telegram` build it, so a run started
+    // from Discord sees the identical tool catalog, confined to this agent's workspace.
+    const capabilities = io.capabilities?.(agent.workspaceDir);
+
+    const channel = await startDiscord({
+      store,
+      agent,
+      adapter,
+      readFile: (p) => readFileSync(p, "utf8"),
+      ...(capabilities ? { capabilities } : {}),
+      allow,
+      token,
+      // A fatal Gateway close (e.g. the MESSAGE CONTENT intent isn't enabled) is
+      // reported here, so the operator sees the cause instead of silence.
+      log: (m) => io.err(m),
+    });
+
+    const who = channel.botUsername ? `@${channel.botUsername}` : "the bot";
+    io.out(`Listening as ${who} for agent "${agent.name}".`);
+    if (allow.size === 0) {
+      io.out("  No authorized channels yet — every message is refused, but the bot replies");
+      io.out("  with the sender's channel id. Re-run with --allow <id> to let a channel in.");
+    } else {
+      const s = allow.size === 1 ? "" : "s";
+      io.out(`  ${allow.size} authorized channel${s}; messages from any other channel are refused.`);
+    }
+    io.out("  In a server, @mention the bot; a DM needs no mention.");
+    io.out("  A destructive action pauses the run and asks the channel to reply /confirm.");
+    io.out("Press Ctrl+C to stop.");
+
+    // Block until shutdown OR the bot dies on its own (a fatal close, which `log`
+    // has just reported) — without the race a dead bot would sit at "Listening…"
+    // until Ctrl+C. Then stop the channel BEFORE returning, so the store (closed
+    // once this callback returns) is never pulled from under a run still in flight.
+    const waitForShutdown = io.waitForShutdown ?? (() => Promise.resolve());
+    await Promise.race([waitForShutdown(), channel.closed ?? new Promise<void>(() => {})]);
+    await channel.stop();
+    io.out("Stopped.");
+    return 0;
+  });
+}
+
+/** Route `channel <telegram|discord> …` to the right transport. */
+async function cmdChannel(rest: string[], io: CliIO): Promise<number> {
+  const sub = rest[0];
+  // `channel` alone prints help and is an error (no transport chosen); `--help` is not.
+  if (sub === undefined || sub === "--help" || sub === "-h") {
+    io.out(COMMAND_HELP.channel!);
+    return sub === undefined ? 1 : 0;
+  }
+  if (sub === "telegram") return cmdChannelTelegram(rest.slice(1), io);
+  if (sub === "discord") return cmdChannelDiscord(rest.slice(1), io);
+  io.err(`Unknown subcommand: channel ${sub}`);
+  io.out(COMMAND_HELP.channel!);
+  return 1;
+}
+
 // --- dispatch --------------------------------------------------------------
 
 /** Dispatch a two-word command (`secrets add`, `skill add`, …) to its handler. */
@@ -1568,7 +1697,7 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
     case "serve":
       return cmdServe(rest, io);
     case "channel":
-      return dispatchSub("channel", "telegram", cmdChannelTelegram, COMMAND_HELP.channel!, rest, io);
+      return cmdChannel(rest, io);
     case "secrets":
       return dispatchSub("secrets", "add", cmdSecretsAdd, COMMAND_HELP.secrets!, rest, io);
     case "skill":

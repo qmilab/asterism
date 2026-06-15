@@ -12,7 +12,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { AsterismStore, resumeRun } from "@qmilab/asterism-core";
 import type { Agent, Capability, RunOutput, RuntimeAdapter } from "@qmilab/asterism-core";
 
-import { createDispatcher } from "./dispatch.ts";
+import { createDispatcher, isControlReply } from "./dispatch.ts";
 import type { ChannelDeps } from "./dispatch.ts";
 
 let store: AsterismStore;
@@ -297,4 +297,32 @@ test("/help lists the commands for an authorized chat", async () => {
   expect(out[0]!.text).toContain("/cancel");
   // It answered help, not a task — no run was started.
   expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
+test("an empty message (a bare mention stripped to nothing) is nudged, not run", async () => {
+  const d = createDispatcher(deps()); // authorized chat "100", clean adapter
+  const out = await d.handle({ chatId: "100", text: "   " });
+  expect(out[0]!.text.toLowerCase()).toContain("send me a task");
+  // No run started — the agent is never executed on an empty task.
+  expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
+test("an unauthorized chat is refused (with its id) even for an empty message", async () => {
+  // Discovery must win over the empty-task nudge: the allow-list is checked first.
+  const d = createDispatcher(deps());
+  const out = await d.handle({ chatId: "999", text: "" });
+  expect(out[0]!.text).toContain("999");
+  expect(out[0]!.text.toLowerCase()).toContain("not authorized");
+});
+
+test("isControlReply recognizes only the confirm/cancel control replies", () => {
+  // Used by a transport that gates unaddressed messages (Discord servers) to keep a
+  // paused run reachable; it must not let ordinary text or other commands through.
+  expect(isControlReply("/confirm")).toBe(true);
+  expect(isControlReply("/cancel now")).toBe(true);
+  expect(isControlReply("/yes")).toBe(true);
+  expect(isControlReply("/no")).toBe(true);
+  expect(isControlReply("/help")).toBe(false);
+  expect(isControlReply("/giphy cat")).toBe(false);
+  expect(isControlReply("do a thing")).toBe(false);
 });

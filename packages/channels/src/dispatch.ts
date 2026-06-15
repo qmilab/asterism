@@ -221,6 +221,14 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
       return reply(chatId, "There's nothing waiting for confirmation right now. Send me a task to get started.");
     }
 
+    // An empty message — e.g. a bare @mention in a Discord server, which strips to
+    // nothing — is not a task worth a run. Nudge instead of running the agent on "".
+    // (This is reached only past the allow-list, so an unknown chat still gets the
+    // discovery reply above, not this.)
+    if (message.text.trim().length === 0) {
+      return reply(chatId, "Send me a task to get started.");
+    }
+
     // Idle: the message is a task. Decline cleanly if no model is configured —
     // the chat-edge analog of the HTTP 503.
     if (!deps.adapter) {
@@ -282,6 +290,18 @@ function isConfirm(command: string | undefined): boolean {
 /** A reply that abandons a pending pause: `/cancel`, or a plain no. */
 function isCancel(command: string | undefined): boolean {
   return command === "/cancel" || command === "/no";
+}
+
+/**
+ * Whether a raw message is a confirmation control reply (`/confirm`/`/cancel` and
+ * their aliases) — the replies that clear a pending pause. Exposed for a transport
+ * that gates *unaddressed* messages: Discord requires an @mention before running a
+ * task in a server, but the pause prompt tells users to "reply /confirm", so these
+ * control replies must still pass the gate or a paused run would be stranded.
+ */
+export function isControlReply(text: string): boolean {
+  const parsed = classifyMessage(text, undefined);
+  return parsed.kind === "command" && (isConfirm(parsed.name) || isCancel(parsed.name));
 }
 
 /** Glyph per gate decision, matching the CLI's action summary. */
