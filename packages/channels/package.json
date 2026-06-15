@@ -1,14 +1,7 @@
 {
-  "name": "@qmilab/asterism",
+  "name": "@qmilab/asterism-channels",
   "version": "0.1.0",
-  "description": "Many agents. One runtime. Separate lives. Run distinct local AI agents — each with its own soul, memory, secrets, skills, workspace, and autonomy level.",
-  "keywords": [
-    "ai",
-    "agents",
-    "cli",
-    "local-first",
-    "autonomy"
-  ],
+  "description": "Chat-app channels (Telegram) for Asterism agents. You probably want @qmilab/asterism.",
   "type": "module",
   "license": "Apache-2.0",
   "homepage": "https://github.com/qmilab/asterism#readme",
@@ -16,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/qmilab/asterism.git",
-    "directory": "packages/cli"
+    "directory": "packages/channels"
   },
   "engines": {
     "node": ">=20.0.0",
@@ -28,9 +21,6 @@
   "files": [
     "dist"
   ],
-  "bin": {
-    "asterism": "./dist/bin.js"
-  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -44,10 +34,6 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@qmilab/asterism-core": "workspace:*",
-    "@qmilab/asterism-adapter-pi": "workspace:*",
-    "@qmilab/asterism-reflect": "workspace:*",
-    "@qmilab/asterism-server": "workspace:*",
-    "@qmilab/asterism-channels": "workspace:*"
+    "@qmilab/asterism-core": "workspace:*"
   }
 }

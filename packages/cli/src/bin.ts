@@ -77,6 +77,9 @@ const io: CliIO = {
   // `serve`: start the local HTTP endpoint. Imported lazily so non-serve commands
   // never load the HTTP layer (the same pattern `run` uses for the substrate).
   startServer: async (options) => (await import("@qmilab/asterism-server")).serve(options),
+  // `channel telegram`: start the chat channel. Lazily imported for the same reason
+  // — only this command loads the channel transport.
+  startTelegram: async (options) => (await import("@qmilab/asterism-channels")).runTelegram(options),
   // Block until the first interrupt, then let `serve` shut down gracefully (stop
   // the server, close the store). A second Ctrl+C falls through to the default
   // hard exit.

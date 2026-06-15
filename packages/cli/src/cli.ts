@@ -36,6 +36,7 @@ import type {
   TrustLevel,
 } from "@qmilab/asterism-core";
 import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
+import type { ChannelHandle, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
@@ -146,6 +147,14 @@ export interface CliIO {
    * {@link CliIO.waitForShutdown} resolves.
    */
   startServer?: (options: ServeOptions) => RunningServer | Promise<RunningServer>;
+  /**
+   * Start a Telegram chat channel for `channel telegram`. Absent ⇒ chat channels
+   * are unavailable in this embedding (the default wiring in `bin.ts` supplies the
+   * real transport). Like {@link CliIO.startServer}, the store stays open for the
+   * channel's lifetime, so the handler returns only after
+   * {@link CliIO.waitForShutdown} resolves.
+   */
+  startTelegram?: (options: TelegramOptions) => ChannelHandle | Promise<ChannelHandle>;
   /**
    * Block until a shutdown is requested (e.g. Ctrl+C). Absent ⇒ returns at once,
    * so a non-interactive caller does not hang. The default wiring waits on
@@ -1384,6 +1393,116 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
   });
 }
 
+// --- channel telegram (chat-app front door) --------------------------------
+
+/** The env var holding the Telegram bot token. Secrets stay out of config/flags. */
+const TELEGRAM_TOKEN_ENV = "ASTERISM_TELEGRAM_TOKEN";
+/** The env var holding a comma-separated allow-list, combined with `--allow`. */
+const TELEGRAM_ALLOW_ENV = "ASTERISM_TELEGRAM_ALLOW";
+
+/** Split a comma-separated allow-list value into trimmed, non-empty chat ids. */
+function parseAllowList(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.channel!);
+    return 0;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism channel telegram <agent> [--allow <chat-id>[,<chat-id>...]]");
+    return 1;
+  }
+  // A value-bearing flag given bare parses as boolean `true`; reject it rather than
+  // silently treating "--allow" as no allow-list.
+  if (parsed.flags.allow === true) {
+    io.err("The --allow option needs a value (a comma-separated list of chat ids).");
+    return 1;
+  }
+
+  if (!io.startTelegram) {
+    io.err("Chat channels are not available in this embedding.");
+    return 1;
+  }
+  const startTelegram = io.startTelegram;
+
+  // The bot token is a secret: it comes from the environment, never config or a flag.
+  const token = io.env[TELEGRAM_TOKEN_ENV];
+  if (!token) {
+    io.err(
+      `Set ${TELEGRAM_TOKEN_ENV} to your bot token (create a bot with @BotFather) before starting the channel.`,
+    );
+    return 1;
+  }
+
+  // The allow-list is the channel's access boundary — the chats permitted to drive
+  // the agent. The flag and the env var are combined. An empty list is allowed: the
+  // bot starts in discovery mode (it refuses every message but replies with the
+  // sender's chat id), so you can learn your id and re-run with --allow. Nothing the
+  // agent can do is ever exposed to an unauthorized chat either way.
+  const allow = new Set<string>([
+    ...parseAllowList(stringFlag(parsed.flags.allow)),
+    ...parseAllowList(io.env[TELEGRAM_ALLOW_ENV]),
+  ]);
+
+  return withHomeStore(io, async (store, home) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    // Unlike `serve` (whose read endpoints work without one), a chat channel has no
+    // value without a model — every message is a task. Require it, and decline
+    // clearly rather than starting a bot that can answer nothing.
+    const made = await resolveAdapter(io, home, agent.name);
+    if (!made.adapter) {
+      io.err(made.reason ?? "No model configured.");
+      return 1;
+    }
+    const adapter = made.adapter;
+
+    // Built the same way `run`/`serve` build it, so a run started from chat sees the
+    // identical tool catalog, confined to this agent's workspace.
+    const capabilities = io.capabilities?.(agent.workspaceDir);
+
+    const channel = await startTelegram({
+      store,
+      agent,
+      adapter,
+      readFile: (p) => readFileSync(p, "utf8"),
+      ...(capabilities ? { capabilities } : {}),
+      allow,
+      token,
+    });
+
+    const who = channel.botUsername ? `@${channel.botUsername}` : "the bot";
+    io.out(`Listening as ${who} for agent "${agent.name}".`);
+    if (allow.size === 0) {
+      io.out("  No authorized chats yet — every message is refused, but the bot replies");
+      io.out("  with the sender's chat id. Re-run with --allow <id> to let a chat in.");
+    } else {
+      const s = allow.size === 1 ? "" : "s";
+      io.out(`  ${allow.size} authorized chat${s}; messages from any other chat are refused.`);
+    }
+    io.out("  A destructive action pauses the run and asks the chat to reply /confirm.");
+    io.out("Press Ctrl+C to stop.");
+
+    // Block until shutdown, then stop the channel BEFORE returning — awaiting the
+    // stop lets the in-flight poll unwind, so the store (closed once this callback
+    // returns) is never pulled out from under a run still being handled.
+    const waitForShutdown = io.waitForShutdown ?? (() => Promise.resolve());
+    await waitForShutdown();
+    await channel.stop();
+    io.out("Stopped.");
+    return 0;
+  });
+}
+
 // --- dispatch --------------------------------------------------------------
 
 /** Dispatch a two-word command (`secrets add`, `skill add`, …) to its handler. */
@@ -1448,6 +1567,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdConfig(rest, io);
     case "serve":
       return cmdServe(rest, io);
+    case "channel":
+      return dispatchSub("channel", "telegram", cmdChannelTelegram, COMMAND_HELP.channel!, rest, io);
     case "secrets":
       return dispatchSub("secrets", "add", cmdSecretsAdd, COMMAND_HELP.secrets!, rest, io);
     case "skill":

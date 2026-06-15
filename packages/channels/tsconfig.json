@@ -10,18 +10,6 @@
   "references": [
     {
       "path": "../core"
-    },
-    {
-      "path": "../adapter-pi"
-    },
-    {
-      "path": "../reflect"
-    },
-    {
-      "path": "../server"
-    },
-    {
-      "path": "../channels"
     }
   ],
   "exclude": [

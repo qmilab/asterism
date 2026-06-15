@@ -39,6 +39,7 @@ Commands:
   reflect <agent> --review          Review memories an agent proposes to keep
   config                            Show or change the model agents run on
   serve <agent>                     Offer an agent over a local HTTP endpoint
+  channel telegram <agent>          Reach an agent from a Telegram chat
 
 Options:
   -h, --help                        Show help
@@ -237,4 +238,29 @@ Options:
 Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
 OPENAI_API_KEY) to start runs; without one, the read endpoints still work. Press
 Ctrl+C to stop.`,
+
+  channel: `asterism channel telegram <agent> [--allow <chat-id>[,<chat-id>...]]
+
+Reach one agent from a Telegram chat, with the same separation guarantees as the
+command line. The bot drives only this agent — it is never a way to reach another.
+
+Only the chats you allow can use the bot. A message from anyone else is refused and
+told its own chat id, so you can decide whether to allow it. A destructive action
+still pauses for your confirmation: the bot asks in the chat, and you reply
+\`/confirm\` to approve just that action — the same gate you get at the keyboard.
+
+Getting started:
+  1. Create a bot with @BotFather in Telegram and copy its token.
+  2. export ASTERISM_TELEGRAM_TOKEN=<token>
+  3. Start the channel, then message the bot — it replies with your chat id.
+  4. Re-run with --allow <that-id> so your chat can put the agent to work.
+
+Options:
+  --allow <id,...>   Chat ids allowed to use the bot, comma-separated. You can also
+                     set ASTERISM_TELEGRAM_ALLOW; the two are combined. With none,
+                     the bot starts but only hands out chat ids until you add one.
+
+Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
+OPENAI_API_KEY) before starting — the bot needs one to run tasks. Press Ctrl+C to
+stop.`,
 };

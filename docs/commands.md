@@ -494,6 +494,42 @@ request/response details.
 
 ---
 
+## `channel telegram`
+
+```
+asterism channel telegram <agent> [--allow <chat-id>[,<chat-id>...]]
+```
+
+Reach one agent from a Telegram chat, with the same separation guarantees as the
+command line. The bot drives **only this agent** — never a way to reach another.
+
+Set the bot token in the environment (`ASTERISM_TELEGRAM_TOKEN`, from
+[@BotFather](https://t.me/BotFather)) — it is a secret and never goes in a flag or
+config. The **allow-list** is the channel's access boundary: only the chat ids you
+allow can use the bot; anyone else is refused and told only their own chat id. A
+destructive action pauses the run and asks in the chat — you reply `/confirm` to
+approve just that action, the same gate you get at the keyboard.
+
+| Option | Default | Description |
+|---|---|---|
+| `--allow <id,...>` | *(none)* | Chat ids allowed to use the bot, comma-separated. Combined with `ASTERISM_TELEGRAM_ALLOW`. With none, the bot starts but only hands out chat ids until you add one. |
+
+```console
+$ export ASTERISM_TELEGRAM_TOKEN=123456789:AAx…
+$ asterism channel telegram writer --allow 8675309
+Listening as @writer_bot for agent "writer".
+  1 authorized chat; messages from any other chat are refused.
+  A destructive action pauses the run and asks the chat to reply /confirm.
+Press Ctrl+C to stop.
+```
+
+A channel needs a [configured model](./installation.md#configuring-a-model) —
+every message is a task — so it will not start without one. See the
+[chat channels guide](./channels.md) for setup, the confirm-by-reply flow, and
+limitations.
+
+---
+
 ## Reference tables
 
 **Trust levels** — `propose` · `notify` · `autonomous`
