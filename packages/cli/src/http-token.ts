@@ -19,7 +19,7 @@
 // The env var always overrides the file, so a container injecting the secret never
 // bakes one into its image and never depends on what is on disk.
 
-import { chmodSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
@@ -58,33 +58,49 @@ function readPersisted(path: string): string | undefined {
 }
 
 /**
- * Exclusively create `path` holding `token`, owner-only — the portable fallback used
- * when the filesystem has no hard links. If we lose the create race (`EEXIST`) the
- * winner has already written its token, so we adopt it rather than 401 its clients.
+ * Reconcile against a `path` that already exists when we tried to create it: adopt a
+ * COMPLETE token a racer published (so both servers agree), or — if it is a stale
+ * empty/partial leftover from an interrupted serve — atomically replace it with the
+ * staged temp so OUR token is actually persisted and reused next time. Renaming the
+ * already-written temp publishes the token in one step, never exposing a partial file.
  */
-function claimByExclusiveWrite(path: string, token: string): string {
+function adoptOrReclaim(path: string, tmp: string, token: string): string {
+  const existing = readPersisted(path);
+  if (existing) return existing;
+  renameSync(tmp, path);
+  return token;
+}
+
+/**
+ * Exclusively create `path` holding `token`, owner-only — the portable fallback used
+ * when the filesystem has no hard links. If we lose the create race (`EEXIST`), defer
+ * to {@link adoptOrReclaim}: adopt the winner's token, or reclaim an empty leftover.
+ */
+function claimByExclusiveWrite(path: string, tmp: string, token: string): string {
   try {
     writeFileSync(path, token, { mode: 0o600, flag: "wx" });
     chmodSync(path, 0o600);
     return token;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") return readPersisted(path) ?? token;
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return adoptOrReclaim(path, tmp, token);
     throw err;
   }
 }
 
 /**
  * Persist a freshly generated token owner-only and return the value actually in
- * effect. Two correctness hazards drive the shape here: a reader must NEVER observe a
- * half-written token, and two `serve` processes racing on first run must converge on a
- * SINGLE token (else one server 401s the other's clients).
+ * effect. Three correctness hazards drive the shape here: a reader must NEVER observe
+ * a half-written token; two `serve` processes racing on first run must converge on a
+ * SINGLE token (else one server 401s the other's clients); and a stale empty/partial
+ * file from an interrupted serve must be replaced, not left to break reuse next time.
  *
- * Both are handled by staging the full token in a private temp file and then
- * publishing it with an atomic exclusive hard link: `path` appears complete in one
- * step (it is a link to an already-written file — no empty/partial window), and only
- * one racer can create it, so the losers read back the winner's token. A filesystem
- * without hard links (e.g. FAT) falls back to an exclusive create + write. The dir is
- * 0700 and the file 0600, set explicitly so a permissive umask cannot widen them.
+ * The token is staged in a private temp file written in full, then published with an
+ * atomic exclusive hard link: `path` appears complete in one step (it is a link to an
+ * already-written file — no empty/partial window) and only one racer can create it, so
+ * the losers adopt the winner's token. If `path` already exists, {@link adoptOrReclaim}
+ * adopts a complete token or reclaims an empty leftover. A filesystem without hard
+ * links (e.g. FAT) falls back to an exclusive create + write. The dir is 0700 and the
+ * file 0600, set explicitly so a permissive umask cannot widen them.
  */
 function persistGenerated(path: string): string {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -100,19 +116,21 @@ function persistGenerated(path: string): string {
   writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
   chmodSync(tmp, 0o600);
   try {
-    linkSync(tmp, path);
-    return token; // won the race; `path` now holds our fully written token
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-      // Lost the race; the winner published a COMPLETE file (it linked a fully
-      // written temp), so adopt its token. The `?? token` is pure defense.
-      return readPersisted(path) ?? token;
+    try {
+      linkSync(tmp, path);
+      return token; // won the race; `path` now holds our fully written token
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        // `path` already exists — adopt a complete token, or reclaim a stale one.
+        return adoptOrReclaim(path, tmp, token);
+      }
+      // No hard-link support here (e.g. FAT) — publish without one.
+      return claimByExclusiveWrite(path, tmp, token);
     }
-    // No hard-link support here — publish without one.
-    return claimByExclusiveWrite(path, token);
   } finally {
-    // Drop the temp name. On the link path this leaves `path` (the other name for the
-    // same inode); on the fallback path the temp is just discarded.
+    // Drop the temp name. After a successful link it is a second name for `path`'s
+    // inode (removing it leaves `path`); after a rename it is already gone; otherwise
+    // it is the now-unneeded stage file.
     rmSync(tmp, { force: true });
   }
 }

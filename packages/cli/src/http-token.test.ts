@@ -75,14 +75,22 @@ test("per-agent tokens are distinct files — separate lives reach the front doo
   expect(httpTokenPath(home, "personal")).not.toBe(httpTokenPath(home, "work"));
 });
 
-test("an empty pre-existing token file yields a fresh token instead of crashing", () => {
-  // The lost-race / mid-create case: the token path already exists (here, empty)
-  // when generation runs. The old wx-then-throw would have failed startup with
-  // EEXIST; the resolver must instead return a usable, non-empty token.
+test("an empty pre-existing token file is reclaimed, persisted, and then reused", () => {
+  // A stale empty leftover from an interrupted serve. The resolver must not crash
+  // (the original wx-then-throw failed startup), AND it must WRITE the token back —
+  // otherwise the next serve sees an empty file again and generates a different one.
   const path = httpTokenPath(home, "personal");
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, ""); // empty ⇒ treated as "no saved token", so generation runs
 
-  const resolved = resolveHttpToken(home, "personal", {});
-  expect(resolved.token).toMatch(/^[0-9a-f]{64}$/);
+  const first = resolveHttpToken(home, "personal", {});
+  expect(first.token).toMatch(/^[0-9a-f]{64}$/);
+  // Persisted (not returned in memory only) and still owner-only.
+  expect(readFileSync(path, "utf8")).toBe(first.token);
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+
+  // The next serve reuses it rather than regenerating — the reuse contract holds.
+  const second = resolveHttpToken(home, "personal", {});
+  expect(second.source).toBe("file");
+  expect(second.token).toBe(first.token);
 });
