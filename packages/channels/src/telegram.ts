@@ -86,6 +86,10 @@ export async function pollOnce(
   const updates = await transport.getUpdates(offset, DEFAULT_POLL_TIMEOUT_SECONDS, signal);
   let next = offset;
   for (const update of updates) {
+    // Shutdown requested mid-batch: stop here so Ctrl+C lets the in-flight run
+    // drain without kicking off more from the rest of this batch. The unprocessed
+    // tail stays unacknowledged, so the next start skips it as backlog.
+    if (signal?.aborted) break;
     if (typeof update.update_id === "number") next = Math.max(next, update.update_id + 1);
 
     const chatId = update.message?.chat?.id;
@@ -128,12 +132,9 @@ export async function runTelegram(options: TelegramOptions): Promise<ChannelHand
 
   // Skip the backlog so a task sent while the bot was offline doesn't suddenly run
   // when it comes online. The queue can span several pages, so this drains them all.
-  let offset = 0;
-  try {
-    offset = await drainBacklog(transport, controller.signal);
-  } catch {
-    // A failed backlog drain is non-fatal — start from 0 and let the loop catch up.
-  }
+  // If it fails we must NOT fall back to polling from zero — that would replay the
+  // very backlog we meant to skip — so let the error fail the launch instead.
+  const offset = await drainBacklog(transport, controller.signal);
 
   const loop = pollLoop(transport, dispatcher, offset, controller.signal);
 

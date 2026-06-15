@@ -5,11 +5,14 @@
 
 import { expect, test } from "bun:test";
 
+import type { Agent, AsterismStore } from "@qmilab/asterism-core";
+
 import type { ChannelDispatcher, OutboundMessage } from "./dispatch.ts";
 import {
   chunkText,
   drainBacklog,
   pollOnce,
+  runTelegram,
   telegramTransport,
   TELEGRAM_MAX_CHARS,
 } from "./telegram.ts";
@@ -84,6 +87,54 @@ test("pollOnce chunks a reply longer than Telegram's limit into multiple sends",
   expect(sent).toHaveLength(2);
   expect(sent[0]!.text.length).toBe(TELEGRAM_MAX_CHARS);
   expect(sent.map((s) => s.text).join("")).toBe(big); // reassembles to the original
+});
+
+test("pollOnce stops dispatching the rest of a batch once shutdown is requested", async () => {
+  // Ctrl+C while a batch is being processed must let the in-flight run drain but
+  // not kick off the remaining updates' runs.
+  const controller = new AbortController();
+  let dispatched = 0;
+  const dispatcher: ChannelDispatcher = {
+    async handle({ chatId }) {
+      dispatched++;
+      controller.abort(); // shutdown requested while handling the first update
+      return [{ chatId, text: "ok" }];
+    },
+  };
+  const transport: TelegramTransport = {
+    async getUpdates() {
+      return [
+        { update_id: 1, message: { chat: { id: 1 }, text: "a" } },
+        { update_id: 2, message: { chat: { id: 2 }, text: "b" } },
+      ];
+    },
+    async sendMessage() {},
+  };
+
+  await pollOnce(transport, dispatcher, 0, controller.signal);
+
+  expect(dispatched).toBe(1); // the second update in the batch was not dispatched
+});
+
+test("runTelegram fails to start when the backlog drain errors (no replay from zero)", async () => {
+  // getMe succeeds, but the drain's getUpdates fails — the launch must reject
+  // rather than silently fall back to live-polling (and replaying) the backlog.
+  const fetchImpl: FetchLike = async (url) => {
+    if (url.includes("/getMe")) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { username: "bot" } }) };
+    }
+    return { ok: false, status: 502, json: async () => ({ ok: false, description: "Bad Gateway" }) };
+  };
+
+  await expect(
+    runTelegram({
+      store: {} as AsterismStore, // never touched: the drain throws before any handle()
+      agent: {} as Agent,
+      allow: new Set(["1"]),
+      token: "T",
+      fetch: fetchImpl,
+    }),
+  ).rejects.toThrow("Bad Gateway");
 });
 
 test("pollOnce advances past an update even when sending its reply fails", async () => {
