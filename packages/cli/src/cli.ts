@@ -1796,7 +1796,8 @@ function serviceEnvPlan(
   kind: ServiceKind,
   captureEnv: boolean,
 ): ServiceEnvPlan {
-  const { model } = resolveModelConfig(io.env, { config: loadConfig(home), agentName });
+  const config = loadConfig(home);
+  const { model } = resolveModelConfig(io.env, { config, agentName });
   const keyVar = providerKeyEnvVar(model?.provider ?? "openai");
   const has = (name: string): boolean => io.env[name] !== undefined;
 
@@ -1810,6 +1811,25 @@ function serviceEnvPlan(
     const app = kind === "telegram" ? "Telegram" : "Discord";
     vars.push({ name: tokenVar, required: true, note: `your ${app} bot token (from ${source}).` });
     needs.push({ label: tokenVar, note: `the ${app} bot token.`, satisfied: captureEnv && has(tokenVar) });
+  }
+
+  // A channel needs a model — every message is a task, so the wrapped `channel`
+  // command exits at once without one. The model comes from `asterism config` (read
+  // off disk, so nothing is needed here) or from ASTERISM_MODEL_* in this file. Add
+  // the need only when the config file alone does not already supply it; otherwise an
+  // operator can fill in every listed variable and still hit a restart loop.
+  if (kind !== "serve") {
+    const modelOnDisk = resolveModelConfig({}, { config, agentName }).model !== undefined;
+    if (!modelOnDisk) {
+      needs.push({
+        label: "a configured model",
+        note:
+          model !== undefined
+            ? "keep ASTERISM_MODEL_ID set here, or run `asterism config set <model-id>`."
+            : "run `asterism config set <model-id>`, or set ASTERISM_MODEL_ID here.",
+        satisfied: captureEnv && model !== undefined,
+      });
+    }
   }
 
   // Model API key — the provider-specific variable, or the ASTERISM_API_KEY fallback.

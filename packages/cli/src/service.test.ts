@@ -154,16 +154,18 @@ describe("renderSystemdUnit", () => {
     expect(unit).toContain("WantedBy=default.target");
   });
 
-  test("quotes paths with spaces and escapes the systemd `%` specifier", () => {
+  test("quotes paths with spaces and escapes the systemd `%` and `$` in ExecStart", () => {
     const tricky = renderSystemdUnit({
       description: "Asterism — writer (serve)",
-      wrapperPath: "/home/My User/.config/asterism/services/writer.serve/run%20.sh",
-      workingDir: "/home/My User/project",
+      wrapperPath: "/home/My User/.config/asterism/services/writer.serve/run%20$X.sh",
+      workingDir: "/home/My User/pro$ject",
     });
+    // ExecStart undergoes %- and $-expansion: both are doubled.
     expect(tricky).toContain(
-      `ExecStart=/bin/sh "/home/My User/.config/asterism/services/writer.serve/run%%20.sh"`,
+      `ExecStart=/bin/sh "/home/My User/.config/asterism/services/writer.serve/run%%20$$X.sh"`,
     );
-    expect(tricky).toContain(`WorkingDirectory="/home/My User/project"`);
+    // WorkingDirectory does %-expansion only, so its `$` stays literal.
+    expect(tricky).toContain(`WorkingDirectory="/home/My User/pro$ject"`);
   });
 });
 

@@ -172,14 +172,24 @@ function systemdLiteral(value: string): string {
 }
 
 /**
- * Quote a path as a single systemd command argument. systemd splits `ExecStart` on
- * unquoted whitespace and treats `%` as a specifier, so a generated path with a
- * space (a home directory with a space) or a `%` would otherwise be mis-parsed.
- * Wrap in double quotes, escape `\` and `"`, and double `%`.
+ * Quote a value as a single systemd token: wrap in double quotes, escape `\` and `"`,
+ * and double `%`. Used for fields that undergo only specifier (`%`) expansion, such
+ * as `WorkingDirectory` — a generated path with a space or `%` would otherwise be
+ * mis-parsed, while a `$` stays literal (these fields do not do `$` expansion).
  */
-function systemdArg(value: string): string {
+function systemdQuote(value: string): string {
   const escaped = systemdLiteral(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `"${escaped}"`;
+}
+
+/**
+ * Quote a path as a single `ExecStart` argument. Beyond {@link systemdQuote}, a
+ * command line ALSO undergoes environment-variable (`$`) expansion, so a literal `$`
+ * in the path must be doubled (`$$`) or systemd would rewrite the wrapper path before
+ * `/bin/sh` ever sees it.
+ */
+function systemdArg(value: string): string {
+  return systemdQuote(value).replace(/\$/g, "$$$$");
 }
 
 /**
@@ -197,7 +207,7 @@ export function renderSystemdUnit(spec: SystemdSpec): string {
     "",
     "[Service]",
     "Type=simple",
-    `WorkingDirectory=${systemdArg(spec.workingDir)}`,
+    `WorkingDirectory=${systemdQuote(spec.workingDir)}`,
     `ExecStart=/bin/sh ${systemdArg(spec.wrapperPath)}`,
     "Restart=on-failure",
     "RestartSec=5",

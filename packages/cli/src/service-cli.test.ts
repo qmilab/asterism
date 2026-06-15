@@ -158,7 +158,13 @@ describe("asterism service", () => {
     const io = baseIo({
       platform: "linux",
       runCommand: makeRunner().run,
-      env: { HOME: home, XDG_CONFIG_HOME: xdg, ASTERISM_TELEGRAM_TOKEN: "tok-123", OPENAI_API_KEY: "sk-xyz" },
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "tok-123",
+        OPENAI_API_KEY: "sk-xyz",
+        ASTERISM_MODEL_ID: "gpt-4o-mini",
+      },
     });
     const p = paths("writer", "telegram");
     const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
@@ -212,7 +218,13 @@ describe("asterism service", () => {
     const io = baseIo({
       platform: "linux",
       runCommand: makeRunner().run,
-      env: { HOME: home, XDG_CONFIG_HOME: xdg, ASTERISM_TELEGRAM_TOKEN: "tok", ASTERISM_API_KEY: "sk-shared" },
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "tok",
+        ASTERISM_API_KEY: "sk-shared",
+        ASTERISM_MODEL_ID: "gpt-4o-mini",
+      },
     });
     const p = paths("writer", "telegram");
     const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
@@ -224,6 +236,16 @@ describe("asterism service", () => {
     expect(env).toContain("# OPENAI_API_KEY=");
     // The API-key need is satisfied by the fallback — no "still missing" nag.
     expect(text).not.toContain("Before it can work");
+  });
+
+  test("a channel install with no model configured asks for one in the hint", async () => {
+    // A fresh workspace has no model set, and a channel needs one to run a task —
+    // so the hint must flag it, or the operator fills in token + key and still loops.
+    const io = baseIo({ platform: "linux", runCommand: makeRunner().run });
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram"]);
+    expect(code).toBe(0);
+    expect(text).toContain("Before it can work");
+    expect(text).toContain("a configured model");
   });
 
   test("--capture-env carries ASTERISM_MODEL_* so an env-configured model survives", async () => {
