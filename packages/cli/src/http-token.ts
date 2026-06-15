@@ -19,7 +19,7 @@
 // The env var always overrides the file, so a container injecting the secret never
 // bakes one into its image and never depends on what is on disk.
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
@@ -58,32 +58,62 @@ function readPersisted(path: string): string | undefined {
 }
 
 /**
- * Persist a freshly generated token owner-only and return the value actually on
- * disk. Uses an exclusive create (`wx`) so two `serve` processes racing on first
- * run converge on a single token — the loser reads the winner's file rather than
- * clobbering it (which would 401 the other's clients). The directory is created
- * 0700 and the file chmod'd 0600 explicitly, so a permissive umask cannot widen them.
+ * Exclusively create `path` holding `token`, owner-only — the portable fallback used
+ * when the filesystem has no hard links. If we lose the create race (`EEXIST`) the
+ * winner has already written its token, so we adopt it rather than 401 its clients.
  */
-function persistGenerated(path: string): string {
-  const token = generateToken();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dirname(path), 0o700);
-  } catch {
-    // Best effort: an unusual home (e.g. a mount that rejects chmod) must not block
-    // serving — the 0600 file below is what actually protects the value.
-  }
+function claimByExclusiveWrite(path: string, token: string): string {
   try {
     writeFileSync(path, token, { mode: 0o600, flag: "wx" });
     chmodSync(path, 0o600);
     return token;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-      // Lost the race; adopt the token the winner persisted so both servers agree.
-      const existing = readPersisted(path);
-      if (existing) return existing;
-    }
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return readPersisted(path) ?? token;
     throw err;
+  }
+}
+
+/**
+ * Persist a freshly generated token owner-only and return the value actually in
+ * effect. Two correctness hazards drive the shape here: a reader must NEVER observe a
+ * half-written token, and two `serve` processes racing on first run must converge on a
+ * SINGLE token (else one server 401s the other's clients).
+ *
+ * Both are handled by staging the full token in a private temp file and then
+ * publishing it with an atomic exclusive hard link: `path` appears complete in one
+ * step (it is a link to an already-written file — no empty/partial window), and only
+ * one racer can create it, so the losers read back the winner's token. A filesystem
+ * without hard links (e.g. FAT) falls back to an exclusive create + write. The dir is
+ * 0700 and the file 0600, set explicitly so a permissive umask cannot widen them.
+ */
+function persistGenerated(path: string): string {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dirname(path), 0o700);
+  } catch {
+    // Best effort: an unusual home (e.g. a mount that rejects chmod) must not block
+    // serving — the 0600 file is what actually protects the value.
+  }
+
+  const token = generateToken();
+  const tmp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+  writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
+  chmodSync(tmp, 0o600);
+  try {
+    linkSync(tmp, path);
+    return token; // won the race; `path` now holds our fully written token
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      // Lost the race; the winner published a COMPLETE file (it linked a fully
+      // written temp), so adopt its token. The `?? token` is pure defense.
+      return readPersisted(path) ?? token;
+    }
+    // No hard-link support here — publish without one.
+    return claimByExclusiveWrite(path, token);
+  } finally {
+    // Drop the temp name. On the link path this leaves `path` (the other name for the
+    // same inode); on the fallback path the temp is just discarded.
+    rmSync(tmp, { force: true });
   }
 }
 

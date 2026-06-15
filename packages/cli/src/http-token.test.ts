@@ -4,9 +4,9 @@
 // owner-only, and reports `generated`; and per-agent tokens never collide.
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { HTTP_TOKEN_ENV, resolveHttpToken } from "./http-token.ts";
 import { httpTokenPath } from "./paths.ts";
@@ -73,4 +73,16 @@ test("per-agent tokens are distinct files — separate lives reach the front doo
   const work = resolveHttpToken(home, "work", {});
   expect(personal.token).not.toBe(work.token);
   expect(httpTokenPath(home, "personal")).not.toBe(httpTokenPath(home, "work"));
+});
+
+test("an empty pre-existing token file yields a fresh token instead of crashing", () => {
+  // The lost-race / mid-create case: the token path already exists (here, empty)
+  // when generation runs. The old wx-then-throw would have failed startup with
+  // EEXIST; the resolver must instead return a usable, non-empty token.
+  const path = httpTokenPath(home, "personal");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, ""); // empty ⇒ treated as "no saved token", so generation runs
+
+  const resolved = resolveHttpToken(home, "personal", {});
+  expect(resolved.token).toMatch(/^[0-9a-f]{64}$/);
 });
