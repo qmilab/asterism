@@ -238,6 +238,19 @@ test("with no model configured, a task is declined rather than crashing", async 
   expect(store.runs.list(personal.id)).toHaveLength(0);
 });
 
+test("an idle /confirm or /cancel is answered, not run as a task", async () => {
+  const d = createDispatcher(deps()); // clean adapter, nothing pending
+
+  const confirm = await d.handle({ chatId: "100", text: "/confirm" });
+  expect(confirm[0]!.text.toLowerCase()).toContain("nothing waiting");
+
+  const cancel = await d.handle({ chatId: "100", text: "/cancel" });
+  expect(cancel[0]!.text.toLowerCase()).toContain("nothing waiting");
+
+  // Neither started an agent run.
+  expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
 test("/help lists the commands for an authorized chat", async () => {
   const d = createDispatcher(deps());
   const out = await d.handle({ chatId: "100", text: "/help" });

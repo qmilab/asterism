@@ -198,6 +198,13 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
       );
     }
 
+    // No pending confirmation: a stray /confirm or /cancel (a double-send after a
+    // run finished, or sent before anything paused) is not a task — answer plainly
+    // instead of running the agent on the command text.
+    if (isConfirm(command) || isCancel(command)) {
+      return reply(chatId, "There's nothing waiting for confirmation right now. Send me a task to get started.");
+    }
+
     // Idle: the message is a task. Decline cleanly if no model is configured —
     // the chat-edge analog of the HTTP 503.
     if (!deps.adapter) {
