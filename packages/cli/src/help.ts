@@ -41,6 +41,7 @@ Commands:
   serve <agent>                     Offer an agent over a local HTTP endpoint
   channel telegram <agent>          Reach an agent from a Telegram chat
   channel discord <agent>           Reach an agent from a Discord channel
+  service install <agent>           Keep an agent running as a background service
 
 Options:
   -h, --help                        Show help
@@ -274,4 +275,44 @@ Options:
 Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
 OPENAI_API_KEY) before starting — the bot needs one to run tasks. Press Ctrl+C to
 stop.`,
+
+  service: `asterism service install <agent> [--kind serve|telegram|discord] [--capture-env] [-- <args>]
+asterism service status <agent> [--kind <kind>]
+asterism service uninstall <agent> [--kind <kind>]
+
+Keep one agent running in the background as a service your computer starts for you
+and restarts if it stops — the same separate-lives guarantees as the command line,
+just always on. It runs one long-lived command for one agent:
+
+  --kind serve      Offer the agent over its local HTTP endpoint (the default).
+  --kind telegram   Run the agent's Telegram chat channel.
+  --kind discord    Run the agent's Discord chat channel.
+
+Pass options to that command after \`--\`:
+  asterism service install writer -- --port 8080
+  asterism service install writer --kind telegram -- --allow 12345
+
+  install     Write the service, register it with macOS (launchd) or Linux
+              (systemd), and start it. It also starts again at login.
+  status      Show whether the agent's services are running, and where to find
+              each one's private settings and logs.
+  uninstall   Stop and remove a service. Its settings file is left in place, in
+              case it holds secrets you want to keep.
+
+Secrets stay out of the service definition. install creates a private environment
+file (readable only by you) that names what the service needs — your model API key,
+and a chat token for a channel. You fill it in; nothing secret is ever written for
+you. Edit it, then restart the service as install tells you.
+
+  --capture-env   Convenience for an environment you have already exported: write
+                  the values currently set in your shell into that private file, so
+                  you don't copy them by hand. It writes secret values to disk (only
+                  the 0600 file, only when you ask) and overwrites the file on each
+                  use. Without it, nothing secret is ever written for you.
+
+A destructive action still pauses for your confirmation. With no one at the keyboard,
+an HTTP run waits until you approve it out of band (POST its confirm endpoint, or run
+\`asterism confirm\`); a chat run asks in the chat for a \`/confirm\` reply.
+
+Supported on macOS and Linux.`,
 };

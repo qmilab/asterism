@@ -6,8 +6,19 @@
 // capability exposure) so the whole surface is testable without touching the
 // real filesystem-of-record.
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { basename, join, resolve as resolvePath } from "node:path";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 
 import { AsterismStore } from "@qmilab/asterism-core";
 import {
@@ -54,7 +65,20 @@ import {
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import type { ModelResolutionContext } from "./model-config.js";
-import { resolveModelConfig } from "./model-config.js";
+import { providerKeyEnvVar, resolveModelConfig } from "./model-config.js";
+import {
+  isServiceKind,
+  launchdLabel,
+  renderEnvFile,
+  renderEnvTemplate,
+  renderLaunchdPlist,
+  renderSystemdUnit,
+  renderWrapper,
+  serviceCommand,
+  SERVICE_KINDS,
+  systemdUnitName,
+} from "./service.js";
+import type { EnvVarSpec, ServiceKind } from "./service.js";
 import {
   agentWorkspace,
   configPath,
@@ -178,6 +202,31 @@ export interface CliIO {
    * loop forever.
    */
   followTick?: () => Promise<boolean>;
+  /**
+   * The host platform, which decides the service manager `service` targets:
+   * launchd on `darwin`, systemd on `linux`. Absent ⇒ unsupported (the default
+   * wiring in `bin.ts` supplies `process.platform`). Injectable so a test can drive
+   * either platform on any host.
+   */
+  platform?: string;
+  /**
+   * The absolute argv prefix that re-launches THIS CLI, e.g. `[node, bin.js]`. A
+   * generated service runs with a minimal PATH, so `service install` bakes in an
+   * absolute launcher rather than relying on `asterism` being found. Absent ⇒
+   * `service install` declines. The default wiring supplies
+   * `[process.execPath, <bin.js>]`.
+   */
+  selfInvocation?: readonly string[];
+  /**
+   * Run an external command and capture its result — how `service` reaches
+   * `launchctl`/`systemctl`. Absent ⇒ the service files are still written, but
+   * registering with the OS service manager is skipped. A non-zero `code` is data,
+   * not a throw: callers read it (e.g. `is-active` reports state through its code).
+   */
+  runCommand?: (
+    command: string,
+    args: readonly string[],
+  ) => Promise<{ code: number; stdout: string; stderr: string }>;
 }
 
 function errorMessage(err: unknown): string {
@@ -1632,6 +1681,557 @@ async function cmdChannel(rest: string[], io: CliIO): Promise<number> {
   return 1;
 }
 
+// --- service (keep an agent's long-lived command running as an OS service) --
+
+/** Where this install keeps the per-service wrapper, env file, and log. */
+function configHomeDir(io: CliIO): string {
+  const xdg = io.env.XDG_CONFIG_HOME;
+  if (xdg && xdg.length > 0) return xdg;
+  const home = io.env.HOME;
+  if (!home) throw new Error("Cannot find your home directory (HOME is not set).");
+  return join(home, ".config");
+}
+
+interface ServicePaths {
+  baseDir: string;
+  wrapper: string;
+  envFile: string;
+  logFile: string;
+  /** The unit/plist the OS service manager loads — platform-specific location. */
+  unitFile: string;
+}
+
+function servicePaths(
+  io: CliIO,
+  platform: string,
+  agentName: string,
+  kind: ServiceKind,
+): ServicePaths {
+  const baseDir = join(configHomeDir(io), "asterism", "services", `${agentName}.${kind}`);
+  let unitFile: string;
+  if (platform === "darwin") {
+    const home = io.env.HOME;
+    if (!home) throw new Error("Cannot find your home directory (HOME is not set).");
+    unitFile = join(home, "Library", "LaunchAgents", `${launchdLabel(agentName, kind)}.plist`);
+  } else {
+    unitFile = join(configHomeDir(io), "systemd", "user", systemdUnitName(agentName, kind));
+  }
+  return {
+    baseDir,
+    wrapper: join(baseDir, "run.sh"),
+    envFile: join(baseDir, "service.env"),
+    logFile: join(baseDir, "service.log"),
+    unitFile,
+  };
+}
+
+/** The platform `service` targets, or undefined when this host is unsupported. */
+function servicePlatform(io: CliIO): "darwin" | "linux" | undefined {
+  const platform = io.platform ?? "";
+  return platform === "darwin" || platform === "linux" ? platform : undefined;
+}
+
+const UNSUPPORTED_PLATFORM =
+  "Running an agent as a service is supported on macOS (launchd) and Linux (systemd).";
+
+/** A human label for one agent's service of a given kind. */
+function serviceTitle(agentName: string, kind: ServiceKind): string {
+  return `${agentName} (${kind})`;
+}
+
+/** Resolve a `--kind` flag into a ServiceKind. A bare/unknown value is an error. */
+function parseServiceKind(value: string | true | undefined): { kind?: ServiceKind; error?: string } {
+  if (value === undefined) return { kind: "serve" };
+  if (value === true) {
+    return { error: "The --kind option needs a value (serve, telegram, or discord)." };
+  }
+  if (!isServiceKind(value)) {
+    return { error: `Unknown service kind "${value}". Use serve, telegram, or discord.` };
+  }
+  return { kind: value };
+}
+
+/** The platform-native command to restart a service after editing its env file. */
+function restartHint(platform: string, agentName: string, kind: ServiceKind): string {
+  return platform === "darwin"
+    ? `launchctl kickstart -k "gui/$(id -u)/${launchdLabel(agentName, kind)}"`
+    : `systemctl --user restart ${systemdUnitName(agentName, kind)}`;
+}
+
+/** Whether the resolved launcher path looks like a throwaway `npx`/`bunx` cache. */
+function looksEphemeral(argv: readonly string[]): boolean {
+  return argv.some((a) => /[/\\](?:tmp|temp|\.cache|caches|_npx|\.npm|\.bun)[/\\]/i.test(a));
+}
+
+/** One thing a service must have in its environment to run, for the install hint. */
+interface ServiceEnvNeed {
+  /** What to show the operator (may name a variable or an either/or pair). */
+  label: string;
+  note: string;
+  /** Whether the current environment already supplies it (only with --capture-env). */
+  satisfied: boolean;
+}
+
+/** The environment a service of this kind reads: the variables to template/capture,
+ *  and the required needs for the install hint. */
+interface ServiceEnvPlan {
+  vars: EnvVarSpec[];
+  needs: ServiceEnvNeed[];
+}
+
+/**
+ * Build the env plan for a service, mirroring EXACTLY how the foreground CLI
+ * resolves a model and its key ({@link resolveModelConfig} / {@link resolveApiKey}):
+ * the provider-specific key OR the `ASTERISM_API_KEY` fallback, plus the
+ * `ASTERISM_MODEL_*` coordinates for anyone who configures the model through the
+ * environment instead of `asterism config`. Listing (and, with `--capture-env`,
+ * capturing) all of them is what keeps an installed service working in the same
+ * setups that work in the user's shell — a service starts from a clean environment
+ * and reads only this file (plus the on-disk config).
+ */
+function serviceEnvPlan(
+  io: CliIO,
+  home: string,
+  agentName: string,
+  kind: ServiceKind,
+  captureEnv: boolean,
+): ServiceEnvPlan {
+  const config = loadConfig(home);
+  const { model } = resolveModelConfig(io.env, { config, agentName });
+  const keyVar = providerKeyEnvVar(model?.provider ?? "openai");
+  const has = (name: string): boolean => io.env[name] !== undefined;
+
+  const vars: EnvVarSpec[] = [];
+  const needs: ServiceEnvNeed[] = [];
+
+  // Channel bot token — required for a channel, and only reachable from the env.
+  if (kind === "telegram" || kind === "discord") {
+    const tokenVar = kind === "telegram" ? "ASTERISM_TELEGRAM_TOKEN" : "ASTERISM_DISCORD_TOKEN";
+    const source = kind === "telegram" ? "@BotFather" : "the Discord Developer Portal";
+    const app = kind === "telegram" ? "Telegram" : "Discord";
+    vars.push({ name: tokenVar, required: true, note: `your ${app} bot token (from ${source}).` });
+    needs.push({ label: tokenVar, note: `the ${app} bot token.`, satisfied: captureEnv && has(tokenVar) });
+  }
+
+  // A channel needs a model — every message is a task, so the wrapped `channel`
+  // command exits at once without one. The model comes from `asterism config` (read
+  // off disk, so nothing is needed here) or from ASTERISM_MODEL_* in this file. Add
+  // the need only when the config file alone does not already supply it; otherwise an
+  // operator can fill in every listed variable and still hit a restart loop.
+  if (kind !== "serve") {
+    const modelOnDisk = resolveModelConfig({}, { config, agentName }).model !== undefined;
+    if (!modelOnDisk) {
+      needs.push({
+        label: "a configured model",
+        note:
+          model !== undefined
+            ? "keep ASTERISM_MODEL_ID set here, or run `asterism config set <model-id>`."
+            : "run `asterism config set <model-id>`, or set ASTERISM_MODEL_ID here.",
+        satisfied: captureEnv && model !== undefined,
+      });
+    }
+  }
+
+  // Model API key — the provider-specific variable, or the ASTERISM_API_KEY fallback.
+  vars.push({
+    name: keyVar,
+    required: kind !== "serve",
+    note:
+      kind === "serve"
+        ? "your model API key — needed to start runs; the read endpoints work without it."
+        : "your model API key — every chat message is a task, so a channel needs one.",
+  });
+  vars.push({
+    name: "ASTERISM_API_KEY",
+    required: false,
+    note: `an alternative to ${keyVar} if you keep one key across providers.`,
+  });
+  if (kind !== "serve") {
+    needs.push({
+      label: `${keyVar} (or ASTERISM_API_KEY)`,
+      note: "your model API key.",
+      satisfied: captureEnv && (has(keyVar) || has("ASTERISM_API_KEY")),
+    });
+  }
+
+  // Model coordinates — needed only when the model is chosen through the environment
+  // rather than `asterism config` (the service reads the config file on disk either
+  // way). Never required here, but captured when set so the env setup carries over.
+  for (const name of [
+    "ASTERISM_MODEL_ID",
+    "ASTERISM_MODEL_PROVIDER",
+    "ASTERISM_MODEL_BASE_URL",
+    "ASTERISM_MODEL_API",
+  ]) {
+    vars.push({
+      name,
+      required: false,
+      note: "set only if you choose your model with environment variables, not `asterism config`.",
+    });
+  }
+
+  // Channel allow-list — optional access boundary.
+  if (kind === "telegram") {
+    vars.push({ name: "ASTERISM_TELEGRAM_ALLOW", required: false, note: "comma-separated chat ids allowed to use the bot." });
+  } else if (kind === "discord") {
+    vars.push({ name: "ASTERISM_DISCORD_ALLOW", required: false, note: "comma-separated channel ids allowed to use the bot." });
+  }
+
+  return { vars, needs };
+}
+
+/**
+ * Write a file atomically at an exact mode. Content lands in a fresh temp file
+ * (`flag: "wx"` so a planted file/symlink is never written through, and the create
+ * mode is never looser than `mode`), then a rename replaces the destination — so a
+ * secret env file is never momentarily world-readable, even when overwriting an
+ * existing file, and a partial write is never left behind.
+ */
+function writeFileAtomic(filePath: string, content: string, mode: number): void {
+  const tmp = `${filePath}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, content, { mode, flag: "wx" });
+  chmodSync(tmp, mode);
+  renameSync(tmp, filePath);
+}
+
+/**
+ * Tighten an existing private file to owner-only. Used on a re-install that keeps an
+ * env file the operator filled in, so a file left at loose permissions is hardened.
+ * A symlink is left untouched — that is the operator's deliberate indirection to
+ * their own secret store, and we must not chmod its target.
+ */
+function hardenPrivateFile(filePath: string): void {
+  try {
+    if (lstatSync(filePath).isFile()) chmodSync(filePath, 0o600);
+  } catch {
+    // Best-effort: a missing or unusual file is handled by the write paths above.
+  }
+}
+
+async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
+  // Split off passthrough args after `--` BEFORE parsing, so flags meant for the
+  // supervised command (e.g. `serve --port 8080`) are forwarded verbatim rather than
+  // read as `service`'s own flags.
+  const sep = args.indexOf("--");
+  const head = sep === -1 ? args : args.slice(0, sep);
+  const passthrough = sep === -1 ? [] : args.slice(sep + 1);
+
+  const parsed = parseArgs(head, ["help", "h", "capture-env"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.service!);
+    return 0;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err(
+      "Usage: asterism service install <agent> [--kind serve|telegram|discord] [--capture-env] [-- <args>]",
+    );
+    return 1;
+  }
+  const captureEnv = parsed.flags["capture-env"] === true;
+  const { kind, error } = parseServiceKind(parsed.flags.kind);
+  if (error || !kind) {
+    io.err(error ?? "A service kind is required.");
+    return 1;
+  }
+
+  const platform = servicePlatform(io);
+  if (!platform) {
+    io.err(UNSUPPORTED_PLATFORM);
+    return 1;
+  }
+  if (!io.selfInvocation || io.selfInvocation.length === 0) {
+    io.err("Cannot determine how to launch asterism for a service in this embedding.");
+    return 1;
+  }
+  const selfInvocation = io.selfInvocation;
+
+  return withHomeStore(io, async (store, home) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    const workingDir = dirname(home);
+    const paths = servicePaths(io, platform, agent.name, kind);
+    const argv = [...selfInvocation, ...serviceCommand(kind, agent.name), ...passthrough];
+
+    // A service references asterism by absolute path; warn if that path looks
+    // ephemeral (a one-off `npx`/`bunx` cache) since the service would break once the
+    // cache is cleaned. Non-fatal — the operator may know better.
+    if (looksEphemeral(selfInvocation)) {
+      io.err("warning: asterism appears to be running from a temporary install path, so this");
+      io.err("         service may stop working later. Install asterism durably (globally or in");
+      io.err("         the project) before relying on it.");
+    }
+
+    // Write the service's files. By default the env file is a TEMPLATE — variable
+    // names only, no values — and is never overwritten once it exists, so a
+    // re-install keeps the secrets you filled in. `--capture-env` is the explicit
+    // opt-in to instead write the values present in your environment NOW into the
+    // 0600 file (overwriting it). The wrapper and unit are always regenerated.
+    mkdirSync(paths.baseDir, { recursive: true });
+    chmodSync(paths.baseDir, 0o700); // the dir holds the private env file and wrapper
+    const envPlan = serviceEnvPlan(io, home, agent.name, kind, captureEnv);
+    if (captureEnv) {
+      writeFileAtomic(paths.envFile, renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) => io.env[n]), 0o600);
+    } else if (!existsSync(paths.envFile)) {
+      writeFileAtomic(paths.envFile, renderEnvTemplate(serviceTitle(agent.name, kind), envPlan.vars), 0o600);
+    } else {
+      // Keep the operator's filled-in file, but make sure it stays owner-only.
+      hardenPrivateFile(paths.envFile);
+    }
+    writeFileAtomic(
+      paths.wrapper,
+      renderWrapper({ label: serviceTitle(agent.name, kind), argv, workingDir, envFile: paths.envFile }),
+      0o700,
+    );
+
+    mkdirSync(dirname(paths.unitFile), { recursive: true });
+    const unit =
+      platform === "darwin"
+        ? renderLaunchdPlist({
+            label: launchdLabel(agent.name, kind),
+            wrapperPath: paths.wrapper,
+            workingDir,
+            logFile: paths.logFile,
+          })
+        : renderSystemdUnit({
+            description: `Asterism — ${serviceTitle(agent.name, kind)}`,
+            wrapperPath: paths.wrapper,
+            workingDir,
+          });
+    writeFileAtomic(paths.unitFile, unit, 0o644);
+
+    // Register with the service manager so it starts now and on login. Registration
+    // failing is fatal; the service merely failing to STAY up (e.g. an env file not
+    // filled in yet) is reported as a note, not an install failure.
+    const run = io.runCommand;
+    if (!run) {
+      io.err("note: the service files were written, but registering with the service manager");
+      io.err("      is not available in this embedding.");
+    } else if (platform === "darwin") {
+      // Unload first so a re-install cleanly replaces a previously-loaded job.
+      await run("launchctl", ["unload", paths.unitFile]).catch(() => undefined);
+      const loaded = await run("launchctl", ["load", "-w", paths.unitFile]);
+      if (loaded.code !== 0) {
+        io.err(`launchctl could not load the service: ${loaded.stderr.trim() || `exit ${loaded.code}`}`);
+        return 1;
+      }
+    } else {
+      const reloaded = await run("systemctl", ["--user", "daemon-reload"]);
+      if (reloaded.code !== 0) {
+        io.err(`systemctl could not reload units: ${reloaded.stderr.trim() || `exit ${reloaded.code}`}`);
+        return 1;
+      }
+      const unitName = systemdUnitName(agent.name, kind);
+      const enabled = await run("systemctl", ["--user", "enable", unitName]);
+      if (enabled.code !== 0) {
+        io.err(`systemctl could not enable the service: ${enabled.stderr.trim() || `exit ${enabled.code}`}`);
+        return 1;
+      }
+      const started = await run("systemctl", ["--user", "restart", unitName]);
+      if (started.code !== 0) {
+        io.err("note: the service is registered but did not start — often a value still missing");
+        io.err(`      from its env file. Check it with: asterism service status ${agent.name}`);
+      }
+    }
+
+    const display = [...serviceCommand(kind, agent.name), ...passthrough].join(" ");
+    io.out(`Installed service "${serviceTitle(agent.name, kind)}".`);
+    io.out(`  Keeps \`asterism ${display}\` running and restarts it if it fails.`);
+    io.out(`  Env file (0600): ${paths.envFile}`);
+    if (captureEnv) {
+      const captured = envPlan.vars.filter((v) => io.env[v.name] !== undefined).map((v) => v.name);
+      io.out(
+        captured.length > 0
+          ? `  Captured from your environment: ${captured.join(", ")}`
+          : "  --capture-env: none of the variables this service needs are set right now.",
+      );
+    }
+    // What the service still lacks to run: required needs capture did not satisfy (or,
+    // without --capture-env, all of them — the operator fills the template in by hand).
+    // The API-key need is satisfied by EITHER the provider key or ASTERISM_API_KEY.
+    const missing = envPlan.needs.filter((n) => !n.satisfied);
+    if (missing.length > 0) {
+      io.out("  Before it can work, set these in that file:");
+      for (const n of missing) io.out(`    ${n.label}   ${n.note}`);
+      io.out(`  Edit it, then restart: ${restartHint(platform, agent.name, kind)}`);
+    }
+    io.out(`  Review it: asterism service status ${agent.name}`);
+    io.out(
+      `  Remove it: asterism service uninstall ${agent.name}${kind === "serve" ? "" : ` --kind ${kind}`}`,
+    );
+    if (platform === "linux") {
+      io.out("  To start before you log in (at boot), enable lingering: loginctl enable-linger");
+    }
+    return 0;
+  });
+}
+
+/** Describe one installed service's current state via the OS service manager. */
+async function serviceState(
+  io: CliIO,
+  platform: string,
+  agentName: string,
+  kind: ServiceKind,
+): Promise<string> {
+  const run = io.runCommand;
+  if (!run) return "installed (state unavailable in this embedding)";
+  if (platform === "darwin") {
+    const res = await run("launchctl", ["list", launchdLabel(agentName, kind)]);
+    if (res.code !== 0) return "installed, not loaded";
+    const pid = /"PID"\s*=\s*(\d+)/.exec(res.stdout);
+    if (pid) return `running (pid ${pid[1]})`;
+    const last = /"LastExitStatus"\s*=\s*(\d+)/.exec(res.stdout);
+    if (last && last[1] !== "0") return `loaded, not running (last exit ${last[1]} — check the log)`;
+    return "loaded, not running";
+  }
+  const unitName = systemdUnitName(agentName, kind);
+  const active = await run("systemctl", ["--user", "is-active", unitName]);
+  const enabled = await run("systemctl", ["--user", "is-enabled", unitName]);
+  const activeWord = active.stdout.trim() || `exit ${active.code}`;
+  const enabledWord = enabled.stdout.trim() || `exit ${enabled.code}`;
+  return `${activeWord} (${enabledWord})`;
+}
+
+async function cmdServiceStatus(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.service!);
+    return 0;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism service status <agent> [--kind serve|telegram|discord]");
+    return 1;
+  }
+  // With no --kind, status reports across every kind; with one, only that kind.
+  let filterKind: ServiceKind | undefined;
+  if (parsed.flags.kind !== undefined) {
+    const { kind, error } = parseServiceKind(parsed.flags.kind);
+    if (error || !kind) {
+      io.err(error ?? "A service kind is required.");
+      return 1;
+    }
+    filterKind = kind;
+  }
+  const platform = servicePlatform(io);
+  if (!platform) {
+    io.err(UNSUPPORTED_PLATFORM);
+    return 1;
+  }
+
+  return withHomeStore(io, async (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    const kinds = filterKind ? [filterKind] : SERVICE_KINDS;
+    const installed = kinds.filter((k) => existsSync(servicePaths(io, platform, agent.name, k).unitFile));
+    if (installed.length === 0) {
+      io.out(
+        filterKind
+          ? `No "${filterKind}" service installed for "${agent.name}".`
+          : `No services installed for "${agent.name}".`,
+      );
+      return 0;
+    }
+    for (const k of installed) {
+      const paths = servicePaths(io, platform, agent.name, k);
+      const state = await serviceState(io, platform, agent.name, k);
+      io.out(`${serviceTitle(agent.name, k)} — ${state}`);
+      io.out(`  env:  ${paths.envFile}`);
+      io.out(
+        platform === "darwin"
+          ? `  log:  ${paths.logFile}`
+          : `  logs: journalctl --user -u ${systemdUnitName(agent.name, k)}`,
+      );
+    }
+    return 0;
+  });
+}
+
+async function cmdServiceUninstall(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.service!);
+    return 0;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism service uninstall <agent> [--kind serve|telegram|discord]");
+    return 1;
+  }
+  let filterKind: ServiceKind | undefined;
+  if (parsed.flags.kind !== undefined) {
+    const { kind, error } = parseServiceKind(parsed.flags.kind);
+    if (error || !kind) {
+      io.err(error ?? "A service kind is required.");
+      return 1;
+    }
+    filterKind = kind;
+  }
+  const platform = servicePlatform(io);
+  if (!platform) {
+    io.err(UNSUPPORTED_PLATFORM);
+    return 1;
+  }
+
+  return withHomeStore(io, async (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    const kinds = filterKind ? [filterKind] : SERVICE_KINDS;
+    const installed = kinds.filter((k) => existsSync(servicePaths(io, platform, agent.name, k).unitFile));
+    if (installed.length === 0) {
+      io.out(
+        filterKind
+          ? `No "${filterKind}" service installed for "${agent.name}".`
+          : `No services installed for "${agent.name}".`,
+      );
+      return 0;
+    }
+    const run = io.runCommand;
+    for (const k of installed) {
+      const paths = servicePaths(io, platform, agent.name, k);
+      if (run) {
+        if (platform === "darwin") {
+          await run("launchctl", ["unload", "-w", paths.unitFile]).catch(() => undefined);
+        } else {
+          await run("systemctl", ["--user", "disable", "--now", systemdUnitName(agent.name, k)]).catch(
+            () => undefined,
+          );
+        }
+      }
+      // Remove the unit + the wrapper and log we generated. LEAVE the env file: it
+      // may hold the operator's secrets, so deleting it is their call, not ours.
+      rmSync(paths.unitFile, { force: true });
+      rmSync(paths.wrapper, { force: true });
+      rmSync(paths.logFile, { force: true });
+      if (platform === "linux" && run) await run("systemctl", ["--user", "daemon-reload"]);
+      io.out(`Removed service "${serviceTitle(agent.name, k)}".`);
+      if (existsSync(paths.envFile)) {
+        io.out(`  Left its env file in place (it may hold secrets): ${paths.envFile}`);
+      }
+    }
+    return 0;
+  });
+}
+
+/** Route `service <install|status|uninstall> …` to its handler. */
+async function cmdService(rest: string[], io: CliIO): Promise<number> {
+  const sub = rest[0];
+  if (sub === undefined || sub === "--help" || sub === "-h") {
+    io.out(COMMAND_HELP.service!);
+    return sub === undefined ? 1 : 0;
+  }
+  if (sub === "install") return cmdServiceInstall(rest.slice(1), io);
+  if (sub === "status") return cmdServiceStatus(rest.slice(1), io);
+  if (sub === "uninstall") return cmdServiceUninstall(rest.slice(1), io);
+  io.err(`Unknown subcommand: service ${sub}`);
+  io.out(COMMAND_HELP.service!);
+  return 1;
+}
+
 // --- dispatch --------------------------------------------------------------
 
 /** Dispatch a two-word command (`secrets add`, `skill add`, …) to its handler. */
@@ -1698,6 +2298,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdServe(rest, io);
     case "channel":
       return cmdChannel(rest, io);
+    case "service":
+      return cmdService(rest, io);
     case "secrets":
       return dispatchSub("secrets", "add", cmdSecretsAdd, COMMAND_HELP.secrets!, rest, io);
     case "skill":

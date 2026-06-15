@@ -18,6 +18,7 @@ test("usage lists every command in the surface", () => {
     "reflect",
     "config",
     "serve",
+    "service install",
   ]) {
     expect(USAGE).toContain(command);
   }

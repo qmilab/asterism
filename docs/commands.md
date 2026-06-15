@@ -571,6 +571,69 @@ limitations.
 
 ---
 
+## `service`
+
+```
+asterism service install   <agent> [--kind serve|telegram|discord] [-- <args>]
+asterism service status    <agent> [--kind <kind>]
+asterism service uninstall <agent> [--kind <kind>]
+```
+
+Keep one agent running in the background as a service your computer starts for you
+and restarts if it stops — the same separate-lives guarantees as the command line,
+just always on. A service runs **one long-lived command for one agent**: its local
+HTTP endpoint (`serve`, the default) or one of its chat channels. Supported on
+**macOS** (launchd) and **Linux** (systemd user services).
+
+Anything after `--` is passed straight to the supervised command, so a `serve`
+service can pick a port and a channel can carry its allow-list:
+
+```console
+$ asterism service install writer -- --port 8080
+$ asterism service install writer --kind telegram -- --allow 12345
+```
+
+| Subcommand | What it does |
+|---|---|
+| `install` | Write the service, register it with the OS, and start it (also at login). Re-running it replaces the definition and keeps your edited settings file. |
+| `status` | Show whether the agent's services are running, and where each one's settings and logs live. With no `--kind`, reports every kind. |
+| `uninstall` | Stop and remove a service. Its settings file is **left in place**, in case it holds secrets you want to keep. |
+
+| Option | Default | Description |
+|---|---|---|
+| `--kind <kind>` | `serve` | Which long-lived command to run: `serve`, `telegram`, or `discord`. |
+| `--capture-env` | *(off)* | On `install`, write the values currently set in your shell into the private env file, instead of an empty template. A convenience that writes secret values to the `0600` file — only when you ask — and overwrites that file each time. |
+
+**Secrets stay out of the service definition.** By default `install` creates a
+private environment file (readable only by you) that *names* what the service needs
+— your model API key, and a chat token for a channel — with no values filled in. You
+edit that file; nothing secret is ever written for you. Until it's filled in, the
+service keeps restarting and `status` shows it not running. If you have already
+exported those variables, `--capture-env` copies their current values into the
+`0600` file for you (the one case where `install` writes a secret to disk — and only
+because you asked).
+
+```console
+$ asterism service install writer --kind telegram
+Installed service "writer (telegram)".
+  Keeps `asterism channel telegram writer` running and restarts it if it fails.
+  Before it can work, set these in its private environment file:
+    ASTERISM_TELEGRAM_TOKEN   your Telegram bot token (from @BotFather).
+    OPENAI_API_KEY   your model API key — every chat message is a task, so a channel needs one.
+  Env file (0600): ~/.config/asterism/services/writer.telegram/service.env
+  Edit it, then restart: systemctl --user restart asterism-writer-telegram.service
+  Review it: asterism service status writer
+  Remove it: asterism service uninstall writer --kind telegram
+```
+
+The **destructive-action gate still fires** in a service exactly as it does at the
+keyboard: an HTTP run parks at `awaiting_confirmation` until you approve it out of
+band, and a chat run asks for a `/confirm` reply. A background service never
+loosens that gate. See the [run-as-a-service guide](./service.md) for the full
+setup, the boot-start note, and how a service finds the right install.
+
+---
+
 ## Reference tables
 
 **Trust levels** — `propose` · `notify` · `autonomous`

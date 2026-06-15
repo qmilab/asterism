@@ -65,6 +65,7 @@ Full docs live in [`docs/`](./docs/):
 - [Five-claims walkthrough](./docs/walkthrough.md) — the separation guarantees proven end to end.
 - [Local HTTP endpoint](./docs/http.md) — serve one agent over HTTP.
 - [Chat channels](./docs/channels.md) — reach one agent from a Telegram or Discord chat.
+- [Run as a service](./docs/service.md) — keep an agent running in the background, started by your OS.
 
 ## Continuous, reviewable learning
 
