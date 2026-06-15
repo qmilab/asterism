@@ -195,9 +195,11 @@ function messageCreateActions(d: unknown, selfId: string): GatewayAction[] {
 
   const mentionsBot = Array.isArray(m.mentions) && m.mentions.some((u) => u != null && u.id === selfId);
   if (mentionsBot) {
-    const text = stripMention(m.content, selfId);
-    if (text.length === 0) return []; // a bare @mention with no task after it
-    return [{ kind: "dispatch", channelId: m.channel_id, text }];
+    // Pass it through even when the mention was the whole message (the text strips
+    // to empty): an unauthorized channel still needs the dispatcher's discovery
+    // reply with its id, and the dispatcher nudges for a task rather than running on
+    // nothing. The transport only decides "is this for the bot"; the mention says yes.
+    return [{ kind: "dispatch", channelId: m.channel_id, text: stripMention(m.content, selfId) }];
   }
   // Not mentioned: only a confirm/cancel control reply is honored, so a user
   // following a pause prompt's "reply /confirm" in a server isn't silently dropped.

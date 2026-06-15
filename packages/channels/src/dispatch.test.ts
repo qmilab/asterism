@@ -299,6 +299,22 @@ test("/help lists the commands for an authorized chat", async () => {
   expect(store.runs.list(personal.id)).toHaveLength(0);
 });
 
+test("an empty message (a bare mention stripped to nothing) is nudged, not run", async () => {
+  const d = createDispatcher(deps()); // authorized chat "100", clean adapter
+  const out = await d.handle({ chatId: "100", text: "   " });
+  expect(out[0]!.text.toLowerCase()).toContain("send me a task");
+  // No run started — the agent is never executed on an empty task.
+  expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
+test("an unauthorized chat is refused (with its id) even for an empty message", async () => {
+  // Discovery must win over the empty-task nudge: the allow-list is checked first.
+  const d = createDispatcher(deps());
+  const out = await d.handle({ chatId: "999", text: "" });
+  expect(out[0]!.text).toContain("999");
+  expect(out[0]!.text.toLowerCase()).toContain("not authorized");
+});
+
 test("isControlReply recognizes only the confirm/cancel control replies", () => {
   // Used by a transport that gates unaddressed messages (Discord servers) to keep a
   // paused run reachable; it must not let ordinary text or other commands through.

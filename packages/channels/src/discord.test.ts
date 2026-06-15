@@ -133,7 +133,9 @@ test("interpretFrame: the legacy <@!id> mention form is also stripped", () => {
   ).toEqual([{ kind: "dispatch", channelId: "C1", text: "ship it" }]);
 });
 
-test("interpretFrame: a bare server @mention with no task after it is ignored", () => {
+test("interpretFrame: a bare server @mention dispatches (empty text) so discovery can answer", () => {
+  // The mention is the whole message: it must still reach the dispatcher — an
+  // unauthorized channel needs its id back, and the dispatcher nudges for a task.
   expect(
     interpretFrame(
       {
@@ -143,7 +145,7 @@ test("interpretFrame: a bare server @mention with no task after it is ignored", 
       },
       "BOT",
     ),
-  ).toEqual([]);
+  ).toEqual([{ kind: "dispatch", channelId: "C1", text: "" }]);
 });
 
 test("interpretFrame: a server /confirm reply is honored without a mention", () => {

@@ -221,6 +221,14 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
       return reply(chatId, "There's nothing waiting for confirmation right now. Send me a task to get started.");
     }
 
+    // An empty message — e.g. a bare @mention in a Discord server, which strips to
+    // nothing — is not a task worth a run. Nudge instead of running the agent on "".
+    // (This is reached only past the allow-list, so an unknown chat still gets the
+    // discovery reply above, not this.)
+    if (message.text.trim().length === 0) {
+      return reply(chatId, "Send me a task to get started.");
+    }
+
     // Idle: the message is a task. Decline cleanly if no model is configured —
     // the chat-edge analog of the HTTP 503.
     if (!deps.adapter) {
