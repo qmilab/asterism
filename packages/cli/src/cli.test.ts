@@ -13,7 +13,7 @@ import type {
 } from "@qmilab/asterism-core";
 import { handleRequest } from "@qmilab/asterism-server";
 import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
-import type { ChannelHandle, TelegramOptions } from "@qmilab/asterism-channels";
+import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { workspaceCapabilities } from "./capabilities.ts";
 import { runCli } from "./cli.ts";
@@ -1267,8 +1267,120 @@ test("channel telegram --help describes the token, allow-list, and confirm flow"
 
 test("an unknown channel subcommand is rejected", async () => {
   const h = harness();
-  expect(await runCli(["channel", "discord", "personal"], h.io)).toBe(1);
-  expect(h.err.join("\n")).toContain("Unknown subcommand: channel discord");
+  expect(await runCli(["channel", "slack", "personal"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Unknown subcommand: channel slack");
+});
+
+// --- channel discord (#21) -------------------------------------------------
+
+const DISCORD_TOKEN = "discord.fake-bot-token";
+
+test("channel discord binds the agent with the token, allow-list, and model wired", async () => {
+  const h = harness({ ASTERISM_DISCORD_TOKEN: DISCORD_TOKEN });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  let captured: DiscordOptions | undefined;
+  const out: string[] = [];
+  const code = await runCli(["channel", "discord", "personal", "--allow", "C1,C2"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startDiscord: (options) => {
+      captured = options;
+      return fakeChannelHandle("agentbot");
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect(captured?.agent.name).toBe("personal");
+  expect(captured?.token).toBe(DISCORD_TOKEN);
+  expect(captured?.adapter).toBeDefined();
+  expect([...(captured?.allow ?? [])].sort()).toEqual(["C1", "C2"]);
+  expect(out.join("\n")).toContain('Listening as @agentbot for agent "personal"');
+  expect(out.join("\n")).toContain("2 authorized channels");
+  expect(out.join("\n")).toContain("Stopped.");
+});
+
+test("channel discord merges the --allow flag with the env allow-list", async () => {
+  const h = harness({ ASTERISM_DISCORD_TOKEN: DISCORD_TOKEN, ASTERISM_DISCORD_ALLOW: "C3, C4" });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: DiscordOptions | undefined;
+  const code = await runCli(["channel", "discord", "personal", "--allow", "C1"], {
+    ...h.io,
+    startDiscord: (options) => {
+      captured = options;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect([...(captured?.allow ?? [])].sort()).toEqual(["C1", "C3", "C4"]);
+});
+
+test("channel discord refuses to start without a bot token", async () => {
+  const h = harness(); // no ASTERISM_DISCORD_TOKEN
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let started = false;
+  const code = await runCli(["channel", "discord", "personal", "--allow", "C1"], {
+    ...h.io,
+    startDiscord: () => {
+      started = true;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(1);
+  expect(started).toBe(false);
+  expect(h.err.join("\n")).toContain("ASTERISM_DISCORD_TOKEN");
+});
+
+test("channel discord starts with no allow-list, in discovery mode", async () => {
+  const h = harness({ ASTERISM_DISCORD_TOKEN: DISCORD_TOKEN });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: DiscordOptions | undefined;
+  const out: string[] = [];
+  const code = await runCli(["channel", "discord", "personal"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startDiscord: (options) => {
+      captured = options;
+      return fakeChannelHandle("agentbot");
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect(captured?.allow.size).toBe(0);
+  expect(out.join("\n")).toContain("No authorized channels yet");
+});
+
+test("channel discord is unavailable when the embedding wires no transport", async () => {
+  const h = harness({ ASTERISM_DISCORD_TOKEN: DISCORD_TOKEN });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  // The default CliIO has no startDiscord — it must say so plainly.
+  expect(await runCli(["channel", "discord", "personal", "--allow", "C1"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("not available in this embedding");
+});
+
+test("channel discord --help describes the Discord setup, intent, and confirm flow", async () => {
+  const help = await capture(["channel", "discord", "--help"], harness().io);
+  expect(help).toContain("ASTERISM_DISCORD_TOKEN");
+  expect(help).toContain("MESSAGE CONTENT");
+  expect(help).toContain("/confirm");
 });
 
 // --- run streaming + action summary (#16) --------------------------------

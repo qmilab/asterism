@@ -80,6 +80,10 @@ const io: CliIO = {
   // `channel telegram`: start the chat channel. Lazily imported for the same reason
   // — only this command loads the channel transport.
   startTelegram: async (options) => (await import("@qmilab/asterism-channels")).runTelegram(options),
+  // `channel discord`: same, over the Discord Gateway. The transport defaults to the
+  // runtime's global WebSocket (Bun, Node 22+); on a runtime without one the launch
+  // fails with a clear pointer to upgrade — no dependency, the `fetch` pattern.
+  startDiscord: async (options) => (await import("@qmilab/asterism-channels")).runDiscord(options),
   // Block until the first interrupt, then let `serve` shut down gracefully (stop
   // the server, close the store). A second Ctrl+C falls through to the default
   // hard exit.

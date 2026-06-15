@@ -8,15 +8,16 @@ import { expect, test } from "bun:test";
 import type { Agent, AsterismStore } from "@qmilab/asterism-core";
 
 import type { ChannelDispatcher, OutboundMessage } from "./dispatch.ts";
+import { chunkText } from "./shared.ts";
+import type { FetchLike } from "./shared.ts";
 import {
-  chunkText,
   drainBacklog,
   pollOnce,
   runTelegram,
   telegramTransport,
   TELEGRAM_MAX_CHARS,
 } from "./telegram.ts";
-import type { FetchLike, TelegramTransport, TelegramUpdate } from "./telegram.ts";
+import type { TelegramTransport, TelegramUpdate } from "./telegram.ts";
 
 /** A transport that hands out canned update batches and records what it sent. */
 function fakeTransport(batches: TelegramUpdate[][]): {

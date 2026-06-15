@@ -18,9 +18,10 @@
 //     destructive pauses and asks; you approve by replying `/confirm`. Confirming
 //     authorizes only the action it stopped on; a new one pauses again.
 //
-// Telegram is the first transport (long-poll, local-first — no public URL).
-// The dispatcher (`createDispatcher`) is transport-neutral so a second chat app
-// reuses it.
+// Two transports ship today: Telegram (HTTP long-poll) and Discord (Gateway
+// WebSocket). Both are local-first — the bot dials out, so neither needs a public
+// URL or an inbound port. The dispatcher (`createDispatcher`) is transport-neutral,
+// so each is a thin wire-protocol shim over the same run flow.
 
 export { createDispatcher } from "./dispatch.js";
 export type {
@@ -30,18 +31,33 @@ export type {
   OutboundMessage,
 } from "./dispatch.js";
 
+export { chunkText } from "./shared.js";
+export type { ChannelHandle, FetchLike } from "./shared.js";
+
 export {
   runTelegram,
   pollOnce,
   telegramTransport,
-  chunkText,
   TELEGRAM_MAX_CHARS,
   DEFAULT_POLL_TIMEOUT_SECONDS,
 } from "./telegram.js";
 export type {
-  ChannelHandle,
   TelegramOptions,
   TelegramTransport,
   TelegramUpdate,
-  FetchLike,
 } from "./telegram.js";
+
+export {
+  runDiscord,
+  interpretFrame,
+  deliver,
+  discordTransport,
+  DISCORD_MAX_CHARS,
+  DISCORD_INTENTS,
+} from "./discord.js";
+export type {
+  DiscordOptions,
+  DiscordTransport,
+  WebSocketLike,
+  WebSocketFactory,
+} from "./discord.js";
