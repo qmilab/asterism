@@ -482,8 +482,18 @@ Serving agent "writer" at http://127.0.0.1:4831
   POST http://127.0.0.1:4831/agents/writer/runs/<run>/confirm    approve a paused run
   GET  http://127.0.0.1:4831/agents/writer/runs    list runs
   GET  http://127.0.0.1:4831/agents/writer/events  review activity
+  Access token (generated, save it — shown only once):
+    9f2c…(64 hex chars)…
+    Send it on every request:  Authorization: Bearer <token>
+    Stored owner-only at …/.asterism/http-tokens/writer.token; set ASTERISM_HTTP_TOKEN to override.
 Press Ctrl+C to stop.
 ```
+
+Every request needs that bearer token — the endpoint is default-deny, on loopback
+as anywhere else. The first serve generates and prints one (and saves it for next
+time); set `ASTERISM_HTTP_TOKEN` to supply your own, which is what you want for an
+exposed or unattended endpoint. See the [HTTP reference](./http.md#authentication)
+for the full token model.
 
 Without a configured model the read endpoints still work; starting a run is
 declined until a model is set. A destructive action has no one at the keyboard to

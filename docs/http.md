@@ -20,6 +20,39 @@ asterism serve writer --host 0.0.0.0 --port 8080   # bind beyond loopback (see s
 The server runs until you press `Ctrl+C`, which shuts it down gracefully
 (in-flight requests drain first).
 
+## Authentication
+
+The endpoint is **default-deny**: every request must carry a bearer token, on
+loopback as much as anywhere else. A missing, empty, or wrong token is a `401`.
+There is no unauthenticated mode — loopback is not private on a shared machine, so
+it is defense-in-depth, not the gate.
+
+The token resolves in this order:
+
+1. **`ASTERISM_HTTP_TOKEN`** (environment) — set this to supply your own. It is the
+   right choice for an **exposed or unattended** endpoint (a container, a service,
+   a VPS), where the secret should be *injected* at runtime and never written to
+   disk by Asterism. It is never read from the config file, never a flag, never
+   logged.
+2. **A saved per-agent token** — when the env var is unset, the **first** `serve`
+   generates a strong token, saves it owner-only under your home, and prints it
+   **once**. Later serves reuse it silently, so an interactive operator is not made
+   to manage an env var every shell. Each agent gets its own token — a server for
+   `writer` and one for `work` hold different keys.
+
+Send it on every request:
+
+```bash
+export ASTERISM_HTTP_TOKEN=…            # the value serve printed, or your own
+curl -s http://127.0.0.1:4831/agents/writer/runs \
+  -H "Authorization: Bearer $ASTERISM_HTTP_TOKEN"
+```
+
+The token gates the **front door** only. Everything behind it — trust enforcement,
+the destructive-action gate, secret scoping, the agent boundary — is unchanged; the
+token decides *who may reach the door*, never what happens once through it. The
+examples below assume `ASTERISM_HTTP_TOKEN` is exported.
+
 ## One agent per server
 
 A running server is **bound to the one agent you named.** The `:agent` segment
@@ -37,6 +70,7 @@ Request body: a JSON object with a non-empty `input` string.
 
 ```bash
 curl -s -X POST http://127.0.0.1:4831/agents/writer/runs \
+  -H "Authorization: Bearer $ASTERISM_HTTP_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"input":"tighten the intro in posts/launch.md"}'
 ```
@@ -73,6 +107,7 @@ buffered response returns above.
 
 ```bash
 curl -N -X POST http://127.0.0.1:4831/agents/writer/runs \
+  -H "Authorization: Bearer $ASTERISM_HTTP_TOKEN" \
   -H 'content-type: application/json' \
   -H 'accept: text/event-stream' \
   -d '{"input":"tighten the intro in posts/launch.md"}'
@@ -98,7 +133,8 @@ one to confirm mid-run over HTTP, so the action waits until you explicitly appro
 it with this request. No body is required.
 
 ```bash
-curl -s -X POST http://127.0.0.1:4831/agents/writer/runs/<run-id>/confirm
+curl -s -X POST http://127.0.0.1:4831/agents/writer/runs/<run-id>/confirm \
+  -H "Authorization: Bearer $ASTERISM_HTTP_TOKEN"
 ```
 
 On success the run re-enters the loop with **only the action it paused on**
@@ -135,7 +171,8 @@ endpoint — `activity` frames then a terminal `result`. A run that cannot be re
 ### `GET /agents/<agent>/runs` — list runs
 
 ```bash
-curl -s http://127.0.0.1:4831/agents/writer/runs
+curl -s http://127.0.0.1:4831/agents/writer/runs \
+  -H "Authorization: Bearer $ASTERISM_HTTP_TOKEN"
 ```
 
 ```json
@@ -160,7 +197,8 @@ prefix — an API client already holds the full id from `GET …/runs`. There is
 [SSE stream](#watching-a-run-live-server-sent-events).
 
 ```bash
-curl -s 'http://127.0.0.1:4831/agents/writer/events?type=action.executed&limit=10'
+curl -s 'http://127.0.0.1:4831/agents/writer/events?type=action.executed&limit=10' \
+  -H "Authorization: Bearer $ASTERISM_HTTP_TOKEN"
 ```
 
 ```json
@@ -177,6 +215,7 @@ a response.
 | `200` | A successful `GET`, or a streaming `POST` (`Accept: text/event-stream`) — the outcome arrives in the terminal `result` frame. |
 | `201` | A run was created and executed (check `status` in the body for the outcome). |
 | `400` | Malformed request — body is not JSON, `input` missing/empty, or a bad `limit`. |
+| `401` | Missing, empty, or wrong bearer token. Generic body; the gate runs before routing, so it never reveals whether a path or agent exists. |
 | `404` | Unknown path, a `:agent` that is not the served agent, or a confirm for an unknown run. |
 | `405` | Known path, wrong method (e.g. `DELETE /…/runs`). |
 | `409` | A confirm for a run that is not `awaiting_confirmation` — nothing to confirm. |
@@ -185,13 +224,21 @@ a response.
 
 ## Security notes
 
+- **A bearer token on every request.** The endpoint is default-deny — a missing,
+  empty, or wrong token is a `401`, on loopback as much as anywhere else (see
+  [Authentication](#authentication)). The comparison is constant-time, and a bad
+  token is indistinguishable from a missing one, so the gate leaks nothing — not
+  even whether a path or agent exists. For an exposed or unattended endpoint,
+  **inject** the token via `ASTERISM_HTTP_TOKEN` rather than relying on the saved
+  per-agent file.
 - **Loopback by default.** The endpoint binds `127.0.0.1`, reachable only from
   this machine. It will not be exposed to your network unless you explicitly set
-  `--host` to a non-loopback address.
-- **No authentication in Phase 0.** Anyone who can reach the bound address can
-  use the endpoint for the served agent. Keep it on loopback, or put your own
-  authenticating proxy in front of it before binding it more widely.
+  `--host` to a non-loopback address. The token is required either way — loopback
+  is defense-in-depth, not the only gate.
+- **No TLS here.** The token authenticates the caller but does not encrypt the
+  connection. Before binding beyond loopback, put a TLS-terminating (and ideally
+  also authenticating) reverse proxy in front of the endpoint.
 - **The same boundary as the CLI.** Runs go through the identical path as
   `asterism run`, so trust enforcement, the destructive-action gate, secret
-  scoping, and the agent boundary all apply unchanged — the HTTP surface adds no
-  way around them.
+  scoping, and the agent boundary all apply unchanged — the token decides who
+  reaches the door, and the HTTP surface adds no way around what is behind it.

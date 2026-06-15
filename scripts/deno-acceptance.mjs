@@ -41,6 +41,13 @@ function check(label, condition) {
   console.log(`  ok  ${label}`);
 }
 
+// The HTTP endpoint is default-deny: every request needs this bearer token, which
+// the server is given via `serve({ authToken })` and each fetch presents.
+const HTTP_TOKEN = "deno-acceptance-token";
+function authed(extra = {}) {
+  return { ...extra, authorization: `Bearer ${HTTP_TOKEN}` };
+}
+
 // Run the built CLI under THIS Deno, in `cwd`, optionally feeding piped stdin.
 // `Deno.execPath()` is the deno binary; `run -A` runs the bin with full perms (a
 // local-first CLI reads/writes the cwd and env). The bin's `node` shebang is
@@ -106,15 +113,24 @@ async function part2ServerUnderDeno() {
     store,
     agent,
     adapter: eventEmittingAdapter({ status: "done", text: "hello over deno http" }),
+    authToken: HTTP_TOKEN,
     port: 0,
   });
   try {
     check("serve() resolved an OS-assigned port", running.port > 0);
 
+    // Default-deny: an unauthenticated request is a 401 over the real socket.
+    const noToken = await fetch(`${running.url}/agents/personal/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "ping" }),
+    });
+    check("unauthenticated POST → 401", noToken.status === 401);
+
     // Buffered run.
     const ran = await fetch(`${running.url}/agents/personal/runs`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: authed({ "content-type": "application/json" }),
       body: JSON.stringify({ input: "ping" }),
     });
     const ranBody = await ran.json();
@@ -124,7 +140,7 @@ async function part2ServerUnderDeno() {
     // Streamed run (SSE) — frames must arrive over the node:http bridge.
     const streamed = await fetch(`${running.url}/agents/personal/runs`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      headers: authed({ "content-type": "application/json", accept: "text/event-stream" }),
       body: JSON.stringify({ input: "ping again" }),
     });
     check("SSE response content-type", (streamed.headers.get("content-type") ?? "").includes("text/event-stream"));
@@ -133,13 +149,13 @@ async function part2ServerUnderDeno() {
     check("SSE carried a result frame", frames.includes("event: result"));
 
     // Read view over the socket.
-    const events = await fetch(`${running.url}/agents/personal/events`);
+    const events = await fetch(`${running.url}/agents/personal/events`, { headers: authed() });
     const evBody = await events.json();
     check("GET events → 200", events.status === 200);
     check("event log recorded run.started", evBody.events.some((e) => e.type === "run.started"));
 
     // Still one-agent-per-server at the network edge.
-    const other = await fetch(`${running.url}/agents/work/runs`);
+    const other = await fetch(`${running.url}/agents/work/runs`, { headers: authed() });
     check("wrong agent → 404", other.status === 404);
   } finally {
     await running.stop();
@@ -180,11 +196,11 @@ async function part3DrainUnderDeno() {
     },
   };
 
-  const running = await serve({ store, agent, adapter, port: 0 });
+  const running = await serve({ store, agent, adapter, authToken: HTTP_TOKEN, port: 0 });
   try {
     const inflight = fetch(`${running.url}/agents/personal/runs`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      headers: authed({ "content-type": "application/json", accept: "text/event-stream" }),
       body: JSON.stringify({ input: "slow stream" }),
     });
     await reached; // the SSE producer is mid-run

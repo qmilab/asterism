@@ -44,16 +44,26 @@ function eventEmittingAdapter(output: RunOutput): RuntimeAdapter {
   };
 }
 
+/** The bearer token this server expects; every request below carries it via `call`. */
+const TOKEN = "node-http-test-token";
+
 function bind(adapter: RuntimeAdapter) {
-  const deps: ServerDeps = { store, agent: personal, adapter };
+  const deps: ServerDeps = { store, agent: personal, adapter, authToken: TOKEN };
   return serveNode({ port: 0, hostname: "127.0.0.1" }, (req) => handleRequest(deps, req));
+}
+
+/** `fetch` with the server's bearer token attached — the endpoint is default-deny. */
+function call(url: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${TOKEN}`);
+  return fetch(url, { ...init, headers });
 }
 
 test("serveNode binds node:http: a buffered run round-trips over a real socket", async () => {
   const running = await bind(eventEmittingAdapter({ status: "done", text: "hello over node http" }));
   expect(running.port).toBeGreaterThan(0);
   try {
-    const ran = await fetch(`${running.url}/agents/personal/runs`, {
+    const ran = await call(`${running.url}/agents/personal/runs`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ input: "ping" }),
@@ -61,13 +71,13 @@ test("serveNode binds node:http: a buffered run round-trips over a real socket",
     expect(ran.status).toBe(201);
     expect(((await ran.json()) as { output: string }).output).toBe("hello over node http");
 
-    const events = await fetch(`${running.url}/agents/personal/events`);
+    const events = await call(`${running.url}/agents/personal/events`);
     expect(events.status).toBe(200);
     const ev = (await events.json()) as { events: { type: string }[] };
     expect(ev.events.some((e) => e.type === "run.started")).toBe(true);
 
     // One agent per server holds at the network edge, node:http or not.
-    const other = await fetch(`${running.url}/agents/work/runs`);
+    const other = await call(`${running.url}/agents/work/runs`);
     expect(other.status).toBe(404);
   } finally {
     await running.stop();
@@ -77,7 +87,7 @@ test("serveNode binds node:http: a buffered run round-trips over a real socket",
 test("serveNode streams SSE frames as the run unfolds", async () => {
   const running = await bind(eventEmittingAdapter({ status: "done", text: "streamed" }));
   try {
-    const res = await fetch(`${running.url}/agents/personal/runs`, {
+    const res = await call(`${running.url}/agents/personal/runs`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
       body: JSON.stringify({ input: "ping" }),
@@ -116,7 +126,7 @@ test("serveNode drains an in-flight buffered run on stop() instead of aborting i
   const running = await bind(adapter);
 
   // Fire a buffered run but do not await it yet.
-  const inflight = fetch(`${running.url}/agents/personal/runs`, {
+  const inflight = call(`${running.url}/agents/personal/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ input: "slow" }),
@@ -160,7 +170,7 @@ test("serveNode drains an in-flight SSE run on stop() instead of tearing it down
 
   const running = await bind(adapter);
 
-  const inflight = fetch(`${running.url}/agents/personal/runs`, {
+  const inflight = call(`${running.url}/agents/personal/runs`, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "text/event-stream" },
     body: JSON.stringify({ input: "slow stream" }),
@@ -184,12 +194,30 @@ test("serveNode drains an in-flight SSE run on stop() instead of tearing it down
 test("serveNode answers a malformed body with a clean 400, not a crash", async () => {
   const running = await bind(eventEmittingAdapter({ status: "done", text: "x" }));
   try {
-    const res = await fetch(`${running.url}/agents/personal/runs`, {
+    const res = await call(`${running.url}/agents/personal/runs`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "not json",
     });
     expect(res.status).toBe(400);
+  } finally {
+    await running.stop();
+  }
+});
+
+test("serveNode rejects an unauthenticated request with 401 over a real socket", async () => {
+  const running = await bind(eventEmittingAdapter({ status: "done", text: "x" }));
+  try {
+    // A bare fetch — no Authorization header — must not start a run, even on loopback.
+    const res = await fetch(`${running.url}/agents/personal/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "ping" }),
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    // Nothing ran: the request never reached the kernel.
+    expect(store.runs.list(personal.id)).toHaveLength(0);
   } finally {
     await running.stop();
   }

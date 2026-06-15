@@ -102,6 +102,13 @@ describe("asterism service", () => {
     expect(wrapper).toContain("exec '/usr/bin/node' '/opt/asterism/bin.js' 'serve' 'writer'");
     expect(wrapper).toContain(`. '${p.env}'`);
 
+    // The serve env template offers the HTTP access token as an OPTIONAL placeholder
+    // (commented, no value) — set it to pin a stable secret for an exposed endpoint;
+    // a loopback service works without it via the saved per-agent token.
+    const env = readFileSync(p.env, "utf8");
+    expect(env).toContain("# ASTERISM_HTTP_TOKEN=");
+    expect(env).not.toMatch(/^ASTERISM_HTTP_TOKEN=/m);
+
     // The file modes are locked down.
     expect(statSync(p.wrapper).mode & 0o777).toBe(0o700);
     expect(statSync(p.env).mode & 0o777).toBe(0o600);

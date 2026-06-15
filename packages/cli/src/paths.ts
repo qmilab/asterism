@@ -24,6 +24,13 @@ export const AGENTS_DIR_NAME = "agents";
  * it. Holds only model coordinates — never an API key.
  */
 export const CONFIG_FILE_NAME = "config.json";
+/**
+ * Subdirectory holding per-agent HTTP access tokens. These gate `asterism serve`'s
+ * front door and are a per-server operator secret, NOT an agent credential — they
+ * live here, owner-only, never in the kernel's scoped secret store and never in the
+ * workspace (which an agent can write and a future target could expose).
+ */
+export const HTTP_TOKENS_DIR_NAME = "http-tokens";
 
 /** Absolute path to the database file given an install's home directory. */
 export function dbPath(home: string): string {
@@ -38,6 +45,16 @@ export function configPath(home: string): string {
 /** A given agent's confined workspace directory inside the home. */
 export function agentWorkspace(home: string, agentName: string): string {
   return join(home, AGENTS_DIR_NAME, agentName);
+}
+
+/**
+ * A given agent's persisted HTTP access token file. Per-agent (so a server for
+ * `personal` and one for `work` hold different door keys — "separate lives" reaches
+ * the network edge too). The name is a validated single path segment, so it is safe
+ * to interpolate here.
+ */
+export function httpTokenPath(home: string, agentName: string): string {
+  return join(home, HTTP_TOKENS_DIR_NAME, `${agentName}.token`);
 }
 
 /**

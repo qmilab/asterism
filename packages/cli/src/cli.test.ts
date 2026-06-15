@@ -965,10 +965,13 @@ test("serve binds the named agent and exposes its endpoints", async () => {
     // against the very deps the CLI wired, proving they are real and scoped.
     // Read everything that needs the store here, before it closes on return.
     waitForShutdown: async () => {
+      // The handler is default-deny, so the request must carry the token the CLI
+      // resolved and injected — proving the wired token actually gates the door.
       const res = await handleRequest(
         captured!,
         new Request("http://127.0.0.1:9090/agents/personal/runs", {
           method: "POST",
+          headers: { authorization: `Bearer ${captured!.authToken}` },
           body: JSON.stringify({ input: "write the blog draft" }),
         }),
       );
@@ -981,13 +984,49 @@ test("serve binds the named agent and exposes its endpoints", async () => {
   expect(captured?.agent.name).toBe("personal");
   expect(captured?.port).toBe(9090);
   expect(captured?.adapter).toBeDefined();
+  // A token was resolved and injected — the server can never be stood up without one.
+  expect(captured?.authToken).toBeTruthy();
   expect(out.join("\n")).toContain('Serving agent "personal" at http://127.0.0.1:4831');
   expect(out.join("\n")).toContain("POST http://127.0.0.1:4831/agents/personal/runs");
+  // First serve with no env token: the generated value is printed once, with guidance.
+  expect(out.join("\n")).toContain("Access token (generated");
+  expect(out.join("\n")).toContain(captured!.authToken);
+  expect(out.join("\n")).toContain("Authorization: Bearer");
   expect(out.join("\n")).toContain("Stopped.");
 
   // The wired deps actually serve a run, and it landed in the agent's store.
   expect(runStatus).toBe(201);
   expect(runsAfter).toBe(1);
+});
+
+test("serve uses ASTERISM_HTTP_TOKEN when set, and never echoes its value", async () => {
+  // The injected-secret path (a container / unattended VPS): the operator supplies a
+  // stable token via the environment, and the CLI must use it verbatim without ever
+  // printing it back (only a freshly generated token is shown, once).
+  const h = harness({ ASTERISM_HTTP_TOKEN: "operator-supplied-secret" });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  let captured: ServeOptions | undefined;
+  const out: string[] = [];
+  const code = await runCli(["serve", "personal"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startServer: (options) => {
+      captured = options;
+      return fakeRunningServer();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect(captured?.authToken).toBe("operator-supplied-secret");
+  const printed = out.join("\n");
+  // The env token is referred to, never re-echoed, and not framed as "generated".
+  expect(printed).toContain("ASTERISM_HTTP_TOKEN");
+  expect(printed).not.toContain("operator-supplied-secret");
+  expect(printed).not.toContain("Access token (generated");
 });
 
 test("serve reports a missing model but still starts (reads work without one)", async () => {
