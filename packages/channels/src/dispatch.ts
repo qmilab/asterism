@@ -173,7 +173,13 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
       );
     }
 
-    const command = parseCommand(message.text, deps.botUsername);
+    const parsed = classifyMessage(message.text, deps.botUsername);
+
+    // A slash-command addressed to a different bot (groups append `@bot`) is not
+    // ours: ignore it entirely — no run, no reply — even mid-confirmation. This is
+    // distinct from ordinary text, which is treated as a task below.
+    if (parsed.kind === "foreign") return [];
+    const command = parsed.kind === "command" ? parsed.name : undefined;
 
     // `/help` and `/start` answer the same way whatever the run state.
     if (command === "/help") return reply(chatId, helpText(deps.agent));
@@ -225,26 +231,37 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
 const NO_MODEL = "No model is configured, so I can't run tasks yet.";
 
 /**
- * The leading slash-command of a message, lowercased, or undefined if the message
- * does not start with one OR is addressed to a different bot. Only the first token
- * matters — `/confirm now` is still `/confirm`.
+ * How an inbound message reads:
+ *   - `command` — a slash-command for us (`/confirm`, `/help`, …), lowercased.
+ *   - `foreign` — a slash-command addressed to a *different* bot; not ours to act
+ *     on and not a task either, so the dispatcher ignores it.
+ *   - `text`    — ordinary text, handled as a task.
+ */
+type ClassifiedMessage =
+  | { kind: "command"; name: string }
+  | { kind: "foreign" }
+  | { kind: "text" };
+
+/**
+ * Classify a message by its leading token. Only the first token matters —
+ * `/confirm now` is still `/confirm`.
  *
  * Telegram appends `@botname` to a command in a group. An unaddressed command is
- * always ours; one addressed to `botUsername` is ours; one addressed to any other
- * bot (or any addressed command when we don't know our own username) is NOT —
- * returning undefined there is what stops `/confirm@other_bot` from resuming this
- * agent's gated run.
+ * ours; one addressed to `botUsername` is ours; one addressed to any other bot
+ * (or any addressed command when we don't know our own username) is `foreign` —
+ * which is what stops `/confirm@other_bot` from resuming this agent's gated run
+ * AND stops `/status@other_bot` from being run as a task.
  */
-function parseCommand(text: string, botUsername?: string): string | undefined {
+function classifyMessage(text: string, botUsername?: string): ClassifiedMessage {
   const first = text.trim().split(/\s+/, 1)[0] ?? "";
-  if (!first.startsWith("/")) return undefined;
+  if (!first.startsWith("/")) return { kind: "text" };
   const at = first.indexOf("@");
-  if (at === -1) return first.toLowerCase();
+  if (at === -1) return { kind: "command", name: first.toLowerCase() };
   const addressedTo = first.slice(at + 1).toLowerCase();
   if (botUsername !== undefined && addressedTo === botUsername.toLowerCase()) {
-    return first.slice(0, at).toLowerCase();
+    return { kind: "command", name: first.slice(0, at).toLowerCase() };
   }
-  return undefined;
+  return { kind: "foreign" };
 }
 
 /** A reply that approves a pending pause: `/confirm`, or a plain yes. */

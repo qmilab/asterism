@@ -197,13 +197,31 @@ test("in a group, /confirm addressed to another bot does not resume our run", as
   await d.handle({ chatId: "-100", text: "clean up dist" }); // pauses
 
   const other = await d.handle({ chatId: "-100", text: "/confirm@other_bot" });
-  expect(other[0]!.text.toLowerCase()).toContain("waiting for confirmation");
+  expect(other).toHaveLength(0); // addressed to another bot — ignored entirely
   expect(store.runs.list(personal.id)[0]!.status).toBe("awaiting_confirmation");
 
   // The same command addressed to us does resume it.
   const ours = await d.handle({ chatId: "-100", text: "/confirm@ourbot" });
   expect(ours[0]!.text).not.toContain("/confirm");
   expect(store.runs.list(personal.id)[0]!.status).toBe("done");
+});
+
+test("a group command addressed to another bot is ignored, not run as a task", async () => {
+  let ran = false;
+  const watching: RuntimeAdapter = {
+    run() {
+      ran = true;
+      async function* noEvents() {}
+      return { events: noEvents(), output: Promise.resolve({ status: "done" as const, text: "" }) };
+    },
+  };
+  const d = createDispatcher(deps({ adapter: watching, allow: new Set(["-100"]), botUsername: "ourbot" }));
+
+  const out = await d.handle({ chatId: "-100", text: "/status@other_bot" });
+
+  expect(out).toHaveLength(0); // no reply
+  expect(ran).toBe(false); // no run started on the other bot's command
+  expect(store.runs.list(personal.id)).toHaveLength(0);
 });
 
 test("a propose agent surfaces its plan without ever pausing to confirm", async () => {
