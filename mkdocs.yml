@@ -33,6 +33,7 @@ nav:
   - Concepts: concepts.md
   - Command reference: commands.md
   - Local HTTP endpoint: http.md
+  - Chat channels: channels.md
   - Five-claims walkthrough: walkthrough.md
 
 markdown_extensions:

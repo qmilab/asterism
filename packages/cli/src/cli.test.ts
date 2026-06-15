@@ -13,6 +13,7 @@ import type {
 } from "@qmilab/asterism-core";
 import { handleRequest } from "@qmilab/asterism-server";
 import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
+import type { ChannelHandle, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { workspaceCapabilities } from "./capabilities.ts";
 import { runCli } from "./cli.ts";
@@ -1067,6 +1068,207 @@ test("serve rejects a non-numeric or out-of-range --port instead of binding the 
   expect(await runCli(["serve", "personal", "--port", "99999"], { ...h.io, ...serveOverrides })).toBe(1);
   expect(h.err.join("\n")).toContain("between 0 and 65535");
   expect(started).toBe(false);
+});
+
+// --- channel telegram (#21) ------------------------------------------------
+
+/** A no-op channel-handle stand-in, so `channel` tests never hit the network. */
+function fakeChannelHandle(botUsername?: string): ChannelHandle {
+  return { ...(botUsername !== undefined ? { botUsername } : {}), stop: async () => {} };
+}
+
+const TG_TOKEN = "123456:fake-bot-token";
+
+test("channel telegram binds the agent with the token, allow-list, and model wired", async () => {
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  let captured: TelegramOptions | undefined;
+  const out: string[] = [];
+  const code = await runCli(["channel", "telegram", "personal", "--allow", "100,200"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startTelegram: (options) => {
+      captured = options;
+      return fakeChannelHandle("personal_bot");
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect(captured?.agent.name).toBe("personal");
+  expect(captured?.token).toBe(TG_TOKEN);
+  expect(captured?.adapter).toBeDefined();
+  expect([...(captured?.allow ?? [])].sort()).toEqual(["100", "200"]);
+  expect(out.join("\n")).toContain('Listening as @personal_bot for agent "personal"');
+  expect(out.join("\n")).toContain("2 authorized chats");
+  expect(out.join("\n")).toContain("Stopped.");
+});
+
+test("channel telegram merges the --allow flag with the env allow-list", async () => {
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN, ASTERISM_TELEGRAM_ALLOW: "300, 400" });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: TelegramOptions | undefined;
+  const code = await runCli(["channel", "telegram", "personal", "--allow", "100"], {
+    ...h.io,
+    startTelegram: (options) => {
+      captured = options;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect([...(captured?.allow ?? [])].sort()).toEqual(["100", "300", "400"]);
+});
+
+test("channel telegram accepts a negative group chat id in --allow", async () => {
+  // Telegram group/supergroup ids are negative; the documented bare form must work.
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: TelegramOptions | undefined;
+  const code = await runCli(["channel", "telegram", "personal", "--allow", "-1001234567890"], {
+    ...h.io,
+    startTelegram: (options) => {
+      captured = options;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect([...(captured?.allow ?? [])]).toEqual(["-1001234567890"]);
+});
+
+test("channel telegram refuses to start without a bot token", async () => {
+  const h = harness(); // no ASTERISM_TELEGRAM_TOKEN
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let started = false;
+  const code = await runCli(["channel", "telegram", "personal", "--allow", "100"], {
+    ...h.io,
+    startTelegram: () => {
+      started = true;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(1);
+  expect(started).toBe(false);
+  expect(h.err.join("\n")).toContain("ASTERISM_TELEGRAM_TOKEN");
+});
+
+test("channel telegram starts with no allow-list, in discovery mode", async () => {
+  // An empty allow-list is safe (nobody is authorized, so nothing runs) and is the
+  // bootstrap path: the bot reports each sender's chat id so you can allow it.
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: TelegramOptions | undefined;
+  const out: string[] = [];
+  const code = await runCli(["channel", "telegram", "personal"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startTelegram: (options) => {
+      captured = options;
+      return fakeChannelHandle("personal_bot");
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect(captured?.allow.size).toBe(0);
+  expect(out.join("\n")).toContain("No authorized chats yet");
+});
+
+test("channel telegram requires a model and never starts without one", async () => {
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  h.io.makeAdapter = () => ({ reason: "Set ASTERISM_MODEL_ID and an API key." });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let started = false;
+  const code = await runCli(["channel", "telegram", "personal", "--allow", "100"], {
+    ...h.io,
+    startTelegram: () => {
+      started = true;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(1);
+  expect(started).toBe(false);
+  expect(h.err.join("\n")).toContain("ASTERISM_MODEL_ID");
+});
+
+test("channel telegram fails clearly for an unknown agent and never starts", async () => {
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  await runCli(["init"], h.io);
+
+  let started = false;
+  const code = await runCli(["channel", "telegram", "ghost", "--allow", "100"], {
+    ...h.io,
+    startTelegram: () => {
+      started = true;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(1);
+  expect(started).toBe(false);
+  expect(h.err.join("\n")).toContain('No agent named "ghost"');
+});
+
+test("channel telegram rejects --allow given without a value", async () => {
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  const code = await runCli(["channel", "telegram", "personal", "--allow"], {
+    ...h.io,
+    startTelegram: () => fakeChannelHandle(),
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(1);
+  expect(h.err.join("\n")).toContain("The --allow option needs a value");
+});
+
+test("channel is unavailable when the embedding wires no transport", async () => {
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  // The default CliIO has no startTelegram — it must say so plainly.
+  expect(await runCli(["channel", "telegram", "personal", "--allow", "100"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("not available in this embedding");
+});
+
+test("channel telegram --help describes the token, allow-list, and confirm flow", async () => {
+  const help = await capture(["channel", "telegram", "--help"], harness().io);
+  expect(help).toContain("ASTERISM_TELEGRAM_TOKEN");
+  expect(help).toContain("--allow");
+  expect(help).toContain("/confirm");
+});
+
+test("an unknown channel subcommand is rejected", async () => {
+  const h = harness();
+  expect(await runCli(["channel", "discord", "personal"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Unknown subcommand: channel discord");
 });
 
 // --- run streaming + action summary (#16) --------------------------------

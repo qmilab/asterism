@@ -11,6 +11,9 @@
 //
 // A long flag named in `booleans` never consumes a following token, so
 // `events tail agent --review` keeps `--review` boolean and `agent` positional.
+//
+// A negative number is taken as a value, not a flag, so `--allow -100123`
+// (a Telegram group id) binds the id rather than being read as another flag.
 
 export interface ParsedArgs {
   positionals: string[];
@@ -45,7 +48,10 @@ export function parseArgs(
         continue;
       }
       const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith("-")) {
+      // Take the next token as the value unless it is another flag. A token that
+      // starts with "-" followed by a digit is a negative number (e.g. a Telegram
+      // group id), so it counts as a value, not a flag.
+      if (next !== undefined && (!next.startsWith("-") || /^-\d/.test(next))) {
         flags[body] = next;
         i++;
       } else {

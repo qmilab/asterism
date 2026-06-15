@@ -64,6 +64,7 @@ Full docs live in [`docs/`](./docs/):
 - [Command reference](./docs/commands.md) — every command and option.
 - [Five-claims walkthrough](./docs/walkthrough.md) — the separation guarantees proven end to end.
 - [Local HTTP endpoint](./docs/http.md) — serve one agent over HTTP.
+- [Chat channels](./docs/channels.md) — reach one agent from a Telegram chat.
 
 ## Continuous, reviewable learning
 

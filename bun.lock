@@ -19,6 +19,13 @@
         "@qmilab/asterism-core": "workspace:*",
       },
     },
+    "packages/channels": {
+      "name": "@qmilab/asterism-channels",
+      "version": "0.1.0",
+      "dependencies": {
+        "@qmilab/asterism-core": "workspace:*",
+      },
+    },
     "packages/cli": {
       "name": "@qmilab/asterism",
       "version": "0.1.0",
@@ -27,6 +34,7 @@
       },
       "dependencies": {
         "@qmilab/asterism-adapter-pi": "workspace:*",
+        "@qmilab/asterism-channels": "workspace:*",
         "@qmilab/asterism-core": "workspace:*",
         "@qmilab/asterism-reflect": "workspace:*",
         "@qmilab/asterism-server": "workspace:*",
@@ -142,6 +150,8 @@
     "@qmilab/asterism": ["@qmilab/asterism@workspace:packages/cli"],
 
     "@qmilab/asterism-adapter-pi": ["@qmilab/asterism-adapter-pi@workspace:packages/adapter-pi"],
+
+    "@qmilab/asterism-channels": ["@qmilab/asterism-channels@workspace:packages/channels"],
 
     "@qmilab/asterism-core": ["@qmilab/asterism-core@workspace:packages/core"],
 
