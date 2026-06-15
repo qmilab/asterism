@@ -62,8 +62,9 @@ ids allowed to use it.
    ```
 4. **Invite the bot** to a server (use the portal's *OAuth2 → URL Generator* with
    the `bot` scope), or open a DM with it.
-5. **Find the channel id.** Start the channel once with no allow-list and message
-   the bot — it replies with the channel id (discovery mode):
+5. **Find the channel id.** Start the channel once with no allow-list, then in a
+   server **@mention the bot** (or just DM it) — it replies with the channel id
+   (discovery mode):
    ```bash
    asterism channel discord writer
    ```
@@ -76,6 +77,11 @@ Discord ids are **channel ids**: a DM channel (your 1:1 with the bot) or a serve
 channel. Allowing a channel authorizes that conversation — a DM authorizes you, a
 server channel authorizes everyone who can post in it, the same way an allowed
 Telegram group authorizes its members.
+
+In a **server**, the bot sees every message in a channel it can read, so it acts
+only when you **@mention it** — it ignores ordinary chatter, and replies with the
+mention removed from your task. In a **DM** there is nothing to mention: every
+message is a task.
 
 > **Runtime.** The Discord channel talks to Discord's Gateway over a WebSocket, so
 > it needs a runtime with one: **Node 22+ or Bun**. On an older Node the channel

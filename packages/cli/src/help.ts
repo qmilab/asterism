@@ -260,9 +260,10 @@ Discord:
   1. Create an app and bot in the Discord Developer Portal, copy the bot token, and
      turn on the MESSAGE CONTENT intent (Bot -> Privileged Gateway Intents).
   2. export ASTERISM_DISCORD_TOKEN=<token>
-  3. Invite the bot to a server (or open a DM), then message it — it replies with the
-     channel id. Needs a WebSocket runtime: Node 22+ or Bun.
-  4. Re-run with --allow <that-id> so that channel can put the agent to work.
+  3. Invite the bot to a server then @mention it in a channel (or just DM it) — it
+     replies with the channel id. Needs a WebSocket runtime: Node 22+ or Bun.
+  4. Re-run with --allow <that-id> so that channel can put the agent to work. In a
+     server the bot acts only when @mentioned; a DM needs no mention.
 
 Options:
   --allow <id,...>   Ids allowed to use the bot, comma-separated. You can also set

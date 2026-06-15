@@ -168,18 +168,41 @@ export function interpretFrame(frame: GatewayFrame, selfId: string): GatewayActi
 /** Turn a `MESSAGE_CREATE` payload into a dispatch action, or nothing if we skip it. */
 function messageCreateActions(d: unknown, selfId: string): GatewayAction[] {
   const m = d as
-    | { channel_id?: unknown; content?: unknown; author?: { id?: unknown; bot?: unknown } }
+    | {
+        channel_id?: unknown;
+        content?: unknown;
+        guild_id?: unknown;
+        author?: { id?: unknown; bot?: unknown };
+        mentions?: ReadonlyArray<{ id?: unknown } | null>;
+      }
     | undefined;
   if (!m || typeof m.channel_id !== "string") return [];
   // Ignore our own messages (the echo of every reply we send) and any other bot, so
-  // the agent never runs on bot chatter or loops on itself. The allow-list (keyed on
-  // the channel, below) is the access boundary; this is just self/bot suppression.
+  // the agent never runs on bot chatter or loops on itself.
   const author = m.author;
   if (author && (author.bot === true || author.id === selfId)) return [];
   // Nothing to act on: an attachment-only message, or MESSAGE CONTENT not granted
   // (content arrives empty), is not a task. Mirrors Telegram skipping non-text.
   if (typeof m.content !== "string" || m.content.length === 0) return [];
-  return [{ kind: "dispatch", channelId: m.channel_id, text: m.content }];
+
+  // A DM is inherently addressed to the bot, so its text is the task as-is. In a
+  // server, though, the bot receives EVERY readable message — so require an explicit
+  // @mention of the bot before acting, and run on the text with the mention removed.
+  // Without this gate the agent would run on unrelated chatter in an allowed channel,
+  // and discovery mode would answer every passing conversation with the channel id.
+  const inGuild = m.guild_id !== undefined && m.guild_id !== null;
+  if (!inGuild) return [{ kind: "dispatch", channelId: m.channel_id, text: m.content }];
+
+  const mentionsBot = Array.isArray(m.mentions) && m.mentions.some((u) => u != null && u.id === selfId);
+  if (!mentionsBot) return [];
+  const text = stripMention(m.content, selfId);
+  if (text.length === 0) return []; // a bare @mention with no task after it
+  return [{ kind: "dispatch", channelId: m.channel_id, text }];
+}
+
+/** Strip the bot's own @mention tokens (`<@id>` and the legacy `<@!id>`) and trim. */
+function stripMention(content: string, selfId: string): string {
+  return content.split(`<@${selfId}>`).join("").split(`<@!${selfId}>`).join("").trim();
 }
 
 /**
@@ -243,6 +266,10 @@ export async function runDiscord(options: DiscordOptions): Promise<ChannelHandle
   });
 
   const handle: ChannelHandle = {
+    // Resolves when the loop ends on its own — a fatal Gateway close (`log` reports
+    // why) that stop() did not cause. A surface races this against its shutdown wait
+    // so a bot that dies does not sit there pretending to listen.
+    closed: loop,
     stop: async () => {
       controller.abort();
       await loop;
@@ -427,7 +454,18 @@ export function discordTransport(token: string, fetchImpl: FetchLike): DiscordTr
       return typeof u.username === "string" ? { id: u.id, username: u.username } : { id: u.id };
     },
     async sendMessage(channelId, text, signal) {
-      await callApi(fetchImpl, token, "POST", `/channels/${channelId}/messages`, { content: text }, signal);
+      // `allowed_mentions: { parse: [] }` ⇒ Discord pings nobody, even if the text
+      // contains @everyone, a role, or a user mention. Replies are model-generated,
+      // so this keeps a prompt from turning into an unintended ping with the bot's
+      // reach.
+      await callApi(
+        fetchImpl,
+        token,
+        "POST",
+        `/channels/${channelId}/messages`,
+        { content: text, allowed_mentions: { parse: [] } },
+        signal,
+      );
     },
   };
 }

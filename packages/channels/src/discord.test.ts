@@ -78,6 +78,74 @@ test("interpretFrame: other dispatch types and unknown opcodes are ignored", () 
   expect(interpretFrame({ op: 99 }, "BOT")).toEqual([]);
 });
 
+test("interpretFrame: a DM (no guild) runs without needing a mention", () => {
+  expect(
+    interpretFrame(
+      { op: 0, t: "MESSAGE_CREATE", d: { channel_id: "D1", content: "do it", author: { id: "U1", bot: false } } },
+      "BOT",
+    ),
+  ).toEqual([{ kind: "dispatch", channelId: "D1", text: "do it" }]);
+});
+
+test("interpretFrame: a server message is ignored unless it @mentions the bot", () => {
+  // The bot sees every readable channel message; unrelated chatter must not run it.
+  expect(
+    interpretFrame(
+      {
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: { guild_id: "G1", channel_id: "C1", content: "just chatting", author: { id: "U1" }, mentions: [] },
+      },
+      "BOT",
+    ),
+  ).toEqual([]);
+});
+
+test("interpretFrame: a server @mention dispatches with the mention stripped", () => {
+  expect(
+    interpretFrame(
+      {
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: {
+          guild_id: "G1",
+          channel_id: "C1",
+          content: "<@BOT> summarize the thread",
+          author: { id: "U1", bot: false },
+          mentions: [{ id: "BOT" }],
+        },
+      },
+      "BOT",
+    ),
+  ).toEqual([{ kind: "dispatch", channelId: "C1", text: "summarize the thread" }]);
+});
+
+test("interpretFrame: the legacy <@!id> mention form is also stripped", () => {
+  expect(
+    interpretFrame(
+      {
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: { guild_id: "G1", channel_id: "C1", content: "<@!BOT> ship it", author: { id: "U1" }, mentions: [{ id: "BOT" }] },
+      },
+      "BOT",
+    ),
+  ).toEqual([{ kind: "dispatch", channelId: "C1", text: "ship it" }]);
+});
+
+test("interpretFrame: a bare server @mention with no task after it is ignored", () => {
+  expect(
+    interpretFrame(
+      {
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: { guild_id: "G1", channel_id: "C1", content: "<@BOT>", author: { id: "U1" }, mentions: [{ id: "BOT" }] },
+      },
+      "BOT",
+    ),
+  ).toEqual([]);
+});
+
 // --- deliver (dispatch + chunked reply) ------------------------------------
 
 /** A transport that records what it sent (and a self id for completeness). */
@@ -155,7 +223,8 @@ test("discordTransport.sendMessage posts the content to the channel", async () =
 
   expect(calls[0]!.url).toBe("https://discord.com/api/v10/channels/C1/messages");
   expect(calls[0]!.method).toBe("POST");
-  expect(JSON.parse(calls[0]!.body!)).toEqual({ content: "hello" });
+  // `allowed_mentions: { parse: [] }` ⇒ a model-generated reply can never ping anyone.
+  expect(JSON.parse(calls[0]!.body!)).toEqual({ content: "hello", allowed_mentions: { parse: [] } });
 });
 
 test("discordTransport surfaces Discord's own error message", async () => {
@@ -403,7 +472,7 @@ test("runDiscord stops on a fatal close and points at the MESSAGE CONTENT intent
   created[0]!.recv(HELLO);
   created[0]!.close(4014, "Disallowed intent(s)"); // privileged intent not granted
 
-  await new Promise((r) => setTimeout(r, 5));
+  await channel.closed; // the loop ends on its own — a surface can race this
   expect(created).toHaveLength(1); // did NOT reconnect
   expect(logs.join("\n")).toContain("MESSAGE CONTENT");
 

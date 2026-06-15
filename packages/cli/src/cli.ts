@@ -1587,6 +1587,9 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
       ...(capabilities ? { capabilities } : {}),
       allow,
       token,
+      // A fatal Gateway close (e.g. the MESSAGE CONTENT intent isn't enabled) is
+      // reported here, so the operator sees the cause instead of silence.
+      log: (m) => io.err(m),
     });
 
     const who = channel.botUsername ? `@${channel.botUsername}` : "the bot";
@@ -1598,14 +1601,16 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
       const s = allow.size === 1 ? "" : "s";
       io.out(`  ${allow.size} authorized channel${s}; messages from any other channel are refused.`);
     }
+    io.out("  In a server, @mention the bot; a DM needs no mention.");
     io.out("  A destructive action pauses the run and asks the channel to reply /confirm.");
     io.out("Press Ctrl+C to stop.");
 
-    // Block until shutdown, then stop the channel BEFORE returning — awaiting the
-    // stop lets the in-flight connection unwind, so the store (closed once this
-    // callback returns) is never pulled out from under a run still being handled.
+    // Block until shutdown OR the bot dies on its own (a fatal close, which `log`
+    // has just reported) — without the race a dead bot would sit at "Listening…"
+    // until Ctrl+C. Then stop the channel BEFORE returning, so the store (closed
+    // once this callback returns) is never pulled from under a run still in flight.
     const waitForShutdown = io.waitForShutdown ?? (() => Promise.resolve());
-    await waitForShutdown();
+    await Promise.race([waitForShutdown(), channel.closed ?? new Promise<void>(() => {})]);
     await channel.stop();
     io.out("Stopped.");
     return 0;

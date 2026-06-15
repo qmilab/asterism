@@ -544,9 +544,10 @@ Set the bot token in the environment (`ASTERISM_DISCORD_TOKEN`, from the
 secret and never goes in a flag or config. Enable the bot's **MESSAGE CONTENT**
 intent in the portal, or it can't read the messages it's sent. The **allow-list**
 is the channel's access boundary: only the channel ids you allow can use the bot;
-anyone else is refused and told only their own channel id. A destructive action
-pauses the run and asks in the channel — you reply `/confirm` to approve just that
-action, the same gate you get at the keyboard.
+anyone else is refused and told only their own channel id. In a server the bot acts
+only when you **@mention** it (a DM needs no mention). A destructive action pauses
+the run and asks in the channel — you reply `/confirm` to approve just that action,
+the same gate you get at the keyboard.
 
 | Option | Default | Description |
 |---|---|---|
@@ -557,6 +558,7 @@ $ export ASTERISM_DISCORD_TOKEN=…
 $ asterism channel discord writer --allow 403592…21
 Listening as @writer for agent "writer".
   1 authorized channel; messages from any other channel are refused.
+  In a server, @mention the bot; a DM needs no mention.
   A destructive action pauses the run and asks the channel to reply /confirm.
 Press Ctrl+C to stop.
 ```

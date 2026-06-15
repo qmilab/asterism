@@ -8,6 +8,14 @@ export interface ChannelHandle {
   /** The bot's `@username`/handle, resolved at startup (absent if the API gave none). */
   botUsername?: string;
   /**
+   * Resolves when the channel's own loop ends without a `stop()` — a fatal,
+   * non-recoverable close (a bad token, a refused intent). A surface can race this
+   * against its shutdown wait so a bot that dies on its own unblocks the command
+   * instead of leaving it "listening" to a dead connection. Absent on a transport
+   * whose loop only ever ends via `stop()`.
+   */
+  closed?: Promise<void>;
+  /**
    * Stop listening and let the loop unwind. Aborts the in-flight connection and
    * resolves once the loop has exited — so a caller can await it before tearing
    * down the store the dispatcher still depends on (the `serve()` contract).

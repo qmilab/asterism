@@ -1383,6 +1383,33 @@ test("channel discord --help describes the Discord setup, intent, and confirm fl
   expect(help).toContain("/confirm");
 });
 
+test("channel discord reports a fatal close and stops, instead of hanging on a dead bot", async () => {
+  const h = harness({ ASTERISM_DISCORD_TOKEN: DISCORD_TOKEN });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  const out: string[] = [];
+  let stopped = false;
+  const code = await runCli(["channel", "discord", "personal", "--allow", "C1"], {
+    ...h.io,
+    out: (t) => out.push(t),
+    startDiscord: (options) => {
+      // The transport reports a fatal Gateway close through the injected logger and
+      // ends its loop — the CLI must surface it and unblock, not sit at "Listening…".
+      options.log?.("Discord refused the connection (code 4014). Enable MESSAGE CONTENT.");
+      return { botUsername: "agentbot", closed: Promise.resolve(), stop: async () => void (stopped = true) };
+    },
+    // Never resolves: only `channel.closed` can unblock the command here.
+    waitForShutdown: () => new Promise<void>(() => {}),
+  });
+
+  expect(code).toBe(0);
+  expect(stopped).toBe(true);
+  expect(out.join("\n")).toContain("Stopped.");
+  expect(h.err.join("\n")).toContain("MESSAGE CONTENT");
+});
+
 // --- run streaming + action summary (#16) --------------------------------
 
 /** A capability whose tool the streaming adapter below drives. */
