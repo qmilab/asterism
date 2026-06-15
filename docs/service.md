@@ -84,6 +84,13 @@ $ asterism service install writer --kind telegram --capture-env
 because you asked for it; each use overwrites the file, and any variable you haven't
 set is left as a commented placeholder.
 
+If you choose your model through the environment (`ASTERISM_MODEL_*`) or keep one
+`ASTERISM_API_KEY` across providers rather than using
+[`asterism config`](./commands.md#config), those variables are named in the file too
+— and `--capture-env` copies them — so the service resolves its model exactly the way
+your shell does. (Whatever you set with `asterism config` is read from disk and needs
+nothing here.)
+
 A `serve` service needs only your model API key, and only to *start runs* — its read
 endpoints work without one. A channel needs both the API key and its chat token,
 because every message is a task.

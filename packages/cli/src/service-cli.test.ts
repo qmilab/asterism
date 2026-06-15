@@ -208,6 +208,60 @@ describe("asterism service", () => {
     expect(statSync(p.env).mode & 0o077).toBe(0);
   });
 
+  test("--capture-env captures the ASTERISM_API_KEY fallback when no provider key is set", async () => {
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: { HOME: home, XDG_CONFIG_HOME: xdg, ASTERISM_TELEGRAM_TOKEN: "tok", ASTERISM_API_KEY: "sk-shared" },
+    });
+    const p = paths("writer", "telegram");
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+
+    const env = readFileSync(p.env, "utf8");
+    expect(env).toContain("ASTERISM_API_KEY='sk-shared'");
+    // The provider-specific key is unset, so it stays a commented placeholder.
+    expect(env).toContain("# OPENAI_API_KEY=");
+    // The API-key need is satisfied by the fallback — no "still missing" nag.
+    expect(text).not.toContain("Before it can work");
+  });
+
+  test("--capture-env carries ASTERISM_MODEL_* so an env-configured model survives", async () => {
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_MODEL_ID: "gpt-4o-mini",
+        ASTERISM_MODEL_PROVIDER: "openai",
+        OPENAI_API_KEY: "sk-xyz",
+      },
+    });
+    const p = paths("writer", "serve");
+    const { code } = await run(io, ["service", "install", "writer", "--capture-env"]);
+    expect(code).toBe(0);
+
+    const env = readFileSync(p.env, "utf8");
+    expect(env).toContain("ASTERISM_MODEL_ID='gpt-4o-mini'");
+    expect(env).toContain("ASTERISM_MODEL_PROVIDER='openai'");
+    expect(env).toContain("OPENAI_API_KEY='sk-xyz'");
+  });
+
+  test("the env template names the API key for the env-configured provider, plus the fallback", async () => {
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: { HOME: home, XDG_CONFIG_HOME: xdg, ASTERISM_MODEL_ID: "claude-x", ASTERISM_MODEL_PROVIDER: "anthropic" },
+    });
+    const p = paths("writer", "serve");
+    await run(io, ["service", "install", "writer"]);
+    const env = readFileSync(p.env, "utf8");
+    expect(env).toContain("# ANTHROPIC_API_KEY=");
+    expect(env).toContain("# ASTERISM_API_KEY=");
+    expect(env).toContain("# ASTERISM_MODEL_ID=");
+  });
+
   test("status reports an installed service's state from the service manager", async () => {
     const installIo = baseIo({ platform: "linux", runCommand: makeRunner().run });
     await run(installIo, ["service", "install", "writer"]);

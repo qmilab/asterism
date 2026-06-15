@@ -1763,16 +1763,56 @@ function looksEphemeral(argv: readonly string[]): boolean {
   return argv.some((a) => /[/\\](?:tmp|temp|\.cache|caches|_npx|\.npm|\.bun)[/\\]/i.test(a));
 }
 
-/** The environment variables a service of this kind needs, for the env-file template. */
-function serviceEnvVars(io: CliIO, home: string, agentName: string, kind: ServiceKind): EnvVarSpec[] {
+/** One thing a service must have in its environment to run, for the install hint. */
+interface ServiceEnvNeed {
+  /** What to show the operator (may name a variable or an either/or pair). */
+  label: string;
+  note: string;
+  /** Whether the current environment already supplies it (only with --capture-env). */
+  satisfied: boolean;
+}
+
+/** The environment a service of this kind reads: the variables to template/capture,
+ *  and the required needs for the install hint. */
+interface ServiceEnvPlan {
+  vars: EnvVarSpec[];
+  needs: ServiceEnvNeed[];
+}
+
+/**
+ * Build the env plan for a service, mirroring EXACTLY how the foreground CLI
+ * resolves a model and its key ({@link resolveModelConfig} / {@link resolveApiKey}):
+ * the provider-specific key OR the `ASTERISM_API_KEY` fallback, plus the
+ * `ASTERISM_MODEL_*` coordinates for anyone who configures the model through the
+ * environment instead of `asterism config`. Listing (and, with `--capture-env`,
+ * capturing) all of them is what keeps an installed service working in the same
+ * setups that work in the user's shell — a service starts from a clean environment
+ * and reads only this file (plus the on-disk config).
+ */
+function serviceEnvPlan(
+  io: CliIO,
+  home: string,
+  agentName: string,
+  kind: ServiceKind,
+  captureEnv: boolean,
+): ServiceEnvPlan {
   const { model } = resolveModelConfig(io.env, { config: loadConfig(home), agentName });
   const keyVar = providerKeyEnvVar(model?.provider ?? "openai");
+  const has = (name: string): boolean => io.env[name] !== undefined;
+
   const vars: EnvVarSpec[] = [];
-  if (kind === "telegram") {
-    vars.push({ name: "ASTERISM_TELEGRAM_TOKEN", required: true, note: "your Telegram bot token (from @BotFather)." });
-  } else if (kind === "discord") {
-    vars.push({ name: "ASTERISM_DISCORD_TOKEN", required: true, note: "your Discord bot token (from the Developer Portal)." });
+  const needs: ServiceEnvNeed[] = [];
+
+  // Channel bot token — required for a channel, and only reachable from the env.
+  if (kind === "telegram" || kind === "discord") {
+    const tokenVar = kind === "telegram" ? "ASTERISM_TELEGRAM_TOKEN" : "ASTERISM_DISCORD_TOKEN";
+    const source = kind === "telegram" ? "@BotFather" : "the Discord Developer Portal";
+    const app = kind === "telegram" ? "Telegram" : "Discord";
+    vars.push({ name: tokenVar, required: true, note: `your ${app} bot token (from ${source}).` });
+    needs.push({ label: tokenVar, note: `the ${app} bot token.`, satisfied: captureEnv && has(tokenVar) });
   }
+
+  // Model API key — the provider-specific variable, or the ASTERISM_API_KEY fallback.
   vars.push({
     name: keyVar,
     required: kind !== "serve",
@@ -1781,12 +1821,43 @@ function serviceEnvVars(io: CliIO, home: string, agentName: string, kind: Servic
         ? "your model API key — needed to start runs; the read endpoints work without it."
         : "your model API key — every chat message is a task, so a channel needs one.",
   });
+  vars.push({
+    name: "ASTERISM_API_KEY",
+    required: false,
+    note: `an alternative to ${keyVar} if you keep one key across providers.`,
+  });
+  if (kind !== "serve") {
+    needs.push({
+      label: `${keyVar} (or ASTERISM_API_KEY)`,
+      note: "your model API key.",
+      satisfied: captureEnv && (has(keyVar) || has("ASTERISM_API_KEY")),
+    });
+  }
+
+  // Model coordinates — needed only when the model is chosen through the environment
+  // rather than `asterism config` (the service reads the config file on disk either
+  // way). Never required here, but captured when set so the env setup carries over.
+  for (const name of [
+    "ASTERISM_MODEL_ID",
+    "ASTERISM_MODEL_PROVIDER",
+    "ASTERISM_MODEL_BASE_URL",
+    "ASTERISM_MODEL_API",
+  ]) {
+    vars.push({
+      name,
+      required: false,
+      note: "set only if you choose your model with environment variables, not `asterism config`.",
+    });
+  }
+
+  // Channel allow-list — optional access boundary.
   if (kind === "telegram") {
     vars.push({ name: "ASTERISM_TELEGRAM_ALLOW", required: false, note: "comma-separated chat ids allowed to use the bot." });
   } else if (kind === "discord") {
     vars.push({ name: "ASTERISM_DISCORD_ALLOW", required: false, note: "comma-separated channel ids allowed to use the bot." });
   }
-  return vars;
+
+  return { vars, needs };
 }
 
 /**
@@ -1880,11 +1951,11 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     // 0600 file (overwriting it). The wrapper and unit are always regenerated.
     mkdirSync(paths.baseDir, { recursive: true });
     chmodSync(paths.baseDir, 0o700); // the dir holds the private env file and wrapper
-    const envVars = serviceEnvVars(io, home, agent.name, kind);
+    const envPlan = serviceEnvPlan(io, home, agent.name, kind, captureEnv);
     if (captureEnv) {
-      writeFileAtomic(paths.envFile, renderEnvFile(serviceTitle(agent.name, kind), envVars, (n) => io.env[n]), 0o600);
+      writeFileAtomic(paths.envFile, renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) => io.env[n]), 0o600);
     } else if (!existsSync(paths.envFile)) {
-      writeFileAtomic(paths.envFile, renderEnvTemplate(serviceTitle(agent.name, kind), envVars), 0o600);
+      writeFileAtomic(paths.envFile, renderEnvTemplate(serviceTitle(agent.name, kind), envPlan.vars), 0o600);
     } else {
       // Keep the operator's filled-in file, but make sure it stays owner-only.
       hardenPrivateFile(paths.envFile);
@@ -1950,19 +2021,20 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     io.out(`  Keeps \`asterism ${display}\` running and restarts it if it fails.`);
     io.out(`  Env file (0600): ${paths.envFile}`);
     if (captureEnv) {
-      const captured = envVars.filter((v) => io.env[v.name] !== undefined).map((v) => v.name);
+      const captured = envPlan.vars.filter((v) => io.env[v.name] !== undefined).map((v) => v.name);
       io.out(
         captured.length > 0
           ? `  Captured from your environment: ${captured.join(", ")}`
           : "  --capture-env: none of the variables this service needs are set right now.",
       );
     }
-    // What is still unsatisfied: required vars that capture did not fill (or, without
-    // --capture-env, all of them — the operator fills the template in by hand).
-    const missing = envVars.filter((v) => v.required && !(captureEnv && io.env[v.name] !== undefined));
+    // What the service still lacks to run: required needs capture did not satisfy (or,
+    // without --capture-env, all of them — the operator fills the template in by hand).
+    // The API-key need is satisfied by EITHER the provider key or ASTERISM_API_KEY.
+    const missing = envPlan.needs.filter((n) => !n.satisfied);
     if (missing.length > 0) {
       io.out("  Before it can work, set these in that file:");
-      for (const v of missing) io.out(`    ${v.name}   ${v.note}`);
+      for (const n of missing) io.out(`    ${n.label}   ${n.note}`);
       io.out(`  Edit it, then restart: ${restartHint(platform, agent.name, kind)}`);
     }
     io.out(`  Review it: asterism service status ${agent.name}`);
