@@ -284,6 +284,18 @@ function isCancel(command: string | undefined): boolean {
   return command === "/cancel" || command === "/no";
 }
 
+/**
+ * Whether a raw message is a confirmation control reply (`/confirm`/`/cancel` and
+ * their aliases) — the replies that clear a pending pause. Exposed for a transport
+ * that gates *unaddressed* messages: Discord requires an @mention before running a
+ * task in a server, but the pause prompt tells users to "reply /confirm", so these
+ * control replies must still pass the gate or a paused run would be stranded.
+ */
+export function isControlReply(text: string): boolean {
+  const parsed = classifyMessage(text, undefined);
+  return parsed.kind === "command" && (isConfirm(parsed.name) || isCancel(parsed.name));
+}
+
 /** Glyph per gate decision, matching the CLI's action summary. */
 const ACTION_GLYPH: Readonly<Record<ActionRecord["decision"], string>> = {
   executed: "✓",

@@ -146,6 +146,34 @@ test("interpretFrame: a bare server @mention with no task after it is ignored", 
   ).toEqual([]);
 });
 
+test("interpretFrame: a server /confirm reply is honored without a mention", () => {
+  // The pause prompt tells users to "reply /confirm" — the guild @mention gate must
+  // not strand a paused run by dropping a plain control reply.
+  expect(
+    interpretFrame(
+      {
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: { guild_id: "G1", channel_id: "C1", content: "/confirm", author: { id: "U1" }, mentions: [] },
+      },
+      "BOT",
+    ),
+  ).toEqual([{ kind: "dispatch", channelId: "C1", text: "/confirm" }]);
+});
+
+test("interpretFrame: another bot's slash-command in a server still needs a mention", () => {
+  expect(
+    interpretFrame(
+      {
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: { guild_id: "G1", channel_id: "C1", content: "/giphy cat", author: { id: "U1" }, mentions: [] },
+      },
+      "BOT",
+    ),
+  ).toEqual([]);
+});
+
 // --- deliver (dispatch + chunked reply) ------------------------------------
 
 /** A transport that records what it sent (and a self id for completeness). */

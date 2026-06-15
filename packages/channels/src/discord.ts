@@ -21,7 +21,7 @@
 // one agent per bot, the allow-list boundary, the destructive-action gate — holds
 // here identically; only the wire protocol differs.
 
-import { createDispatcher } from "./dispatch.js";
+import { createDispatcher, isControlReply } from "./dispatch.js";
 import type { ChannelDeps, ChannelDispatcher } from "./dispatch.js";
 import { chunkText, delay } from "./shared.js";
 import type { ChannelHandle, FetchLike } from "./shared.js";
@@ -194,10 +194,17 @@ function messageCreateActions(d: unknown, selfId: string): GatewayAction[] {
   if (!inGuild) return [{ kind: "dispatch", channelId: m.channel_id, text: m.content }];
 
   const mentionsBot = Array.isArray(m.mentions) && m.mentions.some((u) => u != null && u.id === selfId);
-  if (!mentionsBot) return [];
-  const text = stripMention(m.content, selfId);
-  if (text.length === 0) return []; // a bare @mention with no task after it
-  return [{ kind: "dispatch", channelId: m.channel_id, text }];
+  if (mentionsBot) {
+    const text = stripMention(m.content, selfId);
+    if (text.length === 0) return []; // a bare @mention with no task after it
+    return [{ kind: "dispatch", channelId: m.channel_id, text }];
+  }
+  // Not mentioned: only a confirm/cancel control reply is honored, so a user
+  // following a pause prompt's "reply /confirm" in a server isn't silently dropped.
+  // Ordinary chatter — and other bots' slash-commands like `/giphy` — still need an
+  // @mention before this agent runs.
+  if (isControlReply(m.content)) return [{ kind: "dispatch", channelId: m.channel_id, text: m.content }];
+  return [];
 }
 
 /** Strip the bot's own @mention tokens (`<@id>` and the legacy `<@!id>`) and trim. */

@@ -80,8 +80,9 @@ Telegram group authorizes its members.
 
 In a **server**, the bot sees every message in a channel it can read, so it acts
 only when you **@mention it** — it ignores ordinary chatter, and replies with the
-mention removed from your task. In a **DM** there is nothing to mention: every
-message is a task.
+mention removed from your task. (A `/confirm` or `/cancel` reply is honored without
+a mention, so you can clear a paused run by replying just as the prompt says.) In a
+**DM** there is nothing to mention: every message is a task.
 
 > **Runtime.** The Discord channel talks to Discord's Gateway over a WebSocket, so
 > it needs a runtime with one: **Node 22+ or Bun**. On an older Node the channel
