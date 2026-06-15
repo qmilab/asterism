@@ -100,7 +100,11 @@ export async function pollOnce(
       const replies = await dispatcher.handle({ chatId: String(chatId), text });
       for (const reply of replies) {
         for (const chunk of chunkText(reply.text, TELEGRAM_MAX_CHARS)) {
-          await transport.sendMessage(reply.chatId, chunk, signal);
+          // No signal on the send: it cancels the long-poll, not delivery. The run
+          // has already executed and persisted, so its reply must still go out even
+          // when stop() aborted mid-run — otherwise the finished run's result is
+          // silently dropped. The mid-batch abort check above is what ends the loop.
+          await transport.sendMessage(reply.chatId, chunk);
         }
       }
     } catch {

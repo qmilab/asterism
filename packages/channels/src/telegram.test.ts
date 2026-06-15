@@ -137,6 +137,33 @@ test("runTelegram fails to start when the backlog drain errors (no replay from z
   ).rejects.toThrow("Bad Gateway");
 });
 
+test("a reply for an already-finished run is sent even if shutdown was requested", async () => {
+  // stop() aborts the long-poll signal while a run is in flight. The run finishes
+  // and persists, so its reply must still be delivered — not dropped because the
+  // shared signal is now aborted.
+  const controller = new AbortController();
+  const sent: OutboundMessage[] = [];
+  const dispatcher: ChannelDispatcher = {
+    async handle({ chatId }) {
+      controller.abort(); // shutdown requested while the run is "in flight"
+      return [{ chatId, text: "done" }];
+    },
+  };
+  const transport: TelegramTransport = {
+    async getUpdates() {
+      return [{ update_id: 1, message: { chat: { id: 7 }, text: "go" } }];
+    },
+    async sendMessage(chatId, text, signal) {
+      if (signal?.aborted) throw new Error("send must not get the aborted long-poll signal");
+      sent.push({ chatId, text });
+    },
+  };
+
+  await pollOnce(transport, dispatcher, 0, controller.signal);
+
+  expect(sent).toEqual([{ chatId: "7", text: "done" }]);
+});
+
 test("pollOnce advances past an update even when sending its reply fails", async () => {
   // A failed delivery must NOT keep the offset pinned — otherwise the same update
   // is refetched and its task re-runs. The run already happened; the reply is

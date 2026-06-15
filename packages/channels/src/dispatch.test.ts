@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { AsterismStore } from "@qmilab/asterism-core";
+import { AsterismStore, resumeRun } from "@qmilab/asterism-core";
 import type { Agent, Capability, RunOutput, RuntimeAdapter } from "@qmilab/asterism-core";
 
 import { createDispatcher } from "./dispatch.ts";
@@ -161,6 +161,27 @@ test("a pending confirmation blocks a parallel run until it is resolved", async 
   const runs = store.runs.list(personal.id);
   expect(runs).toHaveLength(1);
   expect(runs[0]!.status).toBe("awaiting_confirmation");
+});
+
+test("a pending confirmation cleared out of band no longer blocks the chat", async () => {
+  const adapter = toolCallingAdapter("delete_files", { command: "rm -rf dist" });
+  const capabilities = [deleteFilesCapability()];
+  const d = createDispatcher(deps({ adapter, capabilities }));
+
+  await d.handle({ chatId: "100", text: "clean up dist" }); // pauses; pending set
+  const runId = store.runs.list(personal.id)[0]!.id;
+
+  // Confirm it out of band, the way `asterism confirm` would — the run finishes,
+  // but the dispatcher's in-memory pending pointer is now stale.
+  const outcome = await resumeRun(store, personal, runId, { adapter, capabilities });
+  expect(outcome.kind).toBe("resumed");
+  expect(store.runs.get(personal.id, runId)!.status).toBe("done");
+
+  // A new message must NOT be rejected as "waiting for confirmation"; it starts a
+  // fresh run (which pauses on its own gate), proving the stale pointer was cleared.
+  const next = await d.handle({ chatId: "100", text: "clean up dist again" });
+  expect(next[0]!.text.toLowerCase()).not.toContain("waiting for confirmation");
+  expect(store.runs.list(personal.id)).toHaveLength(2);
 });
 
 test("/cancel clears the pending confirmation so a new task can start", async () => {

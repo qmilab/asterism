@@ -188,7 +188,17 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
     // A chat waiting on a confirmation is in a focused state: only confirm/cancel
     // act; any other message re-prompts rather than starting a parallel run (which
     // would leave the gated one stranded and confuse which run a later reply means).
-    const pendingRunId = pending.get(chatId);
+    let pendingRunId = pending.get(chatId);
+    if (pendingRunId !== undefined) {
+      // The pause may have been cleared out of band (e.g. `asterism confirm` or the
+      // HTTP confirm endpoint). If the run is no longer awaiting confirmation, drop
+      // the stale pointer so this chat isn't blocked on an already-finished run.
+      const parked = deps.store.runs.get(deps.agent.id, pendingRunId);
+      if (!parked || parked.status !== "awaiting_confirmation") {
+        pending.delete(chatId);
+        pendingRunId = undefined;
+      }
+    }
     if (pendingRunId !== undefined) {
       if (isConfirm(command)) return resume(chatId, pendingRunId);
       if (isCancel(command)) {
