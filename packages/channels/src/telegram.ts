@@ -120,17 +120,17 @@ export async function runTelegram(options: TelegramOptions): Promise<ChannelHand
   // Validate the token and learn the bot's identity before we commit to looping.
   const me = await getMe(options.token, fetchImpl);
 
-  const dispatcher = createDispatcher(options);
+  const dispatcher = createDispatcher({
+    ...options,
+    ...(me.username !== undefined ? { botUsername: me.username } : {}),
+  });
   const controller = new AbortController();
 
-  // Skip the backlog: advance past whatever is already queued without dispatching,
-  // so a task sent hours ago doesn't suddenly run when the bot comes online.
+  // Skip the backlog so a task sent while the bot was offline doesn't suddenly run
+  // when it comes online. The queue can span several pages, so this drains them all.
   let offset = 0;
   try {
-    const backlog = await transport.getUpdates(0, 0, controller.signal);
-    for (const u of backlog) {
-      if (typeof u.update_id === "number") offset = Math.max(offset, u.update_id + 1);
-    }
+    offset = await drainBacklog(transport, controller.signal);
   } catch {
     // A failed backlog drain is non-fatal — start from 0 and let the loop catch up.
   }
@@ -145,6 +145,28 @@ export async function runTelegram(options: TelegramOptions): Promise<ChannelHand
   };
   if (me.username !== undefined) handle.botUsername = me.username;
   return handle;
+}
+
+/**
+ * Acknowledge and discard every queued update so none replay as a fresh task on
+ * startup. `getUpdates` returns at most one page (~100 updates), so a large offline
+ * backlog needs several calls: each one, given the advanced offset, acknowledges
+ * the previous page and returns the next. Returns the offset to begin live polling
+ * from — one past the last queued update. Stops on an empty page, on a page that
+ * fails to advance the offset (malformed, so it can't spin), or on abort.
+ */
+export async function drainBacklog(transport: TelegramTransport, signal?: AbortSignal): Promise<number> {
+  let offset = 0;
+  for (;;) {
+    const batch = await transport.getUpdates(offset, 0, signal);
+    if (batch.length === 0) break;
+    const before = offset;
+    for (const u of batch) {
+      if (typeof u.update_id === "number") offset = Math.max(offset, u.update_id + 1);
+    }
+    if (offset === before || signal?.aborted) break;
+  }
+  return offset;
 }
 
 /** Long-poll until aborted, backing off on transient errors so a blip doesn't spin. */

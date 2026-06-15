@@ -1127,6 +1127,27 @@ test("channel telegram merges the --allow flag with the env allow-list", async (
   expect([...(captured?.allow ?? [])].sort()).toEqual(["100", "300", "400"]);
 });
 
+test("channel telegram accepts a negative group chat id in --allow", async () => {
+  // Telegram group/supergroup ids are negative; the documented bare form must work.
+  const h = harness({ ASTERISM_TELEGRAM_TOKEN: TG_TOKEN });
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: TelegramOptions | undefined;
+  const code = await runCli(["channel", "telegram", "personal", "--allow", "-1001234567890"], {
+    ...h.io,
+    startTelegram: (options) => {
+      captured = options;
+      return fakeChannelHandle();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  });
+
+  expect(code).toBe(0);
+  expect([...(captured?.allow ?? [])]).toEqual(["-1001234567890"]);
+});
+
 test("channel telegram refuses to start without a bot token", async () => {
   const h = harness(); // no ASTERISM_TELEGRAM_TOKEN
   await runCli(["init"], h.io);

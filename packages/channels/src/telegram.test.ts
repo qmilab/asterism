@@ -6,7 +6,13 @@
 import { expect, test } from "bun:test";
 
 import type { ChannelDispatcher, OutboundMessage } from "./dispatch.ts";
-import { chunkText, pollOnce, telegramTransport, TELEGRAM_MAX_CHARS } from "./telegram.ts";
+import {
+  chunkText,
+  drainBacklog,
+  pollOnce,
+  telegramTransport,
+  TELEGRAM_MAX_CHARS,
+} from "./telegram.ts";
 import type { FetchLike, TelegramTransport, TelegramUpdate } from "./telegram.ts";
 
 /** A transport that hands out canned update batches and records what it sent. */
@@ -104,6 +110,42 @@ test("chunkText prefers a newline boundary and drops empty input", () => {
   expect(chunkText("short", 10)).toEqual(["short"]);
   // "line1\nline2" is 11 long; it breaks at the newline (index 5), not mid-word.
   expect(chunkText("line1\nline2", 8)).toEqual(["line1", "line2"]);
+});
+
+test("drainBacklog skips every queued page, not just the first", async () => {
+  // Two full pages then empty — the offset must end past the last update of page 2,
+  // and each call must use the advanced offset (not refetch page 1 forever).
+  const batches: TelegramUpdate[][] = [
+    [{ update_id: 100 }, { update_id: 101 }],
+    [{ update_id: 102 }, { update_id: 103 }],
+    [],
+  ];
+  let call = 0;
+  const seenOffsets: number[] = [];
+  const transport: TelegramTransport = {
+    async getUpdates(offset) {
+      seenOffsets.push(offset);
+      return batches[call++] ?? [];
+    },
+    async sendMessage() {},
+  };
+
+  const offset = await drainBacklog(transport);
+
+  expect(offset).toBe(104);
+  expect(seenOffsets).toEqual([0, 102, 104]);
+});
+
+test("drainBacklog stops on a page that can't advance the offset", async () => {
+  // A malformed update with no numeric update_id must not spin the loop forever.
+  const transport: TelegramTransport = {
+    async getUpdates() {
+      return [{ message: { chat: { id: 1 }, text: "x" } } as TelegramUpdate];
+    },
+    async sendMessage() {},
+  };
+
+  expect(await drainBacklog(transport)).toBe(0);
 });
 
 test("telegramTransport posts to the token's URL and unwraps the result envelope", async () => {

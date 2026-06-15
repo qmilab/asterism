@@ -25,6 +25,15 @@ test("declared boolean flag does not swallow the following token", () => {
   expect(flags.review).toBe(true);
 });
 
+test("a negative number is taken as a flag value, not a flag", () => {
+  // Telegram group ids are negative; `--allow -100123` must bind the id.
+  expect(parseArgs(["--allow", "-100123"]).flags.allow).toBe("-100123");
+  expect(parseArgs(["--allow", "-100,-200"]).flags.allow).toBe("-100,-200");
+  // A "-" followed by a non-digit is still another flag, so the value-less flag
+  // stays boolean true.
+  expect(parseArgs(["--allow", "--other"]).flags.allow).toBe(true);
+});
+
 test("a long flag with no value becomes boolean true", () => {
   const { flags } = parseArgs(["--help"]);
   expect(flags.help).toBe(true);

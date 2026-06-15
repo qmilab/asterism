@@ -86,6 +86,13 @@ export interface ChannelDeps {
    * refuses to start without it.
    */
   allow: ReadonlySet<string>;
+  /**
+   * This bot's `@username`, if known. In a group chat Telegram appends `@bot` to
+   * a command (`/confirm@thisbot`); a command addressed to a *different* bot must
+   * not act on this agent. With the username set, only an unaddressed command or
+   * one addressed to this bot is honored; absent, only unaddressed commands are.
+   */
+  botUsername?: string;
 }
 
 /** The dispatcher: hand it one inbound message, get back the replies to send. */
@@ -166,7 +173,7 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
       );
     }
 
-    const command = parseCommand(message.text);
+    const command = parseCommand(message.text, deps.botUsername);
 
     // `/help` and `/start` answer the same way whatever the run state.
     if (command === "/help") return reply(chatId, helpText(deps.agent));
@@ -211,16 +218,26 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
 const NO_MODEL = "No model is configured, so I can't run tasks yet.";
 
 /**
- * The leading slash-command of a message, lowercased and stripped of any
- * `@botname` suffix (Telegram appends it in groups), or undefined if the message
- * does not start with one. Only the first token matters — `/confirm now` is still
- * `/confirm`.
+ * The leading slash-command of a message, lowercased, or undefined if the message
+ * does not start with one OR is addressed to a different bot. Only the first token
+ * matters — `/confirm now` is still `/confirm`.
+ *
+ * Telegram appends `@botname` to a command in a group. An unaddressed command is
+ * always ours; one addressed to `botUsername` is ours; one addressed to any other
+ * bot (or any addressed command when we don't know our own username) is NOT —
+ * returning undefined there is what stops `/confirm@other_bot` from resuming this
+ * agent's gated run.
  */
-function parseCommand(text: string): string | undefined {
+function parseCommand(text: string, botUsername?: string): string | undefined {
   const first = text.trim().split(/\s+/, 1)[0] ?? "";
   if (!first.startsWith("/")) return undefined;
   const at = first.indexOf("@");
-  return (at === -1 ? first : first.slice(0, at)).toLowerCase();
+  if (at === -1) return first.toLowerCase();
+  const addressedTo = first.slice(at + 1).toLowerCase();
+  if (botUsername !== undefined && addressedTo === botUsername.toLowerCase()) {
+    return first.slice(0, at).toLowerCase();
+  }
+  return undefined;
 }
 
 /** A reply that approves a pending pause: `/confirm`, or a plain yes. */

@@ -182,6 +182,30 @@ test("/cancel clears the pending confirmation so a new task can start", async ()
   expect(store.runs.list(personal.id)).toHaveLength(2);
 });
 
+test("in a group, /confirm addressed to another bot does not resume our run", async () => {
+  // Group chat ids are negative; Telegram appends @botname to commands there. A
+  // /confirm meant for a different bot must not approve this agent's gated action.
+  const d = createDispatcher(
+    deps({
+      adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+      capabilities: [deleteFilesCapability()],
+      allow: new Set(["-100"]),
+      botUsername: "ourbot",
+    }),
+  );
+
+  await d.handle({ chatId: "-100", text: "clean up dist" }); // pauses
+
+  const other = await d.handle({ chatId: "-100", text: "/confirm@other_bot" });
+  expect(other[0]!.text.toLowerCase()).toContain("waiting for confirmation");
+  expect(store.runs.list(personal.id)[0]!.status).toBe("awaiting_confirmation");
+
+  // The same command addressed to us does resume it.
+  const ours = await d.handle({ chatId: "-100", text: "/confirm@ourbot" });
+  expect(ours[0]!.text).not.toContain("/confirm");
+  expect(store.runs.list(personal.id)[0]!.status).toBe("done");
+});
+
 test("a propose agent surfaces its plan without ever pausing to confirm", async () => {
   const d = createDispatcher(
     deps({

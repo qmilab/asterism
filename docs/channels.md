@@ -57,6 +57,9 @@ ASTERISM_TELEGRAM_ALLOW=8675309 asterism channel telegram writer   # via the env
 `--allow` and `ASTERISM_TELEGRAM_ALLOW` are **combined**, so you can keep a base
 list in the environment and add to it per run.
 
+A private chat's id is a positive number; a **group or supergroup** id is
+negative (e.g. `-1001234567890`) — pass it just the same, `--allow -1001234567890`.
+
 ### Discovery mode
 
 Starting with **no** allow-list is allowed and safe: nobody is authorized, so the
