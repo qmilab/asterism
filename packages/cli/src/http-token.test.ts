@@ -94,3 +94,24 @@ test("an empty pre-existing token file is reclaimed, persisted, and then reused"
   expect(second.source).toBe("file");
   expect(second.token).toBe(first.token);
 });
+
+test("a malformed persisted token is rejected, reclaimed, and replaced", () => {
+  // A non-empty but corrupt/truncated file (e.g. an interrupted write) must not be
+  // accepted as the bearer token — that would leave the server on a short,
+  // low-entropy secret. It is repaired with a fresh well-formed token instead.
+  const path = httpTokenPath(home, "personal");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "deadbeef"); // valid hex but far too short to be a real token
+
+  const first = resolveHttpToken(home, "personal", {});
+  expect(first.token).toMatch(/^[0-9a-f]{64}$/);
+  expect(first.token).not.toBe("deadbeef");
+  // The corrupt file was overwritten on disk, owner-only — not left in place.
+  expect(readFileSync(path, "utf8")).toBe(first.token);
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+
+  // And the repaired token is now reused, not regenerated yet again.
+  const second = resolveHttpToken(home, "personal", {});
+  expect(second.source).toBe("file");
+  expect(second.token).toBe(first.token);
+});

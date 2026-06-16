@@ -39,16 +39,27 @@ export interface ResolvedHttpToken {
   path?: string;
 }
 
+/** Token entropy: 32 random bytes, rendered as lowercase hex (header/copy-paste-safe). */
+const TOKEN_BYTES = 32;
+/** The exact shape every generated token has, so a corrupt file can be told apart. */
+const TOKEN_PATTERN = new RegExp(`^[0-9a-f]{${TOKEN_BYTES * 2}}$`);
+
 /** 32 bytes ⇒ 64 hex chars: 256 bits of entropy, header- and copy-paste-safe. */
 function generateToken(): string {
-  return randomBytes(32).toString("hex");
+  return randomBytes(TOKEN_BYTES).toString("hex");
 }
 
-/** Read a persisted token, or `undefined` if the file is absent or effectively empty. */
+/**
+ * Read a persisted token, or `undefined` if the file is absent, empty, OR malformed.
+ * A persisted token is one we generated, so it must match {@link TOKEN_PATTERN}
+ * exactly; a truncated or corrupt value (e.g. an interrupted write) is rejected as
+ * "no token" rather than accepted as a short, low-entropy secret. The caller then
+ * regenerates and the reclaim path replaces the bad file — it is never left in place.
+ */
 function readPersisted(path: string): string | undefined {
   try {
     const value = readFileSync(path, "utf8").trim();
-    return value.length > 0 ? value : undefined;
+    return TOKEN_PATTERN.test(value) ? value : undefined;
   } catch {
     // Missing (ENOENT) or unreadable ⇒ treat as "no persisted token", and a fresh
     // one is generated below. We never surface the raw fs error: it would only ever
