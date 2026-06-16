@@ -35,6 +35,7 @@ nav:
   - Local HTTP endpoint: http.md
   - Chat channels: channels.md
   - Run as a service: service.md
+  - Run in a container: container.md
   - Five-claims walkthrough: walkthrough.md
 
 markdown_extensions:
