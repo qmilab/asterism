@@ -1,0 +1,104 @@
+name: release
+
+# Publishes a release when a vX.Y.Z tag is pushed: every @qmilab/* package to npm,
+# then the GitHub Release. The container image is published from the SAME tag by the
+# container workflow (.github/workflows/docker.yml), so one tag ships everything.
+#
+# Cut a release by bumping all six package versions (+ the CLI VERSION constant, the
+# CHANGELOG, and a regenerated bun.lock) in a PR, merging it, then tagging vX.Y.Z on
+# the merge commit. This workflow refuses to publish if the tag and the committed
+# versions disagree, so a forgotten bump fails fast instead of mis-publishing.
+#
+# One-time prerequisites:
+#   - NPM_TOKEN repo secret = an npm **Automation** access token. The account's 2FA is
+#     auth-and-writes, and an Automation token is the supported way to publish from CI
+#     without an interactive OTP. (OIDC trusted publishing is a future hardening.)
+#   - First GHCR image publish lands the package private — flip it public once in the
+#     org Packages settings (that is the container workflow's concern, noted here for
+#     the whole release picture).
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub Release
+  id-token: write   # npm provenance via GitHub OIDC
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # npm is what actually publishes (provenance + the registry auth); Bun only
+      # packs. Point npm at the public registry so NODE_AUTH_TOKEN is used for auth.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: bun install --frozen-lockfile
+
+      - name: Verify the tag matches the committed package versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for pkg in core adapter-pi reflect server channels cli; do
+            v="$(node -p "require('./packages/$pkg/package.json').version")"
+            if [ "$v" != "$tag" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME (=$tag) != packages/$pkg version $v. Bump every package to $tag (and the CLI VERSION constant + bun.lock) before tagging." >&2
+              exit 1
+            fi
+          done
+          cliConst="$(grep -oE 'VERSION *= *"[^"]+"' packages/cli/src/version.ts | grep -oE '"[^"]+"' | tr -d '"')"
+          if [ -n "$cliConst" ] && [ "$cliConst" != "$tag" ]; then
+            echo "::error::CLI VERSION constant ($cliConst) != tag $tag. Bump packages/cli/src/version.ts." >&2
+            exit 1
+          fi
+          echo "All package versions match $tag."
+
+      # Compilation and the full suite gate the publish — a release never ships red.
+      - run: bun run build
+      - run: bun test
+
+      - name: Publish packages to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Dependency order: core first, the CLI (which depends on the rest) last.
+          # Each package is packed with Bun — which rewrites workspace:* to the real
+          # version from the lockfile — then published from that tarball with npm.
+          # Idempotent: a version already on the registry is skipped, so a re-run
+          # completes a partial publish rather than failing on the first conflict.
+          for pkg in core adapter-pi reflect server channels cli; do
+            dir="packages/$pkg"
+            name="$(node -p "require('./$dir/package.json').name")"
+            version="$(node -p "require('./$dir/package.json').version")"
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already on npm — skipping."
+              continue
+            fi
+            echo "Packing $name@$version"
+            out="$(mktemp -d)"
+            ( cd "$dir" && bun pm pack --destination "$out" )
+            tgz="$(ls "$out"/*.tgz | head -1)"
+            echo "Publishing $tgz"
+            # If provenance ever fails on a prepacked tarball, drop --provenance here.
+            npm publish "$tgz" --access public --provenance
+          done
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists — leaving it."
+          else
+            gh release create "$tag" --title "$tag" --generate-notes
+          fi
