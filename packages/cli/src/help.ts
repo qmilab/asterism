@@ -225,6 +225,12 @@ another. A destructive action still pauses for confirmation even with no one at 
 keyboard: the run waits, and you approve it out of band — POST to its confirm
 endpoint, or run \`asterism confirm\`.
 
+Every request needs an access token: Authorization: Bearer <token>. On first serve
+a token is generated, saved (owner-only), and printed once; later serves reuse it.
+Set ASTERISM_HTTP_TOKEN to supply your own — the right choice for an exposed or
+unattended endpoint, where the secret should be injected, not read off disk. There
+is no unauthenticated mode, on loopback or anywhere else.
+
 Endpoints (with <agent> fixed to the one you serve):
   POST /agents/<agent>/runs            start a run; JSON body {"input":"<task>"}
                                        send Accept: text/event-stream to watch it live

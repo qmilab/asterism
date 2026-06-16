@@ -87,6 +87,8 @@ import {
   findHome,
   isValidAgentName,
 } from "./paths.js";
+import { HTTP_TOKEN_ENV, resolveHttpToken } from "./http-token.js";
+import type { ResolvedHttpToken } from "./http-token.js";
 import { VERSION } from "./version.js";
 
 /** A proposed memory presented for review, with any firewall findings on it. */
@@ -1413,12 +1415,20 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     // workspace, that the command line would give it.
     const capabilities = io.capabilities?.(agent.workspaceDir);
 
+    // The front door is default-deny: resolve the bearer token every request must
+    // carry. Sourced from ASTERISM_HTTP_TOKEN if set (the injected secret for an
+    // unattended/exposed run), else a per-agent token saved under the home — minted
+    // and printed once on first serve, reused silently after. The kernel never sees
+    // it; the surface only verifies it.
+    const httpToken = resolveHttpToken(home, agent.name, io.env);
+
     // The kernel store stays open for the server's lifetime — `withHomeStore`
     // closes it only after this callback returns, which it does once shutdown is
     // requested below. The HTTP surface is bound to THIS agent alone.
     const server = await startServer({
       store,
       agent,
+      authToken: httpToken.token,
       ...(made.adapter ? { adapter: made.adapter } : {}),
       ...(made.reason !== undefined ? { adapterReason: made.reason } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
@@ -1432,6 +1442,7 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     io.out(`  POST ${server.url}/agents/${agent.name}/runs/<run>/confirm    approve a paused run`);
     io.out(`  GET  ${server.url}/agents/${agent.name}/runs    list runs`);
     io.out(`  GET  ${server.url}/agents/${agent.name}/events  review activity`);
+    reportHttpToken(io, httpToken);
     if (!made.adapter) {
       io.out("  note: no model configured — runs are declined until you set one (reads still work).");
     }
@@ -1448,6 +1459,28 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     io.out("Stopped.");
     return 0;
   });
+}
+
+/**
+ * Tell the operator how to authenticate to the endpoint they just started — every
+ * request needs `Authorization: Bearer <token>`. The token VALUE is printed at most
+ * once, the moment it is generated; a token that already exists (env or a saved file)
+ * is referred to, never re-echoed, so it does not pile up in scrollback or logs.
+ */
+function reportHttpToken(io: CliIO, tok: ResolvedHttpToken): void {
+  if (tok.source === "generated") {
+    io.out("  Access token (generated, save it — shown only once):");
+    io.out(`    ${tok.token}`);
+    io.out("    Send it on every request:  Authorization: Bearer <token>");
+    io.out(`    Stored owner-only at ${tok.path}; set ${HTTP_TOKEN_ENV} to override.`);
+    return;
+  }
+  if (tok.source === "file") {
+    io.out("  Requests need the saved access token:  Authorization: Bearer <token>");
+    io.out(`    Read it from ${tok.path}, or set ${HTTP_TOKEN_ENV} to override.`);
+    return;
+  }
+  io.out(`  Requests need the ${HTTP_TOKEN_ENV} token:  Authorization: Bearer <token>`);
 }
 
 // --- channel telegram (chat-app front door) --------------------------------
@@ -1811,6 +1844,19 @@ function serviceEnvPlan(
     const app = kind === "telegram" ? "Telegram" : "Discord";
     vars.push({ name: tokenVar, required: true, note: `your ${app} bot token (from ${source}).` });
     needs.push({ label: tokenVar, note: `the ${app} bot token.`, satisfied: captureEnv && has(tokenVar) });
+  }
+
+  // HTTP access token — optional, not a blocking need: a loopback `serve` service
+  // falls back to the saved per-agent token under the home (the same user, the same
+  // home), so it starts fine without this. Set it to pin a STABLE secret across
+  // restarts — the right move for an exposed endpoint, where the token should be
+  // injected rather than read off the generated file (and found in the service log).
+  if (kind === "serve") {
+    vars.push({
+      name: HTTP_TOKEN_ENV,
+      required: false,
+      note: "your HTTP access token. Optional — without it a saved per-agent token is used; set it to pin a stable secret for an exposed endpoint.",
+    });
   }
 
   // A channel needs a model — every message is a task, so the wrapped `channel`

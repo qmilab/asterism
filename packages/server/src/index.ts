@@ -34,6 +34,8 @@
 // only runtime-specific seam: it wraps `handleRequest` in `Bun.serve` under Bun
 // and in `node:http` off Bun (Node 20+) — see `serve-node.ts`.
 
+import { createHash, timingSafeEqual } from "node:crypto";
+
 import { executeRun, resumeRun } from "@qmilab/asterism-core";
 import type {
   Agent,
@@ -56,6 +58,15 @@ export interface ServerDeps {
   store: AsterismStore;
   /** The single agent this server serves (resolved at startup). */
   agent: Agent;
+  /**
+   * The bearer token every request must present as `Authorization: Bearer <token>`.
+   * Required, with no unauthenticated mode — the surface is default-deny, so a server
+   * cannot be stood up without one. The host (the CLI) resolves it from the
+   * environment or a persisted per-server secret and injects it here; this surface
+   * only verifies it. It is a per-server operator secret, never an agent credential,
+   * and never appears in a response, the event log, or any error.
+   */
+  authToken: string;
   /**
    * The substrate for executing runs. Absent ⇒ `POST /runs` returns 503 (no model
    * configured); the read endpoints still work, so an install with no model can
@@ -87,6 +98,44 @@ function json(status: number, body: unknown): Response {
 
 function fail(status: number, message: string): Response {
   return json(status, { error: message });
+}
+
+/**
+ * The one response shape for any failed authentication. Generic by design — a
+ * missing, empty, malformed, or wrong token are indistinguishable to the client, so
+ * the endpoint never confirms whether a token was "close" or whether a path exists.
+ * Carries `WWW-Authenticate: Bearer` per the HTTP spec for a 401.
+ */
+function unauthorized(): Response {
+  return new Response(JSON.stringify({ error: "Unauthorized." }), {
+    status: 401,
+    headers: { ...JSON_HEADERS, "www-authenticate": "Bearer" },
+  });
+}
+
+/** Pull the token out of an `Authorization: Bearer <token>` header, or null. */
+function bearerToken(req: Request): string | null {
+  const header = req.headers.get("authorization");
+  if (header === null) return null;
+  // Case-insensitive scheme, one or more spaces, then a token that starts non-blank.
+  // A header with no token after the scheme (`Bearer `) yields null and so fails
+  // like an absent one.
+  const match = /^Bearer +(\S.*)$/i.exec(header);
+  return match ? match[1]! : null;
+}
+
+/**
+ * Constant-time bearer check. The presented and expected tokens are SHA-256'd first
+ * so the comparison runs over equal-length digests — `timingSafeEqual` requires that,
+ * and hashing also keeps the comparison from leaking the token's length. A missing
+ * header (`null`) short-circuits to a non-match. The hashing is not a substitute for
+ * a strong token; it only makes the compare itself timing-safe.
+ */
+function tokenMatches(presented: string | null, expected: string): boolean {
+  if (presented === null) return false;
+  const a = createHash("sha256").update(presented).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
 }
 
 /** GET /agents/:agent/runs — the agent's runs, oldest-first (scoped by the repo). */
@@ -305,6 +354,15 @@ function sseResponse(
  */
 export async function handleRequest(deps: ServerDeps, req: Request): Promise<Response> {
   try {
+    // Default-deny, before any routing: an unauthenticated request gets the same
+    // 401 whatever it asks for, so the endpoint never reveals which paths exist or
+    // which agent it serves. Every path is behind the token — there are no
+    // unauthenticated reads, and SSE (an `Accept` header on these same routes)
+    // authenticates identically because it passes through here too.
+    if (!tokenMatches(bearerToken(req), deps.authToken)) {
+      return unauthorized();
+    }
+
     const url = new URL(req.url);
     const segments = url.pathname.split("/").filter((s) => s.length > 0);
 

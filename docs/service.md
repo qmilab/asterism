@@ -91,9 +91,14 @@ If you choose your model through the environment (`ASTERISM_MODEL_*`) or keep on
 your shell does. (Whatever you set with `asterism config` is read from disk and needs
 nothing here.)
 
-A `serve` service needs only your model API key, and only to *start runs* — its read
-endpoints work without one. A channel needs both the API key and its chat token,
-because every message is a task.
+A `serve` service needs your model API key only to *start runs* — its read endpoints
+work without one. Its HTTP endpoint always needs an [access token](./http.md#authentication),
+but a background service has no terminal to print one to: it falls back to the saved
+per-agent token under your home (it runs as you, with your home), which you can read
+from that file or the service log. For an **exposed** endpoint, set
+`ASTERISM_HTTP_TOKEN` in the service env file instead — a stable, injected secret is
+the safer choice, and it is listed there for you. A channel needs both the API key and
+its chat token, because every message is a task.
 
 ## Check on it
 

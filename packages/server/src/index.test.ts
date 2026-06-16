@@ -47,25 +47,34 @@ function cannedAdapter(output: RunOutput): RuntimeAdapter {
   };
 }
 
-/** Deps bound to `personal` with a working substrate, unless overridden. */
+/** The bearer token the test server expects; `get`/`post` send it by default. */
+const TOKEN = "test-http-token";
+
+/** Deps bound to `personal` with a working substrate and a known token, unless overridden. */
 function deps(over: Partial<ServerDeps> = {}): ServerDeps {
   return {
     store,
     agent: personal,
     adapter: cannedAdapter({ status: "done", text: "hello from the agent" }),
+    authToken: TOKEN,
     ...over,
   };
 }
 
 const BASE = "http://127.0.0.1:4831";
 
+/** The valid `Authorization` header for the test token. */
+function auth(): Record<string, string> {
+  return { authorization: `Bearer ${TOKEN}` };
+}
+
 function get(path: string): Request {
-  return new Request(`${BASE}${path}`, { method: "GET" });
+  return new Request(`${BASE}${path}`, { method: "GET", headers: auth() });
 }
 function post(path: string, body: unknown): Request {
   return new Request(`${BASE}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...auth() },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
@@ -245,7 +254,7 @@ test("unknown paths 404 and wrong methods 405", async () => {
   expect(postEvents.status).toBe(405);
   const del = await handleRequest(
     deps(),
-    new Request(`${BASE}/agents/personal/runs`, { method: "DELETE" }),
+    new Request(`${BASE}/agents/personal/runs`, { method: "DELETE", headers: auth() }),
   );
   expect(del.status).toBe(405);
 });
@@ -312,28 +321,107 @@ test("serve() binds a real socket: a run can be triggered and events read over H
     store,
     agent: personal,
     adapter: cannedAdapter({ status: "done", text: "hello over http" }),
+    authToken: TOKEN,
     port: 0,
   });
   try {
     const ran = await fetch(`${running.url}/agents/personal/runs`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...auth() },
       body: JSON.stringify({ input: "ping" }),
     });
     expect(ran.status).toBe(201);
     expect(((await ran.json()) as { output: string }).output).toBe("hello over http");
 
-    const events = await fetch(`${running.url}/agents/personal/events`);
+    const events = await fetch(`${running.url}/agents/personal/events`, { headers: auth() });
     expect(events.status).toBe(200);
     const ev = (await events.json()) as { events: { type: string }[] };
     expect(ev.events.some((e) => e.type === "run.started")).toBe(true);
 
     // Still bound to one agent, even over a real socket.
-    const other = await fetch(`${running.url}/agents/work/runs`);
+    const other = await fetch(`${running.url}/agents/work/runs`, { headers: auth() });
     expect(other.status).toBe(404);
   } finally {
     running.stop();
   }
+});
+
+// --- authentication: the front door is default-deny (#38) -----------------
+//
+// Every request needs a valid bearer token, on loopback as anywhere else. These
+// pin that an unauthenticated caller cannot start a run, confirm a paused run, or
+// read the log — at any trust level — and that a valid token leaves behavior
+// unchanged (proven by every other test in this file passing the header).
+
+/** A request WITHOUT the Authorization header — the unauthenticated case. */
+function unauthed(path: string, method = "GET"): Request {
+  return new Request(`${BASE}${path}`, {
+    method,
+    ...(method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
+  });
+}
+
+test("no token: every endpoint is a 401 and nothing runs", async () => {
+  for (const req of [
+    unauthed("/agents/personal/runs", "POST"),
+    unauthed("/agents/personal/runs/abc/confirm", "POST"),
+    unauthed("/agents/personal/runs"),
+    unauthed("/agents/personal/events"),
+  ]) {
+    const res = await handleRequest(deps(), req);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    // A generic body — it never reveals whether the path or agent exists.
+    expect((await res.json()) as { error: string }).toEqual({ error: "Unauthorized." });
+  }
+  // The unauthenticated POSTs never reached the kernel.
+  expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
+test("a wrong or malformed token is the same 401 as no token", async () => {
+  const variants = [
+    { authorization: "Bearer wrong-token" }, // valid shape, wrong value
+    { authorization: `Bearer ${TOKEN}x` }, // a near-miss (longer)
+    { authorization: "Bearer " }, // scheme, no token
+    { authorization: TOKEN }, // the token, but no Bearer scheme
+    { authorization: `Basic ${TOKEN}` }, // wrong scheme
+  ];
+  for (const headers of variants) {
+    const res = await handleRequest(
+      deps(),
+      new Request(`${BASE}/agents/personal/runs`, { method: "POST", headers, body: "{}" }),
+    );
+    expect(res.status).toBe(401);
+  }
+  expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
+test("the token gate fires before routing — an unknown path is 401, not 404", async () => {
+  // Default-deny: an unauthenticated probe cannot even distinguish a real path from
+  // a bogus one, nor learn which agent this server is bound to.
+  expect((await handleRequest(deps(), unauthed("/"))).status).toBe(401);
+  expect((await handleRequest(deps(), unauthed("/agents/personal/widgets"))).status).toBe(401);
+  expect((await handleRequest(deps(), unauthed("/agents/work/runs", "POST"))).status).toBe(401);
+});
+
+test("the gate is independent of trust level — a propose agent's server still 401s", async () => {
+  // Auth is the outer gate; it does not care about the agent's trust level (the
+  // destructive-action gate inside does). `work` is a propose agent.
+  const res = await handleRequest(deps({ agent: work }), unauthed("/agents/work/runs", "POST"));
+  expect(res.status).toBe(401);
+  expect(store.runs.list(work.id)).toHaveLength(0);
+});
+
+test("SSE authenticates identically — no token is a 401, not a stream", async () => {
+  const req = new Request(`${BASE}/agents/personal/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify({ input: "ping" }),
+  });
+  const res = await handleRequest(deps(), req);
+  expect(res.status).toBe(401);
+  expect(res.headers.get("content-type")).toContain("application/json");
+  expect(store.runs.list(personal.id)).toHaveLength(0);
 });
 
 // --- SSE streaming (#16) -------------------------------------------------
@@ -354,7 +442,7 @@ function eventEmittingAdapter(output: RunOutput): RuntimeAdapter {
 function postStream(path: string, body: unknown): Request {
   return new Request(`${BASE}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    headers: { "content-type": "application/json", accept: "text/event-stream", ...auth() },
     body: JSON.stringify(body),
   });
 }
@@ -505,8 +593,8 @@ function confirmReq(runId: string, stream = false): Request {
   return new Request(`${BASE}/agents/personal/runs/${runId}/confirm`, {
     method: "POST",
     headers: stream
-      ? { "content-type": "application/json", accept: "text/event-stream" }
-      : { "content-type": "application/json" },
+      ? { "content-type": "application/json", accept: "text/event-stream", ...auth() }
+      : { "content-type": "application/json", ...auth() },
     body: "{}",
   });
 }
@@ -576,7 +664,7 @@ test("the confirm path is POST-only and bound to the served agent", async () => 
   // One agent per server: another agent's confirm path is not reachable here.
   const otherAgent = await handleRequest(
     deps(),
-    new Request(`${BASE}/agents/work/runs/abc/confirm`, { method: "POST", body: "{}" }),
+    new Request(`${BASE}/agents/work/runs/abc/confirm`, { method: "POST", body: "{}", headers: auth() }),
   );
   expect(otherAgent.status).toBe(404);
   expect(store.runs.list(work.id)).toHaveLength(0);
