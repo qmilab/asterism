@@ -19,7 +19,16 @@
 // The env var always overrides the file, so a container injecting the secret never
 // bakes one into its image and never depends on what is on disk.
 
-import { chmodSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
@@ -69,49 +78,46 @@ function readPersisted(path: string): string | undefined {
 }
 
 /**
- * Reconcile against a `path` that already exists when we tried to create it: adopt a
- * COMPLETE token a racer published (so both servers agree), or — if it is a stale
- * empty/partial leftover from an interrupted serve — atomically replace it with the
- * staged temp so OUR token is actually persisted and reused next time. Renaming the
- * already-written temp publishes the token in one step, never exposing a partial file.
+ * Atomically publish `token` at `path`, owner-only. Staged in a private temp file
+ * written in full, then `rename`d into place — so a reader never observes a partial
+ * file, and a stale empty/malformed file at `path` is replaced in one step. The dir
+ * is created 0700 and the file 0600 explicitly, so a permissive umask cannot widen
+ * them. Callers serialize this behind the lock below, so it is never two writers.
  */
-function adoptOrReclaim(path: string, tmp: string, token: string): string {
-  const existing = readPersisted(path);
-  if (existing) return existing;
-  renameSync(tmp, path);
-  return token;
-}
-
-/**
- * Exclusively create `path` holding `token`, owner-only — the portable fallback used
- * when the filesystem has no hard links. If we lose the create race (`EEXIST`), defer
- * to {@link adoptOrReclaim}: adopt the winner's token, or reclaim an empty leftover.
- */
-function claimByExclusiveWrite(path: string, tmp: string, token: string): string {
+function writeTokenAtomic(path: string, token: string): void {
+  const tmp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+  writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
+  chmodSync(tmp, 0o600);
   try {
-    writeFileSync(path, token, { mode: 0o600, flag: "wx" });
-    chmodSync(path, 0o600);
-    return token;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") return adoptOrReclaim(path, tmp, token);
-    throw err;
+    renameSync(tmp, path);
+  } finally {
+    rmSync(tmp, { force: true });
   }
 }
 
+/** Block this thread for `ms` — used to back off while another process holds the lock. */
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+function sleepSync(ms: number): void {
+  Atomics.wait(SLEEP_BUF, 0, 0, ms);
+}
+
+/** Lock wait budget: at most LOCK_SPINS × LOCK_BACKOFF_MS (~200ms) before self-healing. */
+const LOCK_SPINS = 100;
+const LOCK_BACKOFF_MS = 2;
+
 /**
- * Persist a freshly generated token owner-only and return the value actually in
- * effect. Three correctness hazards drive the shape here: a reader must NEVER observe
- * a half-written token; two `serve` processes racing on first run must converge on a
- * SINGLE token (else one server 401s the other's clients); and a stale empty/partial
- * file from an interrupted serve must be replaced, not left to break reuse next time.
+ * Persist a freshly generated token owner-only and return the token in effect.
+ * Three correctness hazards drive the shape here: a reader must NEVER observe a
+ * half-written token; two `serve` processes racing on first run (or both reclaiming a
+ * stale empty/malformed file) must converge on a SINGLE token (else one server 401s
+ * the other's clients); and a corrupt file must be replaced, not left in place.
  *
- * The token is staged in a private temp file written in full, then published with an
- * atomic exclusive hard link: `path` appears complete in one step (it is a link to an
- * already-written file — no empty/partial window) and only one racer can create it, so
- * the losers adopt the winner's token. If `path` already exists, {@link adoptOrReclaim}
- * adopts a complete token or reclaims an empty leftover. A filesystem without hard
- * links (e.g. FAT) falls back to an exclusive create + write. The dir is 0700 and the
- * file 0600, set explicitly so a permissive umask cannot widen them.
+ * Convergence is enforced with an exclusive lock file (`<path>.lock`, created with the
+ * `wx` flag — an atomic "fail if it exists"). Exactly one process holds the lock and
+ * writes the token via {@link writeTokenAtomic}; everyone else waits and adopts what it
+ * published. If the lock is never released (a holder crashed mid-write), the bounded
+ * wait gives up and self-heals: it publishes a token and clears the stuck lock, so a
+ * server still starts — convergence is best-effort only in that rare case.
  */
 function persistGenerated(path: string): string {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -122,28 +128,45 @@ function persistGenerated(path: string): string {
     // serving — the 0600 file is what actually protects the value.
   }
 
-  const token = generateToken();
-  const tmp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
-  writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
-  chmodSync(tmp, 0o600);
-  try {
+  // Fast path: a valid token is already saved (the common "reuse" case).
+  const saved = readPersisted(path);
+  if (saved) return saved;
+
+  const lockPath = `${path}.lock`;
+  for (let spin = 0; spin < LOCK_SPINS; spin++) {
+    let fd: number;
     try {
-      linkSync(tmp, path);
-      return token; // won the race; `path` now holds our fully written token
+      fd = openSync(lockPath, "wx", 0o600); // atomic exclusive create ⇒ we hold the lock
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-        // `path` already exists — adopt a complete token, or reclaim a stale one.
-        return adoptOrReclaim(path, tmp, token);
-      }
-      // No hard-link support here (e.g. FAT) — publish without one.
-      return claimByExclusiveWrite(path, tmp, token);
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Another process holds the lock and is writing the token (it lands fast). Adopt
+      // it once published; otherwise back off briefly and retry — never write our own.
+      const published = readPersisted(path);
+      if (published) return published;
+      sleepSync(LOCK_BACKOFF_MS);
+      continue;
     }
-  } finally {
-    // Drop the temp name. After a successful link it is a second name for `path`'s
-    // inode (removing it leaves `path`); after a rename it is already gone; otherwise
-    // it is the now-unneeded stage file.
-    rmSync(tmp, { force: true });
+    try {
+      // Under the lock we are the sole writer. Re-check (a prior holder may have just
+      // published), else generate and publish atomically.
+      const existing = readPersisted(path);
+      if (existing) return existing;
+      const token = generateToken();
+      writeTokenAtomic(path, token);
+      return token;
+    } finally {
+      closeSync(fd);
+      rmSync(lockPath, { force: true });
+    }
   }
+
+  // The lock never freed within the budget — almost certainly a holder that died
+  // mid-write. Self-heal so the server still starts: publish a token and clear the
+  // stuck lock. (Sustained genuine contention here would be pathological.)
+  const token = generateToken();
+  writeTokenAtomic(path, token);
+  rmSync(lockPath, { force: true });
+  return token;
 }
 
 /**

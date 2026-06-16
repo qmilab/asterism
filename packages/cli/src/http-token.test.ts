@@ -115,3 +115,16 @@ test("a malformed persisted token is rejected, reclaimed, and replaced", () => {
   expect(second.source).toBe("file");
   expect(second.token).toBe(first.token);
 });
+
+test("a leftover lock file self-heals so serving still gets a valid token", () => {
+  // A lock abandoned by a crashed serve (no token yet). Resolution must not deadlock:
+  // after a bounded wait it publishes a token anyway and clears the stuck lock.
+  const path = httpTokenPath(home, "personal");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(`${path}.lock`, "");
+
+  const resolved = resolveHttpToken(home, "personal", {});
+  expect(resolved.token).toMatch(/^[0-9a-f]{64}$/);
+  expect(readFileSync(path, "utf8")).toBe(resolved.token); // published despite the lock
+  expect(existsSync(`${path}.lock`)).toBe(false); // and the stuck lock was cleared
+});
