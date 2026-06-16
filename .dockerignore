@@ -1,0 +1,43 @@
+# The image builds from source and compiles fresh inside the build stage, so none
+# of the local build output, installed dependencies, runtime state, or private
+# material is sent to the daemon — a smaller, faster, and cleaner build context.
+
+# dependencies & build output (reinstalled / recompiled in the image)
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.bun/
+
+# local runtime state & secrets — must never enter an image
+.asterism/
+.claude/
+*.db
+*.db-journal
+*.sqlite
+.env
+.env.*
+
+# version control & CI
+.git/
+.github/
+
+# docs site build + private/internal material (not for a published image)
+site/
+internal/
+landing/
+docs/
+CONTEXT_HANDOFF.md
+ROADMAP.md
+PROJECT_INSTRUCTIONS.md
+STARTER_PROMPTS.md
+CLAUDE_INTERNAL.md
+TASKS.md
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# the image-build inputs themselves
+Dockerfile
+.dockerignore

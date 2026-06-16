@@ -66,6 +66,7 @@ Full docs live in [`docs/`](./docs/):
 - [Local HTTP endpoint](./docs/http.md) — serve one agent over HTTP.
 - [Chat channels](./docs/channels.md) — reach one agent from a Telegram or Discord chat.
 - [Run as a service](./docs/service.md) — keep an agent running in the background, started by your OS.
+- [Run in a container](./docs/container.md) — package the same runtime to run on any container host.
 
 ## Continuous, reviewable learning
 
