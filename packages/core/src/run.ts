@@ -584,3 +584,42 @@ export async function resumeRun(
   });
   return { kind: "resumed", result };
 }
+
+/**
+ * The outcome of {@link declineRun}, parallel to {@link ResumeOutcome}:
+ * - `declined`   — the run was parked and has been refused, ending `failed`; the
+ *                  destructive action it stopped on never ran.
+ * - `not_found`  — no such run for this agent (scoped lookup, so a foreign run is
+ *                  indistinguishable from a missing one).
+ * - `not_paused` — the run exists but is not `awaiting_confirmation` (already
+ *                  terminal, or a concurrent confirm claimed it first); `run`
+ *                  carries its actual current state.
+ */
+export type DeclineOutcome =
+  | { kind: "declined"; run: Run }
+  | { kind: "not_found" }
+  | { kind: "not_paused"; run: Run };
+
+/**
+ * Decline a run that paused at `awaiting_confirmation` — the operator refused the
+ * destructive action, so the run ends `failed` and the action never executes. The
+ * counterpart to {@link resumeRun}, and deliberately the same shape.
+ *
+ * It CLAIMS the run first (the same compare-and-set `resumeRun` uses) so a decline
+ * and a confirm race safely: exactly one wins. If a confirm already claimed the run
+ * (it is now `running`) or it has otherwise left `awaiting_confirmation`, the claim
+ * misses and this returns `not_paused` — you cannot decline a run that is already
+ * being resumed. No adapter or substrate is needed: nothing re-enters the loop.
+ */
+export function declineRun(store: AsterismStore, agent: Agent, runId: string): DeclineOutcome {
+  const claimed = store.claimRunForResume(agent.id, runId);
+  if (!claimed) {
+    const current = store.runs.get(agent.id, runId);
+    return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
+  }
+  // We own the run (now `running` after the claim). Drive it to `failed` and record
+  // the refusal. `declineRun` returns undefined only for a cross-agent/unknown run,
+  // which the just-claimed run cannot be — fall back to `claimed` for the type.
+  const declined = store.declineRun(agent.id, runId);
+  return { kind: "declined", run: declined ?? claimed };
+}

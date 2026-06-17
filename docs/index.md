@@ -17,6 +17,8 @@ New here? Read in this order:
    separation and trust guarantees proven end to end.
 5. **[Local HTTP endpoint](./http.md)** — serve one agent over HTTP, with the
    same guarantees as the command line.
+6. **[Dashboard](./dashboard.md)** — watch and steer every agent in one live
+   terminal view.
 
 ## Quick links
 
@@ -28,6 +30,7 @@ New here? Read in this order:
 | Look up a command | [Command reference](./commands.md) |
 | See the separation guarantees proven | [Walkthrough](./walkthrough.md) |
 | Call an agent over HTTP | [HTTP endpoint](./http.md) |
+| Watch and steer every agent at once | [Dashboard](./dashboard.md) |
 | Keep an agent running in the background | [Run as a service](./service.md) |
 
 ## About this phase

@@ -504,6 +504,61 @@ request/response details.
 
 ---
 
+## `dashboard`
+
+```
+asterism dashboard [<url>] [--token <token>] [--headless] [--port <n>] [--host <addr>]
+```
+
+Your live terminal console over **every** agent at once — the one place to see
+what each agent is doing and steer it: review proposed memories, dial autonomy up
+or down, approve or decline an action an agent has paused for confirmation, and
+watch activity stream in. It shows many agents but never crosses between them — it
+only ever asks about one agent at a time, so their separate lives hold here too.
+
+Run with no arguments, it opens the live view for this machine's agents:
+
+```console
+$ asterism dashboard
+```
+
+| Key | Action |
+|---|---|
+| `↑`/`↓`, `j`/`k` | Select an agent |
+| `t` | Set the selected agent's autonomy (trust) level |
+| `c` | Approve the agent's pending destructive action |
+| `x` | Decline the agent's pending destructive action |
+| `m` | Reflect — review proposed memories (`a` accept · `e` edit · `r` reject) |
+| `r` | Refresh now |
+| `?` | Toggle help · `q` quit |
+
+The dashboard is a **thin client** — it holds no logic of its own. Every action is
+one request to a small local console endpoint that spans your agents, the same
+kernel-backed surface the CLI and [`serve`](#serve) use, so it inherits the exact
+same trust enforcement, destructive-action gate, and agent boundary. Reviewing
+memory needs a configured model (it runs reflection on demand); the rest works
+without one.
+
+| Option | Default | Description |
+|---|---|---|
+| `--headless` | — | Run the console **without** the terminal view — the endpoint a dashboard on another machine attaches to. Prints an access token like `serve`. |
+| `--token <t>` | — | The access token when attaching to a remote console (or set `ASTERISM_HTTP_TOKEN`). |
+| `--port <n>` | `4832` | With `--headless`, the port to listen on. |
+| `--host <addr>` | `127.0.0.1` | With `--headless`, the address to bind (loopback by default). |
+
+To watch a machine's agents from elsewhere, run the console there and attach to it:
+
+```console
+# on the host
+$ asterism dashboard --headless
+# on your laptop
+$ asterism dashboard http://host:4832 --token <token>
+```
+
+See the [dashboard reference](./dashboard.md) for the console endpoints behind it.
+
+---
+
 ## `channel telegram`
 
 ```

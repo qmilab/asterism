@@ -39,6 +39,7 @@ Commands:
   reflect <agent> --review          Review memories an agent proposes to keep
   config                            Show or change the model agents run on
   serve <agent>                     Offer an agent over a local HTTP endpoint
+  dashboard                         Watch and steer every agent in one live view
   channel telegram <agent>          Reach an agent from a Telegram chat
   channel discord <agent>           Reach an agent from a Discord channel
   service install <agent>           Keep an agent running as a background service
@@ -246,6 +247,34 @@ Options:
 Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
 OPENAI_API_KEY) to start runs; without one, the read endpoints still work. Press
 Ctrl+C to stop.`,
+
+  dashboard: `asterism dashboard [<url>] [--token <token>] [--headless] [--port <n>] [--host <addr>]
+
+Your live console over every agent at once — the one place to see what each agent is
+doing and steer it. In one terminal view:
+  - every agent, its character, and how much it may do on its own
+  - dial an agent's autonomy up or down on the spot
+  - approve or decline an action an agent has paused for your confirmation
+  - review memories an agent proposes to keep — accept, edit, or reject each
+  - watch activity stream in as it happens
+
+It shows many agents but never crosses between them: it only ever asks about one
+agent at a time, so their separate lives hold here too.
+
+  asterism dashboard                 open the live view for this machine's agents
+  asterism dashboard --headless      run the console for a dashboard elsewhere to attach to
+  asterism dashboard <url> --token … attach to a console running on another machine
+
+Options:
+  --headless      Run the console without the terminal view — for attaching a remote
+                  dashboard, or scripting. Prints an access token like \`serve\`.
+  --token <t>     The access token when attaching to a remote console (or set
+                  ASTERISM_HTTP_TOKEN).
+  --port <n>      With --headless, the port to listen on. Default 4832.
+  --host <addr>   With --headless, the address to bind. Default 127.0.0.1.
+
+Keys: ↑/↓ select · t set autonomy · c approve · x decline · m review memories ·
+r refresh · ? help · q quit.`,
 
   channel: `asterism channel <telegram|discord> <agent> [--allow <id>[,<id>...]]
 

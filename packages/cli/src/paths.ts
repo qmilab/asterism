@@ -58,6 +58,17 @@ export function httpTokenPath(home: string, agentName: string): string {
 }
 
 /**
+ * The install's HTTP access token for the operator CONSOLE (`asterism dashboard`).
+ * Unlike a per-agent serve token, this gates one install-wide door, so it is a
+ * single file at the home root — never inside `http-tokens/<name>.token`, where it
+ * could collide with an agent literally named `console`. Owner-only, like the
+ * per-agent tokens, and never the workspace.
+ */
+export function consoleTokenPath(home: string): string {
+  return join(home, "console.token");
+}
+
+/**
  * Walk up from `startDir` looking for an existing `.asterism/` directory and
  * return its absolute path, or `undefined` if none is found before the
  * filesystem root. Mirrors how `git` discovers its repository from a nested cwd.

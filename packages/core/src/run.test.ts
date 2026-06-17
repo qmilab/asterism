@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { executeRun, resumeRun } from "./run.js";
+import { declineRun, executeRun, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
@@ -1196,4 +1196,76 @@ test("a run completes even if the adapter never closes its event stream", async 
   });
   expect(result.status).toBe("done");
   expect(result.output).toBe("ok");
+});
+
+// --- declineRun (the counterpart to a confirm) -----------------------------
+
+test("declineRun refuses a paused run: it ends failed, logs run.declined, and never runs the action", async () => {
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete the dist files", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  const outcome = declineRun(store, agent, parked.run.id);
+  expect(outcome.kind).toBe("declined");
+  if (outcome.kind !== "declined") return;
+  expect(outcome.run.status).toBe("failed");
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("failed");
+
+  const types = store.events.tail(agent.id).map((e) => e.type);
+  expect(types).toContain("run.declined");
+  // The destructive action paused but was refused — it never executed.
+  expect(types).not.toContain("action.executed");
+});
+
+test("declineRun reports not_found for an unknown run", () => {
+  expect(declineRun(store, agent, "no-such-run").kind).toBe("not_found");
+});
+
+test("declineRun reports not_paused for a run that already finished", async () => {
+  const done = await executeRun(store, agent, "just answer", {
+    adapter: cannedAdapter({ status: "done", text: "answered" }),
+  });
+  const outcome = declineRun(store, agent, done.run.id);
+  expect(outcome.kind).toBe("not_paused");
+  if (outcome.kind === "not_paused") expect(outcome.run.status).toBe("done");
+});
+
+test("declineRun is agent-scoped: another agent cannot decline this agent's paused run", async () => {
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete dist", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+
+  const other = store.createAgent({
+    name: "work",
+    role: "",
+    soulRef: "casual-helper",
+    workspaceDir: "/tmp/work",
+    trustLevel: "autonomous",
+  });
+  // Naming the run under another agent's scope finds nothing — it is never declined.
+  expect(declineRun(store, other, parked.run.id).kind).toBe("not_found");
+  expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("awaiting_confirmation");
+});
+
+test("decline and confirm are mutually exclusive: a declined run cannot then be confirmed", async () => {
+  const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
+  const parked = await executeRun(store, agent, "delete dist", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(declineRun(store, agent, parked.run.id).kind).toBe("declined");
+
+  // The claim is gone (the run is failed), so a racing confirm finds nothing to do —
+  // the same single-winner guarantee that serializes two confirms.
+  const outcome = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(outcome.kind).toBe("not_paused");
 });

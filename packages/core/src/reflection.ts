@@ -20,7 +20,10 @@
 //      it (a Phase 0 constraint). The subset is checked against `MemoryType` at
 //      compile time so the two can never drift.
 
-import type { MemoryType } from "./types.js";
+import type { Agent, MemoryType } from "./types.js";
+import type { AsterismStore } from "./store.js";
+import { screenMemory } from "./firewall.js";
+import type { FirewallFinding } from "./firewall.js";
 
 /**
  * The memory types reflection may propose — the durable, behaviour-shaping kinds.
@@ -93,4 +96,63 @@ export interface ProposedMemory {
  */
 export interface ReflectionProvider {
   reflect(input: ReflectionInput): Promise<readonly ProposedMemory[]>;
+}
+
+/**
+ * A proposed memory readied for human review: the provider's proposal plus the
+ * memory firewall's findings on its content (empty when it screens clean). The
+ * findings are advisory — for the reviewer to see WHAT tripped a rule — the hard
+ * gate is the firewall re-screen at persistence (`store.recordMemory`).
+ */
+export interface ReviewableProposal extends ProposedMemory {
+  findings: readonly FirewallFinding[];
+}
+
+/**
+ * The outcome of {@link proposeReviewableMemories}:
+ * - `proposed` — a reflectable run was found and the provider returned proposals
+ *   (possibly an empty list); `ignored` counts proposals dropped for a
+ *   non-reviewable memory type.
+ * - `no_run`   — the agent has no completed run with output to reflect on (or the
+ *   requested run has none), so nothing was sent to the provider.
+ */
+export type ProposeResult =
+  | { kind: "proposed"; runId: string; proposals: ReviewableProposal[]; ignored: number }
+  | { kind: "no_run" };
+
+/**
+ * The reflect-proposal pipeline, shared by every surface that reviews memory (the
+ * CLI's `reflect --review` and the dashboard's console endpoint) so they can never
+ * drift on WHAT is reviewable. It selects the run to learn from (a given `runId`, or
+ * the agent's latest run with output), hands the transcript and the agent's already-
+ * known memories to the provider, then applies the two kernel policies: the
+ * reflection-only type filter ({@link isReflectionMemoryType}) and a memory-firewall
+ * screen of each proposal for display.
+ *
+ * It only ever PROPOSES — nothing is persisted here (that is the reviewer's accept,
+ * through `store.recordMemory`, where the firewall re-screens as the real gate). The
+ * provider's own errors propagate to the caller, which owns how to report them.
+ */
+export async function proposeReviewableMemories(
+  store: AsterismStore,
+  agent: Agent,
+  provider: ReflectionProvider,
+  options: { runId?: string } = {},
+): Promise<ProposeResult> {
+  const target =
+    options.runId !== undefined
+      ? store.runs.get(agent.id, options.runId)
+      : store.runs.latestWithOutput(agent.id);
+  if (!target || target.output === undefined) return { kind: "no_run" };
+
+  const transcript = { runId: target.id, input: target.input, output: target.output };
+  const knownMemories = store.memories.listActiveAccepted(agent.id).map((m) => m.content);
+  const raw = await provider.reflect({ agentId: agent.id, transcript, knownMemories });
+
+  // Reflection-only types are a kernel constraint, enforced at the consumption point:
+  // a non-conforming custom provider must never slip a disallowed type (e.g.
+  // `episodic`) into review, since `recordMemory` would otherwise accept it.
+  const usable = raw.filter((p) => isReflectionMemoryType(p.memoryType));
+  const proposals = usable.map((p) => ({ ...p, findings: screenMemory(p.content).findings }));
+  return { kind: "proposed", runId: target.id, proposals, ignored: raw.length - usable.length };
 }
