@@ -15,6 +15,8 @@ time. The dashboard makes them legible in one view, and lets you act on them:
 $ asterism dashboard
 ```
 
+![The Asterism dashboard touring its views: the agent roster with one autonomous agent paused for confirmation, the autonomy (trust) chooser, the memory-review card, and the help overlay.](assets/img/dashboard.gif)
+
 | Key | Action |
 |---|---|
 | `↑`/`↓`, `j`/`k` | Select an agent |
