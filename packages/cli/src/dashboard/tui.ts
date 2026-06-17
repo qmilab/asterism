@@ -613,15 +613,16 @@ export async function runDashboard(
     }
   }
 
-  // Enter the alternate screen and raw mode FIRST, then run ALL setup inside the try
-  // so the terminal is always restored on exit — even if the initial load or a draw
-  // throws — and nothing is ever drawn to the normal screen before the switch.
-  term.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
-  term.setRawMode(true);
   let offKey: (() => void) | undefined;
   let offResize: (() => void) | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   try {
+    // Enter the alternate screen and raw mode INSIDE the try, so the finally always
+    // restores the terminal — even if setRawMode throws on an unusual TTY or a custom
+    // embedding, AFTER the alternate screen was already entered. Nothing is drawn to
+    // the normal screen before the switch.
+    term.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
+    term.setRawMode(true);
     offKey = term.onKey((key) => handleKey(key));
     offResize = term.onResize(draw);
     // Live polling — refresh the roster + detail on a fixed cadence so activity, trust
@@ -649,7 +650,14 @@ export async function runDashboard(
     if (timer) clearInterval(timer);
     offKey?.();
     offResize?.();
-    term.setRawMode(false);
+    // Best-effort raw-mode restore: on a TTY where setRawMode throws, don't let it
+    // skip the screen/cursor restore below — getting back to the normal screen with a
+    // visible cursor is the more important recovery.
+    try {
+      term.setRawMode(false);
+    } catch {
+      // ignore — the screen restore still runs
+    }
     term.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   }
 }

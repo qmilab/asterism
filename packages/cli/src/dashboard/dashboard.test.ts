@@ -20,7 +20,7 @@ import type {
 import { handleConsoleRequest } from "@qmilab/asterism-server";
 import type { ConsoleDeps } from "@qmilab/asterism-server";
 
-import { CLEAR_SCREEN, EXIT_ALT_SCREEN, stripAnsi } from "./ansi.js";
+import { CLEAR_SCREEN, ENTER_ALT_SCREEN, EXIT_ALT_SCREEN, SHOW_CURSOR, stripAnsi } from "./ansi.js";
 import { DashboardClient, DashboardError } from "./client.js";
 import type { FetchLike } from "./client.js";
 import { decodeKeys } from "./terminal-node.js";
@@ -319,6 +319,20 @@ test("runDashboard never draws after quit while an action is still in flight", a
   await flush();
   // No frame was painted after teardown — the write count is unchanged.
   expect(term.frames.length).toBe(framesAtQuit);
+});
+
+test("runDashboard restores the terminal even if entering raw mode throws", async () => {
+  const term = fakeTerminal();
+  // An unusual TTY where raw-mode entry fails — but only AFTER the alternate screen
+  // has already been written, the exact case the finally must recover from.
+  term.setRawMode = (on: boolean): void => {
+    if (on) throw new Error("no raw mode");
+  };
+  await expect(runDashboard(client(), term, { refreshMs: 1_000_000 })).rejects.toThrow("no raw mode");
+  const all = term.frames.join("");
+  expect(all).toContain(ENTER_ALT_SCREEN); // it did switch screens…
+  expect(all).toContain(EXIT_ALT_SCREEN); // …and the finally switched back
+  expect(all).toContain(SHOW_CURSOR);
 });
 
 test("runDashboard saves a reflected memory to its source agent, not one selected mid-flight", async () => {
