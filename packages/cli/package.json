@@ -1,6 +1,6 @@
 {
   "name": "@qmilab/asterism",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Many agents. One runtime. Separate lives. Run distinct local AI agents — each with its own soul, memory, secrets, skills, workspace, and autonomy level.",
   "keywords": [
     "ai",
