@@ -186,7 +186,7 @@ not claim to safely contain deliberately hostile code. In particular, an agent's
 filesystem jail. The shipped file tools refuse a path that climbs out of the
 workspace (`..`, an absolute path), but that is each tool's own best-effort
 check, not OS-level containment — a different or misbehaving tool would not be
-physically prevented from writing elsewhere in Phase 0. What ultimately guards
+physically prevented from writing elsewhere today. What ultimately guards
 against irreversible loss is the
 [destructive-action gate](#the-destructive-action-gate) — a deletion pauses for
 confirmation regardless of trust — not the workspace boundary. Stronger execution

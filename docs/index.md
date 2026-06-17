@@ -35,8 +35,10 @@ New here? Read in this order:
 
 ## About this phase
 
-This documentation covers **Phase 0** — the local-first core. Richer cognition,
-agent-to-agent collaboration, and stronger execution isolation come in later
+This documentation covers **Phase 1** — the local-first core plus reach and
+operability: the dashboard, chat channels, the background service, the HTTP
+endpoint, and the container image. Richer cognition, agent-to-agent
+collaboration, and stronger execution isolation come in later
 phases; follow along in the repo's
 [issues](https://github.com/qmilab/asterism/issues). For the precise scope of
 what "separate" guarantees today, see

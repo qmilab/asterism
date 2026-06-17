@@ -60,7 +60,7 @@ gate real actions to govern: an ordinary write executes under `autonomous`, and 
 deletion pauses for confirmation regardless of trust level.
 
 Each tool is confined to the agent's own workspace — a path that climbs out
-(`..`, an absolute path) is refused. That is Phase 0's *logical* scoping, not an
+(`..`, an absolute path) is refused. That is *logical* scoping, not an
 OS-enforced jail (see
 [what isolation means today](./concepts.md#what-isolation-means-today)).
 

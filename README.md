@@ -6,10 +6,11 @@
 
 *Distinct AI agents from one local install — each with its own soul, memory, secrets, skills, workspace, and autonomy. Nothing leaks between them.*
 
+[![npm](https://img.shields.io/npm/v/@qmilab/asterism?color=3b82f6&label=npm)](https://www.npmjs.com/package/@qmilab/asterism)
+[![Container image](https://github.com/qmilab/asterism/actions/workflows/docker.yml/badge.svg)](https://github.com/qmilab/asterism/actions/workflows/docker.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
 [![Runtime](https://img.shields.io/badge/runtime-Node%2020%2B%20%7C%20Bun%20%7C%20Deno-000000)](#quickstart)
-[![Tests](https://img.shields.io/badge/tests-passing-22c55e)](#)
-[![Status](https://img.shields.io/badge/status-Phase%200-6366f1)](#status)
+[![Status](https://img.shields.io/badge/status-Phase%201%20complete-6366f1)](#status)
 
 [**Why**](#why) · [**Quickstart**](#quickstart) · [**Docs**](#documentation) · [**Learning**](#continuous-reviewable-learning) · [**Lodestar**](#pairs-with-lodestar)
 
@@ -91,7 +92,7 @@ A lodestar is the single star you steer by. An asterism is the grouping you navi
 
 ## Status
 
-Phase 0 (Core) — in active development. Local CLI + HTTP, per-agent scoping (memory, secrets, skills, workspace), souls and roles, trust profiles, reviewable memory. Richer cognition, collaboration, and stronger execution isolation come in later phases.
+**Phase 1 complete** — latest release **v0.2.1**. The local-first core — distinct agents with per-agent memory, secrets, skills, and workspace; souls and roles; dialable trust with the destructive-action gate; reviewable memory — now joined by a live terminal **dashboard**, **Telegram and Discord** channels, a background **service**, a token-protected **HTTP endpoint**, and a multi-arch **container image** that runs natively on Intel/AMD and Apple Silicon. Still ahead: richer cognition, agent-to-agent collaboration, and stronger execution isolation. Today's separation is *logical scoping*, not hardened containment — see [what isolation means today](./docs/concepts.md#what-isolation-means-today).
 
 ## Contributing & security
 
