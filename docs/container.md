@@ -12,6 +12,21 @@ on the command line, just carried somewhere else.
 > agent. Confinement of agent code is a [later phase](./concepts.md#what-isolation-means-today),
 > in the container as on your machine.
 
+## Use the published image
+
+The released image is published to the GitHub Container Registry and runs **natively on
+both `linux/amd64` and `linux/arm64`** — Intel/AMD servers and Apple Silicon Macs alike,
+with no `--platform` flag:
+
+```console
+$ docker pull ghcr.io/qmilab/asterism        # or :0.2.1 to pin a version
+$ docker run --rm ghcr.io/qmilab/asterism --help
+```
+
+Tags: `latest`, the exact version (e.g. `0.2.1`), and the minor line (`0.2`). The examples
+below use the short local tag `asterism`; substitute `ghcr.io/qmilab/asterism` anywhere to
+run the published image instead of building your own.
+
 ## Build the image
 
 From a checkout of the repo:
