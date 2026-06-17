@@ -133,6 +133,8 @@ response goes to **standard out**, so you can pipe a run cleanly.
 Here's the moment that makes autonomy safe to use. Ask `writer` to **delete** the
 file it just made:
 
+![An autonomous agent writes a file without asking, then pauses for confirmation before deleting one; after the user runs asterism confirm, the deletion proceeds.](assets/img/gate.gif)
+
 ```console
 $ asterism run writer "delete posts/hello.md, it's no longer needed"
 Run paused: a destructive action needs your confirmation before it can proceed.
@@ -281,6 +283,8 @@ One command at a time is fine for one agent. Once you have a few, open the
 ```console
 $ asterism dashboard
 ```
+
+![The Asterism dashboard: a roster of three agents with their autonomy levels on the left, and the selected autonomous agent's detail on the right, including a pending destructive action awaiting confirmation and an activity timeline.](assets/img/dashboard.png)
 
 From there you can see the roster, dial autonomy up or down, **approve or decline**
 a paused action, and review proposed memories — all without leaving the view. It

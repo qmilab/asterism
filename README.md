@@ -14,6 +14,12 @@
 
 [**Why**](#why) · [**Quickstart**](#quickstart) · [**What you get**](#what-you-get) · [**Docs**](#documentation) · [**Lodestar**](#pairs-with-lodestar)
 
+<br>
+
+<img src="docs/assets/img/dashboard.png" alt="The Asterism dashboard: a roster of three agents with their autonomy levels, and one autonomous agent paused for confirmation before a destructive action." width="760">
+
+<em>The dashboard — every agent and its autonomy in one view, including an autonomous agent paused before a destructive action. <a href="docs/dashboard.md">Watch it live →</a></em>
+
 </div>
 
 ---
@@ -59,6 +65,11 @@ asterism events tail client
 ```
 
 > **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. The autonomy you set governs the rest — `propose` hands you a plan, `notify` and `autonomous` act on their own, and at *every* level an agent **pauses for confirmation before anything destructive**. The gate acts on an agent's *tools*: the shipped CLI registers a default catalog of workspace-scoped file tools (`read_file`, `write_file`, `delete_file`) behind it, so with a [configured model](./docs/installation.md#configuring-a-model) an ordinary edit runs under `autonomous` while a deletion pauses — proven end to end in the [five-claims walkthrough](./docs/walkthrough.md).
+
+<div align="center">
+<img src="docs/assets/img/gate.gif" alt="A terminal recording: an autonomous agent writes a file without asking, then pauses for confirmation before deleting one; after the user confirms, the deletion runs." width="760">
+<br><em>An <code>autonomous</code> agent writes without asking — then stops dead before a delete until you confirm.</em>
+</div>
 
 Prefer a container? The released image is multi-arch and runs natively on Intel/AMD and Apple Silicon — no `--platform` flag:
 
