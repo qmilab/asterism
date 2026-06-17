@@ -78,6 +78,14 @@ export interface DashboardState {
   /** Reflect proposals under review, and the cursor into them. */
   proposals: ReviewableProposal[];
   proposalIndex: number;
+  /**
+   * The agent the proposals under review belong to — captured when reflection ran,
+   * NOT re-derived from the live selection. Reflection is async, and the roster stays
+   * navigable while it is in flight, so the selected agent may have changed by the
+   * time a proposal is accepted; saving to this name keeps a memory from ever being
+   * written under the wrong agent.
+   */
+  reviewAgent: string;
   /** Edit buffer while editing a proposal's content. */
   editBuffer: string;
   /** A transient status line (last action result or error). */
@@ -98,6 +106,7 @@ export function initialState(connection = "local"): DashboardState {
     trustChoice: 0,
     proposals: [],
     proposalIndex: 0,
+    reviewAgent: "",
     editBuffer: "",
     status: "",
     busy: false,
@@ -207,7 +216,8 @@ function reviewBody(state: DashboardState, height: number, w: number): string[] 
   const p = state.proposals[state.proposalIndex];
   if (!p) return fit([dim("No more proposals.")], height, w);
   const lines: string[] = [];
-  lines.push(bold(`Review memory ${state.proposalIndex + 1}/${state.proposals.length}`));
+  const forAgent = state.reviewAgent ? ` for ${state.reviewAgent}` : "";
+  lines.push(bold(truncate(`Review memory ${state.proposalIndex + 1}/${state.proposals.length}${forAgent}`, w)));
   lines.push(dim(`${p.memoryType} · confidence ${p.confidence}`));
   lines.push("");
   for (const line of wrap(p.content, w)) lines.push(line);
@@ -477,11 +487,14 @@ export async function runDashboard(
     if (key.name === "m") {
       return act(async () => {
         const result = await client.reflect(agent.name);
-        if (result.proposals.length === 0) return "Nothing to reflect on yet.";
+        if (result.proposals.length === 0) return `Nothing to reflect on yet for ${agent.name}.`;
+        // Bind the batch to THIS agent (captured at 'm'), not the live selection,
+        // which may have moved while the async reflect was in flight.
         state.proposals = result.proposals;
         state.proposalIndex = 0;
+        state.reviewAgent = agent.name;
         state.mode = "review";
-        return `Reviewing ${result.proposals.length} proposed ${result.proposals.length === 1 ? "memory" : "memories"}.`;
+        return `Reviewing ${result.proposals.length} proposed ${result.proposals.length === 1 ? "memory" : "memories"} for ${agent.name}.`;
       });
     }
   }
@@ -535,8 +548,10 @@ export async function runDashboard(
       return draw();
     }
     const p = state.proposals[state.proposalIndex];
-    const agent = selectedAgent(state);
-    if (!p || !agent) {
+    // Save to the agent the batch belongs to (captured at reflect time), NEVER the
+    // live selection — accepting must not write one agent's memory under another.
+    const agentName = state.reviewAgent;
+    if (!p || !agentName) {
       state.mode = "roster";
       return draw();
     }
@@ -551,7 +566,7 @@ export async function runDashboard(
     }
     if (key.name === "a") {
       void act(async () => {
-        await client.saveMemory(agent.name, {
+        await client.saveMemory(agentName, {
           memoryType: p.memoryType,
           content: p.content,
           confidence: p.confidence,
@@ -573,15 +588,15 @@ export async function runDashboard(
     }
     if (key.name === "enter") {
       const p = state.proposals[state.proposalIndex];
-      const agent = selectedAgent(state);
+      const agentName = state.reviewAgent; // the batch's agent, not the live selection
       const content = state.editBuffer.trim();
       state.mode = "review";
-      if (!p || !agent || content.length === 0) {
+      if (!p || !agentName || content.length === 0) {
         state.status = "Empty edit — not saved.";
         return draw();
       }
       void act(async () => {
-        await client.saveMemory(agent.name, {
+        await client.saveMemory(agentName, {
           memoryType: p.memoryType,
           content,
           confidence: p.confidence,

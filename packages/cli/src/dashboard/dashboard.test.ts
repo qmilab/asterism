@@ -182,9 +182,10 @@ test("render shows a review card in review mode", () => {
     { name: "personal", role: "", soulRef: "casual-helper", trustLevel: "autonomous", pendingConfirmations: 0 },
   ];
   state.mode = "review";
+  state.reviewAgent = "personal";
   state.proposals = [{ memoryType: "semantic", content: "remember the tabs", confidence: 0.8, sourceRunId: "r", findings: [] }];
   const text = stripAnsi(render(state, { cols: 80, rows: 24 }).join("\n"));
-  expect(text).toContain("Review memory 1/1");
+  expect(text).toContain("Review memory 1/1 for personal");
   expect(text).toContain("remember the tabs");
 });
 
@@ -318,4 +319,45 @@ test("runDashboard never draws after quit while an action is still in flight", a
   await flush();
   // No frame was painted after teardown — the write count is unchanged.
   expect(term.frames.length).toBe(framesAtQuit);
+});
+
+test("runDashboard saves a reflected memory to its source agent, not one selected mid-flight", async () => {
+  // personal has a reflectable run; the proposal belongs to personal.
+  store.finishRun(personal.id, store.startRun(personal.id, { input: "tidy" }).id, "tidied", "done");
+  const d = deps({ makeReflectionProvider: () => ({ provider: stubProvider([
+    { memoryType: "semantic", content: "belongs to personal", confidence: 0.9, sourceRunId: "x" },
+  ]) }) });
+  // Gate the reflect so the user can navigate to another agent while it's in flight.
+  let releaseReflect!: () => void;
+  const gate = new Promise<void>((r) => {
+    releaseReflect = r;
+  });
+  const gatedFetch: FetchLike = async (url, init) => {
+    if (url.includes("/reflect")) await gate;
+    return handleConsoleRequest(d, new Request(url, init));
+  };
+  const term = fakeTerminal();
+  const done = runDashboard(new DashboardClient("http://console", TOKEN, gatedFetch), term, {
+    refreshMs: 1_000_000,
+  });
+  await flush();
+
+  // personal is selected (index 0). Start reflect WITHOUT awaiting (it blocks on the gate).
+  const mPress = term.press({ name: "m" });
+  await flush();
+  await term.press({ name: "down" }); // navigate to `work` while the reflect is in flight
+  releaseReflect();
+  await mPress;
+  await flush();
+  expect(term.lastText()).toContain("belongs to personal"); // review opened for personal
+
+  await term.press({ name: "a" }); // accept — must save under personal, not work
+  await flush();
+  expect(store.memories.list(personal.id, { reviewState: "accepted" }).map((m) => m.content)).toEqual([
+    "belongs to personal",
+  ]);
+  expect(store.memories.list(work.id, { reviewState: "accepted" })).toEqual([]); // never misattributed
+
+  await term.press({ name: "q" });
+  await done;
 });
