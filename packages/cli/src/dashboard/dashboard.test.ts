@@ -20,8 +20,9 @@ import type {
 import { handleConsoleRequest } from "@qmilab/asterism-server";
 import type { ConsoleDeps } from "@qmilab/asterism-server";
 
-import { stripAnsi } from "./ansi.js";
+import { CLEAR_SCREEN, EXIT_ALT_SCREEN, stripAnsi } from "./ansi.js";
 import { DashboardClient, DashboardError } from "./client.js";
+import type { FetchLike } from "./client.js";
 import { decodeKeys } from "./terminal-node.js";
 import { initialState, render, runDashboard } from "./tui.js";
 import type { Key, TerminalIO } from "./tui.js";
@@ -278,4 +279,43 @@ test("runDashboard reflects and accepts a proposed memory through the console", 
 
   await term.press({ name: "q" });
   await done;
+});
+
+test("runDashboard never draws after quit while an action is still in flight", async () => {
+  store.finishRun(personal.id, store.startRun(personal.id, { input: "tidy" }).id, "tidied", "done");
+  const d = deps({ makeReflectionProvider: () => ({ provider: stubProvider([
+    { memoryType: "semantic", content: "x", confidence: 0.9, sourceRunId: "x" },
+  ]) }) });
+  // Gate the reflect response so the action stays in flight across the quit.
+  let releaseReflect!: () => void;
+  const reflectGate = new Promise<void>((r) => {
+    releaseReflect = r;
+  });
+  const gatedFetch: FetchLike = async (url, init) => {
+    if (url.includes("/reflect")) await reflectGate;
+    return handleConsoleRequest(d, new Request(url, init));
+  };
+  const term = fakeTerminal();
+  const done = runDashboard(new DashboardClient("http://console", TOKEN, gatedFetch), term, {
+    refreshMs: 1_000_000,
+  });
+  await flush();
+
+  // Start the reflect WITHOUT awaiting it (the real stdin path is fire-and-forget, so
+  // a later keypress is handled concurrently) — it blocks on the gate, in flight.
+  const mPress = term.press({ name: "m" });
+  await flush();
+  await term.press({ name: "q" }); // quit while the reflect is still pending
+  await done; // the terminal is restored and the loop returned
+
+  const framesAtQuit = term.frames.length;
+  const lastWrite = term.frames[framesAtQuit - 1] ?? "";
+  expect(lastWrite).toContain(EXIT_ALT_SCREEN); // the restore was the last write
+  expect(lastWrite).not.toContain(CLEAR_SCREEN); // …not a dashboard frame
+
+  releaseReflect(); // the in-flight action now completes
+  await mPress;
+  await flush();
+  // No frame was painted after teardown — the write count is unchanged.
+  expect(term.frames.length).toBe(framesAtQuit);
 });

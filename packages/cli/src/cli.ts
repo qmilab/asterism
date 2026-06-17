@@ -1618,10 +1618,21 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       io.out(`  POST ${server.url}/agents/<agent>/runs/<run>/confirm | /decline`);
       io.out(`  POST ${server.url}/agents/<agent>/reflect       propose memories to review`);
       reportHttpToken(io, consoleToken);
-      if (host !== undefined && host !== "127.0.0.1" && host !== "localhost") {
+      // What "attach" means depends on where it bound. On loopback (the default) only
+      // THIS machine can reach it; a dashboard elsewhere needs it bound beyond loopback
+      // with --host (behind a TLS-terminating proxy — there is no TLS here).
+      const loopback =
+        server.hostname === "127.0.0.1" ||
+        server.hostname === "localhost" ||
+        server.hostname === "::1";
+      if (loopback) {
+        io.out(`  Attach a dashboard on this machine:  asterism dashboard ${server.url} --token <token>`);
+        io.out("  Bound to loopback (this machine only). To reach it from another machine,");
+        io.out("  re-run with --host <addr> behind a TLS-terminating proxy.");
+      } else {
         io.out("  note: bound beyond loopback — put a TLS-terminating proxy in front (see docs).");
+        io.out(`  Attach a dashboard from elsewhere:  asterism dashboard ${server.url} --token <token>`);
       }
-      io.out("Attach a dashboard from elsewhere:  asterism dashboard <url> --token <token>");
       io.out("Press Ctrl+C to stop.");
       const waitForShutdown = io.waitForShutdown ?? (() => Promise.resolve());
       await waitForShutdown();

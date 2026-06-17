@@ -361,18 +361,28 @@ export async function runDashboard(
     resolveQuit = resolve;
   });
 
+  // Set the moment a quit is requested, BEFORE the terminal is restored. An action a
+  // previous keypress kicked off is fire-and-forget, so it can still be in flight when
+  // we tear down; this flag makes every later draw and reload a no-op, so a pending
+  // `act` can never paint a frame onto the user's normal screen after the alternate
+  // screen is gone, nor fetch against a self-hosted server that is shutting down.
+  let stopped = false;
+
   const draw = (): void => {
+    if (stopped) return;
     term.write(CLEAR_SCREEN + CURSOR_HOME + render(state, { cols: term.columns, rows: term.rows }).join("\r\n"));
   };
 
   /** Reload the roster, keeping the selection in range. */
   const loadRoster = async (): Promise<void> => {
+    if (stopped) return;
     state.agents = await client.listAgents();
     if (state.selected >= state.agents.length) state.selected = Math.max(0, state.agents.length - 1);
   };
 
   /** Reload the selected agent's runs + recent events. */
   const loadDetail = async (): Promise<void> => {
+    if (stopped) return;
     const agent = selectedAgent(state);
     if (!agent) {
       state.runs = [];
@@ -385,6 +395,7 @@ export async function runDashboard(
 
   /** Run an action, showing a status and never letting a failure escape the loop. */
   const act = async (fn: () => Promise<string | void>): Promise<void> => {
+    if (stopped) return;
     state.busy = true;
     draw();
     try {
@@ -399,8 +410,11 @@ export async function runDashboard(
   };
 
   async function handleKey(key: Key): Promise<void> {
-    // Global quit (q outside editing, or Ctrl+C anywhere).
+    if (stopped) return;
+    // Global quit (q outside editing, or Ctrl+C anywhere). Flag stopped FIRST so any
+    // action still in flight from an earlier key can no longer draw or fetch.
     if ((key.ctrl && key.name === "c") || (key.name === "q" && state.mode !== "editing")) {
+      stopped = true;
       resolveQuit();
       return;
     }
@@ -599,7 +613,7 @@ export async function runDashboard(
     // changes, and new pending actions appear without a keystroke. Skipped while a
     // modal/edit is open, or an action is in flight, so a poll never clobbers input.
     timer = setInterval(() => {
-      if (state.mode === "roster" && !state.busy) {
+      if (!stopped && state.mode === "roster" && !state.busy) {
         void act(async () => {
           await loadRoster();
           await loadDetail();
@@ -613,6 +627,10 @@ export async function runDashboard(
     });
     await quit;
   } finally {
+    // Belt and suspenders: suppress any further draws no matter how the loop exited
+    // (a quit key, or a throw), so the restore writes below are the last thing the
+    // terminal receives and no late `act` paints over the normal screen.
+    stopped = true;
     if (timer) clearInterval(timer);
     offKey?.();
     offResize?.();
