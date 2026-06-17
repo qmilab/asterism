@@ -159,7 +159,7 @@ with `-e`, exactly as it is sourced from the environment everywhere else in Aste
 A container loosens the [trust model](./concepts.md#trust-levels) not one bit. A
 destructive action still pauses for explicit confirmation, even for an `autonomous`
 agent. With no terminal attached, an HTTP run parks at `awaiting_confirmation` and
-waits until you approve it [out of band](./http.md#confirm-a-paused-run); a chat run
+waits until you approve it [out of band over HTTP](./http.md); a chat run
 asks for a `/confirm` reply. Running in a container does not mean unattended approval.
 
 ## Same runtime, same boundaries
