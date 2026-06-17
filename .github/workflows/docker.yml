@@ -1,9 +1,14 @@
 name: container image
 
-# Builds the container image. On a pull request or a push to main it only *builds*
-# — proof the Dockerfile still produces a working image. On a release tag (v*) it
-# also publishes to the GitHub Container Registry (ghcr.io/<owner>/asterism) using
-# the built-in GITHUB_TOKEN, so no extra secret is needed.
+# Builds the container image for linux/amd64 and linux/arm64. On a pull request or a
+# push to main it only *builds* — proof the Dockerfile still produces a working image
+# on both architectures. On a release tag (v*) it also publishes a multi-arch manifest
+# to the GitHub Container Registry (ghcr.io/<owner>/asterism) using the built-in
+# GITHUB_TOKEN, so no extra secret is needed.
+#
+# The arm64 build runs under QEMU emulation on the amd64 runner, so it is slower than
+# the native amd64 build — the cost of one image that runs on Intel/AMD servers and on
+# Apple Silicon / ARM hosts alike.
 
 on:
   push:
@@ -40,6 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Register QEMU so the amd64 runner can build the linux/arm64 image too.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Image tags & labels
@@ -66,6 +74,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
