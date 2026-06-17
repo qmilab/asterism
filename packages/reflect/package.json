@@ -1,6 +1,6 @@
 {
   "name": "@qmilab/asterism-reflect",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Proposes reviewable, typed memories for Asterism agents from their run transcripts. You probably want @qmilab/asterism.",
   "type": "module",
   "license": "Apache-2.0",
