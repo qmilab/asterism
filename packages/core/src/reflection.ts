@@ -143,7 +143,13 @@ export async function proposeReviewableMemories(
     options.runId !== undefined
       ? store.runs.get(agent.id, options.runId)
       : store.runs.latestWithOutput(agent.id);
-  if (!target || target.output === undefined) return { kind: "no_run" };
+  // Both paths require NON-BLANK output: `latestWithOutput` already filters on it, and
+  // an explicit `runId` must meet the same bar — a run that finished with empty or
+  // whitespace-only output has nothing to learn from, so the provider is never run on
+  // an empty transcript.
+  if (!target || target.output === undefined || target.output.trim().length === 0) {
+    return { kind: "no_run" };
+  }
 
   const transcript = { runId: target.id, input: target.input, output: target.output };
   const knownMemories = store.memories.listActiveAccepted(agent.id).map((m) => m.content);

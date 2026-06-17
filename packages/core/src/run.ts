@@ -605,21 +605,18 @@ export type DeclineOutcome =
  * destructive action, so the run ends `failed` and the action never executes. The
  * counterpart to {@link resumeRun}, and deliberately the same shape.
  *
- * It CLAIMS the run first (the same compare-and-set `resumeRun` uses) so a decline
- * and a confirm race safely: exactly one wins. If a confirm already claimed the run
- * (it is now `running`) or it has otherwise left `awaiting_confirmation`, the claim
- * misses and this returns `not_paused` — you cannot decline a run that is already
- * being resumed. No adapter or substrate is needed: nothing re-enters the loop.
+ * The store does an atomic compare-and-set straight to `failed` (it never goes
+ * through `running`), so a decline and a confirm race safely over one parked run —
+ * exactly one wins — and the run's `output` is PRESERVED (a transcript produced
+ * before the gate paused it survives, unlike on a resume, which re-runs from the
+ * start and clears it). A miss means the run is unknown/foreign or no longer awaiting
+ * confirmation (already terminal, or a concurrent confirm claimed it first): you
+ * cannot decline a run that is already being resumed. No adapter is needed — nothing
+ * re-enters the loop.
  */
 export function declineRun(store: AsterismStore, agent: Agent, runId: string): DeclineOutcome {
-  const claimed = store.claimRunForResume(agent.id, runId);
-  if (!claimed) {
-    const current = store.runs.get(agent.id, runId);
-    return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
-  }
-  // We own the run (now `running` after the claim). Drive it to `failed` and record
-  // the refusal. `declineRun` returns undefined only for a cross-agent/unknown run,
-  // which the just-claimed run cannot be — fall back to `claimed` for the type.
   const declined = store.declineRun(agent.id, runId);
-  return { kind: "declined", run: declined ?? claimed };
+  if (declined) return { kind: "declined", run: declined };
+  const current = store.runs.get(agent.id, runId);
+  return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
 }

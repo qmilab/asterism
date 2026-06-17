@@ -231,17 +231,19 @@ export class AsterismStore {
   }
 
   /**
-   * Decline a paused run: drive it to `failed` and record `run.declined`. The
-   * counterpart to a confirm — the operator refused a destructive action, so the
-   * run ends without it ever executing. The logical `from` is recorded as
-   * `awaiting_confirmation` (the state the operator acted on), mirroring how
-   * {@link recordRunResumed} records the pre-claim state; the caller (`declineRun`
-   * in run.ts) claims the run first so this races safely against a concurrent
-   * confirm. A cross-agent or unknown run touches nothing and returns undefined.
+   * Decline a paused run: atomically flip `awaiting_confirmation` → `failed` and
+   * record `run.declined`. The counterpart to a confirm — the operator refused a
+   * destructive action, so the run ends without it ever executing. The compare-and-set
+   * ({@link RunRepository.claimForDecline}) is the race guard: it serializes against a
+   * concurrent confirm's claim, so exactly one wins, and unlike a resume it PRESERVES
+   * the run's `output` (a transcript produced before the gate paused it survives, so a
+   * declined run stays reflectable and listed with its text). Returns undefined — and
+   * emits nothing — when the run is unknown, cross-agent, or no longer awaiting
+   * confirmation, which is how the caller (`declineRun` in run.ts) tells those apart.
    */
   declineRun(agentId: string, runId: string): Run | undefined {
     return this.driver.transaction(() => {
-      const run = this.runs.setStatus(agentId, runId, "failed");
+      const run = this.runs.claimForDecline(agentId, runId);
       if (run) {
         this.emit(agentId, "run.declined", { runId, from: "awaiting_confirmation" }, runId);
       }

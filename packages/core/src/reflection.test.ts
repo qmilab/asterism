@@ -228,6 +228,29 @@ test("proposeReviewableMemories targets a specific run when given a runId", asyn
   }
 });
 
+test("proposeReviewableMemories treats an explicit run with blank output as no_run", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const run = store.startRun(agent.id, { input: "noop" });
+    store.finishRun(agent.id, run.id, "   ", "done"); // finished, but whitespace-only output
+    let called = false;
+    const provider: ReflectionProvider = {
+      reflect: async () => {
+        called = true;
+        return [];
+      },
+    };
+    // An explicit runId must meet the same non-blank bar as the default target, so the
+    // provider is never run on an empty transcript.
+    const result = await proposeReviewableMemories(store, agent, provider, { runId: run.id });
+    expect(result.kind).toBe("no_run");
+    expect(called).toBe(false);
+  } finally {
+    store.close();
+  }
+});
+
 test("opening a pre-existing database without runs.output migrates the column in", () => {
   const driver = openDatabase(":memory:");
   // Simulate an older schema: a runs table created before the output column existed.

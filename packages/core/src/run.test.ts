@@ -1269,3 +1269,35 @@ test("decline and confirm are mutually exclusive: a declined run cannot then be 
   });
   expect(outcome.kind).toBe("not_paused");
 });
+
+test("declineRun preserves a paused run's persisted output", async () => {
+  // The agent produces a transcript, then a destructive action pauses the run — so the
+  // parked run already has output. Declining must NOT erase it (a resume would, since
+  // it re-runs from the start; a decline does not re-enter the loop), so the refused
+  // run stays reflectable and listed with its text.
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "delete_files");
+        if (tool) await tool.execute({ args: { command: "rm -rf dist" } }, request.signal);
+        return { status: "done", text: "progress before the gate" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const parked = await executeRun(store, agent, "do work then delete", {
+    adapter,
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(parked.run.output).toBe("progress before the gate"); // persisted at the pause
+
+  const outcome = declineRun(store, agent, parked.run.id);
+  expect(outcome.kind).toBe("declined");
+  if (outcome.kind === "declined") expect(outcome.run.output).toBe("progress before the gate");
+  // The transcript survives the decline on a fresh read, and the run is still found by
+  // the reflection target query (`latestWithOutput`).
+  expect(store.runs.get(agent.id, parked.run.id)?.output).toBe("progress before the gate");
+  expect(store.runs.latestWithOutput(agent.id)?.id).toBe(parked.run.id);
+});
