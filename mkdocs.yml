@@ -29,15 +29,20 @@ exclude_docs: |
 
 nav:
   - Home: index.md
-  - Installation: installation.md
-  - Concepts: concepts.md
-  - Command reference: commands.md
-  - Dashboard: dashboard.md
-  - Local HTTP endpoint: http.md
-  - Chat channels: channels.md
-  - Run as a service: service.md
-  - Run in a container: container.md
-  - Five-claims walkthrough: walkthrough.md
+  - Getting started:
+      - Installation: installation.md
+      - Tutorial: getting-started.md
+      - Concepts: concepts.md
+  - Guides:
+      - Dashboard: dashboard.md
+      - Chat channels: channels.md
+      - Run as a service: service.md
+      - Run in a container: container.md
+      - Local HTTP endpoint: http.md
+  - Reference:
+      - Command reference: commands.md
+  - Deep dive:
+      - Five-claims walkthrough: walkthrough.md
 
 markdown_extensions:
   - admonition

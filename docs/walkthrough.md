@@ -5,6 +5,11 @@ control. This page is the canonical demo that proves them: what each claim looks
 like from the command line, and how the automated acceptance test verifies all
 five end to end.
 
+> **Looking for the gentle introduction?** The
+> [getting-started tutorial](./getting-started.md) walks one agent through the
+> whole loop step by step. This page is the skeptic's version — two agents, and
+> proof that the boundaries between them actually hold.
+
 The five claims:
 
 1. One agent's memory **never appears** in another's.
@@ -81,7 +86,7 @@ Memory for personal (1):
 
 • semantic · accepted · confidence 0.9
   the blog drafts live in ./drafts
-  2026-06-10T12:00:00.000Z · from run a1b2c3d4
+  recorded 2026-06-10T12:00:00.000Z · from run a1b2c3d4
 
 $ asterism memory inspect work
 work has no memories yet.
@@ -157,8 +162,8 @@ error, so the `Run paused` line above (on standard out) stays the only thing you
 pipe:
 
 ```text
-  ✓ executed write_file (write)
-  ⏸ paused   delete_file (destructive)
+  ✓ executed fs.write (write)
+  ⏸ paused   fs.delete (destructive)
 ```
 
 ## Claim 5 — reflection proposes, you decide

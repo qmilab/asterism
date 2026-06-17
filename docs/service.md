@@ -132,7 +132,7 @@ A service does not loosen the [trust model](./concepts.md#trust-levels) one bit.
 destructive action still pauses for your explicit confirmation, exactly as it does
 at the keyboard — even for an `autonomous` agent. With no one watching, an HTTP run
 parks at `awaiting_confirmation` and waits until you approve it
-[out of band](./http.md#confirm-a-paused-run); a chat run asks in the chat for a
+[out of band over HTTP](./http.md); a chat run asks in the chat for a
 `/confirm` reply. Always-on does not mean unattended approval.
 
 ## Boot start and finding the right install

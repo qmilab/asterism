@@ -207,7 +207,7 @@ $ asterism run writer "tighten the intro in posts/launch.md"
   → write_file
   ✓ write_file
 Actions (1 executed):
-  ✓ executed write_file (write)
+  ✓ executed fs.write (write)
 <the agent's response>
 ```
 
