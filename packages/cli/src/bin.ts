@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision } from "./cli.js";
 import { workspaceCapabilities } from "./capabilities.js";
+import { createNodeTerminal } from "./dashboard/terminal-node.js";
 import { ask, readPipedStdin } from "./runtime.js";
 import type { Action } from "@qmilab/asterism-core";
 
@@ -80,6 +81,13 @@ const io: CliIO = {
   // `serve`: start the local HTTP endpoint. Imported lazily so non-serve commands
   // never load the HTTP layer (the same pattern `run` uses for the substrate).
   startServer: async (options) => (await import("@qmilab/asterism-server")).serve(options),
+  // `dashboard`: start the install-wide operator console the TUI is a client of (and
+  // that `--headless` exposes). Lazily imported, like `serve`.
+  startConsole: async (options) => (await import("@qmilab/asterism-server")).serveConsole(options),
+  // `dashboard`: the interactive terminal, wired only when stdin AND stdout are TTYs
+  // — a piped/redirected session has no raw input or sized output to drive a TUI, so
+  // the field is omitted and `dashboard` reports it needs a terminal (or --headless).
+  ...(process.stdin.isTTY && process.stdout.isTTY ? { terminal: createNodeTerminal() } : {}),
   // `channel telegram`: start the chat channel. Lazily imported for the same reason
   // — only this command loads the channel transport.
   startTelegram: async (options) => (await import("@qmilab/asterism-channels")).runTelegram(options),

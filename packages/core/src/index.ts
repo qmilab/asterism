@@ -81,6 +81,7 @@ export type { SecretRef } from "./secrets.js";
 export {
   REFLECTION_MEMORY_TYPES,
   isReflectionMemoryType,
+  proposeReviewableMemories,
 } from "./reflection.js";
 export type {
   ReflectionMemoryType,
@@ -88,6 +89,8 @@ export type {
   ReflectionInput,
   ProposedMemory,
   ReflectionProvider,
+  ReviewableProposal,
+  ProposeResult,
 } from "./reflection.js";
 
 // Run framing — composes soul / role / scoped skills / accepted memories into the
@@ -108,12 +111,13 @@ export type {
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
-export { executeRun, resumeRun } from "./run.js";
+export { executeRun, resumeRun, declineRun } from "./run.js";
 export type {
   ExecuteRunOptions,
   ExecuteRunResult,
   ActionRecord,
   ResumeOutcome,
+  DeclineOutcome,
 } from "./run.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The

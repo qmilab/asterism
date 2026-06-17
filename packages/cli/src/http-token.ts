@@ -32,7 +32,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
-import { httpTokenPath } from "./paths.js";
+import { consoleTokenPath, httpTokenPath } from "./paths.js";
 
 /** The env var holding the HTTP access token. A secret — env only, never config/flags. */
 export const HTTP_TOKEN_ENV = "ASTERISM_HTTP_TOKEN";
@@ -194,5 +194,28 @@ export function resolveHttpToken(
   if (persisted) return { token: persisted, source: "file", path };
 
   // 3. First serve with no env and no file: mint one and save it for next time.
+  return { token: persistGenerated(path), source: "generated", path };
+}
+
+/**
+ * Resolve the HTTP access token the install-wide operator CONSOLE expects
+ * (`asterism dashboard`). The same resolution as {@link resolveHttpToken} — env
+ * override, else a persisted file, else generate-and-save — but install-wide rather
+ * than per-agent, so it reads/writes the single {@link consoleTokenPath}. The
+ * self-hosted dashboard mints this once and reuses it; `--headless` prints it so a
+ * remote `dashboard <url>` can attach. `ASTERISM_HTTP_TOKEN` overrides it, the right
+ * choice for an exposed/unattended console.
+ */
+export function resolveConsoleToken(
+  home: string,
+  env: Record<string, string | undefined>,
+): ResolvedHttpToken {
+  const fromEnv = env[HTTP_TOKEN_ENV]?.trim();
+  if (fromEnv) return { token: fromEnv, source: "env" };
+
+  const path = consoleTokenPath(home);
+  const persisted = readPersisted(path);
+  if (persisted) return { token: persisted, source: "file", path };
+
   return { token: persistGenerated(path), source: "generated", path };
 }

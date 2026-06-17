@@ -32,6 +32,7 @@ nav:
   - Installation: installation.md
   - Concepts: concepts.md
   - Command reference: commands.md
+  - Dashboard: dashboard.md
   - Local HTTP endpoint: http.md
   - Chat channels: channels.md
   - Run as a service: service.md

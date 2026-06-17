@@ -24,9 +24,9 @@ import { AsterismStore } from "@qmilab/asterism-core";
 import {
   BUILTIN_SOULS,
   executeRun,
-  isReflectionMemoryType,
   MEMORY_TYPES,
   MemoryFirewallError,
+  proposeReviewableMemories,
   resumeRun,
   REVIEW_STATES,
   screenMemory,
@@ -39,15 +39,19 @@ import type {
   Capability,
   FirewallFinding,
   MemoryQuery,
-  ProposedMemory,
   ReflectionProvider,
+  ReviewableProposal,
   Run,
   RuntimeAdapter,
   TailOptions,
   TrustLevel,
 } from "@qmilab/asterism-core";
-import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
+import type { RunningServer, ServeConsoleOptions, ServeOptions } from "@qmilab/asterism-server";
 import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
+
+import { DashboardClient } from "./dashboard/client.js";
+import { runDashboard } from "./dashboard/tui.js";
+import type { TerminalIO } from "./dashboard/tui.js";
 
 import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
 import type { ParsedArgs } from "./args.js";
@@ -87,7 +91,7 @@ import {
   findHome,
   isValidAgentName,
 } from "./paths.js";
-import { HTTP_TOKEN_ENV, resolveHttpToken } from "./http-token.js";
+import { HTTP_TOKEN_ENV, resolveConsoleToken, resolveHttpToken } from "./http-token.js";
 import type { ResolvedHttpToken } from "./http-token.js";
 import { VERSION } from "./version.js";
 
@@ -173,6 +177,21 @@ export interface CliIO {
    * {@link CliIO.waitForShutdown} resolves.
    */
   startServer?: (options: ServeOptions) => RunningServer | Promise<RunningServer>;
+  /**
+   * Start the install-wide operator console for `dashboard` (the TUI's thin backend,
+   * and the server `--headless` runs). Absent ⇒ the dashboard cannot self-host in
+   * this embedding (the default wiring in `bin.ts` supplies the real server). Like
+   * {@link CliIO.startServer}, the store stays open for the console's lifetime.
+   */
+  startConsole?: (options: ServeConsoleOptions) => RunningServer | Promise<RunningServer>;
+  /**
+   * The interactive terminal the `dashboard` TUI draws to (raw input + sized output).
+   * Absent ⇒ the dashboard's interactive view is unavailable here (a non-interactive
+   * embedding), so `dashboard` reports that and exits rather than rendering to
+   * nothing. The default wiring in `bin.ts` supplies one over stdin/stdout when
+   * attached to a TTY.
+   */
+  terminal?: TerminalIO;
   /**
    * Start a Telegram chat channel for `channel telegram`. Absent ⇒ chat channels
    * are unavailable in this embedding (the default wiring in `bin.ts` supplies the
@@ -1057,12 +1076,15 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     // so an agent with nothing to reflect on is told so without needing a model
     // configured. Phase 0 targets the latest run (the canonical flow is run →
     // reflect); a future flag can target a specific run.
+    // Check for a reflectable run BEFORE building the model, so an agent with
+    // nothing to reflect on is told so without needing a model configured. The
+    // proposal pipeline below re-selects the same run (the shared kernel helper owns
+    // that policy); this early check only gates the model build.
     const target = store.runs.latestWithOutput(agent.id);
     if (!target || target.output === undefined) {
       io.out(`${name} has no completed run with output to reflect on yet.`);
       return 0;
     }
-    const transcript = { runId: target.id, input: target.input, output: target.output };
 
     // Build the reflection provider (a hosted model) the same way `run` builds its
     // adapter — only after the agent and a reflectable run check out. Resolves this
@@ -1077,28 +1099,24 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     }
     const provider = made.provider;
 
-    // The memories the agent already accepted, so the provider can avoid
-    // re-proposing what it already knows (the kernel applies the active+accepted
-    // predicate so framing and reflection agree on what "known" means).
-    const knownMemories = store.memories
-      .listActiveAccepted(agent.id)
-      .map((m) => m.content);
-
-    let proposals: readonly ProposedMemory[];
+    // The shared kernel pipeline: select the run, hand the transcript + already-known
+    // memories to the provider, apply the reflection-only type filter, and screen
+    // each proposal through the memory firewall. The same call backs the dashboard's
+    // console endpoint, so the two surfaces can never drift on what is reviewable.
+    let usable: readonly ReviewableProposal[];
+    let ignored: number;
     try {
-      proposals = await provider.reflect({ agentId: agent.id, transcript, knownMemories });
+      const result = await proposeReviewableMemories(store, agent, provider);
+      if (result.kind === "no_run") {
+        io.out(`${name} has no completed run with output to reflect on yet.`);
+        return 0;
+      }
+      usable = result.proposals;
+      ignored = result.ignored;
     } catch (err) {
       io.err(`Reflection failed: ${errorMessage(err)}`);
       return 1;
     }
-
-    // Defensive backstop for the reflection-only type constraint: the provider is
-    // typed to the reflectable subset, but a non-conforming custom provider must
-    // never slip a disallowed type (e.g. `episodic`) past review — the kernel's
-    // generic memory write accepts any valid memory type, so the reflection-only
-    // rule is enforced here, at the consumption point.
-    const usable = proposals.filter((p) => isReflectionMemoryType(p.memoryType));
-    const ignored = proposals.length - usable.length;
     if (usable.length === 0) {
       io.out(`${name}: nothing worth remembering from run ${shortId(target.id)}.`);
       return 0;
@@ -1120,16 +1138,16 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
     let errored = 0;
     for (let i = 0; i < usable.length; i++) {
       const p = usable[i]!;
-      // Screen for display so the reviewer sees what tripped a rule; the firewall
-      // also re-screens at persistence (`recordMemory`), the real hard gate.
-      const verdict = screenMemory(p.content);
+      // The firewall findings come from the shared pipeline (screened for display so
+      // the reviewer sees what tripped a rule); the firewall also re-screens at
+      // persistence (`recordMemory`), the real hard gate.
 
       io.out("");
       io.out(`(${i + 1}/${usable.length}) ${p.memoryType} · confidence ${p.confidence}`);
       io.out(`  ${p.content}`);
-      if (!verdict.ok) {
+      if (p.findings.length > 0) {
         io.out(
-          `  ⚠ the memory firewall flagged this (${verdict.findings
+          `  ⚠ the memory firewall flagged this (${p.findings
             .map((f) => f.rule)
             .join(", ")}) — edit to remove the flagged content, or reject it.`,
         );
@@ -1141,7 +1159,7 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
         memoryType: p.memoryType,
         content: p.content,
         confidence: p.confidence,
-        findings: verdict.findings,
+        findings: p.findings,
       });
 
       if (decision.kind === "reject") {
@@ -1481,6 +1499,164 @@ function reportHttpToken(io: CliIO, tok: ResolvedHttpToken): void {
     return;
   }
   io.out(`  Requests need the ${HTTP_TOKEN_ENV} token:  Authorization: Bearer <token>`);
+}
+
+// --- dashboard (the operator's terminal console) ---------------------------
+
+const NO_TERMINAL =
+  "The dashboard needs an interactive terminal. Run it in a TTY, or use --headless to " +
+  "host the console for a dashboard on another machine.";
+
+/**
+ * `asterism dashboard` — the operator's live TUI over ALL their agents. Three shapes,
+ * one command:
+ *   - default: open the local install, self-host the install-wide console in-process
+ *     on an ephemeral loopback port, and run the TUI as a thin client of it.
+ *   - `dashboard <url> [--token]`: attach the TUI to a remote console (no local store).
+ *   - `dashboard --headless [--host --port]`: run the console server only (no TUI) —
+ *     the endpoint a remote `dashboard <url>` connects to.
+ * The TUI holds no behavior of its own: every action is one call to the console, the
+ * same kernel-backed surface the CLI uses, so it inherits the exact guarantees.
+ */
+async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h", "headless"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.dashboard!);
+    return 0;
+  }
+  for (const flag of ["token", "port", "host"] as const) {
+    if (parsed.flags[flag] === true) {
+      io.err(`The --${flag} option needs a value.`);
+      return 1;
+    }
+  }
+  const headless = parsed.flags.headless === true;
+  const urlArg = parsed.positionals[0];
+  const tokenFlag = stringFlag(parsed.flags.token);
+  const host = stringFlag(parsed.flags.host);
+  let port: number | undefined;
+  if (typeof parsed.flags.port === "string") {
+    port = intFlag(parsed.flags.port);
+    if (port === undefined || port > 65535) {
+      io.err("The --port option must be a whole number between 0 and 65535.");
+      return 1;
+    }
+  }
+
+  // Remote client mode: a URL was given ⇒ pure client, no local store or server.
+  if (urlArg !== undefined) {
+    if (headless) {
+      io.err("Pass a URL to attach to a console, or use --headless to host one — not both.");
+      return 1;
+    }
+    if (!io.terminal) {
+      io.err(NO_TERMINAL);
+      return 1;
+    }
+    let baseUrl: string;
+    try {
+      baseUrl = new URL(urlArg).toString();
+    } catch {
+      io.err(`Not a valid console URL: ${urlArg}`);
+      return 1;
+    }
+    const token = tokenFlag ?? io.env[HTTP_TOKEN_ENV]?.trim();
+    if (!token) {
+      io.err(`A remote console needs an access token. Pass --token <token>, or set ${HTTP_TOKEN_ENV}.`);
+      return 1;
+    }
+    await runDashboard(new DashboardClient(baseUrl, token), io.terminal, { connection: urlArg });
+    return 0;
+  }
+
+  // Local: self-host the console (and, unless --headless, run the TUI over it).
+  if (!headless && !io.terminal) {
+    io.err(NO_TERMINAL);
+    return 1;
+  }
+  if (!io.startConsole) {
+    io.err("The dashboard console is not available in this embedding.");
+    return 1;
+  }
+  if (!headless && (port !== undefined || host !== undefined)) {
+    io.err("--port and --host apply to --headless only; the local dashboard binds an ephemeral loopback port.");
+    return 1;
+  }
+  const startConsole = io.startConsole;
+
+  return withHomeStore(io, async (store, home) => {
+    // Per-agent substrate factories, resolving each agent's own model the same way
+    // `run`/`reflect` do — pre-imported so the console's factories stay synchronous.
+    const config = loadConfig(home);
+    const buildAdapterFn = io.makeAdapter ?? (await import("./model.js")).buildAdapter;
+    const buildReflectionFn =
+      io.makeReflectionProvider ?? (await import("./reflect-model.js")).buildReflectionProvider;
+
+    // The console's front door is default-deny like `serve`'s, but install-wide: one
+    // token for the operator's whole console (ASTERISM_HTTP_TOKEN, else a saved file,
+    // else minted once). The kernel never sees it; the surface only verifies it.
+    const consoleToken = resolveConsoleToken(home, io.env);
+
+    const server = await startConsole({
+      store,
+      authToken: consoleToken.token,
+      readFile: (p) => readFileSync(p, "utf8"),
+      ...(io.capabilities ? { capabilities: io.capabilities } : {}),
+      makeAdapter: (agentName) => buildAdapterFn(io.env, { config, agentName }),
+      makeReflectionProvider: (agentName) => buildReflectionFn(io.env, { config, agentName }),
+      // Headless binds a stable port (default) so a remote dashboard can find it; the
+      // self-hosted TUI binds an ephemeral loopback port it reads straight back.
+      ...(headless
+        ? { ...(port !== undefined ? { port } : {}), ...(host !== undefined ? { hostname: host } : {}) }
+        : { port: 0 }),
+    });
+
+    if (headless) {
+      io.out(`Console for all agents at ${server.url}`);
+      io.out(`  GET  ${server.url}/agents                       the roster (every agent + trust)`);
+      io.out(`  PUT  ${server.url}/agents/<agent>/trust         set autonomy`);
+      io.out(`  POST ${server.url}/agents/<agent>/runs/<run>/confirm | /decline`);
+      io.out(`  POST ${server.url}/agents/<agent>/reflect       propose memories to review`);
+      reportHttpToken(io, consoleToken);
+      // What "attach" means depends on where it bound. On loopback (the default) only
+      // THIS machine can reach it; a dashboard elsewhere needs it bound beyond loopback
+      // with --host (behind a TLS-terminating proxy — there is no TLS here).
+      const loopback =
+        server.hostname === "127.0.0.1" ||
+        server.hostname === "localhost" ||
+        server.hostname === "::1";
+      if (loopback) {
+        io.out(`  Attach a dashboard on this machine:  asterism dashboard ${server.url} --token <token>`);
+        io.out("  Bound to loopback (this machine only). To reach it from another machine,");
+        io.out("  re-run with --host <addr> behind a TLS-terminating proxy.");
+      } else {
+        io.out("  note: bound beyond loopback — put a TLS-terminating proxy in front (see docs).");
+        io.out(`  Attach a dashboard from elsewhere:  asterism dashboard ${server.url} --token <token>`);
+      }
+      io.out("Press Ctrl+C to stop.");
+      const waitForShutdown = io.waitForShutdown ?? (() => Promise.resolve());
+      await waitForShutdown();
+      await server.stop();
+      io.out("Stopped.");
+      return 0;
+    }
+
+    // Self-hosted TUI. The terminal was required above; re-bind it for the closure.
+    const terminal = io.terminal;
+    if (!terminal) {
+      io.err(NO_TERMINAL);
+      return 1;
+    }
+    const client = new DashboardClient(server.url, consoleToken.token);
+    try {
+      await runDashboard(client, terminal, { connection: "local" });
+    } finally {
+      // Stop the server before returning so the store (closed by `withHomeStore`)
+      // is never pulled from under an in-flight request.
+      await server.stop();
+    }
+    return 0;
+  });
 }
 
 // --- channel telegram (chat-app front door) --------------------------------
@@ -2342,6 +2518,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdConfig(rest, io);
     case "serve":
       return cmdServe(rest, io);
+    case "dashboard":
+      return cmdDashboard(rest, io);
     case "channel":
       return cmdChannel(rest, io);
     case "service":

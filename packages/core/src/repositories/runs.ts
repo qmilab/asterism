@@ -137,6 +137,30 @@ export class RunRepository {
     return row ? mapRun(row) : undefined;
   }
 
+  /**
+   * Atomically claim a paused run to DECLINE it: flip `awaiting_confirmation` →
+   * `failed` in a SINGLE compare-and-set — the same status precondition as
+   * {@link claimForResume}, so a decline and a confirm race safely over one parked
+   * run (exactly one wins; the loser's `status = 'awaiting_confirmation'` no longer
+   * matches). Unlike a resume, a decline does NOT re-enter the run, so it PRESERVES
+   * `output`: a run that produced a transcript before the gate stopped it stays
+   * reflectable and listed with that text even though it ended refused. Stamps
+   * `finished_at`. Returns the now-`failed` run to the winner, or undefined to every
+   * other caller (the run was unknown, already claimed, or not paused).
+   */
+  claimForDecline(agentId: string, id: string): Run | undefined {
+    requireAgentId(agentId);
+    const finishedAt = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE runs SET status = 'failed', finished_at = COALESCE(finished_at, ?)
+          WHERE id = ? AND agent_id = ? AND status = 'awaiting_confirmation'
+          RETURNING *`,
+      )
+      .get([finishedAt, id, agentId]);
+    return row ? mapRun(row) : undefined;
+  }
+
   setStatus(agentId: string, id: string, status: RunStatus): Run | undefined {
     requireAgentId(agentId);
     validateEnum(status, RUN_STATUSES, "run status");

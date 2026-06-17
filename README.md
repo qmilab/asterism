@@ -63,6 +63,7 @@ Full docs live in [`docs/`](./docs/):
 - [Concepts](./docs/concepts.md) — agents, souls, trust, memory, and what "separate" means today.
 - [Command reference](./docs/commands.md) — every command and option.
 - [Five-claims walkthrough](./docs/walkthrough.md) — the separation guarantees proven end to end.
+- [Dashboard](./docs/dashboard.md) — watch and steer every agent in one live terminal view.
 - [Local HTTP endpoint](./docs/http.md) — serve one agent over HTTP.
 - [Chat channels](./docs/channels.md) — reach one agent from a Telegram or Discord chat.
 - [Run as a service](./docs/service.md) — keep an agent running in the background, started by your OS.

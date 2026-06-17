@@ -231,6 +231,27 @@ export class AsterismStore {
   }
 
   /**
+   * Decline a paused run: atomically flip `awaiting_confirmation` → `failed` and
+   * record `run.declined`. The counterpart to a confirm — the operator refused a
+   * destructive action, so the run ends without it ever executing. The compare-and-set
+   * ({@link RunRepository.claimForDecline}) is the race guard: it serializes against a
+   * concurrent confirm's claim, so exactly one wins, and unlike a resume it PRESERVES
+   * the run's `output` (a transcript produced before the gate paused it survives, so a
+   * declined run stays reflectable and listed with its text). Returns undefined — and
+   * emits nothing — when the run is unknown, cross-agent, or no longer awaiting
+   * confirmation, which is how the caller (`declineRun` in run.ts) tells those apart.
+   */
+  declineRun(agentId: string, runId: string): Run | undefined {
+    return this.driver.transaction(() => {
+      const run = this.runs.claimForDecline(agentId, runId);
+      if (run) {
+        this.emit(agentId, "run.declined", { runId, from: "awaiting_confirmation" }, runId);
+      }
+      return run;
+    });
+  }
+
+  /**
    * Record a memory through the firewall, logging the outcome either way. On
    * success: `memory.recorded` (references only — id/type/reviewState, never the
    * content). On a firewall refusal: `memory.blocked` (the findings, never the

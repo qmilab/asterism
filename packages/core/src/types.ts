@@ -60,6 +60,7 @@ export const EVENT_TYPES = [
   "run.started",
   "run.status_changed",
   "run.resumed",
+  "run.declined",
   "memory.recorded",
   "memory.blocked",
   "skill.attached",
