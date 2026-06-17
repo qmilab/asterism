@@ -139,6 +139,8 @@ Same tools, same task shape — the difference is entirely the trust level.
 `personal` is `autonomous` — the highest trust level — and its task asks it to
 **delete** the files in `dist/`. It still stops:
 
+![A terminal recording of an autonomous agent: an ordinary write executes without asking, a delete pauses for confirmation, and the run resumes only after asterism confirm.](assets/img/gate.gif)
+
 ```console
 $ asterism run personal "update my blog draft and delete the generated files in dist/"
 Run paused: a destructive action needs your confirmation before it can proceed.

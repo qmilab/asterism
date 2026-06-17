@@ -5,6 +5,23 @@ turns on a single idea: **the agent is the boundary.** Each agent is its own
 identity with its own memory, secrets, skills, workspace, and autonomy — and
 nothing crosses between them unless you say so.
 
+```mermaid
+flowchart TB
+    R["Asterism — one local install"]
+    R --> P["personal<br/><i>casual-helper · autonomous</i>"]
+    R --> W["work<br/><i>careful-consultant · propose</i>"]
+    R --> C["client<br/><i>careful-consultant · notify</i>"]
+    P --> Ps["memory · secrets · skills<br/>workspace · event log"]
+    W --> Ws["memory · secrets · skills<br/>workspace · event log"]
+    C --> Cs["memory · secrets · skills<br/>workspace · event log"]
+```
+
+One runtime fans out to separate agents; each owns its stores and nothing sits
+between them. There is **no shared store and no cross-agent path** — the
+separation is enforced everywhere data is read or written. (Today that is
+*logical* scoping, not OS-level containment — see
+[what isolation means today](#what-isolation-means-today).)
+
 This page explains the nouns you will meet in the commands.
 
 ## Agent
