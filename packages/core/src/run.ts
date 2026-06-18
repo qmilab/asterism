@@ -18,6 +18,8 @@
 import type { RuntimeAdapter, RunOutput, RunEvent } from "./adapter.js";
 import { frameRun, resolveSoul } from "./framing.js";
 import type { SkillContext } from "./framing.js";
+import { DEFAULT_RECALL_BUDGET, defaultRecallProvider } from "./recall.js";
+import type { RecallBudget, RecallProvider } from "./recall.js";
 import { auditTrustHooks } from "./audit.js";
 import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
 import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
@@ -48,6 +50,19 @@ export interface ExecuteRunOptions {
    * handed — it never constructs a tool itself.
    */
   capabilities?: readonly Capability[];
+  /**
+   * Selects which of the agent's accepted memories frame this run. Absent ⇒ the
+   * default lexical ranker ({@link defaultRecallProvider}). The kernel resolves
+   * the agent's own candidates and hands them in, so a provider only ranks within
+   * one agent's memory — it never reaches the store or another agent's rows.
+   */
+  recall?: RecallProvider;
+  /**
+   * Bounds how many memories recall may frame. Absent ⇒ {@link DEFAULT_RECALL_BUDGET}.
+   * When the agent holds fewer memories than the budget, framing is unchanged — the
+   * budget only bites once memory grows past it.
+   */
+  recallBudget?: RecallBudget;
   /**
    * Optional sink for the substrate's lifecycle events as they arrive, so a
    * surface can show a run's activity live (CLI progress, HTTP SSE). The kernel
@@ -294,7 +309,20 @@ async function runAndPersist(
     const content = readMaybe(options.readFile, s.path);
     return { name: s.name, ...(content !== undefined ? { content } : {}) };
   });
-  const memories = store.memories.list(agent.id);
+  // Structured recall: rank the agent's accepted memories against this task and
+  // frame at most a budget's worth, instead of inlining all of them. The kernel
+  // resolves the candidates (the agent's OWN active+accepted memories) and hands
+  // them to the provider, which only ranks within that set — recall never queries
+  // the store, so it cannot reach another agent's rows. Under budget the selection
+  // is the full set unchanged, so framing is identical to the pre-recall behaviour.
+  const recall = options.recall ?? defaultRecallProvider;
+  const memories = await recall.recall({
+    agentId: agent.id,
+    query: input,
+    candidates: store.memories.listActiveAccepted(agent.id),
+    budget: options.recallBudget ?? DEFAULT_RECALL_BUDGET,
+    now: run.startedAt,
+  });
   const request = frameRun({
     agent,
     ...(soulText !== undefined ? { soulText } : {}),

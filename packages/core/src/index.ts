@@ -108,6 +108,13 @@ export type {
   ResolveSoulOptions,
 } from "./framing.js";
 
+// Structured recall — the kernel/recall seam. Core defines it (rank an agent's
+// own candidate memories against the task, under a budget) plus a default,
+// dependency-free lexical ranker; a local-ML / embeddings provider is a later
+// opt-in implementation of the same interface, mirroring the RuntimeAdapter seam.
+export { defaultRecallProvider, selectRecall, DEFAULT_RECALL_BUDGET } from "./recall.js";
+export type { RecallProvider, RecallInput, RecallBudget } from "./recall.js";
+
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
