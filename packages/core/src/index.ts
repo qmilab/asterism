@@ -115,6 +115,24 @@ export type {
 export { defaultRecallProvider, selectRecall, enforceRecall, DEFAULT_RECALL_BUDGET } from "./recall.js";
 export type { RecallProvider, RecallInput, RecallBudget } from "./recall.js";
 
+// Trust contracts — EARNED per-capability standing. The kernel reads its own
+// append-only event log (the references-only flight recorder) to PROPOSE which
+// destructive capabilities have a clean enough track record to auto-approve; a
+// human ratifies, and a regression downgrades. Pure, deterministic policy; the
+// grant only ever ADDS a key to the allow-list the destructive gate already reads.
+export {
+  DEFAULT_STANDING_POLICY,
+  gatherEvidence,
+  qualifies,
+  evidenceBasis,
+  proposeStandingGrants,
+} from "./standing.js";
+export type {
+  StandingPolicy,
+  CapabilityEvidence,
+  StandingCandidate,
+} from "./standing.js";
+
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
@@ -146,5 +164,6 @@ export { SkillRepository } from "./repositories/skills.js";
 export type { CreateSkillInput } from "./repositories/skills.js";
 export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
+export { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 export { EventRepository } from "./repositories/events.js";
 export type { AppendEventInput, TailOptions } from "./repositories/events.js";

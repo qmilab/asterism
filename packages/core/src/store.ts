@@ -12,8 +12,11 @@ import type { CreateMemoryInput } from "./repositories/memories.js";
 import { SkillRepository } from "./repositories/skills.js";
 import type { CreateSkillInput } from "./repositories/skills.js";
 import { CredentialRepository } from "./repositories/credentials.js";
+import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import type {
   Agent,
+  CapabilityGrant,
+  CapabilityStanding,
   Credential,
   EventType,
   Memory,
@@ -37,6 +40,8 @@ export class AsterismStore {
   readonly memories: MemoryRepository;
   readonly skills: SkillRepository;
   readonly credentials: CredentialRepository;
+  /** Per-capability earned standing — the agent's "trust contracts". */
+  readonly capabilityStanding: CapabilityStandingRepository;
   /** The local plaintext-bearing secret store; credentials reference into it. */
   readonly secrets: SecretStore;
   readonly events: EventRepository;
@@ -49,6 +54,7 @@ export class AsterismStore {
     this.memories = new MemoryRepository(driver);
     this.skills = new SkillRepository(driver);
     this.credentials = new CredentialRepository(driver);
+    this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.secrets = new SecretStore(driver);
     this.events = new EventRepository(driver);
   }
@@ -119,6 +125,37 @@ export class AsterismStore {
       const agent = this.agents.setTrustLevel(agentId, level);
       this.emit(agentId, "agent.trust_changed", { from, to: agent.trustLevel });
       return agent;
+    });
+  }
+
+  /**
+   * Set one capability's earned standing for an agent and record the transition as
+   * `agent.standing_changed` — the audit trail the trust model needs: WHICH
+   * capability, the `from`/`to` standing, and the references-only `basis` (counts
+   * of the evidence, never an action's arguments). A human ratification grants
+   * (`gated` → `standing-grant`); a regression or operator revoke downgrades
+   * (`standing-grant` → `gated`). `from` is the capability's prior standing, or its
+   * implicit `gated` when it had no row yet. Pass the originating `runId` when the
+   * change came out of a run (e.g. an automatic revoke after a failure) so the event
+   * ties back to it.
+   */
+  setCapabilityStanding(
+    agentId: string,
+    capability: string,
+    standing: CapabilityStanding,
+    basis: string,
+    runId?: string,
+  ): CapabilityGrant {
+    return this.driver.transaction(() => {
+      const from = this.capabilityStanding.get(agentId, capability)?.standing ?? "gated";
+      const grant = this.capabilityStanding.setStanding(agentId, capability, standing, basis);
+      this.emit(
+        agentId,
+        "agent.standing_changed",
+        { capability, from, to: grant.standing, basis },
+        runId,
+      );
+      return grant;
     });
   }
 

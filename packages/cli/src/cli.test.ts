@@ -104,6 +104,30 @@ function agentNamed(store: AsterismStore, name: string) {
   return agent;
 }
 
+/**
+ * Seed an agent's event log with a clean track record for a destructive capability
+ * — one confirmed execution per target, each in a run that finished `done` — so
+ * `trust --review` has something to propose. Opens and closes the home store so the
+ * CLI can reopen it afterward.
+ */
+function seedCleanRecord(h: Harness, agentName: string, capability: string, targets: string[]): void {
+  const store = openHomeStore(h);
+  try {
+    const agent = agentNamed(store, agentName);
+    for (const target of targets) {
+      const run = store.startRun(agent.id, { input: `do ${target}` });
+      store.events.append(agent.id, {
+        runId: run.id,
+        type: "action.executed",
+        payload: { capability, effect: "destructive", fingerprint: target },
+      });
+      store.finishRun(agent.id, run.id, "ok", "done");
+    }
+  } finally {
+    store.close();
+  }
+}
+
 test("init creates a workspace and is idempotent", async () => {
   const h = harness();
   expect(await runCli(["init"], h.io)).toBe(0);
@@ -192,6 +216,73 @@ test("trust changes an agent's autonomy level", async () => {
   await runCli(["new", "work", "--trust", "propose"], h.io);
   expect(await runCli(["trust", "work", "notify"], h.io)).toBe(0);
   expect(h.out.join("\n")).toContain("Set work to notify");
+});
+
+test("trust --review grants an earned capability — only on an explicit yes", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
+
+  h.io.reviewGrant = () => true; // ratify the proposal
+  const out = await capture(["trust", "cleaner", "--review"], h.io);
+  expect(out).toContain("fs.delete");
+  expect(out).toContain("1 granted");
+
+  // The grant persists and shows as acting without pausing.
+  const show = await capture(["trust", "cleaner", "show"], h.io);
+  expect(show).toContain("Acts without pausing");
+  expect(show).toContain("fs.delete");
+});
+
+test("trust --review grants nothing without a reviewer (the safe default)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
+
+  // No reviewGrant injected ⇒ every proposal is declined, nothing is granted.
+  const out = await capture(["trust", "cleaner", "--review"], h.io);
+  expect(out).toContain("0 granted");
+  expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("No capabilities have earned");
+});
+
+test("trust --review reports plainly when nothing has been earned", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  const out = await capture(["trust", "cleaner", "--review"], h.io);
+  expect(out).toContain("no capabilities have earned a standing grant yet");
+});
+
+test("trust revoke takes a granted capability back to gated", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
+  h.io.reviewGrant = () => true;
+  await runCli(["trust", "cleaner", "--review"], h.io);
+
+  expect(await runCli(["trust", "cleaner", "revoke", "fs.delete"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("pauses for your confirmation again");
+  expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("No capabilities have earned");
+});
+
+test("trust revoke of a non-granted capability is a friendly no-op", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  expect(await runCli(["trust", "cleaner", "revoke", "fs.delete"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("not granted");
+});
+
+test("trust show reports no earned grants for a fresh agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "notify"], h.io);
+  const show = await capture(["trust", "cleaner", "show"], h.io);
+  expect(show).toContain("autonomy: notify");
+  expect(show).toContain("No capabilities have earned");
 });
 
 test("secrets add stores a value without ever echoing it", async () => {

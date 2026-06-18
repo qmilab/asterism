@@ -40,6 +40,27 @@ export const REVIEW_STATES = ["proposed", "accepted", "rejected"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
 
 /**
+ * An agent's EARNED autonomy on one destructive capability — the per-capability
+ * "trust contract" that sits underneath the coarse, whole-agent {@link TrustLevel}.
+ * Progressive, and the *only* value that changes gate behaviour is the top rung:
+ *
+ * - `gated`          — the default (and the meaning of no row at all): every
+ *                      destructive invocation of the capability pauses for
+ *                      confirmation, exactly as before. A capability is also reset
+ *                      to `gated` on a regression — autonomy is lost faster than earned.
+ * - `standing-grant` — the capability's destructive actions auto-approve: its key
+ *                      joins the run's `autoApprove` allow-list, so the existing
+ *                      destructive gate ({@link decideGate}) lets it through without a
+ *                      per-action pause. Reached ONLY by an explicit human ratification
+ *                      of an earned track record — never silently, never automatically.
+ *
+ * Earned standing only ever ADDS a key to the allow-list the gate already consults;
+ * it never weakens classification, never crosses capabilities, never crosses agents.
+ */
+export const CAPABILITY_STANDINGS = ["gated", "standing-grant"] as const;
+export type CapabilityStanding = (typeof CAPABILITY_STANDINGS)[number];
+
+/**
  * The kernel's canonical event vocabulary. Every consequential action the kernel
  * performs writes one of these to the append-only log, scoped to its `agentId`:
  * agent + run lifecycle, memory writes (and firewall refusals), skill/credential
@@ -57,6 +78,7 @@ export type ReviewState = (typeof REVIEW_STATES)[number];
 export const EVENT_TYPES = [
   "agent.created",
   "agent.trust_changed",
+  "agent.standing_changed",
   "run.started",
   "run.status_changed",
   "run.resumed",
@@ -145,6 +167,26 @@ export interface Credential {
   /** Reference into the local secret store — never the plaintext value. */
   valueRef: string;
   createdAt: string;
+}
+
+/**
+ * An agent's earned standing on one destructive capability — the persisted
+ * "trust contract". Scoped by `agentId` like every other row; one per
+ * (agent, capability). `basis` is a human-readable, REFERENCES-ONLY summary of the
+ * evidence at the last change (counts, never the action's arguments), so the audit
+ * can show *why* a capability was granted or revoked without ever storing what it
+ * acted on. A capability with no row is implicitly `gated`.
+ */
+export interface CapabilityGrant {
+  id: string;
+  agentId: string;
+  /** The capability key this standing governs (e.g. `fs.delete`). */
+  capability: string;
+  standing: CapabilityStanding;
+  /** Why the standing last changed — counts only, never arguments. */
+  basis: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Event {

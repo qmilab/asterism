@@ -5,10 +5,12 @@
 import type {
   ActionRecord,
   Agent,
+  CapabilityGrant,
   Event,
   Memory,
   Run,
   RunEvent,
+  TrustLevel,
 } from "@qmilab/asterism-core";
 
 /** First 8 chars of a UUID — enough to recognize, short enough to scan. */
@@ -159,6 +161,35 @@ export function formatActionSummary(actions: readonly ActionRecord[]): string[] 
     lines.push(`  ${ACTION_GLYPH[a.decision]} ${a.decision.padEnd(8)} ${a.capability} (${a.effect})`);
   }
   return lines;
+}
+
+/**
+ * Render an agent's earned standings for `trust <agent> show` — its whole-agent
+ * autonomy level, then each destructive capability it has earned the right to act on
+ * without pausing (`standing-grant`) versus one reset to `gated`. References only:
+ * the capability key and the recorded `basis` (counts), never an action's arguments.
+ * A capability with no row is implicitly gated and simply absent from the list.
+ */
+export function formatStandingList(
+  grants: readonly CapabilityGrant[],
+  agentName: string,
+  level: TrustLevel,
+): string {
+  const header = `${agentName} · autonomy: ${level}`;
+  const granted = grants.filter((g) => g.standing === "standing-grant");
+  if (granted.length === 0) {
+    return [
+      header,
+      "",
+      "No capabilities have earned a standing grant — every destructive action pauses",
+      "for your confirmation. Earn one with a clean track record, then `trust <agent> --review`.",
+    ].join("\n");
+  }
+  const lines: string[] = [header, "", `Acts without pausing (${granted.length}):`];
+  for (const g of granted) {
+    lines.push(`  ✓ ${g.capability} — ${g.basis} · granted ${g.updatedAt}`);
+  }
+  return lines.join("\n");
 }
 
 /**

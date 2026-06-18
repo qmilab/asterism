@@ -29,6 +29,7 @@ Commands:
   new <agent>                       Create a new agent with a separate life
   list                              Show every agent and how much it may do
   trust <agent> <level>             Set how much an agent may do on its own
+  trust <agent> --review            Grant capabilities an agent has earned to act on
   secrets add <agent> <KEY> [value] Give an agent a private credential
   skill add <agent> <file.md>       Teach an agent a skill from a markdown file
   run <agent> "<task>"              Put an agent to work on a task
@@ -86,8 +87,30 @@ it is responsible for, and when it last ran. Reads the roster only; it never
 reaches into any agent's memory, secrets, or files.`,
 
   trust: `asterism trust <agent> <level>
+asterism trust <agent> --review
+asterism trust <agent> show
+asterism trust <agent> revoke <capability>
 
-Set how much an agent may do on its own: propose, notify, or autonomous.
+Set how much an agent may do on its own — both the overall level, and, capability by
+capability, the few destructive actions it has earned the right to take without
+pausing for you.
+
+  trust <agent> <level>     Set the overall level: propose, notify, or autonomous.
+  trust <agent> --review    Review capabilities the agent has EARNED the right to act
+                            on without pausing — by handling them cleanly, several
+                            times, across different targets, with nothing declined or
+                            failed in between. You grant or decline each; nothing is
+                            granted without your yes.
+  trust <agent> show        Show the agent's level and which capabilities now act
+                            without pausing.
+  trust <agent> revoke <capability>
+                            Take a grant back — the capability pauses for your
+                            confirmation again.
+
+A grant is earned, never automatic, and lost the moment something goes wrong: a
+declined or failed action on a capability resets it, so it has to be re-earned. Even
+a granted capability stays inside the agent's own workspace and never carries to
+another agent.
 
 ${AUTONOMY_HELP}`,
 

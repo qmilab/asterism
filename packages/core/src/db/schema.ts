@@ -91,4 +91,23 @@ CREATE TABLE IF NOT EXISTS events (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id);
+
+-- An agent's earned standing per destructive capability — the "trust contract"
+-- underneath the coarse trust_level. Scoped by agent_id like every other table;
+-- one row per (agent, capability). standing is 'gated' or 'standing-grant'; only
+-- the latter joins a run's autoApprove allow-list. basis is a references-only
+-- summary (counts) of the evidence at the last change -- never an action's
+-- arguments, keeping the row consistent with the event log's references-only rule.
+-- A capability with no row here is implicitly gated.
+CREATE TABLE IF NOT EXISTS capability_standing (
+  id          TEXT PRIMARY KEY,
+  agent_id    TEXT NOT NULL REFERENCES agents(id),
+  capability  TEXT NOT NULL,
+  standing    TEXT NOT NULL,
+  basis       TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  UNIQUE(agent_id, capability)
+);
+CREATE INDEX IF NOT EXISTS idx_capability_standing_agent ON capability_standing(agent_id);
 `;
