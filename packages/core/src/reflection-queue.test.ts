@@ -347,6 +347,108 @@ test("accept/reject report not_found for an unknown id and not_proposed for a se
   }
 });
 
+test("two overlapping --propose ticks never double-queue a run (claim-at-persist)", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const run = finishedRun(store, agent.id, "lesson");
+
+    // A provider that, MID-model, simulates a concurrent tick that claims this run and queues
+    // its proposal first. When the real invocation returns from the model and tries to claim,
+    // it loses the CAS and must discard its (duplicate) proposals.
+    const racing: ReflectionProvider = {
+      reflect: async ({ transcript }) => {
+        store.claimRunForReflection(agent.id, transcript.runId);
+        store.recordMemory(agent.id, {
+          memoryType: "semantic",
+          content: "from the other tick",
+          confidence: 0.8,
+          sourceRunId: transcript.runId,
+          reviewState: "proposed",
+          status: "active",
+        });
+        return [
+          { memoryType: "semantic", content: "from the other tick", confidence: 0.8, sourceRunId: transcript.runId },
+        ];
+      },
+    };
+
+    const result = await queueProposedMemories(store, agent, racing);
+    expect(result.queued).toBe(0); // lost the claim ⇒ discarded its proposals
+    expect(result.processedRuns).toEqual([]);
+    // Only the other tick's single proposal is queued — the run is never double-queued.
+    expect(store.memories.list(agent.id, { reviewState: "proposed" }).length).toBe(1);
+    expect(unreflectedRuns(store, agent).runs).toEqual([]); // the run is claimed, not re-offered
+  } finally {
+    store.close();
+  }
+});
+
+test("claimRunForReflection is single-winner and scoped; releasing re-offers the run", () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const other = makeAgent(store, "work");
+    const run = finishedRun(store, agent.id, "lesson");
+
+    expect(store.claimRunForReflection(agent.id, run.id)?.id).toBe(run.id);
+    expect(store.claimRunForReflection(agent.id, run.id)).toBeUndefined(); // already claimed
+    expect(store.claimRunForReflection(other.id, run.id)).toBeUndefined(); // cross-agent reaches nothing
+    expect(unreflectedRuns(store, agent).runs).toEqual([]); // claimed ⇒ not a candidate
+
+    store.releaseRunReflection(agent.id, run.id);
+    expect(unreflectedRuns(store, agent).runs.map((r) => r.id)).toEqual([run.id]); // released ⇒ candidate again
+  } finally {
+    store.close();
+  }
+});
+
+test("a model failure leaves the run unclaimed, so it is retried on the next tick", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const run = finishedRun(store, agent.id, "lesson");
+
+    const failing: ReflectionProvider = {
+      reflect: async () => {
+        throw new Error("model down");
+      },
+    };
+    // The model is called BEFORE the claim, so a failure strands nothing — the run is still a
+    // candidate (no `reflected_at` was stamped).
+    await expect(queueProposedMemories(store, agent, failing)).rejects.toThrow("model down");
+    expect(unreflectedRuns(store, agent).runs.map((r) => r.id)).toEqual([run.id]);
+  } finally {
+    store.close();
+  }
+});
+
+test("opening a pre-existing database without runs.reflected_at migrates the column in", () => {
+  const driver = openDatabase(":memory:");
+  // An older schema: a runs table created before the reflected_at claim column existed.
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, input TEXT NOT NULL,
+      status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, output TEXT
+    );
+  `);
+  const store = new AsterismStore(driver);
+  try {
+    const agent = makeAgent(store, "personal");
+    const run = finishedRun(store, agent.id, "lesson");
+    // The claim CAS reads/writes reflected_at; it would throw "no such column" un-migrated.
+    expect(store.claimRunForReflection(agent.id, run.id)?.id).toBe(run.id);
+    expect(unreflectedRuns(store, agent).runs).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
 test("accepting a proposed row the firewall now flags is BLOCKED, not activated (re-screen at accept)", () => {
   // The normal write path screens at create, so a poisoned row can't be queued through it.
   // Insert one directly to simulate a proposal that was clean when queued but the firewall

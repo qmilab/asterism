@@ -436,10 +436,12 @@ set that up** — wire `reflect --propose` to your operating system's scheduler,
 same way you'd schedule any command. It fills the review pile in the background;
 you still review and accept everything yourself, on your own time.
 
-**cron (Linux/macOS)** — propose for `writer` every night at 2am, via `crontab -e`:
+**cron (Linux/macOS)** — propose for `writer` every night at 2am, via `crontab -e`.
+`flock -n` keeps a slow run from overlapping the next one (Asterism also guards against
+double-queueing internally, but skipping the overlap entirely is cleaner):
 
 ```cron
-0 2 * * *  asterism reflect writer --propose >> ~/.asterism/reflect.log 2>&1
+0 2 * * *  flock -n ~/.asterism/reflect-writer.lock asterism reflect writer --propose >> ~/.asterism/reflect.log 2>&1
 ```
 
 **launchd (macOS)** — `~/Library/LaunchAgents/com.asterism.reflect.writer.plist`,

@@ -80,6 +80,13 @@ export class AsterismStore {
     if (!this.columnExists("runs", "output")) {
       this.driver.exec(`ALTER TABLE runs ADD COLUMN output TEXT`);
     }
+    // The per-run reflection claim (`reflected_at`) joined `runs` with the
+    // reflection-scheduling slice, so a database created before it has the column
+    // missing. Add it idempotently; a NULL default means every existing run reads as
+    // "not yet reflected", which is the correct starting state.
+    if (!this.columnExists("runs", "reflected_at")) {
+      this.driver.exec(`ALTER TABLE runs ADD COLUMN reflected_at TEXT`);
+    }
     // The earned-standing thresholds joined `agent_settings` after it first shipped
     // (with only `recall_budget`), so a database created by that release has the
     // table but not these columns. Add them, idempotently, for those databases; a
@@ -561,6 +568,27 @@ export class AsterismStore {
       );
       return memory;
     });
+  }
+
+  /**
+   * Atomically CLAIM a run for reflection — a single compare-and-set stamping
+   * `reflected_at` only if still NULL (see {@link RunRepository.claimForReflection}).
+   * Returns the claimed run to the caller that won, or undefined to one that lost (the
+   * run was already reflected by a concurrent `reflect --propose`, or is unknown /
+   * cross-agent). The single-winner guarantee is what serializes overlapping proposers:
+   * only the claim owner queues a run's proposals, so the same run is never double-queued.
+   */
+  claimRunForReflection(agentId: string, runId: string): Run | undefined {
+    return this.driver.transaction(() => this.runs.claimForReflection(agentId, runId));
+  }
+
+  /**
+   * Release a reflection claim (clear `reflected_at`) so the run is reflectable again —
+   * used when the model call for a just-claimed run fails, so a transient failure is
+   * retried rather than dropping the run's reflection.
+   */
+  releaseRunReflection(agentId: string, runId: string): void {
+    this.driver.transaction(() => this.runs.releaseReflection(agentId, runId));
   }
 
   /**

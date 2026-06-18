@@ -204,27 +204,20 @@ export interface UnreflectedRuns {
 
 /**
  * The runs a non-interactive `reflect --propose` should reflect on next: runs that
- * finished with output and have NOT been reflected before, oldest-first, capped at
- * `limit`. "Reflected before" is read from the agent's own event log — a
- * `reflection.proposed` marker tags every run a prior tick processed — so this needs no
- * new proposer state and is idempotent across ticks. `pending` reports any runs left
- * beyond the cap so the caller can surface them; the cap is never a silent truncation.
- * Scoped to the agent throughout (its own runs, its own log).
+ * finished with output and have NOT been reflected before (`reflected_at IS NULL`),
+ * oldest-first, capped at `limit`. The per-run `reflected_at` claim (see
+ * {@link AsterismStore.claimRunForReflection}) is the durable marker, so this is
+ * idempotent across sequential ticks and single-flight across overlapping ones — and a
+ * single indexed read, so the per-tick cost does not grow with total history. `pending`
+ * reports any runs left beyond the cap so the caller can surface them; the cap is never a
+ * silent truncation. Scoped to the agent throughout (its own runs only).
  */
 export function unreflectedRuns(
   store: AsterismStore,
   agent: Agent,
   limit: number = DEFAULT_REFLECT_RUN_LIMIT,
 ): UnreflectedRuns {
-  // Read only the marker rows (a SQL-side `type` filter), not the whole append-only log —
-  // this runs on a repeating timer, so the per-tick cost must not grow with total history.
-  const reflected = new Set(
-    store.events
-      .tail(agent.id, { type: "reflection.proposed" })
-      .filter((e) => e.runId !== undefined)
-      .map((e) => e.runId as string),
-  );
-  const candidates = store.runs.listWithOutput(agent.id).filter((r) => !reflected.has(r.id));
+  const candidates = store.runs.unreflected(agent.id);
   return { runs: candidates.slice(0, limit), pending: Math.max(0, candidates.length - limit) };
 }
 
@@ -267,72 +260,81 @@ export async function queueProposedMemories(
     ignored: 0,
   };
 
-  // The accepted memories are a stable advisory hint for the provider (a tick only adds
-  // `proposed` rows, never `accepted`), so compute them once.
-  const accepted = store.memories.listActiveAccepted(agent.id);
-  const knownMemories = accepted.map((m) => m.content);
-  // Dedup target: every content already proposed OR accepted, plus everything queued
-  // earlier in THIS tick — so two runs proposing the same lesson queue it once. Built from
-  // the already-fetched accepted set + a scoped `proposed` query (not a full-table scan),
-  // and grown as we persist.
-  const seen = new Set([
-    ...accepted.map((m) => m.content.trim()),
-    ...store.memories
-      .list(agent.id, { reviewState: "proposed" })
-      .map((m) => m.content.trim()),
-  ]);
+  // A stable advisory hint for the provider — a start snapshot is fine (it only helps the
+  // model avoid re-proposing known lessons; the real dedup is `seen`, re-read per run below).
+  const knownMemories = store.memories.listActiveAccepted(agent.id).map((m) => m.content);
 
   for (const run of runs) {
-    // `listWithOutput` guarantees non-blank output; narrow for the type checker.
+    // `unreflected` guarantees non-blank output; narrow for the type checker.
     if (run.output === undefined) continue;
     const transcript = { runId: run.id, input: run.input, output: run.output };
+    // Call the model FIRST, then claim. A model failure (or a process death) therefore leaves
+    // the run UNCLAIMED and retryable on the next tick — nothing is lost.
     const raw = await provider.reflect({ agentId: agent.id, transcript, knownMemories });
 
-    const tally: ReflectionRunTally = { queued: 0, withheld: 0, alreadyKnown: 0, ignored: 0 };
-    for (const p of raw) {
-      if (!isReflectionMemoryType(p.memoryType)) {
-        tally.ignored++;
-        continue;
-      }
-      const content = p.content.trim();
-      if (content.length === 0) {
-        tally.ignored++;
-        continue;
-      }
-      if (seen.has(content)) {
-        tally.alreadyKnown++;
-        continue;
-      }
-      try {
-        store.recordMemory(agent.id, {
-          memoryType: p.memoryType,
-          content,
-          confidence: p.confidence,
-          sourceRunId: p.sourceRunId,
-          reviewState: "proposed",
-          status: "active",
-        });
-        seen.add(content);
-        tally.queued++;
-      } catch (err) {
-        // The firewall refusing a poisoned proposal is an expected per-proposal outcome:
-        // `recordMemory` has already audited `memory.blocked`, so withhold and move on.
-        // Any other error is a genuine storage failure, not a proposal outcome — let it
-        // propagate (the run stays un-marked, so a later tick retries it idempotently).
-        if (err instanceof MemoryFirewallError) {
-          tally.withheld++;
+    // CLAIM the run before persisting. A concurrent `reflect --propose` that already processed
+    // this run wins the claim; we lose it and DISCARD our (now-duplicate) proposals, so the
+    // same run is never double-queued. Single-flight without an external lock.
+    if (!store.claimRunForReflection(agent.id, run.id)) continue;
+
+    try {
+      // Re-read the dedup set AFTER claiming, so it reflects anything a concurrent proposer or
+      // drain committed while we were on the model. Exact-content skip against proposed∪accepted,
+      // grown as we persist so two of this run's proposals with identical content queue once.
+      const seen = new Set([
+        ...store.memories.listActiveAccepted(agent.id).map((m) => m.content.trim()),
+        ...store.memories.list(agent.id, { reviewState: "proposed" }).map((m) => m.content.trim()),
+      ]);
+      const tally: ReflectionRunTally = { queued: 0, withheld: 0, alreadyKnown: 0, ignored: 0 };
+      for (const p of raw) {
+        if (!isReflectionMemoryType(p.memoryType)) {
+          tally.ignored++;
           continue;
         }
-        throw err;
+        const content = p.content.trim();
+        if (content.length === 0) {
+          tally.ignored++;
+          continue;
+        }
+        if (seen.has(content)) {
+          tally.alreadyKnown++;
+          continue;
+        }
+        try {
+          store.recordMemory(agent.id, {
+            memoryType: p.memoryType,
+            content,
+            confidence: p.confidence,
+            sourceRunId: p.sourceRunId,
+            reviewState: "proposed",
+            status: "active",
+          });
+          seen.add(content);
+          tally.queued++;
+        } catch (err) {
+          // The firewall refusing a poisoned proposal is an expected per-proposal outcome:
+          // `recordMemory` has already audited `memory.blocked`, so withhold and move on. Any
+          // other error is a genuine storage failure — rethrown to the run-level catch below.
+          if (err instanceof MemoryFirewallError) {
+            tally.withheld++;
+            continue;
+          }
+          throw err;
+        }
       }
-    }
 
-    store.recordReflectionProposed(agent.id, run.id, tally);
-    result.processedRuns.push(run.id);
-    result.queued += tally.queued;
-    result.withheld += tally.withheld;
-    result.alreadyKnown += tally.alreadyKnown;
-    result.ignored += tally.ignored;
+      store.recordReflectionProposed(agent.id, run.id, tally);
+      result.processedRuns.push(run.id);
+      result.queued += tally.queued;
+      result.withheld += tally.withheld;
+      result.alreadyKnown += tally.alreadyKnown;
+      result.ignored += tally.ignored;
+    } catch (err) {
+      // A storage failure AFTER the claim — release the claim so the run is retried rather
+      // than stranded as reflected-but-empty, then propagate (one failure ends the tick).
+      store.releaseRunReflection(agent.id, run.id);
+      throw err;
+    }
   }
   return result;
 }

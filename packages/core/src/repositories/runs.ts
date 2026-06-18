@@ -110,23 +110,61 @@ export class RunRepository {
   }
 
   /**
-   * Every run that produced output, oldest-first — the candidate set a scheduled
-   * `reflect --propose` filters to the runs it has not reflected yet. Scoped like
-   * every read; the same non-blank-output predicate as {@link latestWithOutput},
-   * so a run with nothing to learn from is never a candidate. Ordered `started_at`
-   * then `rowid` (the same total order `list` uses), so "un-reflected, oldest-first"
-   * is a deterministic, stable sequence across ticks.
+   * The agent's runs that produced output and have NOT been reflected on yet
+   * (`reflected_at IS NULL`), oldest-first — the candidate set a scheduled `reflect
+   * --propose` works through. Scoped like every read; the same non-blank-output
+   * predicate as {@link latestWithOutput}, so a run with nothing to learn from is
+   * never a candidate. Ordered `started_at` then `rowid` (the same total order `list`
+   * uses), so "un-reflected, oldest-first" is a deterministic, stable sequence. The
+   * `reflected_at` claim (see {@link claimForReflection}) is what makes this idempotent
+   * across ticks and single-flight across overlapping ones.
    */
-  listWithOutput(agentId: string): Run[] {
+  unreflected(agentId: string): Run[] {
     requireAgentId(agentId);
     return this.driver
       .prepare(
         `SELECT * FROM runs
-           WHERE agent_id = ? AND output IS NOT NULL AND TRIM(output) <> ''
+           WHERE agent_id = ? AND output IS NOT NULL AND TRIM(output) <> '' AND reflected_at IS NULL
            ORDER BY started_at ASC, rowid ASC`,
       )
       .all([agentId])
       .map(mapRun);
+  }
+
+  /**
+   * Atomically CLAIM a run for reflection: stamp `reflected_at` only if it is still
+   * NULL, in a SINGLE compare-and-set — the same single-winner discipline as
+   * {@link claimForResume}. Returns the now-claimed run to the caller that won, or
+   * undefined to one that lost (the run was already reflected by a concurrent
+   * `--propose`, or is unknown / cross-agent). This is what keeps two overlapping
+   * scheduled proposers from both queueing the same run's proposals: only the claim
+   * winner persists; the loser skips the run.
+   */
+  claimForReflection(agentId: string, id: string): Run | undefined {
+    requireAgentId(agentId);
+    const reflectedAt = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE runs SET reflected_at = ?
+          WHERE id = ? AND agent_id = ? AND reflected_at IS NULL
+          RETURNING *`,
+      )
+      .get([reflectedAt, id, agentId]);
+    return row ? mapRun(row) : undefined;
+  }
+
+  /**
+   * Release a reflection claim — clear `reflected_at` back to NULL — so the run is a
+   * candidate again on the next tick. Used when the model call for a just-claimed run
+   * fails: the claim is undone so a transient failure is retried rather than silently
+   * dropping the run's reflection. Scoped like every write; a no-op if the run is
+   * unknown or cross-agent.
+   */
+  releaseReflection(agentId: string, id: string): void {
+    requireAgentId(agentId);
+    this.driver
+      .prepare(`UPDATE runs SET reflected_at = NULL WHERE id = ? AND agent_id = ?`)
+      .run([id, agentId]);
   }
 
   /**
