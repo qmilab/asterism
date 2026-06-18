@@ -491,9 +491,18 @@ function gateTool(
         return withheldResult(key);
       }
 
-      if (decision === "confirm") {
-        // A resume's standing disposition decides this destructive action without a
-        // fresh pause. Consulted FIRST so a confirmed action emits no awaiting-
+      // A DESTRUCTIVE action is subject to the resume's per-invocation skip
+      // accounting whether the gate decision is `confirm` (it is not earned, so it
+      // must be confirmed) OR `execute` (a standing grant auto-approves it). Both are
+      // irreversible, and BOTH are replayed when a *later* destructive action parks
+      // the run and a human resumes it — so a granted delete/payment must run AT MOST
+      // ONCE across a run's confirm/replay cycles, exactly like a confirmed one.
+      // Consulting `preApproval` here, not only inside the confirm branch, is what
+      // stops a standing grant from re-executing on every resume (the at-most-once
+      // guarantee — golden rule 4 — covers earned autonomy too, not just confirmation).
+      if (classifyEffect(action) === "destructive") {
+        // The resume's standing disposition decides this invocation without a fresh
+        // pause. Consulted FIRST so a confirmed/granted action emits no awaiting-
         // confirmation event and the run does not churn through `awaiting_confirmation`.
         const verdict = hooks.preApproval?.(action) ?? "gate";
         if (verdict === "skip") {
@@ -502,7 +511,11 @@ function gateTool(
           // executing or pausing, so the loop continues to the next action.
           return alreadyPerformedResult(key);
         }
-        if (verdict === "gate") {
+        // A still-undecided action the gate would CONFIRM (it is not granted) must
+        // pause unless a human approves it now. A granted action (decision ===
+        // "execute") or one already confirmed for this resume (verdict === "run")
+        // skips the prompt and runs.
+        if (decision === "confirm" && verdict === "gate") {
           // Consult the (possibly interactive, blocking) confirmation FIRST, then
           // record the pause only if it is denied. `onAwaitConfirmation` is what
           // persists `awaiting_confirmation`, so deferring it past the prompt means a
@@ -522,38 +535,27 @@ function gateTool(
             return awaitingConfirmationResult(key);
           }
         }
-        // verdict === "run", or "gate" + explicitly confirmed: fall through to
-        // execute. With the pause recorded only on denial, an action reaches
-        // `onExecute` ONLY when it was never paused — so a given invocation triggers
-        // `onAwaitConfirmation` or `onExecute`, never both.
-      }
-
-      // Record the execution for the resume's skip-accounting, with the timing the
-      // action's reversibility demands:
-      //
-      //   - A DESTRUCTIVE action is recorded as executed UP FRONT — before running
-      //     it, and regardless of the result. Its side effect is irreversible, and a
-      //     tool's `isError` does NOT tell us whether that effect happened (a
-      //     payment/delete can succeed while the response times out or fails to
-      //     parse). So a resume must treat any *attempt* as done and never repeat it
-      //     — at most once — or it could double-charge / double-delete. Recording
-      //     before the call also covers a throw or a crash mid-action.
-      //
-      //     It also runs WITHOUT the run's abort signal. On a resume the substrate
-      //     may fire several tool calls at once; an unconfirmed sibling that pauses
-      //     aborts the shared signal, and a confirmed irreversible action that
-      //     honored that signal would do nothing yet still be counted as executed —
-      //     and then be skipped on the next confirm, lost forever. A confirmed action
-      //     is approved; it must run to completion, not be cancelled by a sibling's
-      //     pause. (The substrate still sees the aborted signal and stops issuing
-      //     further calls; only THIS confirmed tool is allowed to finish.)
-      //   - An ordinary (read/write) action is recorded ONLY on success, so a
-      //     transient failure simply re-runs. It is reversible, resume never skips it
-      //     anyway, and it still honors the abort signal like any cancellable work.
-      if (classifyEffect(action) === "destructive") {
+        // Confirmed, granted, or pre-approved for this resume: run it. Record the
+        // attempt as executed UP FRONT — before running, and regardless of the result.
+        // The side effect is irreversible, and a tool's `isError` does NOT tell us
+        // whether it happened (a payment/delete can succeed while the response times
+        // out), so a resume must treat any *attempt* as done and never repeat it — at
+        // most once — or it could double-charge / double-delete; recording first also
+        // covers a throw mid-action. It runs WITHOUT the run's abort signal: on a
+        // resume the substrate may fire several calls at once, and a confirmed/granted
+        // irreversible action that honored a sibling's pause-abort would do nothing yet
+        // be counted as executed, then be skipped next confirm — lost forever. It must
+        // run to completion. (The substrate still sees the abort and stops issuing
+        // further calls; only THIS approved tool is allowed to finish.) With the pause
+        // recorded only on denial, a given invocation triggers `onAwaitConfirmation`
+        // OR `onExecute`, never both.
         hooks.onExecute?.(action);
         return tool.execute(invocation);
       }
+
+      // An ordinary (read/write) action is reversible: run it honoring the abort
+      // signal like any cancellable work, and record it ONLY on success, so a
+      // transient failure simply re-runs (resume never skips a reversible action).
       const result = await tool.execute(invocation, signal);
       if (!result.isError) hooks.onExecute?.(action);
       return result;

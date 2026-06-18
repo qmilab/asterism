@@ -79,8 +79,7 @@ test("a clean track record across distinct targets earns a candidate", () => {
   const c = candidates[0]!;
   expect(c.cleanExecutions).toBe(3);
   expect(c.distinctTargets).toBe(3);
-  expect(c.regressions).toBe(0);
-  expect(c.basis).toBe("earned: 3 confirmed executions across 3 distinct targets, 0 regressions");
+  expect(c.basis).toBe("earned: 3 confirmed executions across 3 distinct targets, no slip since");
 });
 
 test("breadth is required: the same target repeated does not earn a grant", () => {
@@ -99,20 +98,30 @@ test("too few clean executions does not earn a grant", () => {
   expect(proposeStandingGrants(store, agent)).toEqual([]);
 });
 
-test("a single decline in the window blocks earning (zero-regression bar)", () => {
+test("a decline resets the streak: a clean record then a decline no longer qualifies", () => {
   cleanExec(agent.id, "fs.delete", "dist");
   cleanExec(agent.id, "fs.delete", "build");
   cleanExec(agent.id, "fs.delete", "cache");
-  declined(agent.id, "fs.delete", "secrets");
+  declined(agent.id, "fs.delete", "secrets"); // the slip resets the earning window
   expect(proposeStandingGrants(store, agent)).toEqual([]);
 });
 
-test("a failed run that ran the capability is a regression and blocks earning", () => {
+test("a failed run that ran the capability resets the streak too", () => {
   cleanExec(agent.id, "fs.delete", "dist");
   cleanExec(agent.id, "fs.delete", "build");
   cleanExec(agent.id, "fs.delete", "cache");
   failedExec(agent.id, "fs.delete", "tmp");
   expect(proposeStandingGrants(store, agent)).toEqual([]);
+});
+
+test("a pre-grant regression does not block earning forever — a fresh streak re-earns", () => {
+  // An early slip with no grant/downgrade after it must NOT permanently disqualify the
+  // capability: the window resets at the regression, and a fresh clean streak re-earns.
+  declined(agent.id, "fs.delete", "secrets"); // the slip comes FIRST
+  cleanExec(agent.id, "fs.delete", "dist");
+  cleanExec(agent.id, "fs.delete", "build");
+  cleanExec(agent.id, "fs.delete", "cache");
+  expect(proposeStandingGrants(store, agent).map((c) => c.capability)).toEqual(["fs.delete"]);
 });
 
 test("a regression on one capability does not block another's earning", () => {
@@ -182,7 +191,6 @@ test("a custom policy can raise or lower the bar", () => {
   const relaxed = proposeStandingGrants(store, agent, {
     minCleanExecutions: 2,
     minDistinctTargets: 2,
-    maxRegressions: 0,
   });
   expect(relaxed.map((c) => c.capability)).toEqual(["fs.delete"]);
 });
@@ -195,11 +203,11 @@ test("gatherEvidence and qualifies are pure over the event list", () => {
   expect(fsDelete.cleanExecutions).toBe(2);
   expect(fsDelete.distinctTargets).toBe(2);
   expect(qualifies(fsDelete, DEFAULT_STANDING_POLICY)).toBe(false); // 2 < 3
-  expect(qualifies(fsDelete, { minCleanExecutions: 2, minDistinctTargets: 2, maxRegressions: 0 })).toBe(true);
+  expect(qualifies(fsDelete, { minCleanExecutions: 2, minDistinctTargets: 2 })).toBe(true);
 });
 
 test("evidenceBasis is references-only counts, with correct pluralization", () => {
-  expect(evidenceBasis({ capability: "x", cleanExecutions: 1, distinctTargets: 1, regressions: 0 })).toBe(
-    "earned: 1 confirmed execution across 1 distinct target, 0 regressions",
+  expect(evidenceBasis({ capability: "x", cleanExecutions: 1, distinctTargets: 1 })).toBe(
+    "earned: 1 confirmed execution across 1 distinct target, no slip since",
   );
 });

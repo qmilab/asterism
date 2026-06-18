@@ -28,33 +28,33 @@ import type { Agent, Event } from "./types.js";
  * shares the "where does a per-agent setting live" decision with the recall budget).
  * The defaults are deliberately conservative: a grant on a destructive capability is
  * broad (it auto-approves every future invocation of that capability), so it must be
- * earned across BREADTH, not a single repeated action, with zero regressions.
+ * earned across BREADTH, not a single repeated action.
+ *
+ * There is no "regressions tolerated" knob: a regression (a decline or a failed run
+ * that ran the capability) RESETS the earning window — autonomy is lost faster than
+ * earned — so the bar is always measured over the clean streak SINCE the last
+ * regression or downgrade. One slip and the agent starts over.
  */
 export interface StandingPolicy {
-  /** Minimum confirmed, successful destructive executions of the capability. */
+  /** Minimum confirmed, successful destructive executions since the last reset. */
   minCleanExecutions: number;
   /** Minimum distinct argument fingerprints among those executions (breadth, not repetition). */
   minDistinctTargets: number;
-  /** Maximum regressions (declines / failed runs) tolerated — above this, no proposal. */
-  maxRegressions: number;
 }
 
-/** The default earning bar: three clean executions across two distinct targets, zero regressions. */
+/** The default earning bar: three clean executions across two distinct targets, no slip since. */
 export const DEFAULT_STANDING_POLICY: StandingPolicy = Object.freeze({
   minCleanExecutions: 3,
   minDistinctTargets: 2,
-  maxRegressions: 0,
 });
 
 /** The evidence for one destructive capability, read from an agent's event log. */
 export interface CapabilityEvidence {
   capability: string;
-  /** Confirmed destructive executions in runs that finished `done` (since the last downgrade). */
+  /** Confirmed destructive executions in `done` runs SINCE the capability's last reset. */
   cleanExecutions: number;
   /** Distinct argument fingerprints among the clean executions — how broad the track record is. */
   distinctTargets: number;
-  /** Refusals + failed-run executions attributed to the capability (since the last downgrade). */
-  regressions: number;
 }
 
 /**
@@ -134,21 +134,17 @@ interface ExecRecord {
 /**
  * Compute every destructive capability's evidence from an agent's whole event log
  * (oldest-first, as `store.events.list` returns it). The computation is windowed
- * per capability: only events AFTER that capability's most recent downgrade
- * (`agent.standing_changed` → `gated`) count, so a regression genuinely RESETS the
- * ramp — autonomy must be re-earned from a fresh track record, not topped up on the
- * history that preceded the revocation.
+ * per capability: only clean executions AFTER that capability's most recent RESET
+ * count. A reset is a downgrade (`agent.standing_changed` → `gated`, e.g. a revoke)
+ * OR a regression (a decline, or a destructive execution in a run that then failed).
+ *
+ * So a regression genuinely RESETS the ramp — autonomy is re-earned from a fresh
+ * track record, never topped up on the history that preceded the slip — and this
+ * holds for a capability that was NEVER granted just as much as for one that was: an
+ * early decline does not block a capability forever; it just means the clean streak
+ * starts after it. (Autonomy is lost faster than earned, in the safe direction.)
  */
 export function gatherEvidence(events: readonly Event[]): Map<string, CapabilityEvidence> {
-  // Per-capability cutoff: the flat-log index of the last downgrade to `gated`.
-  // An execution/regression only counts if it happened strictly after this.
-  const cutoff = new Map<string, number>();
-  events.forEach((e, i) => {
-    if (e.type !== "agent.standing_changed") return;
-    const f = fields(e.payload);
-    if (f.capability !== undefined && f.to === "gated") cutoff.set(f.capability, i);
-  });
-
   // Group every event by its run so each run's outcome can be read as a whole.
   const byRun = new Map<string, { events: Event[]; indices: number[] }>();
   events.forEach((e, i) => {
@@ -160,12 +156,21 @@ export function gatherEvidence(events: readonly Event[]): Map<string, Capability
   });
 
   const cleanExecs = new Map<string, ExecRecord[]>();
-  const regressions = new Map<string, number[]>(); // capability → flat-log indices of regressions
-  const noteRegression = (capability: string, index: number): void => {
-    const list = regressions.get(capability) ?? [];
+  // Per-capability RESET points (flat-log indices): a clean execution only counts if
+  // it lands strictly after the capability's latest reset.
+  const resets = new Map<string, number[]>();
+  const noteReset = (capability: string, index: number): void => {
+    const list = resets.get(capability) ?? [];
     list.push(index);
-    regressions.set(capability, list);
+    resets.set(capability, list);
   };
+
+  // A downgrade to `gated` (a revoke / regression-driven reset) is a reset point.
+  events.forEach((e, i) => {
+    if (e.type !== "agent.standing_changed") return;
+    const f = fields(e.payload);
+    if (f.capability !== undefined && f.to === "gated") noteReset(f.capability, i);
+  });
 
   for (const { events: runEvents, indices } of byRun.values()) {
     const outcome = runOutcome(runEvents);
@@ -185,33 +190,27 @@ export function gatherEvidence(events: readonly Event[]): Map<string, Capability
         cleanExecs.set(ex.capability, list);
       }
     } else if (outcome === "failed") {
-      // A destructive action that ran in a run that then failed is a regression for
-      // its capability — the same signal that auto-revokes a granted capability.
-      for (const ex of execs) noteRegression(ex.capability, ex.index);
+      // A destructive action that ran in a run that then failed is a regression —
+      // the same signal that auto-revokes a granted capability — so it resets the ramp.
+      for (const ex of execs) noteReset(ex.capability, ex.index);
     } else if (outcome === "declined") {
       const cap = declinedCapability(runEvents);
       if (cap !== undefined) {
         // Attribute the decline to the pending capability, at the decline's index.
         const declineIdx = indices[runEvents.findIndex((e) => e.type === "run.declined")]!;
-        noteRegression(cap, declineIdx);
+        noteReset(cap, declineIdx);
       }
     }
   }
 
-  // Assemble per-capability evidence, applying each capability's downgrade window.
-  const capabilities = new Set<string>([...cleanExecs.keys(), ...regressions.keys()]);
+  // Assemble per-capability evidence over the window since each capability's last reset.
+  const capabilities = new Set<string>([...cleanExecs.keys(), ...resets.keys()]);
   const out = new Map<string, CapabilityEvidence>();
   for (const capability of capabilities) {
-    const since = cutoff.get(capability) ?? -1;
+    const since = Math.max(-1, ...(resets.get(capability) ?? []));
     const cleans = (cleanExecs.get(capability) ?? []).filter((ex) => ex.index > since);
-    const regs = (regressions.get(capability) ?? []).filter((idx) => idx > since);
     const distinct = new Set(cleans.map((ex) => ex.fingerprint ?? "")).size;
-    out.set(capability, {
-      capability,
-      cleanExecutions: cleans.length,
-      distinctTargets: distinct,
-      regressions: regs.length,
-    });
+    out.set(capability, { capability, cleanExecutions: cleans.length, distinctTargets: distinct });
   }
   return out;
 }
@@ -220,8 +219,7 @@ export function gatherEvidence(events: readonly Event[]): Map<string, Capability
 export function qualifies(evidence: CapabilityEvidence, policy: StandingPolicy): boolean {
   return (
     evidence.cleanExecutions >= policy.minCleanExecutions &&
-    evidence.distinctTargets >= policy.minDistinctTargets &&
-    evidence.regressions <= policy.maxRegressions
+    evidence.distinctTargets >= policy.minDistinctTargets
   );
 }
 
@@ -229,8 +227,7 @@ export function qualifies(evidence: CapabilityEvidence, policy: StandingPolicy):
 export function evidenceBasis(evidence: CapabilityEvidence): string {
   const execs = `${evidence.cleanExecutions} confirmed execution${evidence.cleanExecutions === 1 ? "" : "s"}`;
   const targets = `${evidence.distinctTargets} distinct target${evidence.distinctTargets === 1 ? "" : "s"}`;
-  const regs = `${evidence.regressions} regression${evidence.regressions === 1 ? "" : "s"}`;
-  return `earned: ${execs} across ${targets}, ${regs}`;
+  return `earned: ${execs} across ${targets}, no slip since`;
 }
 
 /**

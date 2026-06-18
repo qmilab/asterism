@@ -1617,3 +1617,51 @@ test("a standing grant never crosses agents: B's run is unaffected by A's grant"
   // `other` did not earn the grant, so its destructive action still pauses.
   expect(result.status).toBe("awaiting_confirmation");
 });
+
+test("a standing-granted action is not re-executed when a LATER pause is resumed", async () => {
+  // The at-most-once guarantee must cover earned autonomy, not only confirmation. A
+  // granted action auto-approves (gate decision `execute`, not `confirm`), so without
+  // skip-accounting it would replay on every resume. Here the agent deletes (granted,
+  // runs) then drops a table (NOT granted, pauses); confirming the drop replays the
+  // loop — and the granted delete must NOT run a second time (no double delete/pay).
+  let deleteCount = 0;
+  const countingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete files",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        deleteCount += 1;
+        return { output: "deleted" };
+      },
+    },
+  };
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { command: "rm -rf dist" } },
+    { tool: "drop_table", args: { command: "drop table users" } },
+  ]);
+
+  const parked = await executeRun(store, agent, "delete then drop", {
+    adapter,
+    capabilities: [countingDelete, dropTableCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation"); // parked on the ungranted drop
+  expect(deleteCount).toBe(1); // the granted delete ran once
+
+  const outcome = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [countingDelete, dropTableCapability()],
+  });
+  expect(outcome.kind).toBe("resumed");
+  if (outcome.kind !== "resumed") return;
+  expect(outcome.result.status).toBe("done");
+  // The crux: the granted delete was SKIPPED on the replay, not repeated.
+  expect(deleteCount).toBe(1);
+  // The replayed granted action shows as already-performed, the confirmed drop as executed.
+  expect(outcome.result.actions).toEqual([
+    { capability: "drop_table", effect: "destructive", decision: "executed" },
+  ]);
+});
