@@ -45,12 +45,15 @@ deleting one, and remembers what you approve. The short version:
 ```bash
 npx @qmilab/asterism init     # Node 20+   (Bun: bunx --bun @qmilab/asterism init · Deno: deno run -A npm:@qmilab/asterism init)
 
+# the commands below assume a global install — `npm install -g @qmilab/asterism` —
+# or keep prefixing each one with your runner (e.g. `npx @qmilab/asterism new …`)
+
 # create two agents with distinct souls and autonomy
 asterism new writer  --soul casual-helper       --trust autonomous
 asterism new client  --soul careful-consultant  --trust propose
 
 # scoped secrets and skills — never shared across agents
-asterism secrets add client GITHUB_TOKEN
+asterism secrets add client GITHUB_TOKEN ghp_example_token   # value: inline, piped, or from $GITHUB_TOKEN
 # a skill is just a markdown file you write
 echo "# Blog style: sentence-case headings, active voice" > blog-style.md
 asterism skill   add writer blog-style.md
@@ -64,7 +67,7 @@ asterism memory inspect writer
 asterism events tail client
 ```
 
-> **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. The autonomy you set governs the rest — `propose` hands you a plan, `notify` and `autonomous` act on their own, and at *every* level an agent **pauses for confirmation before anything destructive**. The gate acts on an agent's *tools*: the shipped CLI registers a default catalog of workspace-scoped file tools (`read_file`, `write_file`, `delete_file`) behind it, so with a [configured model](./docs/installation.md#configuring-a-model) an ordinary edit runs under `autonomous` while a deletion pauses — proven end to end in the [five-claims walkthrough](./docs/walkthrough.md).
+> **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. The autonomy you set governs the rest — `propose` hands you a plan, while `notify` and `autonomous` act on their own — but before anything **destructive**, even an `autonomous` agent **pauses for your confirmation**. The gate acts on an agent's *tools*: the shipped CLI registers a default catalog of workspace-scoped file tools (`read_file`, `write_file`, `delete_file`) behind it, so with a [configured model](./docs/installation.md#configuring-a-model) an ordinary edit runs under `autonomous` while a deletion pauses — proven end to end in the [five-claims walkthrough](./docs/walkthrough.md).
 
 <div align="center">
 <img src="docs/assets/img/gate.gif" alt="A terminal recording: an autonomous agent writes a file without asking, then pauses for confirmation before deleting one; after the user confirms, the deletion runs." width="760">
@@ -86,7 +89,7 @@ See [Run in a container](./docs/container.md) for the full setup.
 | Capability | What it gives you |
 |---|---|
 | **Distinct agents & souls** | Many agents from one install, each its own identity with its own character. → [Concepts](./docs/concepts.md) |
-| **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous`, with a hard stop before anything irreversible at *every* level. → [Trust](./docs/concepts.md#trust-levels) |
+| **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included. → [Trust](./docs/concepts.md#trust-levels) |
 | **Reviewable memory** | Typed, scoped per agent, and written only when you approve it. → [Memory](./docs/concepts.md#memory) |
 | **Live dashboard** | Watch and steer every agent — autonomy, approvals, memory — in one terminal view. → [Dashboard](./docs/dashboard.md) |
 | **Chat channels** | Reach one agent from a Telegram or Discord chat. → [Channels](./docs/channels.md) |

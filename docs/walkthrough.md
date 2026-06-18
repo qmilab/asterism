@@ -27,7 +27,7 @@ The five claims:
 asterism init
 asterism new personal --soul casual-helper      --trust autonomous
 asterism new work     --soul careful-consultant --trust propose
-asterism secrets add work GITHUB_TOKEN
+asterism secrets add work GITHUB_TOKEN ghp_example_token   # value: inline, piped, or from $GITHUB_TOKEN
 
 # a skill is just a markdown file you write
 echo "# Blog writer: tighten drafts, keep the author's voice" > blog-writer.md
@@ -94,7 +94,8 @@ work has no memories yet.
 
 `personal`'s memory exists; `work`'s is empty. There is no store an agent can
 reach into for another agent's memory — each query is scoped to one agent. A
-cross-agent read is impossible, not merely discouraged.
+cross-agent read is impossible through the commands and API Asterism exposes, not
+merely discouraged (see [what isolation means today](./concepts.md#what-isolation-means-today)).
 
 ## Claim 2 — separate secrets
 
@@ -110,9 +111,9 @@ Activity for work (1):
 
 The payload records the key and a *reference* to where the value is stored —
 never the value itself. The secret never appears — not in the event log, not in
-any command's output, and not in the framing of either agent's run. The
-secret resolves for its owner and for no one else. `personal` has no way to read
-`work`'s `GITHUB_TOKEN`, and `personal` has no credentials of its own.
+any command's output, and not in the framing of either agent's run. It is stored
+for its owner alone and is unreadable by any other agent. `personal` has no way to
+read `work`'s `GITHUB_TOKEN`, and `personal` has no credentials of its own.
 
 ## Claim 3 — propose plans, autonomous acts
 

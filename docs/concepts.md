@@ -137,16 +137,18 @@ Skills frame the agent's runs alongside its role, soul, and memory.
 A **secret** (credential) is a private value scoped to one agent — an API token,
 a key. It is stored for that agent alone, by reference, and is **never printed
 back, written to the event log, or readable by any other agent.** Reading or
-exporting a secret's value is itself a destructive action that pauses for
-confirmation.
+exporting a secret's value is classified destructive, so any tool that surfaced
+one would first have to clear the
+[destructive-action gate](#the-destructive-action-gate) — but the Phase 1 catalog
+ships no such tool: secrets are stored scoped, not yet surfaced into a run at all.
 
 ## Event log
 
 Every agent keeps an append-only **event log** of its consequential actions: it
 was created, its trust changed, a run started, an action executed or was
-withheld or paused for confirmation, a memory was recorded or blocked, a secret
-was read. The log stores **references, never values** — you will never find a
-secret in it. Read it with [`asterism events tail`](./commands.md#events-tail).
+withheld or paused for confirmation, a memory was recorded or blocked, a
+credential was added or removed. The log stores **references, never values** —
+you will never find a secret in it. Read it with [`asterism events tail`](./commands.md#events-tail).
 
 The event types you will see:
 
@@ -162,7 +164,7 @@ The event types you will see:
 | `memory.recorded` / `memory.blocked` | A memory was saved / refused by the firewall. |
 | `skill.attached` | A skill was attached. |
 | `credential.added` / `credential.rotated` / `credential.removed` | A secret changed. |
-| `secret.read` | A secret value was read out. |
+| `secret.read` | A secret value was read out. *(Reserved — no Phase 1 tool reads a secret into a run, so you won't see this yet.)* |
 
 ## Reflection
 
