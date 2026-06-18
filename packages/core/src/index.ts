@@ -80,8 +80,13 @@ export type { SecretRef } from "./secrets.js";
 // client; the default hosted-model provider lives in `@qmilab/asterism-reflect`.
 export {
   REFLECTION_MEMORY_TYPES,
+  DEFAULT_REFLECT_RUN_LIMIT,
   isReflectionMemoryType,
   proposeReviewableMemories,
+  queueProposedMemories,
+  unreflectedRuns,
+  acceptProposedMemory,
+  rejectProposedMemory,
 } from "./reflection.js";
 export type {
   ReflectionMemoryType,
@@ -91,6 +96,10 @@ export type {
   ReflectionProvider,
   ReviewableProposal,
   ProposeResult,
+  ReflectionRunTally,
+  UnreflectedRuns,
+  QueueResult,
+  DrainResult,
 } from "./reflection.js";
 
 // Run framing — composes soul / role / scoped skills / accepted memories into the

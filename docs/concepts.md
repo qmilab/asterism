@@ -178,12 +178,18 @@ work and proposes typed memories it might keep:
 run transcript → proposed typed memories → safety screen → you accept / edit / reject
 ```
 
-Nothing persists without your approval. Every proposal is typed, attributed to
-the run it came from, carries a confidence score, and is screened by a **memory
-firewall** that flags anything unsafe to remember before you ever see it. Run it
-with [`asterism reflect <agent> --review`](./commands.md#reflect). In this phase
-reflection proposes only `semantic`, `procedural`, `convention`, and `negative`
-memories.
+Nothing becomes a real memory without your approval. Every proposal is typed,
+attributed to the run it came from, carries a confidence score, and is screened by
+a **memory firewall** that flags anything unsafe to remember before you ever see
+it. Run it with [`asterism reflect <agent> --review`](./commands.md#reflect). In
+this phase reflection proposes only `semantic`, `procedural`, `convention`, and
+`negative` memories.
+
+You can also let an agent draft proposals **on a schedule** —
+[`reflect --propose`](./commands.md#schedule-it-yourself) fills a review pile in
+the background for you to go through later. It never accepts anything; an agent
+never starts remembering on its own. And it is never on by default: nothing
+reflects on a schedule unless you wire it to a timer yourself.
 
 Reflection is model-generated, so the exact proposals and confidence scores
 differ from run to run; the transcripts in these docs are illustrative, not

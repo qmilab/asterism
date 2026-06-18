@@ -148,12 +148,35 @@ export class DashboardClient {
     return body as ReflectResult;
   }
 
-  /** Persist an accepted (or edited) proposed memory. */
+  /** Persist an accepted (or edited) proposed memory (the live-compute path). */
   async saveMemory(
     agent: string,
     memory: { memoryType: string; content: string; confidence?: number; sourceRunId?: string },
   ): Promise<Memory> {
     const body = await this.send("POST", `/agents/${enc(agent)}/memory`, memory);
+    return (body as { memory: Memory }).memory;
+  }
+
+  /**
+   * Accept a queued (persisted `proposed`) memory, optionally editing it — the drain
+   * counterpart to {@link saveMemory}. The kernel transitions it active in place, or
+   * re-screens an edit through the firewall and supersedes the original.
+   */
+  async acceptProposal(agent: string, memoryId: string, content?: string): Promise<Memory> {
+    const body = await this.send(
+      "POST",
+      `/agents/${enc(agent)}/memory/${enc(memoryId)}/accept`,
+      content !== undefined ? { content } : {},
+    );
+    return (body as { memory: Memory }).memory;
+  }
+
+  /** Reject a queued (persisted `proposed`) memory: it leaves the review queue. */
+  async rejectProposal(agent: string, memoryId: string): Promise<Memory> {
+    const body = await this.send(
+      "POST",
+      `/agents/${enc(agent)}/memory/${enc(memoryId)}/reject`,
+    );
     return (body as { memory: Memory }).memory;
   }
 

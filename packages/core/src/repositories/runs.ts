@@ -110,6 +110,26 @@ export class RunRepository {
   }
 
   /**
+   * Every run that produced output, oldest-first — the candidate set a scheduled
+   * `reflect --propose` filters to the runs it has not reflected yet. Scoped like
+   * every read; the same non-blank-output predicate as {@link latestWithOutput},
+   * so a run with nothing to learn from is never a candidate. Ordered `started_at`
+   * then `rowid` (the same total order `list` uses), so "un-reflected, oldest-first"
+   * is a deterministic, stable sequence across ticks.
+   */
+  listWithOutput(agentId: string): Run[] {
+    requireAgentId(agentId);
+    return this.driver
+      .prepare(
+        `SELECT * FROM runs
+           WHERE agent_id = ? AND output IS NOT NULL AND TRIM(output) <> ''
+           ORDER BY started_at ASC, rowid ASC`,
+      )
+      .all([agentId])
+      .map(mapRun);
+  }
+
+  /**
    * Atomically claim a paused run for resume: flip `awaiting_confirmation` →
    * `running` in a SINGLE compare-and-set. The status precondition lives in the
    * UPDATE's WHERE clause, so two concurrent confirms cannot both win — the first

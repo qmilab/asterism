@@ -22,12 +22,14 @@ import type {
   Credential,
   EventType,
   Memory,
+  ReviewState,
   Run,
   RunStatus,
   Skill,
   StandingThresholds,
   TrustLevel,
 } from "./types.js";
+import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError } from "./firewall.js";
@@ -481,6 +483,63 @@ export class AsterismStore {
       runId,
     );
     return memory;
+  }
+
+  /**
+   * Transition a PROPOSED memory's review state — the human's accept/reject of a
+   * queued proposal — and record `memory.reviewed` (references only: the memory id and
+   * the `from`/`to` states, never the content). The review queue a scheduled `reflect
+   * --propose` fills is drained through here: accepting flips `proposed → accepted` (the
+   * row was firewall-screened at create, so activating it introduces no unscreened
+   * content), rejecting flips `proposed → rejected`. Scoped like every write — a
+   * cross-agent or unknown id matches nothing, changes nothing, and emits nothing. A
+   * true no-op (the state is already `reviewState`) writes the row but logs no event, the
+   * same discipline the setting/standing changes use. Stamps the originating `runId` when
+   * the memory carries one, so the review ties back to the run it was learned from.
+   */
+  setMemoryReviewState(
+    agentId: string,
+    id: string,
+    reviewState: ReviewState,
+  ): Memory | undefined {
+    return this.driver.transaction(() => {
+      const before = this.memories.get(agentId, id)?.reviewState ?? null;
+      const memory = this.memories.setReviewState(agentId, id, reviewState);
+      if (memory && before !== memory.reviewState) {
+        this.emit(
+          agentId,
+          "memory.reviewed",
+          { memoryId: memory.id, from: before, to: memory.reviewState },
+          memory.sourceRunId,
+        );
+      }
+      return memory;
+    });
+  }
+
+  /**
+   * Record that a non-interactive `reflect --propose` has reflected on `runId` — a
+   * references-only `reflection.proposed` marker carrying the per-run tally (how many
+   * proposals were queued / withheld / already-known / ignored), never any content. This
+   * marker is what makes re-ticks idempotent: the next `--propose` reads these events to
+   * skip the runs it has already processed, so a repeating timer never re-proposes the
+   * same run. The same flight-recorder pattern the earned-standing reader uses — no new
+   * durable proposer state, just an entry in the append-only log. Emit-only (no row to
+   * write), so it is not wrapped in a transaction, mirroring {@link recordRunResumed}.
+   */
+  recordReflectionProposed(agentId: string, runId: string, tally: ReflectionRunTally): void {
+    this.emit(
+      agentId,
+      "reflection.proposed",
+      {
+        runId,
+        queued: tally.queued,
+        withheld: tally.withheld,
+        alreadyKnown: tally.alreadyKnown,
+        ignored: tally.ignored,
+      },
+      runId,
+    );
   }
 
   /** Attach a markdown skill and record `skill.attached` (name + workspace path). */

@@ -370,17 +370,25 @@ other read, a live tail is scoped to the one agent.
 
 ```
 asterism reflect <agent> --review
+asterism reflect <agent> --propose
 ```
 
-Look back over an agent's latest completed run and review the memories it
-proposes to keep. Nothing is saved without your approval — for each proposal you
-**accept**, **edit**, or **reject**, and anything that looks unsafe to remember
-is flagged. `--review` is required; reflection never runs in a silent auto mode.
+Turn an agent's work into memories it might keep. Reflection only ever **proposes**
+— you stay the one who decides what an agent remembers. There are two halves: one
+fills a review pile, the other lets you go through it. One of `--review` /
+`--propose` is required; reflection never runs in a silent auto mode.
 
-Requires a [configured model](./installation.md#configuring-a-model) to draft
-the proposals. In an interactive terminal each proposal prompts
-`[a]ccept / [e]dit / [r]eject`; a non-interactive (piped) session rejects
-everything — nothing is written.
+### `--review` — go through the pile
+
+Review the proposals waiting for an agent and **accept**, **edit**, or **reject**
+each one. Anything that looks unsafe to remember is flagged. If proposals are
+already waiting (see `--propose`), it reviews those — no model needed, since they
+are already drafted. Otherwise it looks over the agent's latest completed run and
+drafts new proposals on the spot (which needs a
+[configured model](./installation.md#configuring-a-model)).
+
+In an interactive terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`;
+a non-interactive (piped) session rejects everything — nothing is written.
 
 ```console
 $ asterism reflect writer --review
@@ -402,6 +410,74 @@ Done — 1 saved, 1 rejected.
 
 If a proposal trips the memory firewall it is flagged with a `⚠`; if you accept
 a flagged one anyway, the firewall still refuses to save it (`⛔ blocked`).
+
+### `--propose` — fill the pile, unattended
+
+Look over an agent's new work and set aside what might be worth remembering, for
+you to review later. It **saves nothing as active and asks nothing** — it just
+adds to the review pile, which you drain with `--review` when you're ready.
+Anything that looks unsafe to remember is held back rather than added. Safe to
+re-run: it only looks at work it hasn't already looked over, and never queues the
+same thing twice.
+
+Because `--propose` is unattended, it's the form you can put on a schedule (below).
+Drafting proposals needs a [configured model](./installation.md#configuring-a-model).
+
+```console
+$ asterism reflect writer --propose
+Queued 2 proposed memories for writer from 1 run.
+Review them with: asterism reflect writer --review
+```
+
+### Schedule it yourself
+
+Asterism ships no clock of its own. **Nothing reflects on a schedule unless you
+set that up** — wire `reflect --propose` to your operating system's scheduler, the
+same way you'd schedule any command. It fills the review pile in the background;
+you still review and accept everything yourself, on your own time.
+
+**cron (Linux/macOS)** — propose for `writer` every night at 2am, via `crontab -e`:
+
+```cron
+0 2 * * *  asterism reflect writer --propose >> ~/.asterism/reflect.log 2>&1
+```
+
+**launchd (macOS)** — `~/Library/LaunchAgents/com.asterism.reflect.writer.plist`,
+then `launchctl load` it:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.asterism.reflect.writer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>asterism</string><string>reflect</string>
+    <string>writer</string><string>--propose</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+</dict></plist>
+```
+
+**systemd timer (Linux)** — a templated `asterism-reflect@.service` plus its
+`.timer`, then `systemctl --user enable --now asterism-reflect@writer.timer`:
+
+```ini
+# asterism-reflect@.service
+[Service]
+Type=oneshot
+ExecStart=asterism reflect %i --propose
+
+# asterism-reflect@writer.timer
+[Timer]
+OnCalendar=*-*-* 02:00:00
+[Install]
+WantedBy=timers.target
+```
+
+Whatever the cadence, the deal is the same: a scheduled run only ever **adds to
+the pile**. An agent never starts remembering something on its own — every memory
+still waits for your `--review`.
 
 ---
 
