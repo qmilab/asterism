@@ -136,7 +136,7 @@ describe("isolation — the agent is the boundary", () => {
     expect(bobContents).toEqual(["bob note"]);
 
     expect(
-      store.memories.setReviewState(bob.id, aliceMem.id, "rejected"),
+      store.memories.settleProposed(bob.id, aliceMem.id, "rejected"),
     ).toBeUndefined();
     expect(store.memories.get(alice.id, aliceMem.id)?.reviewState).toBe(
       "accepted",

@@ -1455,6 +1455,19 @@ async function reviewQueueDrain(
   name: string,
   queued: Memory[],
 ): Promise<number> {
+  // Draining a persisted proposal is a DURABLE decision: a reject transitions the row to
+  // `rejected`, not a discard. So in a non-interactive session (no reviewer wired — e.g. a
+  // piped or cron-launched `reflect --review`) the safe-default reject would silently wipe
+  // the whole pile. Refuse to drain unattended; leave it intact for a real review. (The live
+  // path's reject persists nothing, so it stays harmless without a reviewer.)
+  if (!io.review) {
+    io.out(
+      `${queued.length} proposed ${queued.length === 1 ? "memory is" : "memories are"} waiting for ${name}.`,
+    );
+    io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal to go through them.`);
+    return 0;
+  }
+
   io.out(
     `Reviewing ${queued.length} queued ${queued.length === 1 ? "memory" : "memories"} for ${name}.`,
   );
@@ -1479,6 +1492,7 @@ async function reviewQueueDrain(
     // original (the kernel helper re-screens, the hard gate; a poisoned edit throws here).
     (i, content, edited) =>
       void acceptProposedMemory(store, agent, queued[i]!.id, edited ? content : undefined),
+    true, // warn on a still-poisoned edit before persisting, same as the live path
   );
 
   printReviewSummary(io, counts);

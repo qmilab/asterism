@@ -61,23 +61,32 @@ const io: CliIO = {
   // returned VERBATIM so a piped secret is stored exactly as given.
   readStdin: readPipedStdin,
   // `reflect --review`: the kernel proposes typed memories and prints each one; the
-  // human decides its fate here. Nothing is saved without an explicit accept, and a
-  // non-interactive (piped) session saves nothing — the safe default, mirroring the
-  // destructive-action prompt above. The proposal text is already printed by the
-  // command, so this only collects the decision.
-  review: async (): Promise<ReviewDecision> => {
-    const answer = await ask("  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject):");
-    const choice = (answer ?? "").toLowerCase();
-    if (choice === "a" || choice === "accept" || choice === "y" || choice === "yes") {
-      return { kind: "accept" };
-    }
-    if (choice === "e" || choice === "edit") {
-      const edited = await ask("  New content:");
-      const content = edited ?? "";
-      return content.length > 0 ? { kind: "edit", content } : { kind: "reject" };
-    }
-    return { kind: "reject" };
-  },
+  // human decides its fate here. Wired ONLY when stdin is a TTY — a piped/redirected
+  // session has no human to decide, and the field's ABSENCE is what the command reads as
+  // "non-interactive". This matters for the persisted queue: there, a reject is a durable
+  // transition, so a default-reject in a non-interactive session would wipe the pile;
+  // omitting `review` makes the queue drain refuse to run unattended instead (the live
+  // path's reject is ephemeral, so it stays harmless either way). The proposal text is
+  // already printed by the command, so this only collects the decision.
+  ...(process.stdin.isTTY
+    ? {
+        review: async (): Promise<ReviewDecision> => {
+          const answer = await ask(
+            "  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject):",
+          );
+          const choice = (answer ?? "").toLowerCase();
+          if (choice === "a" || choice === "accept" || choice === "y" || choice === "yes") {
+            return { kind: "accept" };
+          }
+          if (choice === "e" || choice === "edit") {
+            const edited = await ask("  New content:");
+            const content = edited ?? "";
+            return content.length > 0 ? { kind: "edit", content } : { kind: "reject" };
+          }
+          return { kind: "reject" };
+        },
+      }
+    : {}),
   // `trust --review`: the kernel proposes which capabilities have EARNED a standing
   // grant and prints each with its evidence; the human ratifies here. Nothing is
   // granted without an explicit yes, and a non-interactive (piped) session grants

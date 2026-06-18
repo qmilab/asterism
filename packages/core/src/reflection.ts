@@ -22,7 +22,7 @@
 
 import type { Agent, Memory, MemoryType, Run } from "./types.js";
 import type { AsterismStore } from "./store.js";
-import { MemoryFirewallError, screenMemory } from "./firewall.js";
+import { assertMemorySafe, MemoryFirewallError, screenMemory } from "./firewall.js";
 import type { FirewallFinding } from "./firewall.js";
 
 /**
@@ -216,10 +216,12 @@ export function unreflectedRuns(
   agent: Agent,
   limit: number = DEFAULT_REFLECT_RUN_LIMIT,
 ): UnreflectedRuns {
+  // Read only the marker rows (a SQL-side `type` filter), not the whole append-only log —
+  // this runs on a repeating timer, so the per-tick cost must not grow with total history.
   const reflected = new Set(
     store.events
-      .list(agent.id)
-      .filter((e) => e.type === "reflection.proposed" && e.runId !== undefined)
+      .tail(agent.id, { type: "reflection.proposed" })
+      .filter((e) => e.runId !== undefined)
       .map((e) => e.runId as string),
   );
   const candidates = store.runs.listWithOutput(agent.id).filter((r) => !reflected.has(r.id));
@@ -270,14 +272,15 @@ export async function queueProposedMemories(
   const accepted = store.memories.listActiveAccepted(agent.id);
   const knownMemories = accepted.map((m) => m.content);
   // Dedup target: every content already proposed OR accepted, plus everything queued
-  // earlier in THIS tick — so two runs proposing the same lesson queue it once. Seeded
-  // from the store, grown as we persist.
-  const seen = new Set(
-    store.memories
-      .list(agent.id)
-      .filter((m) => m.reviewState === "proposed" || m.reviewState === "accepted")
+  // earlier in THIS tick — so two runs proposing the same lesson queue it once. Built from
+  // the already-fetched accepted set + a scoped `proposed` query (not a full-table scan),
+  // and grown as we persist.
+  const seen = new Set([
+    ...accepted.map((m) => m.content.trim()),
+    ...store.memories
+      .list(agent.id, { reviewState: "proposed" })
       .map((m) => m.content.trim()),
-  );
+  ]);
 
   for (const run of runs) {
     // `listWithOutput` guarantees non-blank output; narrow for the type checker.
@@ -346,37 +349,44 @@ export type DrainResult =
   | { kind: "not_found" }
   | { kind: "not_proposed" };
 
+/** Read back whether `id` exists at all for this agent — to tell `not_found` from a lost CAS. */
+function drainMiss(store: AsterismStore, agent: Agent, id: string): DrainResult {
+  return store.memories.get(agent.id, id) ? { kind: "not_proposed" } : { kind: "not_found" };
+}
+
 /**
- * Reject a queued proposal: transition `proposed → rejected` (audited `memory.reviewed`).
- * The row stays as a rejected record; it was never active, so nothing it framed changes.
- * Agent-scoped — a cross-agent or unknown id is `not_found`; an already-settled one is
- * `not_proposed`.
+ * Reject a queued proposal: settle `proposed → rejected` via the single-winner CAS (audited
+ * `memory.reviewed`). The row stays as a rejected record; it was never active, so nothing it
+ * framed changes. Agent-scoped — a cross-agent or unknown id is `not_found`; an
+ * already-settled one (or a lost race against a concurrent drain) is `not_proposed`.
  */
 export function rejectProposedMemory(store: AsterismStore, agent: Agent, id: string): DrainResult {
-  const current = store.memories.get(agent.id, id);
-  if (!current) return { kind: "not_found" };
-  if (current.reviewState !== "proposed") return { kind: "not_proposed" };
-  const memory = store.setMemoryReviewState(agent.id, id, "rejected");
-  return memory ? { kind: "rejected", memory } : { kind: "not_found" };
+  const settled = store.settleProposedMemory(agent.id, id, "rejected");
+  return settled ? { kind: "rejected", memory: settled } : drainMiss(store, agent, id);
 }
 
 /**
  * Accept a queued proposal — the human's ratification that turns an inert `proposed` row
- * into an `active + accepted` memory that frames future runs. Shared by every drain
- * surface (CLI `reflect --review`, the dashboard) so they can never drift on HOW an accept
- * is applied.
+ * into an `active + accepted` memory that frames future runs. Shared by every drain surface
+ * (CLI `reflect --review`, the dashboard) so they can never drift on HOW an accept is applied.
  *
- * - Unchanged: the proposed row was firewall-screened at create, so activating it
- *   introduces no unscreened content — it transitions `proposed → accepted` in place.
- * - Edited (`editedContent` non-blank and different): the edit is NEW content the firewall
- *   has not seen, so it goes through the re-screening write path (`recordMemory`) as a
- *   fresh `accepted` memory, and the original proposal is marked `rejected` (superseded).
- *   A poisoned edit throws `MemoryFirewallError` from `recordMemory` — the hard gate — for
- *   the caller to surface; the original proposal is left untouched in that case.
+ * The memory firewall is the HARD GATE at the persistence boundary, applied on BOTH paths:
+ *
+ * - Unchanged: re-screen the proposal's content ({@link assertMemorySafe}) and, if it still
+ *   passes, settle `proposed → accepted` via the single-winner CAS. The re-screen matters
+ *   because the firewall ruleset can tighten between an unattended `--propose` and the human
+ *   review — a proposal that was clean when queued but the rules now flag is blocked, not
+ *   activated (it throws `MemoryFirewallError` for the caller to surface; the row stays
+ *   `proposed`).
+ * - Edited (`editedContent` non-blank and different): screen the NEW content up front (so a
+ *   poisoned edit is refused WITHOUT touching the original — it stays in the queue), then
+ *   CAS-claim the original `proposed → rejected` and record the edit as a fresh `accepted`
+ *   memory. Claiming before the record is what stops two concurrent edited-accepts from
+ *   yielding two accepted memories: only the CAS winner records; the loser is `not_proposed`.
  *
  * A blank or identical `editedContent` is treated as "unchanged" (the surfaces guard blank
  * edits before calling). Agent-scoped — a cross-agent or unknown id is `not_found`; an
- * already-settled one is `not_proposed`.
+ * already-settled one (or a lost race) is `not_proposed`.
  */
 export function acceptProposedMemory(
   store: AsterismStore,
@@ -390,6 +400,12 @@ export function acceptProposedMemory(
 
   const edited = editedContent?.trim();
   if (edited !== undefined && edited.length > 0 && edited !== current.content) {
+    // Screen the edit BEFORE claiming, so a poisoned edit throws here and leaves the
+    // original proposal untouched in the queue.
+    assertMemorySafe(edited);
+    // CAS-claim the original out of the queue first — a concurrent drain that already
+    // settled it loses here, so we never record a duplicate accepted memory.
+    if (!store.settleProposedMemory(agent.id, id, "rejected")) return drainMiss(store, agent, id);
     const memory = store.recordMemory(agent.id, {
       memoryType: current.memoryType,
       content: edited,
@@ -398,11 +414,12 @@ export function acceptProposedMemory(
       reviewState: "accepted",
       status: "active",
     });
-    // The edit superseded the proposal; mark the original rejected so the queue clears.
-    store.setMemoryReviewState(agent.id, id, "rejected");
     return { kind: "accepted", memory };
   }
 
-  const memory = store.setMemoryReviewState(agent.id, id, "accepted");
-  return memory ? { kind: "accepted", memory } : { kind: "not_found" };
+  // Unchanged: re-screen at the persistence boundary (throws if the rules now flag it),
+  // then claim it active via the CAS.
+  assertMemorySafe(current.content);
+  const settled = store.settleProposedMemory(agent.id, id, "accepted");
+  return settled ? { kind: "accepted", memory: settled } : drainMiss(store, agent, id);
 }

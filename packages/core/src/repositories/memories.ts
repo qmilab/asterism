@@ -150,7 +150,18 @@ export class MemoryRepository {
       .map(mapMemory);
   }
 
-  setReviewState(
+  /**
+   * Atomically settle a PROPOSED memory: flip `review_state` from `proposed` to
+   * `reviewState` in a SINGLE compare-and-set — the same single-winner discipline the
+   * run-claim CAS uses ({@link RunRepository.claimForResume} / `claimForDecline`). The
+   * `review_state = 'proposed'` precondition lives in the UPDATE's WHERE clause, so two
+   * concurrent drains over one proposal cannot both win: the first transitions it and the
+   * second matches nothing. Returns the settled row to the winner, or undefined to a caller
+   * that lost the race (or named an unknown / already-settled id). This is what keeps a
+   * rejected proposal from being resurrected to `accepted` by a racing accept, and one
+   * proposal from yielding two accepted memories under concurrent edited-accepts.
+   */
+  settleProposed(
     agentId: string,
     id: string,
     reviewState: ReviewState,
@@ -159,7 +170,9 @@ export class MemoryRepository {
     validateEnum(reviewState, REVIEW_STATES, "memory reviewState");
     const row = this.driver
       .prepare(
-        `UPDATE memories SET review_state = ? WHERE id = ? AND agent_id = ? RETURNING *`,
+        `UPDATE memories SET review_state = ?
+          WHERE id = ? AND agent_id = ? AND review_state = 'proposed'
+          RETURNING *`,
       )
       .get([reviewState, id, agentId]);
     return row ? mapMemory(row) : undefined;

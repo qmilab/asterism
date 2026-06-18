@@ -1144,6 +1144,24 @@ test("reflect --review drains the queue by rejecting too (a refused proposal lea
   expect(await capture(["memory", "inspect", "personal"], h.io)).not.toContain("accepted");
 });
 
+test("reflect --review leaves a queued pile intact when run non-interactively (no destructive default-reject)", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "keep me for review", confidence: 0.8 }]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // io.review is unset here — a piped / cron-launched session. Draining would persist a
+  // reject, so the command must REFUSE to drain and leave the pile untouched.
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("waiting");
+  expect(out).not.toContain("rejected");
+  const mem = await capture(["memory", "inspect", "personal"], h.io);
+  expect(mem).toContain("keep me for review");
+  expect(mem).toContain("proposed"); // still queued, not wiped
+});
+
 test("reflect --propose is idempotent — a second run finds no new work", async () => {
   const h = harness();
   await withFinishedRun(h);

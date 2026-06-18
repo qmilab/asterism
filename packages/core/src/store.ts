@@ -486,30 +486,31 @@ export class AsterismStore {
   }
 
   /**
-   * Transition a PROPOSED memory's review state — the human's accept/reject of a
-   * queued proposal — and record `memory.reviewed` (references only: the memory id and
-   * the `from`/`to` states, never the content). The review queue a scheduled `reflect
-   * --propose` fills is drained through here: accepting flips `proposed → accepted` (the
-   * row was firewall-screened at create, so activating it introduces no unscreened
-   * content), rejecting flips `proposed → rejected`. Scoped like every write — a
-   * cross-agent or unknown id matches nothing, changes nothing, and emits nothing. A
-   * true no-op (the state is already `reviewState`) writes the row but logs no event, the
-   * same discipline the setting/standing changes use. Stamps the originating `runId` when
-   * the memory carries one, so the review ties back to the run it was learned from.
+   * Settle a PROPOSED memory — the human's accept/reject of a queued proposal — via a
+   * single compare-and-set ({@link MemoryRepository.settleProposed}) and record the
+   * transition as `memory.reviewed` (references only: the memory id and the `from`/`to`
+   * states, never the content). The review queue a scheduled `reflect --propose` fills is
+   * drained through here: accepting flips `proposed → accepted`, rejecting flips
+   * `proposed → rejected`. The CAS is the race guard — two surfaces draining one proposal
+   * (a CLI `reflect --review` and the dashboard, say) cannot both win, so a rejected
+   * proposal can never be resurrected to accepted by a racing accept. `from` is always
+   * `proposed` (the only state the CAS transitions from). Returns the settled row to the
+   * winner — stamping the originating `runId` on the event when the memory carries one — or
+   * undefined to a caller that lost the race or named an unknown / already-settled id, in
+   * which case nothing changes and nothing is logged.
    */
-  setMemoryReviewState(
+  settleProposedMemory(
     agentId: string,
     id: string,
     reviewState: ReviewState,
   ): Memory | undefined {
     return this.driver.transaction(() => {
-      const before = this.memories.get(agentId, id)?.reviewState ?? null;
-      const memory = this.memories.setReviewState(agentId, id, reviewState);
-      if (memory && before !== memory.reviewState) {
+      const memory = this.memories.settleProposed(agentId, id, reviewState);
+      if (memory) {
         this.emit(
           agentId,
           "memory.reviewed",
-          { memoryId: memory.id, from: before, to: memory.reviewState },
+          { memoryId: memory.id, from: "proposed", to: memory.reviewState },
           memory.sourceRunId,
         );
       }
