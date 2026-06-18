@@ -149,3 +149,145 @@ test("clearRecallBudget logs a transition to null only when something was set", 
   const after = store.events.tail(beta.id).filter((e) => e.type === "agent.setting_changed").length;
   expect(after).toBe(before);
 });
+
+// --- earned-standing thresholds (the second per-agent tunable) ---------------
+
+/** Count an agent's `agent.setting_changed` events whose `setting` is `field`. */
+function settingEvents(agentId: string, field: string): number {
+  return store.events
+    .tail(agentId)
+    .filter((e) => e.type === "agent.setting_changed" && (e.payload as Record<string, unknown>).setting === field)
+    .length;
+}
+
+test("standing thresholds are scoped: one agent's bar never appears for another", () => {
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+  // Beta shares nothing — a per-agent bar is one agent's, never global.
+  expect(store.agentSettings.getStandingThresholds(beta.id)).toEqual({});
+  expect(store.agentSettings.get(beta.id)).toBeUndefined();
+});
+
+test("an unset agent has no threshold overrides", () => {
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({});
+});
+
+test("setting one threshold leaves the other untouched (no clobber)", () => {
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5 });
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({ minCleanExecutions: 5 });
+  // Now set only the breadth half — the execution half must survive.
+  store.setStandingThresholds(alpha.id, { minDistinctTargets: 4 });
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+});
+
+test("the recall budget and the standing thresholds never clobber each other", () => {
+  store.setRecallBudget(alpha.id, 40);
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  // Both tunables coexist on the one row...
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+  // ...and clearing one leaves the other intact, in both directions.
+  store.clearStandingThresholds(alpha.id);
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({});
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 2, minDistinctTargets: 1 });
+  store.clearRecallBudget(alpha.id);
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBeUndefined();
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 2,
+    minDistinctTargets: 1,
+  });
+});
+
+test("setStandingThresholds upserts: setting again rewrites the row, it does not add a second", () => {
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 2 });
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 2,
+    minDistinctTargets: 4,
+  });
+});
+
+test("createdAt is preserved across a threshold upsert; updatedAt advances", async () => {
+  const first = store.agentSettings.setStandingThresholds(alpha.id, { minCleanExecutions: 5 });
+  await new Promise((r) => setTimeout(r, 2));
+  const second = store.agentSettings.setStandingThresholds(alpha.id, { minDistinctTargets: 4 });
+  expect(second.createdAt).toBe(first.createdAt);
+  expect(second.updatedAt >= first.updatedAt).toBe(true);
+});
+
+test("clearStandingThresholds returns the agent to the default; the row persists", () => {
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  store.clearStandingThresholds(alpha.id);
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({});
+  // The row is kept (NULL thresholds) so a later set preserves created_at.
+  expect(store.agentSettings.get(alpha.id)).toBeDefined();
+});
+
+test("clearStandingThresholds on an agent that never set one is a no-op", () => {
+  expect(store.clearStandingThresholds(alpha.id)).toBeUndefined();
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({});
+});
+
+test("setStandingThresholds validates each value as a positive whole number", () => {
+  expect(() => store.setStandingThresholds(alpha.id, { minCleanExecutions: 0 })).toThrow();
+  expect(() => store.setStandingThresholds(alpha.id, { minDistinctTargets: -2 })).toThrow();
+  expect(() => store.setStandingThresholds(alpha.id, { minCleanExecutions: 2.5 })).toThrow();
+  expect(() => store.setStandingThresholds(alpha.id, { minDistinctTargets: Number.NaN })).toThrow();
+  // A rejected write leaves nothing behind.
+  expect(store.agentSettings.get(alpha.id)).toBeUndefined();
+});
+
+test("setStandingThresholds with no field provided is rejected", () => {
+  expect(() => store.setStandingThresholds(alpha.id, {})).toThrow();
+  expect(() => store.agentSettings.setStandingThresholds(alpha.id, {})).toThrow();
+});
+
+test("the threshold repository methods require an agentId", () => {
+  expect(() => store.agentSettings.getStandingThresholds("")).toThrow();
+  expect(() => store.agentSettings.setStandingThresholds("", { minCleanExecutions: 2 })).toThrow();
+  expect(() => store.agentSettings.clearStandingThresholds("")).toThrow();
+});
+
+test("setStandingThresholds records one references-only event per changed field", () => {
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  const events = store.events
+    .tail(alpha.id)
+    .filter((e) => e.type === "agent.setting_changed")
+    .map((e) => e.payload as Record<string, unknown>);
+  expect(events).toContainEqual({ setting: "minCleanExecutions", from: null, to: 5 });
+  expect(events).toContainEqual({ setting: "minDistinctTargets", from: null, to: 4 });
+});
+
+test("setting a threshold to its current value is a no-op: no phantom event", () => {
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  // Re-set the same clean value plus a genuinely new targets value: only targets logs.
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 2 });
+  expect(settingEvents(alpha.id, "minCleanExecutions")).toBe(1); // unchanged half logged once
+  expect(settingEvents(alpha.id, "minDistinctTargets")).toBe(2); // changed both times
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 2,
+  });
+});
+
+test("clearStandingThresholds logs to null only for the fields that were set", () => {
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5 }); // only clean set
+  store.clearStandingThresholds(alpha.id);
+  // The set half logs a clear; the never-set half logs nothing.
+  const cleared = store.events
+    .tail(alpha.id)
+    .filter((e) => e.type === "agent.setting_changed")
+    .at(-1);
+  expect(cleared!.payload).toEqual({ setting: "minCleanExecutions", from: 5, to: null });
+  expect(settingEvents(alpha.id, "minDistinctTargets")).toBe(0);
+});

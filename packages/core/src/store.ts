@@ -25,6 +25,7 @@ import type {
   Run,
   RunStatus,
   Skill,
+  StandingThresholds,
   TrustLevel,
 } from "./types.js";
 import { EventRepository } from "./repositories/events.js";
@@ -76,6 +77,16 @@ export class AsterismStore {
   private migrate(): void {
     if (!this.columnExists("runs", "output")) {
       this.driver.exec(`ALTER TABLE runs ADD COLUMN output TEXT`);
+    }
+    // The earned-standing thresholds joined `agent_settings` after it first shipped
+    // (with only `recall_budget`), so a database created by that release has the
+    // table but not these columns. Add them, idempotently, for those databases; a
+    // fresh database already has them from SCHEMA, so each step is a no-op there.
+    if (!this.columnExists("agent_settings", "min_clean_executions")) {
+      this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN min_clean_executions INTEGER`);
+    }
+    if (!this.columnExists("agent_settings", "min_distinct_targets")) {
+      this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN min_distinct_targets INTEGER`);
     }
   }
 
@@ -214,6 +225,93 @@ export class AsterismStore {
         from,
         to: null,
       });
+      return settings;
+    });
+  }
+
+  /**
+   * Set an agent's earned-standing thresholds (the bar a destructive capability must
+   * clear to be PROPOSED for an auto-approve grant), recording each genuine change as
+   * `agent.setting_changed` — references only (a config count, never an action's
+   * arguments). Only the provided fields are written, and only a real transition is
+   * logged: a field set to its current value writes and records nothing, the same
+   * discipline as `setRecallBudget`. An invalid value cannot equal a stored
+   * (already-validated) one, so it still reaches the repository's write-boundary
+   * validation and throws. Throws if no threshold is provided.
+   */
+  setStandingThresholds(agentId: string, thresholds: StandingThresholds): AgentSettings {
+    if (thresholds.minCleanExecutions === undefined && thresholds.minDistinctTargets === undefined) {
+      throw new Error("no standing thresholds to set");
+    }
+    return this.driver.transaction(() => {
+      const before = this.agentSettings.getStandingThresholds(agentId);
+      // Narrow to the fields that genuinely change — an unchanged value is a true
+      // no-op (no write, no phantom event).
+      const changes: StandingThresholds = {};
+      if (
+        thresholds.minCleanExecutions !== undefined &&
+        thresholds.minCleanExecutions !== before.minCleanExecutions
+      ) {
+        changes.minCleanExecutions = thresholds.minCleanExecutions;
+      }
+      if (
+        thresholds.minDistinctTargets !== undefined &&
+        thresholds.minDistinctTargets !== before.minDistinctTargets
+      ) {
+        changes.minDistinctTargets = thresholds.minDistinctTargets;
+      }
+      if (changes.minCleanExecutions === undefined && changes.minDistinctTargets === undefined) {
+        const existing = this.agentSettings.get(agentId);
+        if (existing) return existing;
+      }
+
+      const settings = this.agentSettings.setStandingThresholds(agentId, changes);
+      if (changes.minCleanExecutions !== undefined) {
+        this.emit(agentId, "agent.setting_changed", {
+          setting: "minCleanExecutions",
+          from: before.minCleanExecutions ?? null,
+          to: settings.minCleanExecutions ?? null,
+        });
+      }
+      if (changes.minDistinctTargets !== undefined) {
+        this.emit(agentId, "agent.setting_changed", {
+          setting: "minDistinctTargets",
+          from: before.minDistinctTargets ?? null,
+          to: settings.minDistinctTargets ?? null,
+        });
+      }
+      return settings;
+    });
+  }
+
+  /**
+   * Clear an agent's earned-standing threshold overrides, returning that capability
+   * bar to the kernel default, and record one `agent.setting_changed` (`to: null`)
+   * per field that was actually set. A no-op when neither was set: nothing changes,
+   * nothing is logged, and the returned row is whatever already existed (or
+   * undefined) — symmetric with `clearRecallBudget`.
+   */
+  clearStandingThresholds(agentId: string): AgentSettings | undefined {
+    return this.driver.transaction(() => {
+      const before = this.agentSettings.getStandingThresholds(agentId);
+      if (before.minCleanExecutions === undefined && before.minDistinctTargets === undefined) {
+        return this.agentSettings.get(agentId);
+      }
+      const settings = this.agentSettings.clearStandingThresholds(agentId);
+      if (before.minCleanExecutions !== undefined) {
+        this.emit(agentId, "agent.setting_changed", {
+          setting: "minCleanExecutions",
+          from: before.minCleanExecutions,
+          to: null,
+        });
+      }
+      if (before.minDistinctTargets !== undefined) {
+        this.emit(agentId, "agent.setting_changed", {
+          setting: "minDistinctTargets",
+          from: before.minDistinctTargets,
+          to: null,
+        });
+      }
       return settings;
     });
   }

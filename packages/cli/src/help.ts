@@ -90,6 +90,7 @@ reaches into any agent's memory, secrets, or files.`,
 asterism trust <agent> --review
 asterism trust <agent> show
 asterism trust <agent> revoke <capability>
+asterism trust <agent> threshold [--clean <n>] [--targets <n>]  ·  --unset
 
 Set how much an agent may do on its own — both the overall level, and, capability by
 capability, the few destructive actions it has earned the right to take without
@@ -101,16 +102,25 @@ pausing for you.
                             times, across different targets, with nothing declined or
                             failed in between. You grant or decline each; nothing is
                             granted without your yes.
-  trust <agent> show        Show the agent's level and which capabilities now act
-                            without pausing.
+  trust <agent> show        Show the agent's level, which capabilities now act
+                            without pausing, and its earning bar.
   trust <agent> revoke <capability>
                             Take a grant back — the capability pauses for your
                             confirmation again.
+  trust <agent> threshold [--clean <n>] [--targets <n>]
+                            Tune how much clean track record review asks for before it
+                            proposes a grant: how many confirmed executions (--clean),
+                            across how many different targets (--targets). Set either
+                            or both; leave the other as it is.
+  trust <agent> threshold --unset
+                            Clear the custom bar — back to the built-in default.
+  trust <agent> threshold   Show this agent's current earning bar.
 
 A grant is earned, never automatic, and lost the moment something goes wrong: a
-declined or failed action on a capability resets it, so it has to be re-earned. Even
-a granted capability stays inside the agent's own workspace and never carries to
-another agent.
+declined or failed action on a capability resets it, so it has to be re-earned. A
+higher bar only asks for more evidence before proposing — it never lets anything act
+without your yes. Even a granted capability stays inside the agent's own workspace and
+never carries to another agent.
 
 ${AUTONOMY_HELP}`,
 

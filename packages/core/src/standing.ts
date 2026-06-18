@@ -48,6 +48,22 @@ export const DEFAULT_STANDING_POLICY: StandingPolicy = Object.freeze({
   minDistinctTargets: 2,
 });
 
+/**
+ * The EFFECTIVE earning bar for an agent: its own per-agent threshold overrides
+ * (set via `trust ... threshold`) where present, else {@link DEFAULT_STANDING_POLICY}
+ * for each half. The kernel owns this resolution — the same reason `resolveRecallBudget`
+ * does — so every surface that proposes grants reads one effective policy and can never
+ * drift on the bar. The read is `agentId`-scoped, so a bar is resolved only from that
+ * agent's own setting, never another's; an unset agent resolves to the pure default.
+ */
+export function resolveStandingPolicy(store: AsterismStore, agent: Agent): StandingPolicy {
+  const override = store.agentSettings.getStandingThresholds(agent.id);
+  return {
+    minCleanExecutions: override.minCleanExecutions ?? DEFAULT_STANDING_POLICY.minCleanExecutions,
+    minDistinctTargets: override.minDistinctTargets ?? DEFAULT_STANDING_POLICY.minDistinctTargets,
+  };
+}
+
 /** The evidence for one destructive capability, read from an agent's event log. */
 export interface CapabilityEvidence {
   capability: string;
@@ -245,11 +261,16 @@ export function evidenceBasis(evidence: CapabilityEvidence): string {
  * and only then is the grant recorded and the gate's `autoApprove` widened. An
  * already-granted capability is excluded, so re-running review never re-proposes what
  * is already earned.
+ *
+ * The earning bar is the agent's own EFFECTIVE policy ({@link resolveStandingPolicy}:
+ * its per-agent overrides, else the default) unless a `policy` is passed explicitly —
+ * so a stricter agent bar suppresses a candidate the default would surface, and a
+ * looser one surfaces it sooner, all without weakening the gate.
  */
 export function proposeStandingGrants(
   store: AsterismStore,
   agent: Agent,
-  policy: StandingPolicy = DEFAULT_STANDING_POLICY,
+  policy: StandingPolicy = resolveStandingPolicy(store, agent),
 ): StandingCandidate[] {
   const events = store.events.list(agent.id);
   const evidence = gatherEvidence(events);
