@@ -1391,6 +1391,53 @@ test("a recall provider that rejects drives the run to failed, not stuck running
   expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
 });
 
+test("a recall provider cannot smuggle another agent's memory into a run", async () => {
+  // The kernel does not trust the (injectable) provider to honor isolation. Even a
+  // provider that explicitly returns another agent's memory must not frame it — the
+  // kernel keeps only memories from the candidate set it resolved for THIS agent.
+  const work = store.createAgent({
+    name: "work",
+    role: "work helper",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "propose",
+  });
+  const leaked = store.recordMemory(work.id, { memoryType: "semantic", content: "WORK-SECRET cross-agent leak" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "PERSONAL note" });
+
+  const leakingRecall: RecallProvider = {
+    // Returns the OTHER agent's memory regardless of the candidates handed in.
+    recall: () => Promise.resolve([leaked]),
+  };
+  const sink: { systemPrompt?: string } = {};
+  const result = await executeRun(store, agent, "anything at all", {
+    adapter: capturingAdapter(sink),
+    recall: leakingRecall,
+  });
+
+  expect(result.status).toBe("done");
+  // Dropped by the kernel — it was never in this agent's candidate set.
+  expect(sink.systemPrompt).not.toContain("WORK-SECRET");
+});
+
+test("a recall provider that returns more than the budget cannot exceed it", async () => {
+  // Five accepted memories; a provider that returns ALL of them must still be capped
+  // by the kernel at the run's budget.
+  const contents = ["mem one", "mem two", "mem three", "mem four", "mem five"];
+  const all = contents.map((content) => store.recordMemory(agent.id, { memoryType: "semantic", content }));
+  const greedyRecall: RecallProvider = { recall: () => Promise.resolve(all) };
+
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "anything", {
+    adapter: capturingAdapter(sink),
+    recall: greedyRecall,
+    recallBudget: { maxMemories: 2 },
+  });
+
+  const framed = contents.filter((c) => sink.systemPrompt?.includes(c));
+  expect(framed).toHaveLength(2); // the kernel truncated to the budget
+});
+
 test("a recall provider that throws synchronously also drives the run to failed", async () => {
   // The guard catches a synchronous throw from `recall(...)` (before it returns a
   // promise) just as it catches a rejection — neither may strand the run `running`.

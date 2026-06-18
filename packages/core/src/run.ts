@@ -18,7 +18,7 @@
 import type { RuntimeAdapter, RunOutput, RunEvent } from "./adapter.js";
 import { frameRun, resolveSoul } from "./framing.js";
 import type { SkillContext } from "./framing.js";
-import { DEFAULT_RECALL_BUDGET, defaultRecallProvider } from "./recall.js";
+import { DEFAULT_RECALL_BUDGET, defaultRecallProvider, enforceRecall } from "./recall.js";
 import type { RecallBudget, RecallProvider } from "./recall.js";
 import { auditTrustHooks } from "./audit.js";
 import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
@@ -337,17 +337,27 @@ async function runAndPersist(
     // Structured recall: rank the agent's accepted memories against this task and
     // frame at most a budget's worth, instead of inlining all of them. The kernel
     // resolves the candidates (the agent's OWN active+accepted memories) and hands
-    // them to the provider, which only ranks within that set — recall never queries
-    // the store, so it cannot reach another agent's rows. Under budget the selection
-    // is the full set unchanged, so framing is identical to the pre-recall behaviour.
+    // them to the provider, which only ranks within that set. Under budget the
+    // selection is the full set unchanged, so framing is identical to before.
+    //
+    // The provider is injectable and untrusted: `enforceRecall` re-imposes the
+    // kernel's guarantees on its output — every framed memory must be one of the
+    // candidates the kernel resolved (so a buggy/hostile provider cannot frame
+    // another agent's row, or tamper with a real id's content), deduped and
+    // truncated to the budget. The boundary is the kernel's, never the provider's.
     const recall = options.recall ?? defaultRecallProvider;
-    const memories = await recall.recall({
+    const recallInput = {
       agentId: agent.id,
       query: input,
       candidates: store.memories.listActiveAccepted(agent.id),
       budget: options.recallBudget ?? DEFAULT_RECALL_BUDGET,
       now: run.startedAt,
-    });
+    };
+    const memories = enforceRecall(
+      await recall.recall(recallInput),
+      recallInput.candidates,
+      recallInput.budget,
+    );
     const request = frameRun({
       agent,
       ...(soulText !== undefined ? { soulText } : {}),

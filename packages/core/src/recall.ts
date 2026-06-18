@@ -230,3 +230,53 @@ export const defaultRecallProvider: RecallProvider = {
     return Promise.resolve(selectRecall(input));
   },
 };
+
+// ---------------------------------------------------------------------------
+// Kernel-side enforcement — the recall guarantees do not depend on the provider.
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-impose the kernel's recall guarantees on a provider's output, no matter what
+ * the provider did. A {@link RecallProvider} is INJECTABLE — a later embeddings /
+ * vector backend could be buggy or hostile — so the kernel never trusts its result
+ * to honor the contract. This re-establishes, in trusted code (mirroring how the
+ * trust layer never trusts the adapter — the kernel owns the boundary, the seam
+ * only proposes):
+ *
+ *   - ISOLATION — every framed memory is one of the `candidates` the kernel handed
+ *     in, matched by `id`. A provider cannot introduce a memory the kernel did not
+ *     resolve, including another agent's row, or one of this agent's own
+ *     proposed/archived memories (candidates are only the active+accepted set). And
+ *     the framed object is the kernel's OWN trusted candidate — never the object the
+ *     provider returned — so a provider cannot tamper with a real id's content either.
+ *   - BUDGET — at most `maxMemories` are framed, even if the provider returned more.
+ *   - NO DUPLICATES — each candidate is framed at most once.
+ *
+ * The provider's ORDER is preserved among the memories that survive, so its ranking
+ * is honored — only constrained. The default provider already satisfies all three,
+ * so this is a no-op for it; it exists to make the seam safe for the providers it
+ * is built to admit.
+ */
+export function enforceRecall(
+  selected: readonly Memory[],
+  candidates: readonly Memory[],
+  budget: RecallBudget,
+): readonly Memory[] {
+  const max = budget.maxMemories;
+  if (max <= 0) return [];
+  // The trusted objects, keyed by id — what actually frames the run.
+  const trusted = new Map<string, Memory>();
+  for (const candidate of candidates) trusted.set(candidate.id, candidate);
+
+  const out: Memory[] = [];
+  const taken = new Set<string>();
+  for (const memory of selected) {
+    if (out.length >= max) break;
+    const canonical = trusted.get(memory.id);
+    if (canonical === undefined) continue; // not a candidate the kernel resolved — drop
+    if (taken.has(memory.id)) continue; // already framed — dedupe
+    taken.add(memory.id);
+    out.push(canonical); // frame the kernel's own object, not the provider's
+  }
+  return out;
+}

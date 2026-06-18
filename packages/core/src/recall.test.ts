@@ -11,7 +11,7 @@
 
 import { expect, test } from "bun:test";
 
-import { DEFAULT_RECALL_BUDGET, defaultRecallProvider, selectRecall } from "./recall.js";
+import { DEFAULT_RECALL_BUDGET, defaultRecallProvider, enforceRecall, selectRecall } from "./recall.js";
 import type { RecallBudget } from "./recall.js";
 import type { Memory } from "./types.js";
 
@@ -174,4 +174,52 @@ test("defaultRecallProvider resolves to the same selection as selectRecall", asy
   const input = { agentId: "agent-1", query: "beta", candidates, budget: BUDGET_1 };
   const viaProvider = await defaultRecallProvider.recall(input);
   expect(ids(viaProvider)).toEqual(ids(selectRecall(input)));
+});
+
+// --- enforceRecall: the kernel's guarantees do not depend on the provider -----
+
+test("enforceRecall drops any memory that was not in the candidate set (isolation)", () => {
+  const a = mem({ id: "a", content: "kept" });
+  const b = mem({ id: "b", content: "kept too" });
+  const foreign = mem({ id: "foreign", agentId: "other-agent", content: "another agent's memory" });
+  // A provider that returns a memory the kernel never resolved.
+  const result = enforceRecall([a, foreign, b], [a, b], DEFAULT_RECALL_BUDGET);
+  expect(ids(result)).toEqual(["a", "b"]); // foreign dropped
+});
+
+test("enforceRecall frames the kernel's own object, not the provider's (no content tamper)", () => {
+  const real = mem({ id: "x", content: "the true content" });
+  // A provider that returns a same-id object with tampered content.
+  const tampered: Memory = { ...real, content: "INJECTED malicious content" };
+  const result = enforceRecall([tampered], [real], DEFAULT_RECALL_BUDGET);
+  expect(result).toHaveLength(1);
+  expect(result[0]).toBe(real); // the trusted candidate, by reference
+  expect(result[0]!.content).toBe("the true content");
+});
+
+test("enforceRecall truncates to the budget even if the provider returns more", () => {
+  const candidates = [mem({ id: "a", content: "a" }), mem({ id: "b", content: "b" }), mem({ id: "c", content: "c" })];
+  const result = enforceRecall(candidates, candidates, { maxMemories: 2 });
+  expect(result).toHaveLength(2);
+});
+
+test("enforceRecall dedupes a candidate the provider returned more than once", () => {
+  const a = mem({ id: "a", content: "a" });
+  const b = mem({ id: "b", content: "b" });
+  const result = enforceRecall([a, a, b, a], [a, b], DEFAULT_RECALL_BUDGET);
+  expect(ids(result)).toEqual(["a", "b"]);
+});
+
+test("enforceRecall preserves the provider's order among surviving memories", () => {
+  const a = mem({ id: "a", content: "a" });
+  const b = mem({ id: "b", content: "b" });
+  const c = mem({ id: "c", content: "c" });
+  // Provider's ranking: c, a, b — honored (only constrained, not re-sorted).
+  const result = enforceRecall([c, a, b], [a, b, c], DEFAULT_RECALL_BUDGET);
+  expect(ids(result)).toEqual(["c", "a", "b"]);
+});
+
+test("enforceRecall with a budget of zero frames nothing", () => {
+  const candidates = [mem({ id: "a", content: "a" })];
+  expect(enforceRecall(candidates, candidates, { maxMemories: 0 })).toEqual([]);
 });

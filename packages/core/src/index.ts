@@ -112,7 +112,7 @@ export type {
 // own candidate memories against the task, under a budget) plus a default,
 // dependency-free lexical ranker; a local-ML / embeddings provider is a later
 // opt-in implementation of the same interface, mirroring the RuntimeAdapter seam.
-export { defaultRecallProvider, selectRecall, DEFAULT_RECALL_BUDGET } from "./recall.js";
+export { defaultRecallProvider, selectRecall, enforceRecall, DEFAULT_RECALL_BUDGET } from "./recall.js";
 export type { RecallProvider, RecallInput, RecallBudget } from "./recall.js";
 
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
