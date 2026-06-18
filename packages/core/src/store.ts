@@ -175,6 +175,16 @@ export class AsterismStore {
   setRecallBudget(agentId: string, budget: number): AgentSettings {
     return this.driver.transaction(() => {
       const from = this.agentSettings.getRecallBudget(agentId) ?? null;
+      // An unchanged value is a true no-op — no write, no phantom event. The event log
+      // records real transitions only (the same discipline as `clearRecallBudget`'s
+      // guard below). `from === budget` means a row already holds this exact value,
+      // which — being a stored budget — was already validated, so skipping the write is
+      // safe. Any invalid `budget` cannot equal a stored value, so it still reaches the
+      // repository's write-boundary validation and throws.
+      if (from === budget) {
+        const existing = this.agentSettings.get(agentId);
+        if (existing) return existing;
+      }
       const settings = this.agentSettings.setRecallBudget(agentId, budget);
       this.emit(agentId, "agent.setting_changed", {
         setting: "recallBudget",
@@ -195,14 +205,15 @@ export class AsterismStore {
   clearRecallBudget(agentId: string): AgentSettings | undefined {
     return this.driver.transaction(() => {
       const from = this.agentSettings.getRecallBudget(agentId) ?? null;
+      // Nothing set is a true no-op — no write, no event — symmetric with
+      // `setRecallBudget`. Return whatever row exists (a NULL-budget row, or none).
+      if (from === null) return this.agentSettings.get(agentId);
       const settings = this.agentSettings.clearRecallBudget(agentId);
-      if (from !== null) {
-        this.emit(agentId, "agent.setting_changed", {
-          setting: "recallBudget",
-          from,
-          to: null,
-        });
-      }
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "recallBudget",
+        from,
+        to: null,
+      });
       return settings;
     });
   }

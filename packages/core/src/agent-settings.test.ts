@@ -110,6 +110,16 @@ test("setRecallBudget records an agent.setting_changed event, references only", 
   expect(payload.to).toBe(40);
 });
 
+test("setRecallBudget to the unchanged value is a no-op: no phantom event, no row churn", () => {
+  const first = store.setRecallBudget(alpha.id, 40); // the audited store op — emits once
+  store.setRecallBudget(alpha.id, 40); // same value again — should record nothing
+  // Exactly one transition is on the log — the redundant set recorded nothing.
+  expect(store.events.tail(alpha.id).filter((e) => e.type === "agent.setting_changed").length).toBe(1);
+  // The value is still 40, and the row was not rewritten (updatedAt unchanged).
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.get(alpha.id)?.updatedAt).toBe(first.updatedAt);
+});
+
 test("setRecallBudget again records the prior value as `from`", () => {
   store.setRecallBudget(alpha.id, 40);
   store.setRecallBudget(alpha.id, 10);
