@@ -244,6 +244,15 @@ async function runAndPersist(
   const profile = trustProfile({
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),
+    // Earned standing is the FIRST real producer of the destructive gate's
+    // `autoApprove` allow-list: a destructive capability the agent has EARNED — and a
+    // human has RATIFIED — a `standing-grant` on auto-approves, exactly as a
+    // statically-configured allow-list entry would (`decideGate` is untouched). This
+    // only ever ADDS keys the gate already knows how to honor; it never weakens
+    // classification, never crosses capabilities, and — `grantedKeys` is
+    // agentId-scoped — never crosses agents. With no grants it is the empty set, so
+    // the gate behaves exactly as before.
+    autoApprove: store.capabilityStanding.grantedKeys(agent.id),
   });
   // The agent's secret key for fingerprinting a paused action's arguments. The same
   // key feeds the audit (which records the fingerprint on a pause) and the gate
@@ -280,6 +289,34 @@ async function runAndPersist(
     decision,
   });
   const collectActions = (): readonly ActionRecord[] => actions;
+
+  // Fail-safe asymmetry — autonomy is lost faster than it is earned. A run that
+  // EXECUTED an earned (granted) destructive capability and then FAILED loses that
+  // grant: the capability is downgraded to `gated`, so its next invocation pauses for
+  // confirmation again until it re-earns standing from a fresh track record (the
+  // evidence window resets at the downgrade). Scoped to exactly the granted
+  // capabilities that ran in THIS run — a failure that never touched a granted
+  // capability leaves every grant intact. Only the terminal/catch FAILED exits call
+  // this; a paused or declined run never does, so neither revokes.
+  const revokeFailedGrants = (): void => {
+    const executedDestructive = new Set(
+      actions
+        .filter((a) => a.decision === "executed" && a.effect === "destructive")
+        .map((a) => a.capability),
+    );
+    if (executedDestructive.size === 0) return;
+    for (const capability of store.capabilityStanding.grantedKeys(agent.id)) {
+      if (executedDestructive.has(capability)) {
+        store.setCapabilityStanding(
+          agent.id,
+          capability,
+          "gated",
+          "revoked after a failed run",
+          run.id,
+        );
+      }
+    }
+  };
 
   const baseHooks: TrustHooks = {
     onAwaitConfirmation: (action) => {
@@ -391,6 +428,7 @@ async function runAndPersist(
       return { run: paused, status: "awaiting_confirmation", output: "", actions: collectActions() };
     }
     const failed = store.finishRun(agent.id, run.id, "", "failed");
+    revokeFailedGrants();
     return {
       run: failed ?? run,
       status: "failed",
@@ -429,6 +467,7 @@ async function runAndPersist(
   // do not "simplify" them away.
   const status: RunStatus = output.status === "done" ? "done" : "failed";
   const finished = store.finishRun(agent.id, run.id, output.text, status);
+  if (status === "failed") revokeFailedGrants();
   return {
     run: finished ?? current ?? run,
     status,

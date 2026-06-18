@@ -27,6 +27,7 @@ import {
   MEMORY_TYPES,
   MemoryFirewallError,
   proposeReviewableMemories,
+  proposeStandingGrants,
   resumeRun,
   REVIEW_STATES,
   screenMemory,
@@ -65,6 +66,7 @@ import {
   formatMemoryList,
   formatRunActivity,
   formatRunList,
+  formatStandingList,
   shortId,
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
@@ -112,6 +114,17 @@ export type ReviewDecision =
   | { kind: "accept" }
   | { kind: "edit"; content: string }
   | { kind: "reject" };
+
+/** A proposed standing grant presented for ratification during `trust <agent> --review`. */
+export interface StandingReviewItem {
+  /** 1-based position in the batch. */
+  index: number;
+  total: number;
+  /** The destructive capability proposed for an auto-approve grant. */
+  capability: string;
+  /** The references-only evidence basis (counts of clean executions / targets / regressions). */
+  basis: string;
+}
 
 /** Everything the CLI touches the outside world through — injectable for tests. */
 export interface CliIO {
@@ -168,6 +181,13 @@ export interface CliIO {
    * every proposal, so nothing persists — the same safe default as `confirm`.
    */
   review?: (item: ReviewItem) => ReviewDecision | Promise<ReviewDecision>;
+  /**
+   * Ratify a proposed standing grant during `trust <agent> --review` — return true
+   * to grant the capability an auto-approve standing, false to leave it gated. Absent
+   * ⇒ reject every proposal, so nothing is granted without an explicit yes (the same
+   * safe default as `confirm`/`review`; earning autonomy is itself a reviewable act).
+   */
+  reviewGrant?: (item: StandingReviewItem) => boolean | Promise<boolean>;
   /** Open the kernel store at a path. Absent ⇒ the real local SQLite store. */
   openStore?: (path: string) => AsterismStore;
   /**
@@ -459,23 +479,122 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
 // --- trust -----------------------------------------------------------------
 
 async function cmdTrust(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, ["help", "h", "review"]);
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.trust!);
     return 0;
   }
   const name = parsed.positionals[0];
-  const level = parsed.positionals[1];
-  if (!name || !level) {
-    io.err("Usage: asterism trust <agent> <propose|notify|autonomous>");
+  if (!name) {
+    io.err("Usage: asterism trust <agent> <propose|notify|autonomous>  ·  --review  ·  show  ·  revoke <capability>");
+    return 1;
+  }
+  // `trust <agent> --review` ratifies EARNED per-capability standing grants; the
+  // positional forms set the whole-agent level (`<level>`) or manage standing
+  // (`show`, `revoke <capability>`). The level form is unchanged for back-compat.
+  if (parsed.flags.review === true) return cmdTrustReview(name, io);
+  const sub = parsed.positionals[1];
+  if (sub === "show") return cmdTrustShow(name, io);
+  if (sub === "revoke") return cmdTrustRevoke(name, parsed.positionals[2], io);
+  if (!sub) {
+    io.err("Usage: asterism trust <agent> <propose|notify|autonomous>  ·  --review  ·  show  ·  revoke <capability>");
     return 1;
   }
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    validateEnum(level, TRUST_LEVELS, "trust level");
-    const updated = store.setTrust(agent.id, level as TrustLevel);
+    validateEnum(sub, TRUST_LEVELS, "trust level");
+    const updated = store.setTrust(agent.id, sub as TrustLevel);
     io.out(`Set ${updated.name} to ${updated.trustLevel}.`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism trust <agent> --review` — ratify EARNED standing grants. The kernel
+ * proposes which destructive capabilities have a clean enough track record (read
+ * from the agent's own event log; no model needed — this is evidence, not
+ * reflection); the human grants or declines each. A grant lets that capability
+ * auto-approve from now on, exactly as if it had been allow-listed — nothing is
+ * granted without an explicit yes (default reject), so earning autonomy stays a
+ * reviewable, human-ratified act.
+ */
+async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
+  return withHomeStore(io, async (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    const candidates = proposeStandingGrants(store, agent);
+    if (candidates.length === 0) {
+      io.out(`${name}: no capabilities have earned a standing grant yet.`);
+      io.out("An agent earns one by handling a destructive capability cleanly, several");
+      io.out("times, across different targets, with nothing declined or failed in between.");
+      return 0;
+    }
+
+    io.out(
+      `Reviewing ${candidates.length} earned ${candidates.length === 1 ? "capability" : "capabilities"} for ${name}.`,
+    );
+    io.out("Granting one lets that capability act without pausing for you — until a");
+    io.out("regression takes it back. Nothing is granted unless you accept it.");
+
+    // Absent reviewer ⇒ reject everything: nothing is granted without an explicit yes.
+    const review = io.reviewGrant ?? ((): boolean => false);
+    let granted = 0;
+    let declined = 0;
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]!;
+      io.out("");
+      io.out(`(${i + 1}/${candidates.length}) ${c.capability}`);
+      io.out(`  ${c.basis}`);
+
+      const accept = await review({ index: i + 1, total: candidates.length, capability: c.capability, basis: c.basis });
+      if (!accept) {
+        declined++;
+        io.out("  ✗ left gated");
+        continue;
+      }
+      store.setCapabilityStanding(agent.id, c.capability, "standing-grant", c.basis);
+      granted++;
+      io.out("  ✓ granted — acts without pausing from now on");
+    }
+
+    io.out("");
+    io.out(`Done — ${granted} granted, ${declined} left gated.`);
+    return 0;
+  });
+}
+
+/** `asterism trust <agent> show` — the agent's whole-agent level plus its earned standings. */
+async function cmdTrustShow(name: string, io: CliIO): Promise<number> {
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    io.out(formatStandingList(store.capabilityStanding.list(agent.id), agent.name, agent.trustLevel));
+    return 0;
+  });
+}
+
+/** `asterism trust <agent> revoke <capability>` — downgrade an earned grant back to gated. */
+async function cmdTrustRevoke(
+  name: string,
+  capability: string | undefined,
+  io: CliIO,
+): Promise<number> {
+  if (!capability) {
+    io.err("Usage: asterism trust <agent> revoke <capability>");
+    return 1;
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const current = store.capabilityStanding.get(agent.id, capability);
+    if (!current || current.standing !== "standing-grant") {
+      io.out(`${name}: '${capability}' is not granted — nothing to revoke (it already pauses for confirmation).`);
+      return 0;
+    }
+    store.setCapabilityStanding(agent.id, capability, "gated", "manually revoked");
+    io.out(`Revoked '${capability}' for ${name} — it pauses for your confirmation again.`);
     return 0;
   });
 }

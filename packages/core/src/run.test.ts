@@ -1498,3 +1498,206 @@ test("a recall provider that throws synchronously also drives the run to failed"
   expect(result.error).toContain("recall blew up synchronously");
   expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
 });
+
+// --- trust contracts: earned standing flows through the gate (slice 1) ------
+//
+// The load-bearing integration: a capability the agent holds a `standing-grant` on
+// is the FIRST real producer of the gate's autoApprove allow-list, so a destructive
+// action it would otherwise pause on runs without a confirmation — and a regression
+// (a failed run that exercised the grant) takes the grant back, on the spot.
+
+/** An adapter that runs one tool through the gate, then reports the run FAILED. */
+function toolThenFailAdapter(toolName: string, args: unknown): RuntimeAdapter {
+  return {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === toolName);
+        if (tool) await tool.execute({ args }, request.signal);
+        return { status: "failed", text: "", error: "boom" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+}
+
+test("a granted destructive capability auto-approves — no pause, finishes done", async () => {
+  // Earn-then-ratify is the human's job; here we record the ratified grant directly.
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+
+  // No `confirm` callback at all — a non-granted destructive action would park here.
+  const result = await executeRun(store, agent, "delete the dist files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [deleteFilesCapability()],
+  });
+
+  expect(result.status).toBe("done");
+  expect(result.output).toBe("deleted"); // the tool truly ran
+  const types = store.events.tail(agent.id).map((e) => e.type);
+  expect(types).toContain("action.executed");
+  expect(types).not.toContain("action.awaiting_confirmation"); // never parked
+  expect(result.actions).toEqual([
+    { capability: "delete_files", effect: "destructive", decision: "executed" },
+  ]);
+});
+
+test("a grant is per-capability: a non-granted destructive action still pauses", async () => {
+  // delete_files is granted; drop_table is NOT. The gate is not weakened — a
+  // different destructive capability still pauses, even at autonomous.
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+  const result = await executeRun(store, agent, "drop the table", {
+    adapter: toolCallingAdapter("drop_table", { command: "drop table users" }),
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(result.status).toBe("awaiting_confirmation");
+});
+
+test("a granted capability that runs in a FAILED run is revoked on the spot", async () => {
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+  expect(store.capabilityStanding.grantedKeys(agent.id)).toEqual(["delete_files"]);
+
+  const result = await executeRun(store, agent, "delete the dist files", {
+    adapter: toolThenFailAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [deleteFilesCapability()],
+  });
+
+  expect(result.status).toBe("failed");
+  // Autonomy lost faster than earned: the grant is gone, so its next call pauses again.
+  expect(store.capabilityStanding.grantedKeys(agent.id)).toEqual([]);
+  // The latest standing change is the revoke (the earlier one was the grant itself).
+  const downgrade = store.events
+    .tail(agent.id)
+    .findLast((e) => e.type === "agent.standing_changed");
+  expect((downgrade?.payload as { to: string; capability: string }).to).toBe("gated");
+  expect((downgrade?.payload as { capability: string }).capability).toBe("delete_files");
+  expect((downgrade?.payload as { basis: string }).basis).toBe("revoked after a failed run");
+});
+
+test("a failed run that never touched a granted capability leaves the grant intact", async () => {
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+  // The run fails, but no destructive capability executed (the adapter just fails).
+  const result = await executeRun(store, agent, "do something that fails", {
+    adapter: cannedAdapter({ status: "failed", text: "", error: "unrelated failure" }),
+    capabilities: [deleteFilesCapability()],
+  });
+  expect(result.status).toBe("failed");
+  expect(store.capabilityStanding.grantedKeys(agent.id)).toEqual(["delete_files"]); // untouched
+});
+
+test("a PAUSED run never revokes a grant (only a terminal failure does)", async () => {
+  // delete_files is granted (auto-approves); drop_table is not, so the run parks on
+  // it. A pause is not a failure — the delete_files grant must survive.
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+  const result = await executeRun(store, agent, "delete then drop", {
+    adapter: sequenceAdapter([
+      { tool: "delete_files", args: { command: "rm -rf dist" } },
+      { tool: "drop_table", args: { command: "drop table users" } },
+    ]),
+    capabilities: [deleteFilesCapability(), dropTableCapability()],
+  });
+  expect(result.status).toBe("awaiting_confirmation");
+  expect(store.capabilityStanding.grantedKeys(agent.id)).toEqual(["delete_files"]); // still granted
+});
+
+test("a standing grant never crosses agents: B's run is unaffected by A's grant", async () => {
+  const other = store.createAgent({
+    name: "work",
+    role: "",
+    soulRef: "casual-helper",
+    workspaceDir: "/tmp/work",
+    trustLevel: "autonomous",
+  });
+  // `agent` is granted delete_files; `other` is not.
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+
+  const result = await executeRun(store, other, "delete the dist files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [deleteFilesCapability()],
+  });
+  // `other` did not earn the grant, so its destructive action still pauses.
+  expect(result.status).toBe("awaiting_confirmation");
+});
+
+test("a successful destructive action records action.succeeded; an errored one does not", async () => {
+  // The success signal earning is built from must be REAL (emitted by the gate after a
+  // non-error result), not just an up-front attempt. A confirmed delete that succeeds
+  // emits both action.executed (attempt) and action.succeeded (success).
+  const okRun = await executeRun(store, agent, "delete the dist files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [deleteFilesCapability()],
+    confirm: () => true,
+  });
+  expect(okRun.status).toBe("done");
+  let types = store.events.tail(agent.id, { runId: okRun.run.id }).map((e) => e.type);
+  expect(types).toContain("action.executed");
+  expect(types).toContain("action.succeeded");
+
+  // An errored destructive tool records the attempt but NO success — so it can never
+  // be mistaken for a clean execution when earning a standing grant.
+  const erroringDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete files",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "could not delete", isError: true }),
+    },
+  };
+  const errRun = await executeRun(store, agent, "delete the cache files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf cache" }),
+    capabilities: [erroringDelete],
+    confirm: () => true,
+  });
+  types = store.events.tail(agent.id, { runId: errRun.run.id }).map((e) => e.type);
+  expect(types).toContain("action.executed"); // the attempt is recorded (at-most-once)
+  expect(types).not.toContain("action.succeeded"); // but no success — earns nothing
+});
+
+test("a standing-granted action is not re-executed when a LATER pause is resumed", async () => {
+  // The at-most-once guarantee must cover earned autonomy, not only confirmation. A
+  // granted action auto-approves (gate decision `execute`, not `confirm`), so without
+  // skip-accounting it would replay on every resume. Here the agent deletes (granted,
+  // runs) then drops a table (NOT granted, pauses); confirming the drop replays the
+  // loop — and the granted delete must NOT run a second time (no double delete/pay).
+  let deleteCount = 0;
+  const countingDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete files",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => {
+        deleteCount += 1;
+        return { output: "deleted" };
+      },
+    },
+  };
+  store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
+  const adapter = sequenceAdapter([
+    { tool: "delete_files", args: { command: "rm -rf dist" } },
+    { tool: "drop_table", args: { command: "drop table users" } },
+  ]);
+
+  const parked = await executeRun(store, agent, "delete then drop", {
+    adapter,
+    capabilities: [countingDelete, dropTableCapability()],
+  });
+  expect(parked.status).toBe("awaiting_confirmation"); // parked on the ungranted drop
+  expect(deleteCount).toBe(1); // the granted delete ran once
+
+  const outcome = await resumeRun(store, agent, parked.run.id, {
+    adapter,
+    capabilities: [countingDelete, dropTableCapability()],
+  });
+  expect(outcome.kind).toBe("resumed");
+  if (outcome.kind !== "resumed") return;
+  expect(outcome.result.status).toBe("done");
+  // The crux: the granted delete was SKIPPED on the replay, not repeated.
+  expect(deleteCount).toBe(1);
+  // The replayed granted action shows as already-performed, the confirmed drop as executed.
+  expect(outcome.result.actions).toEqual([
+    { capability: "drop_table", effect: "destructive", decision: "executed" },
+  ]);
+});

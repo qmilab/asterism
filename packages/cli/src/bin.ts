@@ -78,6 +78,14 @@ const io: CliIO = {
     }
     return { kind: "reject" };
   },
+  // `trust --review`: the kernel proposes which capabilities have EARNED a standing
+  // grant and prints each with its evidence; the human ratifies here. Nothing is
+  // granted without an explicit yes, and a non-interactive (piped) session grants
+  // nothing — the same safe default as the prompts above.
+  reviewGrant: async (): Promise<boolean> => {
+    const answer = await ask("  Grant this capability a standing (act without pausing)? [y/N]:");
+    return answer !== undefined && /^y(es)?$/i.test(answer);
+  },
   // `serve`: start the local HTTP endpoint. Imported lazily so non-serve commands
   // never load the HTTP layer (the same pattern `run` uses for the substrate).
   startServer: async (options) => (await import("@qmilab/asterism-server")).serve(options),
