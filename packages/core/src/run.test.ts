@@ -10,10 +10,11 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { declineRun, executeRun, resumeRun } from "./run.js";
+import { declineRun, executeRun, resolveRecallBudget, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
+import { DEFAULT_RECALL_BUDGET } from "./recall.js";
 import type { RecallProvider } from "./recall.js";
 import type { Agent } from "./types.js";
 
@@ -1370,6 +1371,65 @@ test("recall caps framed memories at the budget and prefers task-relevant ones",
   expect(sink.systemPrompt).toContain("run the database migration with the staging flag");
   expect(sink.systemPrompt).not.toContain("purple velvet curtains");
   expect(sink.systemPrompt).not.toContain("tangerine zeppelin");
+});
+
+test("resolveRecallBudget falls back to the default when the agent has no setting", () => {
+  expect(resolveRecallBudget(store, agent)).toEqual(DEFAULT_RECALL_BUDGET);
+});
+
+test("resolveRecallBudget returns the agent's own override, scoped per agent", () => {
+  const work = store.createAgent({
+    name: "work",
+    role: "",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "propose",
+  });
+  store.setRecallBudget(agent.id, 3);
+  // The override is this agent's; the other agent still resolves to the default.
+  expect(resolveRecallBudget(store, agent)).toEqual({ maxMemories: 3 });
+  expect(resolveRecallBudget(store, work)).toEqual(DEFAULT_RECALL_BUDGET);
+});
+
+test("a per-agent recall budget bites in framing without any host override", async () => {
+  // The configured per-agent budget must flow through run.ts's resolver into framing —
+  // no `options.recallBudget` passed, exactly the CLI/HTTP path. Budget 2, five
+  // memories, only two task-relevant: the two relevant ones frame, the rest drop.
+  store.setRecallBudget(agent.id, 2);
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "kiwi mango papaya" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "the database migration runs at midnight" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "purple velvet curtains" });
+  store.recordMemory(agent.id, { memoryType: "procedural", content: "run the database migration with the staging flag" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "tangerine zeppelin afternoon" });
+
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "how do I run the database migration", {
+    adapter: capturingAdapter(sink),
+  });
+
+  expect(sink.systemPrompt).toContain("the database migration runs at midnight");
+  expect(sink.systemPrompt).toContain("run the database migration with the staging flag");
+  expect(sink.systemPrompt).not.toContain("purple velvet curtains");
+  expect(sink.systemPrompt).not.toContain("tangerine zeppelin");
+});
+
+test("an explicit host recallBudget overrides the agent's configured setting", async () => {
+  // Precedence: an explicit option wins over the stored per-agent value. Budget set to
+  // 1, but the host forces 3 — all three task-relevant memories frame.
+  store.setRecallBudget(agent.id, 1);
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "the database migration runs at midnight" });
+  store.recordMemory(agent.id, { memoryType: "procedural", content: "run the database migration with the staging flag" });
+  store.recordMemory(agent.id, { memoryType: "convention", content: "always back up before a database migration" });
+
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "how do I run the database migration", {
+    adapter: capturingAdapter(sink),
+    recallBudget: { maxMemories: 3 },
+  });
+
+  expect(sink.systemPrompt).toContain("the database migration runs at midnight");
+  expect(sink.systemPrompt).toContain("run the database migration with the staging flag");
+  expect(sink.systemPrompt).toContain("always back up before a database migration");
 });
 
 test("a recall provider that rejects drives the run to failed, not stuck running", async () => {

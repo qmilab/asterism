@@ -79,6 +79,7 @@ export const EVENT_TYPES = [
   "agent.created",
   "agent.trust_changed",
   "agent.standing_changed",
+  "agent.setting_changed",
   "run.started",
   "run.status_changed",
   "run.resumed",
@@ -114,6 +115,23 @@ export function validateEnum<T extends string>(
     );
   }
   return value as T;
+}
+
+/**
+ * Assert that `value` is a positive whole number, returning it. Throws a clear
+ * error otherwise (zero, negative, fractional, NaN, or ±Infinity all fail —
+ * `Number.isInteger` rejects the non-finite cases). The numeric sibling of
+ * {@link validateEnum}: the write-boundary chokepoint for a tunable that must be a
+ * positive count (e.g. a recall budget), so a bad value from a surface can never
+ * reach a stored setting the kernel later trusts.
+ */
+export function validatePositiveInt(value: number, label: string): number {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(
+      `invalid ${label}: ${JSON.stringify(value)} (expected a positive whole number)`,
+    );
+  }
+  return value;
 }
 
 /** The agent identity. `teamId` / `ownerPrincipalId` are reserved and hidden. */
@@ -186,6 +204,25 @@ export interface CapabilityGrant {
   standing: CapabilityStanding;
   /** Why the standing last changed — counts only, never arguments. */
   basis: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * An agent's per-agent kernel settings — the operator-configurable knobs that
+ * tune how the agent thinks, scoped by `agentId` like every other row. One per
+ * agent; each field is an OVERRIDE where `undefined` means "unset, use the kernel
+ * default". The shared home for per-agent tunables (recall budget is the first;
+ * future knobs slot in beside it), so the resolution of "effective value" always
+ * lives in the kernel, never in a surface.
+ */
+export interface AgentSettings {
+  agentId: string;
+  /**
+   * Per-agent recall budget — the maximum number of memories a run may frame.
+   * `undefined` ⇒ unset, so the kernel falls back to {@link DEFAULT_RECALL_BUDGET}.
+   */
+  recallBudget?: number;
   createdAt: string;
   updatedAt: string;
 }

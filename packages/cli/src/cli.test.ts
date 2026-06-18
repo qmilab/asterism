@@ -1875,6 +1875,90 @@ test("config set rejects a value-bearing flag given with no value", async () => 
   expect(h.err.join("\n")).toContain("--provider");
 });
 
+test("config recall-budget sets a per-agent budget, persisted in the kernel store", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["config", "recall-budget", "personal", "40"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set personal's recall budget to 40 memories");
+
+  // The budget is a kernel setting (agentId-scoped), not surface config.
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getRecallBudget(agentNamed(store, "personal").id)).toBe(40);
+  } finally {
+    store.close();
+  }
+});
+
+test("config recall-budget with no value shows the current setting", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // Unset → the default is reported.
+  expect(await capture(["config", "recall-budget", "personal"], h.io)).toContain("uses the default recall budget");
+  await runCli(["config", "recall-budget", "personal", "5"], h.io);
+  expect(await capture(["config", "recall-budget", "personal"], h.io)).toContain("recall budget: 5 memories");
+});
+
+test("config recall-budget rejects values that are not a positive whole number", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  for (const bad of ["0", "-5", "abc", "2.5"]) {
+    h.err.length = 0;
+    expect(await runCli(["config", "recall-budget", "personal", bad], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("positive whole number");
+  }
+  // Nothing was persisted by any rejected attempt.
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getRecallBudget(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("config recall-budget --unset clears the override, then is a no-op", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "recall-budget", "personal", "40"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["config", "recall-budget", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("uses the default");
+
+  // A second unset reports there was nothing set — it does not claim to clear again.
+  h.out.length = 0;
+  expect(await runCli(["config", "recall-budget", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("had no recall budget set");
+});
+
+test("config recall-budget reports an unknown agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "recall-budget", "ghost", "40"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("No agent named");
+});
+
+test("config show lists each agent's recall budget, set or default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["config", "recall-budget", "personal", "40"], h.io);
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("Per-agent recall budget:");
+  expect(shown).toContain("personal  →  40  [set]");
+  // The other agent is unaffected — a per-agent setting never crosses agents.
+  expect(shown).toContain("work  →  20  [default]");
+});
+
 test("new --model pins the agent's model in the config file", async () => {
   const h = harness();
   await runCli(["init"], h.io);
