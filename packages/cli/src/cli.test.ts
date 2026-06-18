@@ -282,6 +282,88 @@ test("trust show reports no earned grants for a fresh agent", async () => {
   const show = await capture(["trust", "cleaner", "show"], h.io);
   expect(show).toContain("autonomy: notify");
   expect(show).toContain("No capabilities have earned");
+  // A fresh agent shows the default earning bar, labelled as a default.
+  expect(show).toContain("Earning bar: 3 clean executions across 2 distinct targets [default]");
+});
+
+test("trust threshold with no flags shows the effective bar and per-half source", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  const before = await capture(["trust", "cleaner", "threshold"], h.io);
+  expect(before).toContain("clean executions: 3 [default]");
+  expect(before).toContain("distinct targets: 2 [default]");
+});
+
+test("trust threshold sets one or both halves, leaving the other intact", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  // Set only --clean; --targets stays on the default.
+  expect(await runCli(["trust", "cleaner", "threshold", "--clean", "5"], h.io)).toBe(0);
+  let show = await capture(["trust", "cleaner", "threshold"], h.io);
+  expect(show).toContain("clean executions: 5 [set]");
+  expect(show).toContain("distinct targets: 2 [default]");
+  // Now set --targets; --clean must survive.
+  expect(await runCli(["trust", "cleaner", "threshold", "--targets", "4"], h.io)).toBe(0);
+  show = await capture(["trust", "cleaner", "threshold"], h.io);
+  expect(show).toContain("clean executions: 5 [set]");
+  expect(show).toContain("distinct targets: 4 [set]");
+});
+
+test("trust threshold raises the bar review applies — a record that earned now does not", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  // A clean record over three distinct targets clears the default bar (3/2).
+  seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
+  h.io.reviewGrant = () => true;
+  expect(await capture(["trust", "cleaner", "--review"], h.io)).toContain("(1/1) fs.delete");
+  // Revoke it, then raise the bar to 5 executions: the same record no longer proposes.
+  await runCli(["trust", "cleaner", "revoke", "fs.delete"], h.io);
+  await runCli(["trust", "cleaner", "threshold", "--clean", "5"], h.io);
+  expect(await capture(["trust", "cleaner", "--review"], h.io)).toContain("no capabilities have earned");
+});
+
+test("trust threshold --unset clears the override, then is a no-op", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  await runCli(["trust", "cleaner", "threshold", "--clean", "5", "--targets", "4"], h.io);
+  expect(await capture(["trust", "cleaner", "threshold", "--unset"], h.io)).toContain(
+    "back to the default",
+  );
+  // Now nothing is set — unset again reports the no-op, not a second clear.
+  expect(await capture(["trust", "cleaner", "threshold", "--unset"], h.io)).toContain(
+    "had no custom earning bar",
+  );
+  const show = await capture(["trust", "cleaner", "threshold"], h.io);
+  expect(show).toContain("clean executions: 3 [default]");
+  expect(show).toContain("distinct targets: 2 [default]");
+});
+
+test("trust threshold rejects values that are not a positive whole number", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  for (const bad of ["0", "-3", "2.5", "abc"]) {
+    expect(await runCli(["trust", "cleaner", "threshold", "--clean", bad], h.io)).toBe(1);
+  }
+  // A rejected set leaves the bar on the default.
+  expect(await capture(["trust", "cleaner", "threshold"], h.io)).toContain(
+    "clean executions: 3 [default]",
+  );
+});
+
+test("trust threshold is scoped: one agent's bar never reaches another", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  await runCli(["new", "other", "--trust", "autonomous"], h.io);
+  await runCli(["trust", "cleaner", "threshold", "--clean", "7", "--targets", "6"], h.io);
+  const other = await capture(["trust", "other", "threshold"], h.io);
+  expect(other).toContain("clean executions: 3 [default]");
+  expect(other).toContain("distinct targets: 2 [default]");
 });
 
 test("secrets add stores a value without ever echoing it", async () => {

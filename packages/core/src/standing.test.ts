@@ -14,6 +14,7 @@ import {
   gatherEvidence,
   proposeStandingGrants,
   qualifies,
+  resolveStandingPolicy,
 } from "./standing.js";
 import type { Agent } from "./types.js";
 
@@ -291,4 +292,55 @@ test("evidenceBasis is references-only counts, with correct pluralization", () =
   expect(evidenceBasis({ capability: "x", cleanExecutions: 1, distinctTargets: 1 })).toBe(
     "earned: 1 confirmed execution across 1 distinct target, no slip since",
   );
+});
+
+// --- per-agent earning bar (resolveStandingPolicy) --------------------------
+
+test("resolveStandingPolicy falls back to the default when the agent is unset", () => {
+  expect(resolveStandingPolicy(store, agent)).toEqual(DEFAULT_STANDING_POLICY);
+});
+
+test("resolveStandingPolicy uses the agent's overrides where set, the default otherwise", () => {
+  store.setStandingThresholds(agent.id, { minCleanExecutions: 5 });
+  // Only the execution half is overridden; the breadth half stays at the default.
+  expect(resolveStandingPolicy(store, agent)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: DEFAULT_STANDING_POLICY.minDistinctTargets,
+  });
+  store.setStandingThresholds(agent.id, { minDistinctTargets: 4 });
+  expect(resolveStandingPolicy(store, agent)).toEqual({ minCleanExecutions: 5, minDistinctTargets: 4 });
+});
+
+test("the bar is resolved per agent: one agent's override never reaches another", () => {
+  const other = store.createAgent({
+    name: "other",
+    role: "",
+    soulRef: "casual-helper",
+    workspaceDir: "/tmp/other",
+    trustLevel: "autonomous",
+  });
+  store.setStandingThresholds(agent.id, { minCleanExecutions: 9, minDistinctTargets: 9 });
+  // `other` set nothing, so it resolves to the pure default — never `agent`'s bar.
+  expect(resolveStandingPolicy(store, other)).toEqual(DEFAULT_STANDING_POLICY);
+});
+
+test("proposeStandingGrants honors a stored per-agent bar without an explicit policy", () => {
+  cleanExec(agent.id, "fs.delete", "dist");
+  cleanExec(agent.id, "fs.delete", "build");
+  // Two clean targets: below the default (3 executions), so nothing is proposed.
+  expect(proposeStandingGrants(store, agent)).toEqual([]);
+  // Lower this agent's bar to 2/2 — now the same record qualifies, with NO policy arg.
+  store.setStandingThresholds(agent.id, { minCleanExecutions: 2, minDistinctTargets: 2 });
+  expect(proposeStandingGrants(store, agent).map((c) => c.capability)).toEqual(["fs.delete"]);
+});
+
+test("a stricter per-agent bar suppresses a candidate the default would surface", () => {
+  cleanExec(agent.id, "fs.delete", "dist");
+  cleanExec(agent.id, "fs.delete", "build");
+  cleanExec(agent.id, "fs.delete", "cache");
+  // Clears the default (3/2)...
+  expect(proposeStandingGrants(store, agent).map((c) => c.capability)).toEqual(["fs.delete"]);
+  // ...but a stricter bar (5 executions) holds it back until more evidence accrues.
+  store.setStandingThresholds(agent.id, { minCleanExecutions: 5 });
+  expect(proposeStandingGrants(store, agent)).toEqual([]);
 });

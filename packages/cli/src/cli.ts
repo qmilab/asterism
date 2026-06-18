@@ -24,11 +24,13 @@ import { AsterismStore } from "@qmilab/asterism-core";
 import {
   BUILTIN_SOULS,
   DEFAULT_RECALL_BUDGET,
+  DEFAULT_STANDING_POLICY,
   executeRun,
   MEMORY_TYPES,
   MemoryFirewallError,
   proposeReviewableMemories,
   proposeStandingGrants,
+  resolveStandingPolicy,
   resumeRun,
   REVIEW_STATES,
   screenMemory,
@@ -45,6 +47,8 @@ import type {
   ReviewableProposal,
   Run,
   RuntimeAdapter,
+  StandingPolicy,
+  StandingThresholds,
   TailOptions,
   TrustLevel,
 } from "@qmilab/asterism-core";
@@ -479,26 +483,33 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
 
 // --- trust -----------------------------------------------------------------
 
+const TRUST_USAGE =
+  "Usage: asterism trust <agent> <propose|notify|autonomous>  ·  --review  ·  show  ·  revoke <capability>  ·  threshold";
+
 async function cmdTrust(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h", "review"]);
+  // `--unset` is boolean so `trust <agent> threshold --unset` never consumes a
+  // following token as its value; `--clean` / `--targets` carry the threshold values.
+  const parsed = parseArgs(args, ["help", "h", "review", "unset"]);
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.trust!);
     return 0;
   }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism trust <agent> <propose|notify|autonomous>  ·  --review  ·  show  ·  revoke <capability>");
+    io.err(TRUST_USAGE);
     return 1;
   }
   // `trust <agent> --review` ratifies EARNED per-capability standing grants; the
   // positional forms set the whole-agent level (`<level>`) or manage standing
-  // (`show`, `revoke <capability>`). The level form is unchanged for back-compat.
+  // (`show`, `revoke <capability>`, `threshold`). The level form is unchanged for
+  // back-compat.
   if (parsed.flags.review === true) return cmdTrustReview(name, io);
   const sub = parsed.positionals[1];
   if (sub === "show") return cmdTrustShow(name, io);
   if (sub === "revoke") return cmdTrustRevoke(name, parsed.positionals[2], io);
+  if (sub === "threshold") return cmdTrustThreshold(name, parsed, io);
   if (!sub) {
-    io.err("Usage: asterism trust <agent> <propose|notify|autonomous>  ·  --review  ·  show  ·  revoke <capability>");
+    io.err(TRUST_USAGE);
     return 1;
   }
   return withHomeStore(io, (store) => {
@@ -566,12 +577,97 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
   });
 }
 
+/** One line describing an earning bar — shared by `trust show` and `trust threshold`. */
+function describeEarningBar(policy: StandingPolicy): string {
+  const execs = `${policy.minCleanExecutions} clean execution${policy.minCleanExecutions === 1 ? "" : "s"}`;
+  const targets = `${policy.minDistinctTargets} distinct target${policy.minDistinctTargets === 1 ? "" : "s"}`;
+  return `${execs} across ${targets}`;
+}
+
 /** `asterism trust <agent> show` — the agent's whole-agent level plus its earned standings. */
 async function cmdTrustShow(name: string, io: CliIO): Promise<number> {
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
     io.out(formatStandingList(store.capabilityStanding.list(agent.id), agent.name, agent.trustLevel));
+    // The earning bar a capability must clear to be PROPOSED — defaulted, or this
+    // agent's own override (set via `trust <agent> threshold`).
+    const overrides = store.agentSettings.getStandingThresholds(agent.id);
+    const custom =
+      overrides.minCleanExecutions !== undefined || overrides.minDistinctTargets !== undefined;
+    io.out("");
+    io.out(
+      `Earning bar: ${describeEarningBar(resolveStandingPolicy(store, agent))} ${custom ? "[customized]" : "[default]"}.`,
+    );
+    return 0;
+  });
+}
+
+/**
+ * `asterism trust <agent> threshold [--clean <n>] [--targets <n>]` / `--unset` —
+ * read or tune the bar a destructive capability must clear before it is PROPOSED for
+ * an auto-approve grant. With `--clean` and/or `--targets`, sets the per-agent
+ * override(s); with `--unset`, clears both back to the kernel default; with neither,
+ * shows the current bar. The gate is never weakened — this only changes how much
+ * track record review asks for; nothing auto-approves without a human grant.
+ */
+function cmdTrustThreshold(name: string, parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const cleanGiven = parsed.flags.clean !== undefined;
+  const targetsGiven = parsed.flags.targets !== undefined;
+  const unset = parsed.flags.unset === true;
+  const DEFAULTS = describeEarningBar(DEFAULT_STANDING_POLICY);
+
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    if (unset) {
+      const had = store.agentSettings.getStandingThresholds(agent.id);
+      if (had.minCleanExecutions === undefined && had.minDistinctTargets === undefined) {
+        io.out(`${name} had no custom earning bar — it already uses the default (${DEFAULTS}).`);
+        return 0;
+      }
+      store.clearStandingThresholds(agent.id);
+      io.out(`Cleared ${name}'s earning bar — back to the default (${DEFAULTS}).`);
+      return 0;
+    }
+
+    // No flags: show the effective bar and label each half's source.
+    if (!cleanGiven && !targetsGiven) {
+      const overrides = store.agentSettings.getStandingThresholds(agent.id);
+      const effective = resolveStandingPolicy(store, agent);
+      io.out(`${name}'s earning bar: ${describeEarningBar(effective)}.`);
+      io.out(
+        `  clean executions: ${effective.minCleanExecutions} [${overrides.minCleanExecutions !== undefined ? "set" : "default"}]`,
+      );
+      io.out(
+        `  distinct targets: ${effective.minDistinctTargets} [${overrides.minDistinctTargets !== undefined ? "set" : "default"}]`,
+      );
+      return 0;
+    }
+
+    // Each provided value must be a positive whole number. `intFlag` parses a
+    // non-negative integer; reject 0, a negative (parsed as a value, never a flag),
+    // and anything non-numeric with a clear message rather than a raw kernel error.
+    const thresholds: StandingThresholds = {};
+    if (cleanGiven) {
+      const value = intFlag(parsed.flags.clean);
+      if (value === undefined || value <= 0) {
+        io.err("--clean must be a positive whole number.");
+        return 1;
+      }
+      thresholds.minCleanExecutions = value;
+    }
+    if (targetsGiven) {
+      const value = intFlag(parsed.flags.targets);
+      if (value === undefined || value <= 0) {
+        io.err("--targets must be a positive whole number.");
+        return 1;
+      }
+      thresholds.minDistinctTargets = value;
+    }
+    store.setStandingThresholds(agent.id, thresholds);
+    io.out(`Set ${name}'s earning bar to ${describeEarningBar(resolveStandingPolicy(store, agent))}.`);
     return 0;
   });
 }

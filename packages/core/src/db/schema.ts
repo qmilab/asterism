@@ -116,15 +116,23 @@ CREATE INDEX IF NOT EXISTS idx_capability_standing_agent ON capability_standing(
 -- isolation boundary; there is no global settings store any agent can reach).
 -- One row per agent (agent_id IS the primary key), each column a nullable
 -- override where NULL means "unset -- fall back to the kernel default". This is
--- the shared home for per-agent tunables: recall_budget is the first, and future
--- knobs (e.g. earned-standing thresholds) add a column here rather than accreting
--- onto the agents identity table. A nullable column added later is picked up on a
--- fresh open via this CREATE; an older database with the table already present
--- needs the additive ALTER in store.migrate(), same as every other later column.
+-- the shared home for per-agent tunables: recall_budget was the first; the
+-- earned-standing thresholds (min_clean_executions / min_distinct_targets) are
+-- the second -- a new knob adds a column here rather than accreting onto the
+-- agents identity table. Each setter touches only its own column(s), so tuning one
+-- knob never clears another. A nullable column added later is picked up on a fresh
+-- open via this CREATE; an older database with the table already present needs the
+-- additive ALTER in store.migrate(), same as every other later column.
 CREATE TABLE IF NOT EXISTS agent_settings (
-  agent_id      TEXT PRIMARY KEY REFERENCES agents(id),
-  recall_budget INTEGER,
-  created_at    TEXT NOT NULL,
-  updated_at    TEXT NOT NULL
+  agent_id             TEXT PRIMARY KEY REFERENCES agents(id),
+  recall_budget        INTEGER,
+  -- The earning bar for a per-capability standing grant, overriding the kernel
+  -- DEFAULT_STANDING_POLICY for this agent: how many clean confirmed executions,
+  -- across how many distinct targets, a destructive capability must clear to be
+  -- PROPOSED for auto-approval. NULL on either ⇒ that half uses the default.
+  min_clean_executions INTEGER,
+  min_distinct_targets INTEGER,
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL
 );
 `;

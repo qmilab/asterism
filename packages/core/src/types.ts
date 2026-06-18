@@ -223,9 +223,31 @@ export interface AgentSettings {
    * `undefined` ⇒ unset, so the kernel falls back to {@link DEFAULT_RECALL_BUDGET}.
    */
   recallBudget?: number;
+  /**
+   * Per-agent override of the earned-standing earning bar: the minimum clean,
+   * confirmed destructive executions a capability needs to be PROPOSED for an
+   * auto-approve grant. `undefined` ⇒ unset, so the kernel falls back to
+   * `DEFAULT_STANDING_POLICY.minCleanExecutions`.
+   */
+  minCleanExecutions?: number;
+  /**
+   * Per-agent override of the earning bar's breadth half: the minimum DISTINCT
+   * targets among those clean executions. `undefined` ⇒ unset, so the kernel falls
+   * back to `DEFAULT_STANDING_POLICY.minDistinctTargets`.
+   */
+  minDistinctTargets?: number;
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * The earned-standing thresholds an operator can override per agent — the writable
+ * subset of {@link AgentSettings}. Each field is optional: a provided field is set,
+ * an omitted one is left exactly as it was (so tuning one half never clears the
+ * other). The kernel resolves these against `DEFAULT_STANDING_POLICY` for an
+ * effective `StandingPolicy`.
+ */
+export type StandingThresholds = Pick<AgentSettings, "minCleanExecutions" | "minDistinctTargets">;
 
 export interface Event {
   id: string;

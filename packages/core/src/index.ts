@@ -122,6 +122,7 @@ export type { RecallProvider, RecallInput, RecallBudget } from "./recall.js";
 // grant only ever ADDS a key to the allow-list the destructive gate already reads.
 export {
   DEFAULT_STANDING_POLICY,
+  resolveStandingPolicy,
   gatherEvidence,
   qualifies,
   evidenceBasis,
