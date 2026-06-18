@@ -14,6 +14,7 @@ import { declineRun, executeRun, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
+import type { RecallProvider } from "./recall.js";
 import type { Agent } from "./types.js";
 
 let store: AsterismStore;
@@ -1369,4 +1370,41 @@ test("recall caps framed memories at the budget and prefers task-relevant ones",
   expect(sink.systemPrompt).toContain("run the database migration with the staging flag");
   expect(sink.systemPrompt).not.toContain("purple velvet curtains");
   expect(sink.systemPrompt).not.toContain("tangerine zeppelin");
+});
+
+test("a recall provider that rejects drives the run to failed, not stuck running", async () => {
+  // An injected provider (e.g. a later embeddings / vector backend) can be
+  // unavailable and reject. Recall runs after the run is persisted `running`, so an
+  // unguarded rejection would strand it there; it must be caught and finished
+  // `failed`, exactly like a substrate failure.
+  const failingRecall: RecallProvider = {
+    recall: () => Promise.reject(new Error("embeddings backend unavailable")),
+  };
+  const result = await executeRun(store, agent, "do the thing", {
+    adapter: cannedAdapter({ status: "done", text: "the adapter should never run" }),
+    recall: failingRecall,
+  });
+
+  expect(result.status).toBe("failed");
+  expect(result.error).toContain("embeddings backend unavailable");
+  // Persisted terminal, not left mid-flight.
+  expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
+});
+
+test("a recall provider that throws synchronously also drives the run to failed", async () => {
+  // The guard catches a synchronous throw from `recall(...)` (before it returns a
+  // promise) just as it catches a rejection — neither may strand the run `running`.
+  const throwingRecall: RecallProvider = {
+    recall: () => {
+      throw new Error("recall blew up synchronously");
+    },
+  };
+  const result = await executeRun(store, agent, "do the thing", {
+    adapter: cannedAdapter({ status: "done", text: "the adapter should never run" }),
+    recall: throwingRecall,
+  });
+
+  expect(result.status).toBe("failed");
+  expect(result.error).toContain("recall blew up synchronously");
+  expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
 });
