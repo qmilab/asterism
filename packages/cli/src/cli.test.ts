@@ -1162,6 +1162,36 @@ test("reflect --review leaves a queued pile intact when run non-interactively (n
   expect(mem).toContain("proposed"); // still queued, not wiped
 });
 
+test("reflect --review reports a concurrently-settled proposal as skipped, not saved", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "race me", confidence: 0.8 }]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // Simulate another review surface settling the proposal mid-review: when the reviewer is
+  // asked, reject it through a SECOND store handle, then return accept here. The CLI's accept
+  // then loses the CAS and must report it skipped, not saved.
+  h.io.review = (): ReviewDecision => {
+    const other = openHomeStore(h);
+    try {
+      const agent = agentNamed(other, "personal");
+      const proposed = other.memories.list(agent.id, { reviewState: "proposed" })[0]!;
+      other.settleProposedMemory(agent.id, proposed.id, "rejected");
+    } finally {
+      other.close();
+    }
+    return { kind: "accept" };
+  };
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("already reviewed elsewhere");
+  expect(out).toContain("0 saved");
+  // The CLI did not activate it — the concurrent reject stands.
+  expect(await capture(["memory", "inspect", "personal"], h.io)).not.toContain("accepted");
+});
+
 test("reflect --propose is idempotent — a second run finds no new work", async () => {
   const h = harness();
   await withFinishedRun(h);

@@ -332,7 +332,15 @@ async function acceptMemory(
     if (raw !== undefined && typeof raw !== "string") {
       return fail(400, 'If given, "content" must be a string.');
     }
-    if (typeof raw === "string") content = raw;
+    if (typeof raw === "string") {
+      // A blank edit is NOT "accept unchanged" — that would silently activate the original a
+      // caller was trying to clear. Reject it like the CLI/dashboard do; to discard a
+      // proposal, call the reject endpoint.
+      if (raw.trim().length === 0) {
+        return fail(400, 'If given, "content" must be a non-empty string (use …/reject to discard).');
+      }
+      content = raw;
+    }
   }
 
   try {

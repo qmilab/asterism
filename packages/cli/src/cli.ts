@@ -1328,7 +1328,16 @@ interface ReviewCounts {
   rejected: number;
   blocked: number;
   errored: number;
+  /** Proposals another surface settled mid-review — the write didn't happen here (queue only). */
+  stale: number;
 }
+
+/**
+ * The outcome of one persist a review-loop callback attempts: `ok` (the write happened) or
+ * `stale` (the proposal was already settled by a concurrent drain — the queue path's CAS lost,
+ * so nothing was written). The live path always returns `ok`; a stale result never happens there.
+ */
+type DrainOutcome = "ok" | "stale";
 
 /** One proposal's display fields, the same for a live-computed and a queued proposal. */
 interface ReviewableView {
@@ -1345,20 +1354,33 @@ interface ReviewableView {
  * `view(i)` yields proposal `i`'s display fields; `reject(i)` records a rejection (a no-op for
  * the live path, a queue transition for the drain path); `accept(i, content, edited)` persists
  * an acceptance and MAY throw `MemoryFirewallError` — the hard gate — which is caught and
- * counted per-proposal so one bad write never aborts the batch. With `warnEditRescreen`, an
- * edit that still trips the firewall is flagged before the accept is attempted.
+ * counted per-proposal so one bad write never aborts the batch. Both callbacks return a
+ * {@link DrainOutcome}: a `stale` result (a queued proposal a concurrent surface settled first)
+ * is reported as skipped, NOT counted as saved/rejected, so the summary never over-reports
+ * writes that did not happen. With `warnEditRescreen`, an edit that still trips the firewall is
+ * flagged before the accept is attempted.
  */
 async function driveReviewLoop(
   io: CliIO,
   total: number,
   view: (i: number) => ReviewableView,
-  reject: (i: number) => void,
-  accept: (i: number, content: string, edited: boolean) => void,
+  reject: (i: number) => DrainOutcome,
+  accept: (i: number, content: string, edited: boolean) => DrainOutcome,
   warnEditRescreen = false,
 ): Promise<ReviewCounts> {
   // Absent reviewer ⇒ reject everything: nothing is accepted without an explicit yes.
   const review = io.review ?? ((): ReviewDecision => ({ kind: "reject" }));
-  const counts: ReviewCounts = { accepted: 0, rejected: 0, blocked: 0, errored: 0 };
+  const counts: ReviewCounts = { accepted: 0, rejected: 0, blocked: 0, errored: 0, stale: 0 };
+  // Record a rejection, accounting a concurrent settle as skipped rather than rejected.
+  const recordReject = (i: number, emptyEdit: boolean): void => {
+    if (reject(i) === "stale") {
+      counts.stale++;
+      io.out("  · already reviewed elsewhere — skipped");
+    } else {
+      counts.rejected++;
+      io.out(emptyEdit ? "  ✗ rejected (empty after edit)" : "  ✗ rejected");
+    }
+  };
   for (let i = 0; i < total; i++) {
     const v = view(i);
 
@@ -1383,18 +1405,14 @@ async function driveReviewLoop(
     });
 
     if (decision.kind === "reject") {
-      reject(i);
-      counts.rejected++;
-      io.out("  ✗ rejected");
+      recordReject(i, false);
       continue;
     }
     // Trim, and treat an empty/whitespace edit as a rejection — never accept a blank memory.
     const edited = decision.kind === "edit";
     const content = (edited ? decision.content : v.content).trim();
     if (content.length === 0) {
-      reject(i);
-      counts.rejected++;
-      io.out("  ✗ rejected (empty after edit)");
+      recordReject(i, true);
       continue;
     }
     // Re-screen the EDITED content so the warning matches what is about to be persisted
@@ -1412,9 +1430,13 @@ async function driveReviewLoop(
     try {
       // The firewall re-screens at persistence (the single hard chokepoint) and refuses a
       // poisoned write regardless of approval — caught below and counted, not fatal.
-      accept(i, content, edited);
-      counts.accepted++;
-      io.out(edited ? "  ✓ saved (edited)" : "  ✓ saved");
+      if (accept(i, content, edited) === "stale") {
+        counts.stale++;
+        io.out("  · already reviewed elsewhere — skipped");
+      } else {
+        counts.accepted++;
+        io.out(edited ? "  ✓ saved (edited)" : "  ✓ saved");
+      }
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
         counts.blocked++;
@@ -1438,7 +1460,8 @@ function printReviewSummary(io: CliIO, c: ReviewCounts): void {
   io.out(
     `Done — ${c.accepted} saved, ${c.rejected} rejected` +
       `${c.blocked > 0 ? `, ${c.blocked} blocked` : ""}` +
-      `${c.errored > 0 ? `, ${c.errored} errored` : ""}.`,
+      `${c.errored > 0 ? `, ${c.errored} errored` : ""}` +
+      `${c.stale > 0 ? `, ${c.stale} already reviewed elsewhere` : ""}.`,
   );
 }
 
@@ -1487,11 +1510,17 @@ async function reviewQueueDrain(
         findings: screenMemory(m.content).findings,
       };
     },
-    (i) => void rejectProposedMemory(store, agent, queued[i]!.id),
+    // A `rejected` result is the write we made; anything else means a concurrent surface
+    // already settled this proposal (the CAS lost) — report it stale, don't count a reject.
+    (i) => (rejectProposedMemory(store, agent, queued[i]!.id).kind === "rejected" ? "ok" : "stale"),
     // Accept in place, or — for an edit — record the re-screened edit and supersede the
     // original (the kernel helper re-screens, the hard gate; a poisoned edit throws here).
+    // A non-`accepted` result means it was settled elsewhere first — stale, not saved.
     (i, content, edited) =>
-      void acceptProposedMemory(store, agent, queued[i]!.id, edited ? content : undefined),
+      acceptProposedMemory(store, agent, queued[i]!.id, edited ? content : undefined).kind ===
+      "accepted"
+        ? "ok"
+        : "stale",
     true, // warn on a still-poisoned edit before persisting, same as the live path
   );
 
@@ -1570,10 +1599,11 @@ async function reviewLiveCompute(
       const p = usable[i]!;
       return { memoryType: p.memoryType, content: p.content, confidence: p.confidence, findings: p.findings };
     },
-    // A live proposal persists nothing until accepted, so a rejection is a no-op.
-    () => {},
+    // A live proposal persists nothing until accepted, so a rejection is a no-op — always `ok`.
+    (): DrainOutcome => "ok",
     // Accepted memories are saved active + accepted, so they frame the agent's future runs.
-    (i, content) => {
+    // A live compute is never concurrently settled, so the write always happens (`ok`).
+    (i, content): DrainOutcome => {
       const p = usable[i]!;
       store.recordMemory(agent.id, {
         memoryType: p.memoryType,
@@ -1583,6 +1613,7 @@ async function reviewLiveCompute(
         reviewState: "accepted",
         status: "active",
       });
+      return "ok";
     },
     true, // warn on a still-poisoned edit before persisting
   );

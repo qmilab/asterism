@@ -289,6 +289,18 @@ test("POST accept with an edit re-screens it (422 on a poisoned edit) and supers
   expect(store.memories.get(personal.id, id2)?.reviewState).toBe("proposed");
 });
 
+test("POST accept rejects a blank edit instead of silently accepting the original", async () => {
+  const id = queueProposal(personal);
+  const res = await handleConsoleRequest(
+    deps(),
+    send("POST", `/agents/personal/memory/${id}/accept`, { content: "   " }),
+  );
+  expect(res.status).toBe(400);
+  // The original was NOT activated by an empty edit — it is still awaiting review.
+  expect(store.memories.get(personal.id, id)?.reviewState).toBe("proposed");
+  expect(store.memories.listActiveAccepted(personal.id)).toEqual([]);
+});
+
 test("POST /agents/:a/memory/:id/reject removes a queued proposal from the queue", async () => {
   const id = queueProposal(personal);
   const res = await handleConsoleRequest(deps(), send("POST", `/agents/personal/memory/${id}/reject`));
