@@ -169,6 +169,32 @@ test("declining a run resets EVERY capability it was concurrently paused on", ()
   expect(proposeStandingGrants(store, agent)).toEqual([]);
 });
 
+test("a refused duplicate at decline resets the capability even if its twin was confirmed", () => {
+  // fs.delete earns a clean streak...
+  cleanExec(agent.id, "fs.delete", "dist");
+  cleanExec(agent.id, "fs.delete", "build");
+  cleanExec(agent.id, "fs.delete", "cache");
+  expect(proposeStandingGrants(store, agent).map((c) => c.capability)).toEqual(["fs.delete"]);
+
+  // ...then a run pauses on the SAME invocation twice (concurrent duplicates), one is
+  // confirmed and runs on the resume, and its refused twin re-pauses and is declined.
+  // The refusal must reset fs.delete even though an identical-fingerprint twin ran —
+  // a per-key boolean "was it ever executed?" would miss this.
+  const run = store.startRun(agent.id, { input: "delete dup" });
+  store.setRunStatus(agent.id, run.id, "running");
+  store.setRunStatus(agent.id, run.id, "awaiting_confirmation");
+  const p = { capability: "fs.delete", effect: "destructive", fingerprint: "dup" };
+  store.events.append(agent.id, { runId: run.id, type: "action.awaiting_confirmation", payload: p });
+  store.events.append(agent.id, { runId: run.id, type: "action.awaiting_confirmation", payload: p });
+  store.events.append(agent.id, { runId: run.id, type: "run.resumed", payload: { runId: run.id } });
+  store.events.append(agent.id, { runId: run.id, type: "action.executed", payload: p });
+  store.events.append(agent.id, { runId: run.id, type: "action.succeeded", payload: p });
+  store.events.append(agent.id, { runId: run.id, type: "action.awaiting_confirmation", payload: p }); // the refused twin
+  store.declineRun(agent.id, run.id);
+
+  expect(proposeStandingGrants(store, agent)).toEqual([]);
+});
+
 test("a pre-grant regression does not block earning forever — a fresh streak re-earns", () => {
   // An early slip with no grant/downgrade after it must NOT permanently disqualify the
   // capability: the window resets at the regression, and a fresh clean streak re-earns.
