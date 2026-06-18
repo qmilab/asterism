@@ -256,6 +256,12 @@ export const defaultRecallProvider: RecallProvider = {
  * is honored — only constrained. The default provider already satisfies all three,
  * so this is a no-op for it; it exists to make the seam safe for the providers it
  * is built to admit.
+ *
+ * The no-tamper guarantee frames objects from `candidates`, so it is only as strong
+ * as that array's integrity: the caller MUST pass candidates the provider could not
+ * have mutated. The kernel (`run.ts`) does this by handing the provider per-object
+ * clones and keeping a pristine `candidates` array — which it passes here — for
+ * itself. `selected` is treated as references-and-ids only; its objects never frame.
  */
 export function enforceRecall(
   selected: readonly Memory[],

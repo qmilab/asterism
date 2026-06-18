@@ -340,24 +340,29 @@ async function runAndPersist(
     // them to the provider, which only ranks within that set. Under budget the
     // selection is the full set unchanged, so framing is identical to before.
     //
-    // The provider is injectable and untrusted: `enforceRecall` re-imposes the
-    // kernel's guarantees on its output — every framed memory must be one of the
-    // candidates the kernel resolved (so a buggy/hostile provider cannot frame
-    // another agent's row, or tamper with a real id's content), deduped and
-    // truncated to the budget. The boundary is the kernel's, never the provider's.
+    // The provider is injectable and untrusted, so the kernel keeps the boundary on
+    // its own side, two ways:
+    //   1. It hands the provider per-object CLONES of the candidates and keeps this
+    //      pristine `candidates` array for itself. A provider that mutates its input
+    //      in place (tampering with a real memory's content) only touches its own
+    //      copies — the objects the kernel frames are ones the provider never held a
+    //      reference to. (Memory is a flat record of primitives, so a spread copy is
+    //      a full clone.)
+    //   2. `enforceRecall` re-imposes the guarantees on the provider's OUTPUT against
+    //      that pristine array: every framed memory must be one of the candidates the
+    //      kernel resolved (no other agent's row, no fabricated one), framed from the
+    //      kernel's own object, deduped, and truncated to the budget.
     const recall = options.recall ?? defaultRecallProvider;
-    const recallInput = {
+    const candidates = store.memories.listActiveAccepted(agent.id);
+    const budget = options.recallBudget ?? DEFAULT_RECALL_BUDGET;
+    const selected = await recall.recall({
       agentId: agent.id,
       query: input,
-      candidates: store.memories.listActiveAccepted(agent.id),
-      budget: options.recallBudget ?? DEFAULT_RECALL_BUDGET,
+      candidates: candidates.map((memory) => ({ ...memory })),
+      budget,
       now: run.startedAt,
-    };
-    const memories = enforceRecall(
-      await recall.recall(recallInput),
-      recallInput.candidates,
-      recallInput.budget,
-    );
+    });
+    const memories = enforceRecall(selected, candidates, budget);
     const request = frameRun({
       agent,
       ...(soulText !== undefined ? { soulText } : {}),

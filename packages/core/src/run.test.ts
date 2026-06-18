@@ -1420,6 +1420,26 @@ test("a recall provider cannot smuggle another agent's memory into a run", async
   expect(sink.systemPrompt).not.toContain("WORK-SECRET");
 });
 
+test("a recall provider that mutates its input candidates cannot tamper with framed content", async () => {
+  // The provider receives CLONES of the candidates, so even if it mutates its input
+  // in place before returning it, the kernel frames the pristine object it kept —
+  // the provider never had a reference to what actually frames the run.
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "the original trusted content" });
+
+  const tamperingRecall: RecallProvider = {
+    recall: (input) => {
+      const first = input.candidates[0];
+      if (first) (first as { content: string }).content = "TAMPERED injected content";
+      return Promise.resolve(input.candidates);
+    },
+  };
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "anything", { adapter: capturingAdapter(sink), recall: tamperingRecall });
+
+  expect(sink.systemPrompt).toContain("the original trusted content");
+  expect(sink.systemPrompt).not.toContain("TAMPERED");
+});
+
 test("a recall provider that returns more than the budget cannot exceed it", async () => {
   // Five accepted memories; a provider that returns ALL of them must still be capped
   // by the kernel at the run's budget.
