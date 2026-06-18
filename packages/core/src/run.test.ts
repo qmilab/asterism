@@ -14,6 +14,7 @@ import { declineRun, executeRun, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunEvent, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
+import type { RecallProvider } from "./recall.js";
 import type { Agent } from "./types.js";
 
 let store: AsterismStore;
@@ -105,6 +106,21 @@ function writeFileCapability(): Capability {
       description: "write a file",
       inputSchema: { type: "object", properties: {} },
       execute: () => ({ output: "written" }),
+    },
+  };
+}
+
+/**
+ * A substrate stand-in that captures the framed system prompt (what recall +
+ * framing produced) into `sink`, so a test can assert WHICH memories framed the
+ * run, then resolves a trivial output.
+ */
+function capturingAdapter(sink: { systemPrompt?: string }): RuntimeAdapter {
+  return {
+    run(request) {
+      sink.systemPrompt = request.systemPrompt;
+      async function* noEvents() {}
+      return { events: noEvents(), output: Promise.resolve({ status: "done", text: "ok" }) };
     },
   };
 }
@@ -1300,4 +1316,185 @@ test("declineRun preserves a paused run's persisted output", async () => {
   // the reflection target query (`latestWithOutput`).
   expect(store.runs.get(agent.id, parked.run.id)?.output).toBe("progress before the gate");
   expect(store.runs.latestWithOutput(agent.id)?.id).toBe(parked.run.id);
+});
+
+// --- structured recall ------------------------------------------------------
+//
+// Recall selects which of the agent's accepted memories frame a run. The kernel
+// resolves the agent's OWN candidates and hands them to the provider, so the
+// isolation boundary holds by construction: a run can only ever frame its own
+// agent's memory. These prove that at the orchestration level (the unit ranker is
+// covered in recall.test.ts).
+
+test("recall frames only the running agent's memories, never another agent's", async () => {
+  // A second agent holds memories whose content matches `personal`'s task. Recall
+  // must still never surface them — the agent is the isolation boundary.
+  const work = store.createAgent({
+    name: "work",
+    role: "work helper",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "propose",
+  });
+  store.recordMemory(work.id, { memoryType: "semantic", content: "WORK-ONLY staging deploy runbook" });
+  store.recordMemory(work.id, { memoryType: "convention", content: "WORK-ONLY always tag the release first" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "PERSONAL blog deploy checklist" });
+
+  const sink: { systemPrompt?: string } = {};
+  const result = await executeRun(store, agent, "help me with the staging deploy", {
+    adapter: capturingAdapter(sink),
+  });
+
+  expect(result.status).toBe("done");
+  expect(sink.systemPrompt).toContain("PERSONAL blog deploy checklist");
+  // The other agent's memory never frames this run, however task-relevant it reads.
+  expect(sink.systemPrompt).not.toContain("WORK-ONLY");
+});
+
+test("recall caps framed memories at the budget and prefers task-relevant ones", async () => {
+  // Five accepted memories; only two speak to the task. A budget of 2 frames the two
+  // relevant ones and drops the rest — the budget biting once memory grows.
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "kiwi mango papaya" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "the database migration runs at midnight" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "purple velvet curtains" });
+  store.recordMemory(agent.id, { memoryType: "procedural", content: "run the database migration with the staging flag" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "tangerine zeppelin afternoon" });
+
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "how do I run the database migration", {
+    adapter: capturingAdapter(sink),
+    recallBudget: { maxMemories: 2 },
+  });
+
+  expect(sink.systemPrompt).toContain("the database migration runs at midnight");
+  expect(sink.systemPrompt).toContain("run the database migration with the staging flag");
+  expect(sink.systemPrompt).not.toContain("purple velvet curtains");
+  expect(sink.systemPrompt).not.toContain("tangerine zeppelin");
+});
+
+test("a recall provider that rejects drives the run to failed, not stuck running", async () => {
+  // An injected provider (e.g. a later embeddings / vector backend) can be
+  // unavailable and reject. Recall runs after the run is persisted `running`, so an
+  // unguarded rejection would strand it there; it must be caught and finished
+  // `failed`, exactly like a substrate failure.
+  const failingRecall: RecallProvider = {
+    recall: () => Promise.reject(new Error("embeddings backend unavailable")),
+  };
+  const result = await executeRun(store, agent, "do the thing", {
+    adapter: cannedAdapter({ status: "done", text: "the adapter should never run" }),
+    recall: failingRecall,
+  });
+
+  expect(result.status).toBe("failed");
+  expect(result.error).toContain("embeddings backend unavailable");
+  // Persisted terminal, not left mid-flight.
+  expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
+});
+
+test("a recall provider cannot smuggle another agent's memory into a run", async () => {
+  // The kernel does not trust the (injectable) provider to honor isolation. Even a
+  // provider that explicitly returns another agent's memory must not frame it — the
+  // kernel keeps only memories from the candidate set it resolved for THIS agent.
+  const work = store.createAgent({
+    name: "work",
+    role: "work helper",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "propose",
+  });
+  const leaked = store.recordMemory(work.id, { memoryType: "semantic", content: "WORK-SECRET cross-agent leak" });
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "PERSONAL note" });
+
+  const leakingRecall: RecallProvider = {
+    // Returns the OTHER agent's memory regardless of the candidates handed in.
+    recall: () => Promise.resolve([leaked]),
+  };
+  const sink: { systemPrompt?: string } = {};
+  const result = await executeRun(store, agent, "anything at all", {
+    adapter: capturingAdapter(sink),
+    recall: leakingRecall,
+  });
+
+  expect(result.status).toBe("done");
+  // Dropped by the kernel — it was never in this agent's candidate set.
+  expect(sink.systemPrompt).not.toContain("WORK-SECRET");
+});
+
+test("a recall provider that mutates its input candidates cannot tamper with framed content", async () => {
+  // The provider receives CLONES of the candidates, so even if it mutates its input
+  // in place before returning it, the kernel frames the pristine object it kept —
+  // the provider never had a reference to what actually frames the run.
+  store.recordMemory(agent.id, { memoryType: "semantic", content: "the original trusted content" });
+
+  const tamperingRecall: RecallProvider = {
+    recall: (input) => {
+      const first = input.candidates[0];
+      if (first) (first as { content: string }).content = "TAMPERED injected content";
+      return Promise.resolve(input.candidates);
+    },
+  };
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "anything", { adapter: capturingAdapter(sink), recall: tamperingRecall });
+
+  expect(sink.systemPrompt).toContain("the original trusted content");
+  expect(sink.systemPrompt).not.toContain("TAMPERED");
+});
+
+test("a recall provider that returns more than the budget cannot exceed it", async () => {
+  // Five accepted memories; a provider that returns ALL of them must still be capped
+  // by the kernel at the run's budget.
+  const contents = ["mem one", "mem two", "mem three", "mem four", "mem five"];
+  const all = contents.map((content) => store.recordMemory(agent.id, { memoryType: "semantic", content }));
+  const greedyRecall: RecallProvider = { recall: () => Promise.resolve(all) };
+
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "anything", {
+    adapter: capturingAdapter(sink),
+    recall: greedyRecall,
+    recallBudget: { maxMemories: 2 },
+  });
+
+  const framed = contents.filter((c) => sink.systemPrompt?.includes(c));
+  expect(framed).toHaveLength(2); // the kernel truncated to the budget
+});
+
+test("a recall provider that mutates its input budget cannot raise the cap", async () => {
+  // The provider gets a fresh budget object snapshotted from a primitive, so bumping
+  // input.budget.maxMemories does nothing — the kernel enforces the original cap.
+  for (const c of ["mem one", "mem two", "mem three", "mem four"]) {
+    store.recordMemory(agent.id, { memoryType: "semantic", content: c });
+  }
+  const budgetRaisingRecall: RecallProvider = {
+    recall: (input) => {
+      (input.budget as { maxMemories: number }).maxMemories = 999;
+      return Promise.resolve(input.candidates);
+    },
+  };
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "anything", {
+    adapter: capturingAdapter(sink),
+    recall: budgetRaisingRecall,
+    recallBudget: { maxMemories: 1 },
+  });
+
+  const framed = ["mem one", "mem two", "mem three", "mem four"].filter((c) => sink.systemPrompt?.includes(c));
+  expect(framed).toHaveLength(1); // cap held despite the provider's mutation
+});
+
+test("a recall provider that throws synchronously also drives the run to failed", async () => {
+  // The guard catches a synchronous throw from `recall(...)` (before it returns a
+  // promise) just as it catches a rejection — neither may strand the run `running`.
+  const throwingRecall: RecallProvider = {
+    recall: () => {
+      throw new Error("recall blew up synchronously");
+    },
+  };
+  const result = await executeRun(store, agent, "do the thing", {
+    adapter: cannedAdapter({ status: "done", text: "the adapter should never run" }),
+    recall: throwingRecall,
+  });
+
+  expect(result.status).toBe("failed");
+  expect(result.error).toContain("recall blew up synchronously");
+  expect(store.runs.get(agent.id, result.run.id)?.status).toBe("failed");
 });

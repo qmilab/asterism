@@ -18,6 +18,8 @@
 import type { RuntimeAdapter, RunOutput, RunEvent } from "./adapter.js";
 import { frameRun, resolveSoul } from "./framing.js";
 import type { SkillContext } from "./framing.js";
+import { DEFAULT_RECALL_BUDGET, defaultRecallProvider, enforceRecall } from "./recall.js";
+import type { RecallBudget, RecallProvider } from "./recall.js";
 import { auditTrustHooks } from "./audit.js";
 import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
 import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
@@ -48,6 +50,19 @@ export interface ExecuteRunOptions {
    * handed — it never constructs a tool itself.
    */
   capabilities?: readonly Capability[];
+  /**
+   * Selects which of the agent's accepted memories frame this run. Absent ⇒ the
+   * default lexical ranker ({@link defaultRecallProvider}). The kernel resolves
+   * the agent's own candidates and hands them in, so a provider only ranks within
+   * one agent's memory — it never reaches the store or another agent's rows.
+   */
+  recall?: RecallProvider;
+  /**
+   * Bounds how many memories recall may frame. Absent ⇒ {@link DEFAULT_RECALL_BUDGET}.
+   * When the agent holds fewer memories than the budget, framing is unchanged — the
+   * budget only bites once memory grows past it.
+   */
+  recallBudget?: RecallBudget;
   /**
    * Optional sink for the substrate's lifecycle events as they arrive, so a
    * surface can show a run's activity live (CLI progress, HTTP SSE). The kernel
@@ -294,36 +309,75 @@ async function runAndPersist(
     const content = readMaybe(options.readFile, s.path);
     return { name: s.name, ...(content !== undefined ? { content } : {}) };
   });
-  const memories = store.memories.list(agent.id);
-  const request = frameRun({
-    agent,
-    ...(soulText !== undefined ? { soulText } : {}),
-    skills,
-    memories,
-    input,
-    tools,
-    signal: abortController.signal,
-  });
-
-  // If the substrate throws — synchronously from `run(request)` while building its
-  // handle, or by rejecting its output promise (the contract says a run settles
-  // with status "failed", but a non-conforming or crashing adapter can do either) —
-  // do not strand the run in `running`: drive it to a terminal state so every
-  // surface gets a structured result rather than an opaque rejection (over HTTP
-  // that would otherwise be a 500 with the run row mid-flight). So `run(request)`
-  // itself stays INSIDE the guard, not just the `await`.
+  // Everything that can fail while turning the agent's identity + task into an
+  // executed outcome — recall, framing, and the substrate run — sits INSIDE one
+  // guard, so a throw anywhere drives the run to a terminal state instead of
+  // stranding it `running`. The run is already persisted `running` above; an
+  // unguarded throw here would surface as an opaque rejection with the row stuck
+  // mid-flight (over HTTP, a 500 with no terminal status). So `run(request)` AND the
+  // recall/framing before it stay inside the guard, not just the `await`.
+  //
+  // Recall in particular can fail for a real reason: an injected provider (a later
+  // embeddings / vector backend) may be unavailable, or reject. That is a failed run,
+  // exactly like a substrate failure — caught here and finished `failed`, never left
+  // `running`. The default lexical provider never rejects, so this changes nothing
+  // for the default path; it makes the seam safe for the providers it exists to admit.
   //
   // `streamed` is the event-drain promise: starts as a resolved no-op so the catch
-  // can flush it unconditionally even when the substrate threw before handing back
-  // a handle (nothing was ever streamed in that case), and is reassigned the moment
-  // we have a handle. Forwarding is kicked off NOW (not awaited yet) so activity
-  // streams while the run is in flight; it is flushed (NOT blindly awaited — see
-  // `flushEvents`) at each exit below so the stream is drained before the surface
-  // formats its result without a non-closing stream being able to hang the run. The
-  // kernel is the single consumer and only forwards — it never acts on an event.
+  // can flush it unconditionally even when the throw happened before any handle —
+  // including before recall returned, when nothing was ever streamed — and is
+  // reassigned the moment we have a handle. Forwarding is kicked off NOW (not awaited
+  // yet) so activity streams while the run is in flight; it is flushed (NOT blindly
+  // awaited — see `flushEvents`) at each exit below so the stream is drained before
+  // the surface formats its result without a non-closing stream being able to hang
+  // the run. The kernel is the single consumer and only forwards — it never acts.
   let output: RunOutput;
   let streamed: Promise<void> = Promise.resolve();
   try {
+    // Structured recall: rank the agent's accepted memories against this task and
+    // frame at most a budget's worth, instead of inlining all of them. The kernel
+    // resolves the candidates (the agent's OWN active+accepted memories) and hands
+    // them to the provider, which only ranks within that set. Under budget the
+    // selection is the full set unchanged, so framing is identical to before.
+    //
+    // The provider is injectable and untrusted, so the kernel never shares a mutable
+    // object with it that it later trusts — it keeps the boundary on its own side,
+    // three ways:
+    //   1. It hands the provider per-object CLONES of the candidates and keeps this
+    //      pristine `candidates` array for itself. A provider that mutates its input
+    //      in place (tampering with a real memory's content) only touches its own
+    //      copies — the objects the kernel frames are ones the provider never held a
+    //      reference to. (Memory is a flat record of primitives, so a spread is a full
+    //      clone.)
+    //   2. It snapshots the budget to a primitive BEFORE calling the provider and gives
+    //      the provider (and enforceRecall) their own fresh budget objects — never the
+    //      caller's, which may be the shared DEFAULT_RECALL_BUDGET. A provider that
+    //      mutates `input.budget` cannot raise the cap or poison the default.
+    //   3. `enforceRecall` re-imposes the guarantees on the provider's OUTPUT against
+    //      the pristine candidates: every framed memory must be one the kernel resolved
+    //      (no other agent's row, no fabricated one), framed from the kernel's own
+    //      object, deduped, and truncated to the budget.
+    const recall = options.recall ?? defaultRecallProvider;
+    const candidates = store.memories.listActiveAccepted(agent.id);
+    const maxMemories = (options.recallBudget ?? DEFAULT_RECALL_BUDGET).maxMemories;
+    const selected = await recall.recall({
+      agentId: agent.id,
+      query: input,
+      candidates: candidates.map((memory) => ({ ...memory })),
+      budget: { maxMemories },
+      now: run.startedAt,
+    });
+    const memories = enforceRecall(selected, candidates, { maxMemories });
+    const request = frameRun({
+      agent,
+      ...(soulText !== undefined ? { soulText } : {}),
+      skills,
+      memories,
+      input,
+      tools,
+      signal: abortController.signal,
+    });
+
     const handle = options.adapter.run(request);
     streamed = drainEvents(handle.events, options.onEvent);
     output = await handle.output;
