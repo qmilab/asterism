@@ -1,9 +1,12 @@
 # Concepts
 
 Asterism runs many distinct agents from one local install. The whole design
-turns on a single idea: **the agent is the boundary.** Each agent is its own
-identity with its own memory, secrets, skills, workspace, and autonomy — and
-nothing crosses between them unless you say so.
+turns on a single idea:
+
+**The agent is the boundary.**
+
+Each agent is its own identity with its own memory, secrets, skills, workspace,
+and autonomy — and nothing crosses between them unless you say so.
 
 ```mermaid
 flowchart TB
