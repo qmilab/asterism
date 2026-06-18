@@ -1,8 +1,9 @@
 # Asterism documentation
 
 Run many distinct AI agents from one local install — each with its own soul,
-memory, secrets, skills, workspace, event log, and autonomy level. Nothing leaks
-between them.
+memory, secrets, skills, workspace, event log, and autonomy level.
+
+**Nothing leaks between them.**
 
 **New here? Start with the [getting-started tutorial](./getting-started.md)** — a
 ~15-minute walk from install to a working agent that writes a file, pauses before
