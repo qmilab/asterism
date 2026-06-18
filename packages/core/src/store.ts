@@ -13,8 +13,10 @@ import { SkillRepository } from "./repositories/skills.js";
 import type { CreateSkillInput } from "./repositories/skills.js";
 import { CredentialRepository } from "./repositories/credentials.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
+import { AgentSettingsRepository } from "./repositories/agent-settings.js";
 import type {
   Agent,
+  AgentSettings,
   CapabilityGrant,
   CapabilityStanding,
   Credential,
@@ -42,6 +44,8 @@ export class AsterismStore {
   readonly credentials: CredentialRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
+  /** Per-agent kernel settings — the operator-configurable tunables (e.g. recall budget). */
+  readonly agentSettings: AgentSettingsRepository;
   /** The local plaintext-bearing secret store; credentials reference into it. */
   readonly secrets: SecretStore;
   readonly events: EventRepository;
@@ -55,6 +59,7 @@ export class AsterismStore {
     this.skills = new SkillRepository(driver);
     this.credentials = new CredentialRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
+    this.agentSettings = new AgentSettingsRepository(driver);
     this.secrets = new SecretStore(driver);
     this.events = new EventRepository(driver);
   }
@@ -156,6 +161,49 @@ export class AsterismStore {
         runId,
       );
       return grant;
+    });
+  }
+
+  /**
+   * Set an agent's per-agent recall budget and record the change as
+   * `agent.setting_changed` — the audit trail for an operator tuning how much memory
+   * frames the agent's runs: which `setting`, and the `from`/`to` values (a config
+   * count, never an action's arguments, so the log stays references-only). `from` is
+   * the prior override, or null when it was unset (running on the kernel default). The
+   * repository validates a positive whole number at the write boundary.
+   */
+  setRecallBudget(agentId: string, budget: number): AgentSettings {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getRecallBudget(agentId) ?? null;
+      const settings = this.agentSettings.setRecallBudget(agentId, budget);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "recallBudget",
+        from,
+        to: settings.recallBudget ?? null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Clear an agent's recall-budget override, returning it to the kernel default, and
+   * record the change as `agent.setting_changed` (`to: null`). A no-op when the agent
+   * had no override set: nothing changes, so nothing is logged — the returned row is
+   * undefined, telling the caller there was nothing to clear. Mirrors the asymmetry of
+   * `setCapabilityStanding`'s revoke: only a real transition lands on the record.
+   */
+  clearRecallBudget(agentId: string): AgentSettings | undefined {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getRecallBudget(agentId) ?? null;
+      const settings = this.agentSettings.clearRecallBudget(agentId);
+      if (from !== null) {
+        this.emit(agentId, "agent.setting_changed", {
+          setting: "recallBudget",
+          from,
+          to: null,
+        });
+      }
+      return settings;
     });
   }
 

@@ -110,4 +110,21 @@ CREATE TABLE IF NOT EXISTS capability_standing (
   UNIQUE(agent_id, capability)
 );
 CREATE INDEX IF NOT EXISTS idx_capability_standing_agent ON capability_standing(agent_id);
+
+-- Per-agent kernel settings -- the operator-configurable knobs that tune how an
+-- agent thinks, scoped by agent_id like everything else (the agent is the
+-- isolation boundary; there is no global settings store any agent can reach).
+-- One row per agent (agent_id IS the primary key), each column a nullable
+-- override where NULL means "unset -- fall back to the kernel default". This is
+-- the shared home for per-agent tunables: recall_budget is the first, and future
+-- knobs (e.g. earned-standing thresholds) add a column here rather than accreting
+-- onto the agents identity table. A nullable column added later is picked up on a
+-- fresh open via this CREATE; an older database with the table already present
+-- needs the additive ALTER in store.migrate(), same as every other later column.
+CREATE TABLE IF NOT EXISTS agent_settings (
+  agent_id      TEXT PRIMARY KEY REFERENCES agents(id),
+  recall_budget INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
 `;

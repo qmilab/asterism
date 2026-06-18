@@ -215,22 +215,35 @@ API key, e.g. OPENAI_API_KEY) to draft the proposals.`,
   config: `asterism config
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
+asterism config recall-budget <agent> <n>  ·  --unset
 
-Choose the model your agents run on. Set one install-wide default, and give any
-single agent its own model when you want it to run on something different.
+Choose the model your agents run on, and tune how much each agent remembers into a
+run. Set one install-wide default model, and give any single agent its own model or
+its own recall budget when you want it to differ.
 
-  asterism config                       Show the current setup and the model each
-                                        agent resolves to.
+  asterism config                       Show the current setup: the model each agent
+                                        resolves to, and its recall budget.
   asterism config set <model-id>        Set the install-wide default model.
   asterism config set <model-id> --agent <name>
                                         Pin one agent to its own model.
   asterism config unset [--agent <name>]
                                         Clear the default, or one agent's override.
+  asterism config recall-budget <agent> <n>
+                                        Set how many memories this agent may recall
+                                        into a run (a positive whole number).
+  asterism config recall-budget <agent> --unset
+                                        Clear it, so the agent uses the default again.
+  asterism config recall-budget <agent>
+                                        Show this agent's current recall budget.
 
 Where a model comes from, most specific first: an agent's own model, then the
 ASTERISM_MODEL_* environment variables, then the install default, then built-in
 provider settings. So an environment variable overrides the saved default, and an
 agent's own model overrides everything.
+
+An agent's recall budget caps how many of its saved memories are selected to frame a
+run — the most relevant are kept under the cap. Each agent's budget is its own; leave
+it unset to use the built-in default.
 
 Options for \`set\`:
   --provider <name>   Provider name. Built-in: openai, anthropic. Default: openai.

@@ -58,9 +58,13 @@ export interface ExecuteRunOptions {
    */
   recall?: RecallProvider;
   /**
-   * Bounds how many memories recall may frame. Absent ⇒ {@link DEFAULT_RECALL_BUDGET}.
-   * When the agent holds fewer memories than the budget, framing is unchanged — the
-   * budget only bites once memory grows past it.
+   * An explicit, host-level recall budget override — the HIGHEST-precedence source.
+   * Absent ⇒ the kernel resolves the effective budget from the agent's own setting
+   * (`resolveRecallBudget`: the per-agent override, else {@link DEFAULT_RECALL_BUDGET}).
+   * So a host can still force a budget per call, but the normal path is the
+   * operator-configured per-agent value, not a hard-coded default. When the agent
+   * holds fewer memories than the resolved budget, framing is unchanged — the budget
+   * only bites once memory grows past it.
    */
   recallBudget?: RecallBudget;
   /**
@@ -117,6 +121,22 @@ export interface ExecuteRunResult {
    * these as the post-run summary; the empty array means the run took no actions.
    */
   actions: readonly ActionRecord[];
+}
+
+/**
+ * Resolve the effective recall budget for an agent's run: the agent's own
+ * per-agent override if set, else the kernel default ({@link DEFAULT_RECALL_BUDGET}).
+ * The kernel owns this resolution so every surface (CLI, HTTP, a future dashboard)
+ * gets the same effective value from one place and can never drift on it — the same
+ * reason the run flow itself lives in one call. The read is `agentId`-scoped, so an
+ * agent's budget is resolved only from its own setting, never another's.
+ *
+ * An explicit `options.recallBudget` still wins over this (see {@link ExecuteRunOptions});
+ * this is the resolution for the normal path where no host override is supplied.
+ */
+export function resolveRecallBudget(store: AsterismStore, agent: Agent): RecallBudget {
+  const override = store.agentSettings.getRecallBudget(agent.id);
+  return override !== undefined ? { maxMemories: override } : DEFAULT_RECALL_BUDGET;
 }
 
 /** Read a file's text via the injected reader, or undefined if it cannot be read. */
@@ -396,7 +416,10 @@ async function runAndPersist(
     //      object, deduped, and truncated to the budget.
     const recall = options.recall ?? defaultRecallProvider;
     const candidates = store.memories.listActiveAccepted(agent.id);
-    const maxMemories = (options.recallBudget ?? DEFAULT_RECALL_BUDGET).maxMemories;
+    // The effective budget: an explicit host override, else the agent's own resolved
+    // setting (per-agent value → kernel default). Snapshotted to a primitive here, so
+    // the provider never receives the shared DEFAULT_RECALL_BUDGET object to mutate.
+    const maxMemories = (options.recallBudget ?? resolveRecallBudget(store, agent)).maxMemories;
     const selected = await recall.recall({
       agentId: agent.id,
       query: input,

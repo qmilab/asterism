@@ -23,6 +23,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { AsterismStore } from "@qmilab/asterism-core";
 import {
   BUILTIN_SOULS,
+  DEFAULT_RECALL_BUDGET,
   executeRun,
   MEMORY_TYPES,
   MemoryFirewallError,
@@ -1363,7 +1364,9 @@ function hasSettings(settings: ModelSettings | undefined): settings is ModelSett
 }
 
 async function cmdConfig(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  // `--unset` is a boolean here so `config recall-budget <agent> --unset` never
+  // tries to consume a following token as its value.
+  const parsed = parseArgs(args, ["help", "h", "unset"]);
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.config!);
     return 0;
@@ -1372,6 +1375,7 @@ async function cmdConfig(args: string[], io: CliIO): Promise<number> {
   if (sub === undefined || sub === "show") return cmdConfigShow(io);
   if (sub === "set") return cmdConfigSet(parsed, io);
   if (sub === "unset") return cmdConfigUnset(parsed, io);
+  if (sub === "recall-budget") return cmdConfigRecallBudget(parsed, io);
   io.err(`Unknown subcommand: config ${sub}`);
   io.out(COMMAND_HELP.config!);
   return 1;
@@ -1417,7 +1421,91 @@ function cmdConfigShow(io: CliIO): Promise<number> {
     }
 
     io.out("");
+    io.out("Per-agent recall budget:");
+    if (agents.length === 0) {
+      io.out("  (no agents yet)");
+    } else {
+      // How many memories each agent's runs may frame. An unset agent resolves to the
+      // kernel default; the kernel owns that resolution (`resolveRecallBudget`), so this
+      // only reads the stored override and labels its source.
+      for (const agent of agents) {
+        const budget = store.agentSettings.getRecallBudget(agent.id);
+        io.out(
+          budget !== undefined
+            ? `  ${agent.name}  →  ${budget}  [set]`
+            : `  ${agent.name}  →  ${DEFAULT_RECALL_BUDGET.maxMemories}  [default]`,
+        );
+      }
+    }
+
+    io.out("");
     io.out("API keys are never stored here — set them in the environment (e.g. OPENAI_API_KEY).");
+    return 0;
+  });
+}
+
+/**
+ * `asterism config recall-budget <agent> [<n>]` / `--unset` — read or set how many
+ * memories an agent's runs may frame. With a value, sets the per-agent override;
+ * with `--unset`, clears it back to the kernel default; with neither, shows the
+ * current setting. The kernel validates and stores it (agentId-scoped) and owns the
+ * effective-value resolution — this surface only parses, calls, and formats.
+ */
+function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const agentName = parsed.positionals[1];
+  if (!agentName) {
+    io.err("Usage: asterism config recall-budget <agent> <n>  ·  --unset");
+    return Promise.resolve(1);
+  }
+  const unset = parsed.flags.unset === true;
+  const valueRaw = parsed.positionals[2];
+  // The tiny arg parser turns a bare negative number (`-5`) into a short boolean flag
+  // (key `5`), not a positional, so a digit-only flag key is a negative budget the user
+  // tried to set. Catch it as an invalid value rather than letting it vanish and fall
+  // through to the read-only "show" path as a silent no-op.
+  const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
+  const DEFAULT = DEFAULT_RECALL_BUDGET.maxMemories;
+
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, agentName);
+    if (!agent) return noAgent(io, agentName);
+
+    if (unset) {
+      // Decide the message from the PRIOR value, not row existence: a cleared row
+      // persists (with a NULL budget) to keep its created_at, so "is there a row" is
+      // not "was something set". Skip the write entirely when nothing was set.
+      const had = store.agentSettings.getRecallBudget(agent.id);
+      if (had === undefined) {
+        io.out(`${agentName} had no recall budget set — it already uses the default (${DEFAULT}).`);
+        return 0;
+      }
+      store.clearRecallBudget(agent.id);
+      io.out(`Cleared ${agentName}'s recall budget — it uses the default (${DEFAULT}) again.`);
+      return 0;
+    }
+
+    // No value and no `--unset`: read the current setting rather than change it.
+    if (valueRaw === undefined && !negativeValue) {
+      const current = store.agentSettings.getRecallBudget(agent.id);
+      io.out(
+        current !== undefined
+          ? `${agentName}'s recall budget: ${current} ${current === 1 ? "memory" : "memories"}.`
+          : `${agentName} uses the default recall budget (${DEFAULT} memories).`,
+      );
+      return 0;
+    }
+
+    // A budget must be a positive whole number. `intFlag` parses a non-negative
+    // integer; reject 0, a negative (the `negativeValue` case above), and anything
+    // non-numeric here with a clear message rather than letting the kernel's
+    // write-boundary validation surface as a raw error.
+    const budget = valueRaw !== undefined ? intFlag(valueRaw) : undefined;
+    if (budget === undefined || budget <= 0) {
+      io.err("The recall budget must be a positive whole number.");
+      return 1;
+    }
+    store.setRecallBudget(agent.id, budget);
+    io.out(`Set ${agentName}'s recall budget to ${budget} ${budget === 1 ? "memory" : "memories"}.`);
     return 0;
   });
 }
