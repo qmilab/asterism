@@ -400,21 +400,14 @@ export function acceptProposedMemory(
 
   const edited = editedContent?.trim();
   if (edited !== undefined && edited.length > 0 && edited !== current.content) {
-    // Screen the edit BEFORE claiming, so a poisoned edit throws here and leaves the
-    // original proposal untouched in the queue.
+    // Screen the edit BEFORE the write, so a poisoned edit throws here and leaves the
+    // original proposal untouched in the queue. The store then claims the original and
+    // records the edit ATOMICALLY (one transaction) — claiming first stops two concurrent
+    // edited-accepts from both recording, and the atomicity stops a storage failure from
+    // leaving the original rejected with the edit lost.
     assertMemorySafe(edited);
-    // CAS-claim the original out of the queue first — a concurrent drain that already
-    // settled it loses here, so we never record a duplicate accepted memory.
-    if (!store.settleProposedMemory(agent.id, id, "rejected")) return drainMiss(store, agent, id);
-    const memory = store.recordMemory(agent.id, {
-      memoryType: current.memoryType,
-      content: edited,
-      confidence: current.confidence,
-      ...(current.sourceRunId !== undefined ? { sourceRunId: current.sourceRunId } : {}),
-      reviewState: "accepted",
-      status: "active",
-    });
-    return { kind: "accepted", memory };
+    const memory = store.acceptEditedProposal(agent.id, current, edited);
+    return memory ? { kind: "accepted", memory } : drainMiss(store, agent, id);
   }
 
   // Unchanged: re-screen at the persistence boundary (throws if the rules now flag it),

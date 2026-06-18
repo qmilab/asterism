@@ -519,6 +519,51 @@ export class AsterismStore {
   }
 
   /**
+   * Accept a queued proposal WITH AN EDIT, atomically. In ONE transaction it CAS-claims the
+   * original out of the queue (`proposed → rejected`, recording `memory.reviewed`) and records
+   * the edited content as a fresh `active + accepted` memory (recording `memory.recorded`).
+   * Atomic so the two writes cannot tear: if the record fails, the claim rolls back and the
+   * proposal stays in the queue — never silently lost. Claiming the original FIRST is what
+   * stops two concurrent edited-accepts from yielding two accepted memories: only the CAS
+   * winner records; a loser gets undefined and writes nothing. The caller has already screened
+   * `content` through the firewall (the hard gate) before calling — identical content, so the
+   * create's own screen cannot newly block it here. Returns the new accepted memory, or
+   * undefined when the CAS lost (a concurrent drain already settled the proposal).
+   */
+  acceptEditedProposal(agentId: string, current: Memory, content: string): Memory | undefined {
+    return this.driver.transaction(() => {
+      const claimed = this.memories.settleProposed(agentId, current.id, "rejected");
+      if (!claimed) return undefined;
+      this.emit(
+        agentId,
+        "memory.reviewed",
+        { memoryId: claimed.id, from: "proposed", to: claimed.reviewState },
+        claimed.sourceRunId,
+      );
+      const memory = this.memories.create(agentId, {
+        memoryType: current.memoryType,
+        content,
+        confidence: current.confidence,
+        ...(current.sourceRunId !== undefined ? { sourceRunId: current.sourceRunId } : {}),
+        reviewState: "accepted",
+        status: "active",
+      });
+      this.emit(
+        agentId,
+        "memory.recorded",
+        {
+          memoryId: memory.id,
+          memoryType: memory.memoryType,
+          reviewState: memory.reviewState,
+          confidence: memory.confidence,
+        },
+        memory.sourceRunId,
+      );
+      return memory;
+    });
+  }
+
+  /**
    * Record that a non-interactive `reflect --propose` has reflected on `runId` — a
    * references-only `reflection.proposed` marker carrying the per-run tally (how many
    * proposals were queued / withheld / already-known / ignored), never any content. This
