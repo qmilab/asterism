@@ -340,29 +340,34 @@ async function runAndPersist(
     // them to the provider, which only ranks within that set. Under budget the
     // selection is the full set unchanged, so framing is identical to before.
     //
-    // The provider is injectable and untrusted, so the kernel keeps the boundary on
-    // its own side, two ways:
+    // The provider is injectable and untrusted, so the kernel never shares a mutable
+    // object with it that it later trusts — it keeps the boundary on its own side,
+    // three ways:
     //   1. It hands the provider per-object CLONES of the candidates and keeps this
     //      pristine `candidates` array for itself. A provider that mutates its input
     //      in place (tampering with a real memory's content) only touches its own
     //      copies — the objects the kernel frames are ones the provider never held a
-    //      reference to. (Memory is a flat record of primitives, so a spread copy is
-    //      a full clone.)
-    //   2. `enforceRecall` re-imposes the guarantees on the provider's OUTPUT against
-    //      that pristine array: every framed memory must be one of the candidates the
-    //      kernel resolved (no other agent's row, no fabricated one), framed from the
-    //      kernel's own object, deduped, and truncated to the budget.
+    //      reference to. (Memory is a flat record of primitives, so a spread is a full
+    //      clone.)
+    //   2. It snapshots the budget to a primitive BEFORE calling the provider and gives
+    //      the provider (and enforceRecall) their own fresh budget objects — never the
+    //      caller's, which may be the shared DEFAULT_RECALL_BUDGET. A provider that
+    //      mutates `input.budget` cannot raise the cap or poison the default.
+    //   3. `enforceRecall` re-imposes the guarantees on the provider's OUTPUT against
+    //      the pristine candidates: every framed memory must be one the kernel resolved
+    //      (no other agent's row, no fabricated one), framed from the kernel's own
+    //      object, deduped, and truncated to the budget.
     const recall = options.recall ?? defaultRecallProvider;
     const candidates = store.memories.listActiveAccepted(agent.id);
-    const budget = options.recallBudget ?? DEFAULT_RECALL_BUDGET;
+    const maxMemories = (options.recallBudget ?? DEFAULT_RECALL_BUDGET).maxMemories;
     const selected = await recall.recall({
       agentId: agent.id,
       query: input,
       candidates: candidates.map((memory) => ({ ...memory })),
-      budget,
+      budget: { maxMemories },
       now: run.startedAt,
     });
-    const memories = enforceRecall(selected, candidates, budget);
+    const memories = enforceRecall(selected, candidates, { maxMemories });
     const request = frameRun({
       agent,
       ...(soulText !== undefined ? { soulText } : {}),

@@ -1458,6 +1458,29 @@ test("a recall provider that returns more than the budget cannot exceed it", asy
   expect(framed).toHaveLength(2); // the kernel truncated to the budget
 });
 
+test("a recall provider that mutates its input budget cannot raise the cap", async () => {
+  // The provider gets a fresh budget object snapshotted from a primitive, so bumping
+  // input.budget.maxMemories does nothing — the kernel enforces the original cap.
+  for (const c of ["mem one", "mem two", "mem three", "mem four"]) {
+    store.recordMemory(agent.id, { memoryType: "semantic", content: c });
+  }
+  const budgetRaisingRecall: RecallProvider = {
+    recall: (input) => {
+      (input.budget as { maxMemories: number }).maxMemories = 999;
+      return Promise.resolve(input.candidates);
+    },
+  };
+  const sink: { systemPrompt?: string } = {};
+  await executeRun(store, agent, "anything", {
+    adapter: capturingAdapter(sink),
+    recall: budgetRaisingRecall,
+    recallBudget: { maxMemories: 1 },
+  });
+
+  const framed = ["mem one", "mem two", "mem three", "mem four"].filter((c) => sink.systemPrompt?.includes(c));
+  expect(framed).toHaveLength(1); // cap held despite the provider's mutation
+});
+
 test("a recall provider that throws synchronously also drives the run to failed", async () => {
   // The guard catches a synchronous throw from `recall(...)` (before it returns a
   // promise) just as it catches a rejection — neither may strand the run `running`.

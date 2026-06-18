@@ -223,3 +223,7 @@ test("enforceRecall with a budget of zero frames nothing", () => {
   const candidates = [mem({ id: "a", content: "a" })];
   expect(enforceRecall(candidates, candidates, { maxMemories: 0 })).toEqual([]);
 });
+
+test("the default recall budget is frozen so it cannot be poisoned", () => {
+  expect(Object.isFrozen(DEFAULT_RECALL_BUDGET)).toBe(true);
+});

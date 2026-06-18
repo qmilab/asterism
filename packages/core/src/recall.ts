@@ -34,8 +34,13 @@ export interface RecallBudget {
  * The default recall budget. Chosen high enough that a typical agent's memory
  * frames in full — so recall is invisible until memory actually grows past it,
  * and small memory sets (the canonical demo, existing tests) are unaffected.
+ *
+ * Frozen: it is a shared module constant, and the kernel must never let an untrusted
+ * provider mutate it (which would change every later run's cap). The kernel also
+ * never hands this object to a provider — it passes a fresh snapshot — but freezing
+ * is the belt-and-suspenders that makes a poisoning bug impossible, not just avoided.
  */
-export const DEFAULT_RECALL_BUDGET: RecallBudget = { maxMemories: 20 };
+export const DEFAULT_RECALL_BUDGET: RecallBudget = Object.freeze({ maxMemories: 20 });
 
 /**
  * What the kernel hands a {@link RecallProvider}. All `candidates` already belong
