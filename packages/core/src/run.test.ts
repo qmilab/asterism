@@ -1618,6 +1618,42 @@ test("a standing grant never crosses agents: B's run is unaffected by A's grant"
   expect(result.status).toBe("awaiting_confirmation");
 });
 
+test("a successful destructive action records action.succeeded; an errored one does not", async () => {
+  // The success signal earning is built from must be REAL (emitted by the gate after a
+  // non-error result), not just an up-front attempt. A confirmed delete that succeeds
+  // emits both action.executed (attempt) and action.succeeded (success).
+  const okRun = await executeRun(store, agent, "delete the dist files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf dist" }),
+    capabilities: [deleteFilesCapability()],
+    confirm: () => true,
+  });
+  expect(okRun.status).toBe("done");
+  let types = store.events.tail(agent.id, { runId: okRun.run.id }).map((e) => e.type);
+  expect(types).toContain("action.executed");
+  expect(types).toContain("action.succeeded");
+
+  // An errored destructive tool records the attempt but NO success — so it can never
+  // be mistaken for a clean execution when earning a standing grant.
+  const erroringDelete: Capability = {
+    key: "delete_files",
+    effect: "destructive",
+    tool: {
+      name: "delete_files",
+      description: "delete files",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({ output: "could not delete", isError: true }),
+    },
+  };
+  const errRun = await executeRun(store, agent, "delete the cache files", {
+    adapter: toolCallingAdapter("delete_files", { command: "rm -rf cache" }),
+    capabilities: [erroringDelete],
+    confirm: () => true,
+  });
+  types = store.events.tail(agent.id, { runId: errRun.run.id }).map((e) => e.type);
+  expect(types).toContain("action.executed"); // the attempt is recorded (at-most-once)
+  expect(types).not.toContain("action.succeeded"); // but no success — earns nothing
+});
+
 test("a standing-granted action is not re-executed when a LATER pause is resumed", async () => {
   // The at-most-once guarantee must cover earned autonomy, not only confirmation. A
   // granted action auto-approves (gate decision `execute`, not `confirm`), so without

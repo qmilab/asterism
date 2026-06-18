@@ -116,11 +116,10 @@ function seedCleanRecord(h: Harness, agentName: string, capability: string, targ
     const agent = agentNamed(store, agentName);
     for (const target of targets) {
       const run = store.startRun(agent.id, { input: `do ${target}` });
-      store.events.append(agent.id, {
-        runId: run.id,
-        type: "action.executed",
-        payload: { capability, effect: "destructive", fingerprint: target },
-      });
+      const payload = { capability, effect: "destructive", fingerprint: target };
+      // The gate records the attempt then the success; only a success counts as clean.
+      store.events.append(agent.id, { runId: run.id, type: "action.executed", payload });
+      store.events.append(agent.id, { runId: run.id, type: "action.succeeded", payload });
       store.finishRun(agent.id, run.id, "ok", "done");
     }
   } finally {

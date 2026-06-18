@@ -91,6 +91,7 @@ export const EVENT_TYPES = [
   "credential.removed",
   "secret.read",
   "action.executed",
+  "action.succeeded",
   "action.withheld",
   "action.awaiting_confirmation",
 ] as const;

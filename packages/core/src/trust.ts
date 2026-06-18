@@ -362,6 +362,18 @@ export type PreApprovalVerdict = "skip" | "run" | "gate";
 export interface TrustHooks {
   /** An action is about to execute. The `notify`/`autonomous` surfacing + audit point. */
   onExecute?: (action: Action) => void;
+  /**
+   * A DESTRUCTIVE action's tool returned WITHOUT error — a genuine success signal,
+   * fired after `tool.execute` resolves non-error. Deliberately distinct from
+   * {@link onExecute}, which fires UP FRONT for a destructive action (before the tool
+   * runs, so the at-most-once resume accounting counts every *attempt* even one that
+   * times out). `onExecute` records an attempt; `onSucceeded` records that it actually
+   * succeeded — which is what an earned-standing track record must be built from, so a
+   * merely-attempted (errored) destructive action never counts as a clean execution.
+   * Not fired for read/write actions (their `onExecute` already implies success) or
+   * when the tool errors or throws.
+   */
+  onSucceeded?: (action: Action) => void;
   /** A side-effecting action was withheld under `propose` (recorded as a plan step). */
   onWithhold?: (action: Action) => void;
   /**
@@ -550,7 +562,13 @@ function gateTool(
         // recorded only on denial, a given invocation triggers `onAwaitConfirmation`
         // OR `onExecute`, never both.
         hooks.onExecute?.(action);
-        return tool.execute(invocation);
+        const destructiveResult = await tool.execute(invocation);
+        // A success signal SEPARATE from the up-front attempt: only a destructive
+        // action whose tool returned non-error counts toward an earned track record,
+        // so a failed/ambiguous attempt (still recorded as executed for at-most-once)
+        // never earns autonomy. A throw skips this, as it should.
+        if (!destructiveResult.isError) hooks.onSucceeded?.(action);
+        return destructiveResult;
       }
 
       // An ordinary (read/write) action is reversible: run it honoring the abort

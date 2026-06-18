@@ -85,6 +85,21 @@ export function auditTrustHooks(
       );
       base.onExecute?.(action);
     },
+    onSucceeded: (action) => {
+      // `action.succeeded` records that a destructive action's tool actually returned
+      // non-error — the success signal an earned-standing track record is built from,
+      // distinct from the up-front `action.executed` (an *attempt*). Carries the same
+      // keyed fingerprint so the evidence reader can measure breadth across distinct
+      // targets. References only, like every audit event.
+      record(
+        "action.succeeded",
+        action,
+        fingerprintKey !== undefined
+          ? { fingerprint: actionFingerprint(action.args, fingerprintKey) }
+          : undefined,
+      );
+      base.onSucceeded?.(action);
+    },
     onWithhold: (action) => {
       record("action.withheld", action);
       base.onWithhold?.(action);

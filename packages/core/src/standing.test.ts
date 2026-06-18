@@ -35,9 +35,21 @@ afterEach(() => {
   store.close();
 });
 
-/** A confirmed destructive execution of `capability` on `target`, in a run that finished `done`. */
+/** A confirmed, SUCCESSFUL destructive execution of `capability` on `target`, in a `done` run. */
 function cleanExec(agentId: string, capability: string, target: string): void {
   const run = store.startRun(agentId, { input: `do ${target}` });
+  const payload = { capability, effect: "destructive", fingerprint: target };
+  // The gate records the attempt up front (`action.executed`) then, on a non-error
+  // result, the success (`action.succeeded`). Only the latter counts as clean.
+  store.events.append(agentId, { runId: run.id, type: "action.executed", payload });
+  store.events.append(agentId, { runId: run.id, type: "action.succeeded", payload });
+  store.finishRun(agentId, run.id, "ok", "done");
+}
+
+/** A destructive ATTEMPT of `capability` on `target` whose tool ERRORED, in a `done` run. */
+function erroredExec(agentId: string, capability: string, target: string): void {
+  const run = store.startRun(agentId, { input: `do ${target}` });
+  // Up-front attempt only — no `action.succeeded`, because the tool returned isError.
   store.events.append(agentId, {
     runId: run.id,
     type: "action.executed",
@@ -111,6 +123,49 @@ test("a failed run that ran the capability resets the streak too", () => {
   cleanExec(agent.id, "fs.delete", "build");
   cleanExec(agent.id, "fs.delete", "cache");
   failedExec(agent.id, "fs.delete", "tmp");
+  expect(proposeStandingGrants(store, agent)).toEqual([]);
+});
+
+test("errored destructive attempts do not count as clean executions", () => {
+  // The gate records `action.executed` UP FRONT for a destructive action (for the
+  // at-most-once resume guarantee), even when the tool then errors. An attempt that
+  // never succeeded must NOT earn autonomy, even if the run recovered and finished done.
+  erroredExec(agent.id, "fs.delete", "dist");
+  erroredExec(agent.id, "fs.delete", "build");
+  erroredExec(agent.id, "fs.delete", "cache");
+  expect(proposeStandingGrants(store, agent)).toEqual([]);
+  // One real success among the errored attempts still isn't enough on its own.
+  cleanExec(agent.id, "fs.delete", "logs");
+  expect(proposeStandingGrants(store, agent)).toEqual([]);
+});
+
+test("declining a run resets EVERY capability it was concurrently paused on", () => {
+  // Both capabilities have a clean streak...
+  cleanExec(agent.id, "fs.delete", "dist");
+  cleanExec(agent.id, "fs.delete", "build");
+  cleanExec(agent.id, "fs.delete", "cache");
+  cleanExec(agent.id, "git.push", "a");
+  cleanExec(agent.id, "git.push", "b");
+  cleanExec(agent.id, "git.push", "c");
+  expect(proposeStandingGrants(store, agent).map((c) => c.capability)).toEqual(["fs.delete", "git.push"]);
+
+  // ...then ONE run pauses on BOTH at once and is declined. The decline refuses both,
+  // so neither keeps its streak — not just the last one paused.
+  const run = store.startRun(agent.id, { input: "delete then push" });
+  store.setRunStatus(agent.id, run.id, "running");
+  store.setRunStatus(agent.id, run.id, "awaiting_confirmation");
+  store.events.append(agent.id, {
+    runId: run.id,
+    type: "action.awaiting_confirmation",
+    payload: { capability: "fs.delete", effect: "destructive", fingerprint: "x" },
+  });
+  store.events.append(agent.id, {
+    runId: run.id,
+    type: "action.awaiting_confirmation",
+    payload: { capability: "git.push", effect: "destructive", fingerprint: "y" },
+  });
+  store.declineRun(agent.id, run.id);
+
   expect(proposeStandingGrants(store, agent)).toEqual([]);
 });
 
