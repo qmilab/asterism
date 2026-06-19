@@ -128,6 +128,12 @@ approve. Nothing is ever written silently. Memories have a type:
 Memory is reviewed, never assumed — see [Reflection](#reflection). Inspect any
 agent's memory with [`asterism memory inspect`](./commands.md#memory-inspect).
 
+Before each run, an agent **recalls** the most relevant of its memories to frame the
+task, capped by a per-agent budget. By default that relevance is judged by keywords,
+needing nothing and making no network call. You can opt a single agent into ranking
+its memory by *meaning* instead, using a local embeddings endpoint you run yourself —
+strictly opt-in and off by default. See [Tuning recall](./commands.md#tuning-recall).
+
 ## Skills
 
 A **skill** is a Markdown file you attach to an agent to teach it something —

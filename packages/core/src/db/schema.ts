@@ -132,6 +132,11 @@ CREATE INDEX IF NOT EXISTS idx_capability_standing_agent ON capability_standing(
 CREATE TABLE IF NOT EXISTS agent_settings (
   agent_id             TEXT PRIMARY KEY REFERENCES agents(id),
   recall_budget        INTEGER,
+  -- The agent's opt-in recall provider selection, or NULL for the built-in lexical
+  -- ranker (the default). The only non-NULL value today is 'local' (local
+  -- embeddings). The kernel stores the selection only; the host builds the provider,
+  -- so core never imports ML. NULL ⇒ default, like every other column here.
+  recall_provider      TEXT,
   -- The earning bar for a per-capability standing grant, overriding the kernel
   -- DEFAULT_STANDING_POLICY for this agent: how many clean confirmed executions,
   -- across how many distinct targets, a destructive capability must clear to be

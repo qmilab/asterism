@@ -2179,6 +2179,134 @@ test("config show lists each agent's recall budget, set or default", async () =>
   expect(shown).toContain("work  →  20  [default]");
 });
 
+test("config recall-provider sets a per-agent provider, persisted in the kernel store", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["config", "recall-provider", "personal", "local"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set personal's recall provider to local");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getRecallProvider(agentNamed(store, "personal").id)).toBe("local");
+  } finally {
+    store.close();
+  }
+});
+
+test("config recall-provider with no value shows the current setting", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await capture(["config", "recall-provider", "personal"], h.io)).toContain(
+    "keyword (built-in) recall (the default)",
+  );
+  await runCli(["config", "recall-provider", "personal", "local"], h.io);
+  expect(await capture(["config", "recall-provider", "personal"], h.io)).toContain(
+    "recall provider: local",
+  );
+});
+
+test("config recall-provider rejects an unknown provider id and persists nothing", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["config", "recall-provider", "personal", "cloud-magic"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Unknown recall provider");
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getRecallProvider(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("config recall-provider --unset clears the override, then is a no-op", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "recall-provider", "personal", "local"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["config", "recall-provider", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("keyword (built-in) recall again");
+
+  h.out.length = 0;
+  expect(await runCli(["config", "recall-provider", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("nothing to unset");
+});
+
+test("config show lists each agent's recall provider, set or default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["config", "recall-provider", "personal", "local"], h.io);
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("Per-agent recall provider:");
+  expect(shown).toContain("personal  →  local  [set]");
+  // The other agent is unaffected — a per-agent setting never crosses agents.
+  expect(shown).toContain("work  →  keyword (built-in)  [default]");
+});
+
+test("a run uses the injected recall provider only for an opted-in agent", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+
+  // A spy recall provider: records each agent it was asked to frame, passes candidates through.
+  const framedFor: string[] = [];
+  h.io.makeRecallProvider = () => ({
+    provider: {
+      recall(input) {
+        framedFor.push(input.agentId);
+        return Promise.resolve(input.candidates);
+      },
+    },
+  });
+
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "autonomous"], h.io);
+  await runCli(["config", "recall-provider", "personal", "local"], h.io);
+
+  // The opted-in agent's run consults the provider...
+  expect(await runCli(["run", "personal", "do the thing"], h.io)).toBe(0);
+  // ...the un-opted agent's run never does (it uses the built-in lexical ranker).
+  expect(await runCli(["run", "work", "do the thing"], h.io)).toBe(0);
+
+  const store = openHomeStore(h);
+  try {
+    const personalId = agentNamed(store, "personal").id;
+    const workId = agentNamed(store, "work").id;
+    expect(framedFor).toContain(personalId);
+    expect(framedFor).not.toContain(workId);
+  } finally {
+    store.close();
+  }
+});
+
+test("an opted-in agent with no configured endpoint hard-fails the run, visibly", async () => {
+  const h = harness(); // no ASTERISM_RECALL_EMBED_* in the environment
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  // No makeRecallProvider override → the real builder runs and reports misconfiguration.
+
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "recall-provider", "personal", "local"], h.io);
+
+  expect(await runCli(["run", "personal", "do the thing"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("endpoint is not configured");
+
+  // Configuring the endpoint lets the run proceed.
+  h.io.env.ASTERISM_RECALL_EMBED_URL = "http://localhost:11434/v1/embeddings";
+  h.io.env.ASTERISM_RECALL_EMBED_MODEL = "nomic-embed-text";
+  expect(await runCli(["run", "personal", "do the thing"], h.io)).toBe(0);
+});
+
 test("new --model pins the agent's model in the config file", async () => {
   const h = harness();
   await runCli(["init"], h.io);

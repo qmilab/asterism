@@ -36,6 +36,7 @@
         "@qmilab/asterism-adapter-pi": "workspace:*",
         "@qmilab/asterism-channels": "workspace:*",
         "@qmilab/asterism-core": "workspace:*",
+        "@qmilab/asterism-recall-local": "workspace:*",
         "@qmilab/asterism-reflect": "workspace:*",
         "@qmilab/asterism-server": "workspace:*",
       },
@@ -45,6 +46,13 @@
       "version": "0.2.1",
       "optionalDependencies": {
         "better-sqlite3": "^12.10.0",
+      },
+    },
+    "packages/recall-local": {
+      "name": "@qmilab/asterism-recall-local",
+      "version": "0.2.1",
+      "dependencies": {
+        "@qmilab/asterism-core": "workspace:*",
       },
     },
     "packages/reflect": {
@@ -154,6 +162,8 @@
     "@qmilab/asterism-channels": ["@qmilab/asterism-channels@workspace:packages/channels"],
 
     "@qmilab/asterism-core": ["@qmilab/asterism-core@workspace:packages/core"],
+
+    "@qmilab/asterism-recall-local": ["@qmilab/asterism-recall-local@workspace:packages/recall-local"],
 
     "@qmilab/asterism-reflect": ["@qmilab/asterism-reflect@workspace:packages/reflect"],
 

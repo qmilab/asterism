@@ -238,10 +238,12 @@ already waiting needs no model.`,
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
 asterism config recall-budget <agent> <n>  ·  --unset
+asterism config recall-provider <agent> local  ·  --unset
 
-Choose the model your agents run on, and tune how much each agent remembers into a
-run. Set one install-wide default model, and give any single agent its own model or
-its own recall budget when you want it to differ.
+Choose the model your agents run on, and tune how much — and how — each agent
+remembers into a run. Set one install-wide default model, and give any single agent
+its own model, its own recall budget, or its own recall provider when you want it to
+differ.
 
   asterism config                       Show the current setup: the model each agent
                                         resolves to, and its recall budget.
@@ -257,6 +259,14 @@ its own recall budget when you want it to differ.
                                         Clear it, so the agent uses the default again.
   asterism config recall-budget <agent>
                                         Show this agent's current recall budget.
+  asterism config recall-provider <agent> local
+                                        Rank this agent's memory by meaning, using a
+                                        local embeddings endpoint (opt-in, off by
+                                        default; see below).
+  asterism config recall-provider <agent> --unset
+                                        Go back to the built-in keyword ranker.
+  asterism config recall-provider <agent>
+                                        Show this agent's current recall provider.
 
 Where a model comes from, most specific first: an agent's own model, then the
 ASTERISM_MODEL_* environment variables, then the install default, then built-in
@@ -266,6 +276,15 @@ agent's own model overrides everything.
 An agent's recall budget caps how many of its saved memories are selected to frame a
 run — the most relevant are kept under the cap. Each agent's budget is its own; leave
 it unset to use the built-in default.
+
+Recall provider chooses HOW that selection is ranked. The default is a built-in
+keyword ranker that needs nothing and makes no network call. Opt an agent into
+\`local\` to rank its memory by meaning instead, using a local embeddings endpoint you
+run yourself (e.g. Ollama) — set ASTERISM_RECALL_EMBED_URL and
+ASTERISM_RECALL_EMBED_MODEL (and ASTERISM_RECALL_EMBED_KEY if it needs a token). This
+is strictly opt-in and off by default; nothing here sends your memory anywhere unless
+you turn it on and point it at your own endpoint. If that endpoint is unreachable
+during a run, recall quietly falls back to the keyword ranker rather than failing.
 
 Options for \`set\`:
   --provider <name>   Provider name. Built-in: openai, anthropic. Default: openai.

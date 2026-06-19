@@ -1,6 +1,6 @@
 import type { SqlDriver, SqlRow } from "../db/driver.js";
-import type { AgentSettings, StandingThresholds } from "../types.js";
-import { validatePositiveInt } from "../types.js";
+import type { AgentSettings, RecallProviderId, StandingThresholds } from "../types.js";
+import { RECALL_PROVIDER_IDS, validateEnum, validatePositiveInt } from "../types.js";
 import { requireAgentId } from "./scope.js";
 
 /** A NULLable integer column → a number, or undefined when NULL/absent. */
@@ -18,14 +18,33 @@ function mapSettings(row: SqlRow): AgentSettings {
   const recallBudget = intOrUnset(row.recall_budget);
   const minCleanExecutions = intOrUnset(row.min_clean_executions);
   const minDistinctTargets = intOrUnset(row.min_distinct_targets);
+  const recallProvider = textOrUnset(row.recall_provider);
   return {
     agentId: String(row.agent_id),
     ...(recallBudget !== undefined ? { recallBudget } : {}),
     ...(minCleanExecutions !== undefined ? { minCleanExecutions } : {}),
     ...(minDistinctTargets !== undefined ? { minDistinctTargets } : {}),
+    // Validate on read too: a value reaches here only through the validated setter, so
+    // any unknown string is a corrupt row, not a new provider — coerce it to unset
+    // (the safe default) rather than surface an unrecognized selection to the host.
+    ...(recallProvider !== undefined && isRecallProviderId(recallProvider)
+      ? { recallProvider }
+      : {}),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+/** A NULLable text column → a non-empty string, or undefined when NULL/absent/blank. */
+function textOrUnset(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const s = String(value);
+  return s.length > 0 ? s : undefined;
+}
+
+/** Whether `value` is a recognized opt-in recall provider id. */
+function isRecallProviderId(value: string): value is RecallProviderId {
+  return (RECALL_PROVIDER_IDS as readonly string[]).includes(value);
 }
 
 /**
@@ -118,6 +137,59 @@ export class AgentSettingsRepository {
     const row = this.driver
       .prepare(
         `UPDATE agent_settings SET recall_budget = NULL, updated_at = ?
+           WHERE agent_id = ? RETURNING *`,
+      )
+      .get([now, agentId]);
+    return row ? mapSettings(row) : undefined;
+  }
+
+  /**
+   * An agent's opt-in recall-provider selection, or undefined when unset (no row, or
+   * the column is NULL) — the host reads this and, when set, wires the matching opt-in
+   * provider into the run; unset ⇒ the built-in lexical ranker. Scoped to `agentId`,
+   * so it can only ever return one agent's own selection.
+   */
+  getRecallProvider(agentId: string): RecallProviderId | undefined {
+    return this.get(agentId)?.recallProvider;
+  }
+
+  /**
+   * Set an agent's opt-in recall provider. Validates the id against the known set at
+   * the write boundary (the kernel never trusts a surface to have checked), then
+   * upserts ONLY the `recall_provider` column — every other setting is left untouched.
+   * `created_at` is preserved across updates; `updated_at` advances on every change.
+   */
+  setRecallProvider(agentId: string, provider: RecallProviderId): AgentSettings {
+    requireAgentId(agentId);
+    const value = validateEnum(provider, RECALL_PROVIDER_IDS, "recall provider");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `INSERT INTO agent_settings (agent_id, recall_provider, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           recall_provider = excluded.recall_provider,
+           updated_at = excluded.updated_at
+         RETURNING *`,
+      )
+      .get([agentId, value, now, now]);
+    if (!row) throw new Error("agent settings upsert did not persist");
+    return mapSettings(row);
+  }
+
+  /**
+   * Clear an agent's recall-provider override (back to the built-in lexical ranker) by
+   * setting only that column to NULL. Returns the updated row, or undefined when the
+   * agent had no settings row at all (nothing to clear) — symmetric with
+   * {@link clearRecallBudget}. The row itself is kept even when every override is now
+   * NULL, so a later setting preserves `created_at`.
+   */
+  clearRecallProvider(agentId: string): AgentSettings | undefined {
+    requireAgentId(agentId);
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE agent_settings SET recall_provider = NULL, updated_at = ?
            WHERE agent_id = ? RETURNING *`,
       )
       .get([now, agentId]);
