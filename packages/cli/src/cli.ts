@@ -32,6 +32,7 @@ import {
   proposeReviewableMemories,
   proposeStandingGrants,
   queueProposedMemories,
+  RECALL_PROVIDER_IDS,
   rejectProposedMemory,
   resolveStandingPolicy,
   resumeRun,
@@ -48,6 +49,8 @@ import type {
   FirewallFinding,
   Memory,
   MemoryQuery,
+  RecallProvider,
+  RecallProviderId,
   ReflectionProvider,
   ReviewableProposal,
   Run,
@@ -184,6 +187,21 @@ export interface CliIO {
     context: ModelResolutionContext,
   ) => {
     provider?: ReflectionProvider;
+    reason?: string;
+  };
+  /**
+   * Build the opt-in recall provider for an agent that has selected one. Absent ⇒ the
+   * default wiring builds the local-embeddings provider from the environment
+   * (`recall-provider.ts`, lazily imported). Only consulted when the agent's
+   * `recallProvider` setting is set; an unset agent always uses the kernel's built-in
+   * lexical ranker and this is never called. `onDegrade` is wired to a loud stderr line
+   * for the run-time fallback when the endpoint is unreachable.
+   */
+  makeRecallProvider?: (
+    env: CliIO["env"],
+    options: { onDegrade?: (error: unknown) => void },
+  ) => {
+    provider?: RecallProvider;
     reason?: string;
   };
   /**
@@ -338,6 +356,36 @@ async function resolveAdapter(
   return io.makeAdapter
     ? io.makeAdapter(io.env, context)
     : (await import("./model.js")).buildAdapter(io.env, context);
+}
+
+/**
+ * Resolve the recall provider for a run. An agent with no `recallProvider` setting
+ * uses the kernel's built-in lexical ranker — so this returns nothing and the run
+ * omits `options.recall` (`executeRun` defaults to it). An agent opted into a provider
+ * (today only `local`) has it built from the environment, LAZILY — the recall-local
+ * package is imported only on this path, so an install that never opts in never loads
+ * it. A `reason` means opted-in-but-misconfigured (no endpoint): the caller hard-fails
+ * so the mistake is visible, never silently downgraded to keyword ranking.
+ *
+ * The read is `agentId`-scoped (`getRecallProvider`), so an agent's selection is
+ * resolved only from its own setting, never another's.
+ */
+async function resolveRecall(
+  io: CliIO,
+  store: AsterismStore,
+  agent: Agent,
+): Promise<{ provider?: RecallProvider; reason?: string }> {
+  const selection = store.agentSettings.getRecallProvider(agent.id);
+  if (selection === undefined) return {}; // built-in lexical ranker
+  const onDegrade = (error: unknown) =>
+    io.err(
+      `Recall: the local embeddings endpoint was unreachable (${errorMessage(error)}); ` +
+        "framed memory by keyword instead.",
+    );
+  const made = io.makeRecallProvider
+    ? io.makeRecallProvider(io.env, { onDegrade })
+    : (await import("./recall-provider.js")).buildEmbeddingRecallProvider(io.env, { onDegrade });
+  return made;
 }
 
 // --- init ------------------------------------------------------------------
@@ -812,6 +860,15 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
 
+    // An agent opted into a recall provider has it resolved here; an unset agent uses
+    // the kernel's built-in lexical ranker (no `recall` option). Opted-in-but-
+    // unconfigured is a hard error — surface it before constructing the run.
+    const recallMade = await resolveRecall(io, store, agent);
+    if (recallMade.reason) {
+      io.err(recallMade.reason);
+      return 1;
+    }
+
     // The whole run flow — start, trust-resolve + gate, frame, run, persist — is
     // the kernel's. This surface only supplies host concerns (the substrate, a
     // file reader for soul/skill bodies, the interactive confirm prompt) and
@@ -833,6 +890,7 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       },
       ...(io.confirm ? { confirm: io.confirm } : {}),
       ...(capabilities ? { capabilities } : {}),
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
     });
 
     // After a run that can act on its own, surface what it actually did — the gate
@@ -965,6 +1023,14 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
 
+    // Resume re-frames the run, so it honors the agent's recall provider too — same
+    // resolution and same hard-fail-on-misconfiguration as the initial run.
+    const recallMade = await resolveRecall(io, store, agent);
+    if (recallMade.reason) {
+      io.err(recallMade.reason);
+      return 1;
+    }
+
     // The resume is the kernel's: it re-enters the loop with exactly the actions
     // this run was gated on pre-approved, records the grant, and persists the
     // outcome. This surface only streams activity and formats the result.
@@ -984,6 +1050,7 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
         if (line) io.err(line);
       },
       ...(capabilities ? { capabilities } : {}),
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
     });
 
     // Defensive: the run could have changed between the check above and the resume.
@@ -1705,6 +1772,7 @@ async function cmdConfig(args: string[], io: CliIO): Promise<number> {
   if (sub === "set") return cmdConfigSet(parsed, io);
   if (sub === "unset") return cmdConfigUnset(parsed, io);
   if (sub === "recall-budget") return cmdConfigRecallBudget(parsed, io);
+  if (sub === "recall-provider") return cmdConfigRecallProvider(parsed, io);
   io.err(`Unknown subcommand: config ${sub}`);
   io.out(COMMAND_HELP.config!);
   return 1;
@@ -1764,6 +1832,29 @@ function cmdConfigShow(io: CliIO): Promise<number> {
             ? `  ${agent.name}  →  ${budget}  [set]`
             : `  ${agent.name}  →  ${DEFAULT_RECALL_BUDGET.maxMemories}  [default]`,
         );
+      }
+    }
+
+    io.out("");
+    io.out("Per-agent recall provider:");
+    if (agents.length === 0) {
+      io.out("  (no agents yet)");
+    } else {
+      // Which ranker selects an agent's framing memories. Unset ⇒ the built-in keyword
+      // ranker; an opted-in agent names its provider (e.g. local embeddings).
+      for (const agent of agents) {
+        const provider = store.agentSettings.getRecallProvider(agent.id);
+        io.out(
+          provider !== undefined
+            ? `  ${agent.name}  →  ${provider}  [set]`
+            : `  ${agent.name}  →  ${DEFAULT_RECALL_PROVIDER_LABEL}  [default]`,
+        );
+      }
+      const embedSet = ["ASTERISM_RECALL_EMBED_URL", "ASTERISM_RECALL_EMBED_MODEL"].filter(
+        (k) => io.env[k] !== undefined,
+      );
+      if (embedSet.length > 0) {
+        io.out(`  (local-embeddings endpoint configured: ${embedSet.join(", ")})`);
       }
     }
 
@@ -1835,6 +1926,76 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
     }
     store.setRecallBudget(agent.id, budget);
     io.out(`Set ${agentName}'s recall budget to ${budget} ${budget === 1 ? "memory" : "memories"}.`);
+    return 0;
+  });
+}
+
+/** How the default (unset) recall ranker is described in CLI output. */
+const DEFAULT_RECALL_PROVIDER_LABEL = "keyword (built-in)";
+
+/**
+ * `asterism config recall-provider <agent> [local]` / `--unset` — opt an agent into a
+ * recall provider, or read the current one. `local` selects local-embeddings recall
+ * (ranks memory by meaning against a local endpoint — see ASTERISM_RECALL_EMBED_*);
+ * `--unset` returns to the built-in keyword ranker; neither shows the current setting.
+ * The kernel validates the id (agentId-scoped) and stores it; this surface only parses,
+ * calls, and formats. It does not build the provider — that happens at run time, only
+ * for an opted-in agent.
+ */
+function cmdConfigRecallProvider(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const agentName = parsed.positionals[1];
+  if (!agentName) {
+    io.err(`Usage: asterism config recall-provider <agent> ${RECALL_PROVIDER_IDS.join("|")}  ·  --unset`);
+    return Promise.resolve(1);
+  }
+  const unset = parsed.flags.unset === true;
+  const valueRaw = parsed.positionals[2];
+
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, agentName);
+    if (!agent) return noAgent(io, agentName);
+
+    if (unset) {
+      // Decide the message from the PRIOR value, not row existence (a cleared row
+      // persists with a NULL selection to keep created_at) — mirrors recall-budget.
+      const had = store.agentSettings.getRecallProvider(agent.id);
+      if (had === undefined) {
+        io.out(
+          `${agentName} was already using ${DEFAULT_RECALL_PROVIDER_LABEL} recall — nothing to unset.`,
+        );
+        return 0;
+      }
+      store.clearRecallProvider(agent.id);
+      io.out(`Cleared ${agentName}'s recall provider — it uses ${DEFAULT_RECALL_PROVIDER_LABEL} recall again.`);
+      return 0;
+    }
+
+    // No value and no `--unset`: read the current setting rather than change it.
+    if (valueRaw === undefined) {
+      const current = store.agentSettings.getRecallProvider(agent.id);
+      io.out(
+        current !== undefined
+          ? `${agentName}'s recall provider: ${current}.`
+          : `${agentName} uses ${DEFAULT_RECALL_PROVIDER_LABEL} recall (the default).`,
+      );
+      return 0;
+    }
+
+    // Validate the id here so a typo gets a clear CLI message naming the choices,
+    // rather than surfacing the kernel's write-boundary error.
+    if (!(RECALL_PROVIDER_IDS as readonly string[]).includes(valueRaw)) {
+      io.err(
+        `Unknown recall provider "${valueRaw}". Choose one of: ${RECALL_PROVIDER_IDS.join(", ")} ` +
+          "(or --unset for the built-in keyword ranker).",
+      );
+      return 1;
+    }
+    store.setRecallProvider(agent.id, valueRaw as RecallProviderId);
+    const hint =
+      valueRaw === "local"
+        ? " Configure the endpoint with ASTERISM_RECALL_EMBED_URL and ASTERISM_RECALL_EMBED_MODEL."
+        : "";
+    io.out(`Set ${agentName}'s recall provider to ${valueRaw}.${hint}`);
     return 0;
   });
 }
@@ -1964,6 +2125,12 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     // rather than failing to serve at all.
     const made = await resolveAdapter(io, home, agent.name);
 
+    // Resolve the agent's opt-in recall provider once, the same way `run` does — so a
+    // run over HTTP frames memory identically. An unset agent uses the built-in
+    // lexical ranker (no provider); opted-in-but-unconfigured carries a reason the
+    // server surfaces as a 503, like a missing model.
+    const recallMade = await resolveRecall(io, store, agent);
+
     // Built once for the served agent, the same way `run` builds it — so a run
     // started over HTTP sees the identical tool catalog, confined to this agent's
     // workspace, that the command line would give it.
@@ -1985,6 +2152,8 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
       authToken: httpToken.token,
       ...(made.adapter ? { adapter: made.adapter } : {}),
       ...(made.reason !== undefined ? { adapterReason: made.reason } : {}),
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
+      ...(recallMade.reason !== undefined ? { recallReason: recallMade.reason } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
       ...(port !== undefined ? { port } : {}),
@@ -2140,6 +2309,14 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       ...(io.capabilities ? { capabilities: io.capabilities } : {}),
       makeAdapter: (agentName) => buildAdapterFn(io.env, { config, agentName }),
       makeReflectionProvider: (agentName) => buildReflectionFn(io.env, { config, agentName }),
+      // Resolve each agent's opt-in recall provider through the SAME `resolveRecall`
+      // the CLI's run/serve/channel paths use, so the dashboard cannot drift on what
+      // "opted in" means or how a misconfiguration is reported. Returns `{}` for an
+      // agent on the built-in lexical ranker.
+      makeRecall: async (agentName) => {
+        const a = findAgentByName(store, agentName);
+        return a ? resolveRecall(io, store, a) : {};
+      },
       // Headless binds a stable port (default) so a remote dashboard can find it; the
       // self-hosted TUI binds an ephemeral loopback port it reads straight back.
       ...(headless
@@ -2268,6 +2445,16 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
     }
     const adapter = made.adapter;
 
+    // Resolve the agent's opt-in recall provider (built-in lexical ranker when unset).
+    // A channel requires a working config to be useful, so an opted-in-but-
+    // unconfigured provider fails the launch rather than starting a bot that would
+    // decline every task — the same fail-fast stance as the missing-model check above.
+    const recallMade = await resolveRecall(io, store, agent);
+    if (recallMade.reason) {
+      io.err(recallMade.reason);
+      return 1;
+    }
+
     // Built the same way `run`/`serve` build it, so a run started from chat sees the
     // identical tool catalog, confined to this agent's workspace.
     const capabilities = io.capabilities?.(agent.workspaceDir);
@@ -2276,6 +2463,7 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
       store,
       agent,
       adapter,
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
       allow,
@@ -2369,6 +2557,14 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
     }
     const adapter = made.adapter;
 
+    // Resolve the agent's opt-in recall provider; fail the launch if it opted in but
+    // is unconfigured, the same fail-fast stance as the missing-model check above.
+    const recallMade = await resolveRecall(io, store, agent);
+    if (recallMade.reason) {
+      io.err(recallMade.reason);
+      return 1;
+    }
+
     // Built the same way `run`/`serve`/`channel telegram` build it, so a run started
     // from Discord sees the identical tool catalog, confined to this agent's workspace.
     const capabilities = io.capabilities?.(agent.workspaceDir);
@@ -2377,6 +2573,7 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
       store,
       agent,
       adapter,
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
       allow,

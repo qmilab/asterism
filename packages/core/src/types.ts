@@ -218,6 +218,16 @@ export interface CapabilityGrant {
  * future knobs slot in beside it), so the resolution of "effective value" always
  * lives in the kernel, never in a surface.
  */
+/**
+ * The recall providers an agent can be opted into, beyond the built-in default. The
+ * default lexical ranker is the absence of a selection (no row / NULL), never a value
+ * here — so this lists only the OPT-IN alternatives. `"local"` selects the local
+ * embeddings provider (`@qmilab/asterism-recall-local`), wired by the host only when
+ * chosen; `core` itself never imports it.
+ */
+export const RECALL_PROVIDER_IDS = ["local"] as const;
+export type RecallProviderId = (typeof RECALL_PROVIDER_IDS)[number];
+
 export interface AgentSettings {
   agentId: string;
   /**
@@ -225,6 +235,14 @@ export interface AgentSettings {
    * `undefined` ⇒ unset, so the kernel falls back to {@link DEFAULT_RECALL_BUDGET}.
    */
   recallBudget?: number;
+  /**
+   * Per-agent opt-in to an alternative recall provider — which ranker selects WHICH
+   * memories frame a run. `undefined` ⇒ unset, so the kernel uses its built-in,
+   * dependency-free lexical ranker. The only non-default value is `"local"` (local
+   * embeddings); the kernel stores the SELECTION but never builds the provider — the
+   * host reads this and wires the opt-in package in, so `core` stays ML-free.
+   */
+  recallProvider?: RecallProviderId;
   /**
    * Per-agent override of the earned-standing earning bar: the minimum clean,
    * confirmed destructive executions a capability needs to be PROPOSED for an

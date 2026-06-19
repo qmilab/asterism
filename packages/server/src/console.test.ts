@@ -11,6 +11,7 @@ import type {
   Agent,
   Capability,
   ProposedMemory,
+  RecallProvider,
   ReflectionProvider,
   RuntimeAdapter,
   RunOutput,
@@ -185,6 +186,39 @@ test("POST /agents/:a/runs/:r/confirm resumes a paused run to done", async () =>
   const json = (await res.json()) as { status: string };
   expect(json.status).toBe("done");
   expect(store.runs.get(personal.id, runId)?.status).toBe("done");
+});
+
+test("confirm re-frames through the agent's opt-in recall provider", async () => {
+  const framedFor: string[] = [];
+  const recall: RecallProvider = {
+    recall(input) {
+      framedFor.push(input.agentId);
+      return Promise.resolve(input.candidates);
+    },
+  };
+  const d = deps({
+    makeAdapter: () => ({ adapter: sequenceAdapter("delete_files", { command: "rm -rf dist" }) }),
+    capabilities: () => [deleteFilesCapability()],
+    makeRecall: async () => ({ provider: recall }),
+  });
+  const runId = await parkRun(personal);
+  const res = await handleConsoleRequest(d, send("POST", `/agents/personal/runs/${runId}/confirm`));
+  expect(res.status).toBe(200);
+  // The resume re-frames the run, so the opted-in provider was consulted for it.
+  expect(framedFor).toContain(personal.id);
+});
+
+test("confirm is 503 when the agent's recall provider is misconfigured", async () => {
+  const d = deps({
+    makeRecall: async () => ({ reason: "Set ASTERISM_RECALL_EMBED_URL and ASTERISM_RECALL_EMBED_MODEL." }),
+  });
+  const runId = await parkRun(personal);
+  const res = await handleConsoleRequest(d, send("POST", `/agents/personal/runs/${runId}/confirm`));
+  expect(res.status).toBe(503);
+  const json = (await res.json()) as { error: string };
+  expect(json.error).toContain("ASTERISM_RECALL_EMBED_URL");
+  // The run stays parked — the resume was refused before re-entering the loop.
+  expect(store.runs.get(personal.id, runId)?.status).toBe("awaiting_confirmation");
 });
 
 test("POST confirm is 404 for an unknown run and 409 for one not awaiting confirmation", async () => {

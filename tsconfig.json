@@ -4,6 +4,7 @@
     { "path": "packages/core" },
     { "path": "packages/adapter-pi" },
     { "path": "packages/reflect" },
+    { "path": "packages/recall-local" },
     { "path": "packages/server" },
     { "path": "packages/channels" },
     { "path": "packages/cli" }

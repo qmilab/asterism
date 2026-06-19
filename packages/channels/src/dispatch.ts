@@ -36,6 +36,7 @@ import type {
   Capability,
   ExecuteRunOptions,
   ExecuteRunResult,
+  RecallProvider,
   RuntimeAdapter,
 } from "@qmilab/asterism-core";
 
@@ -71,6 +72,18 @@ export interface ChannelDeps {
   adapter?: RuntimeAdapter;
   /** When `adapter` is absent, a client-facing explanation of what to configure. */
   adapterReason?: string;
+  /**
+   * The recall provider for this agent's runs when it has opted into one (resolved at
+   * startup, like `adapter`). Absent ⇒ the kernel's built-in lexical ranker — so a
+   * chat-driven run frames memory exactly as the CLI would for the same agent.
+   */
+  recall?: RecallProvider;
+  /**
+   * Set when the agent opted into a recall provider that could not be built (no
+   * endpoint configured). A task is declined with this note rather than silently
+   * keyword-ranking — the chat-edge analog of the HTTP 503, like {@link adapterReason}.
+   */
+  recallReason?: string;
   /** Reads a file's text (soul + skill bodies); forwarded to the run untouched. */
   readFile?: (path: string) => string;
   /**
@@ -112,6 +125,7 @@ function runOptions(deps: ChannelDeps, adapter: RuntimeAdapter): ExecuteRunOptio
     adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
     ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+    ...(deps.recall ? { recall: deps.recall } : {}),
   };
 }
 
@@ -146,6 +160,9 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
   async function resume(chatId: string, runId: string): Promise<OutboundMessage[]> {
     if (!deps.adapter) {
       return reply(chatId, deps.adapterReason ?? NO_MODEL);
+    }
+    if (deps.recallReason !== undefined) {
+      return reply(chatId, deps.recallReason);
     }
     const outcome = await resumeRun(deps.store, deps.agent, runId, runOptions(deps, deps.adapter));
     if (outcome.kind === "not_found") {
@@ -233,6 +250,11 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
     // the chat-edge analog of the HTTP 503.
     if (!deps.adapter) {
       return reply(chatId, deps.adapterReason ?? NO_MODEL);
+    }
+    // Same for an opted-in-but-unconfigured recall provider: decline visibly rather
+    // than silently keyword-ranking against the operator's choice.
+    if (deps.recallReason !== undefined) {
+      return reply(chatId, deps.recallReason);
     }
     const result = await executeRun(
       deps.store,

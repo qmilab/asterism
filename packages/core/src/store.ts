@@ -23,6 +23,7 @@ import type {
   EventType,
   Memory,
   ReviewState,
+  RecallProviderId,
   Run,
   RunStatus,
   Skill,
@@ -96,6 +97,13 @@ export class AsterismStore {
     }
     if (!this.columnExists("agent_settings", "min_distinct_targets")) {
       this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN min_distinct_targets INTEGER`);
+    }
+    // The opt-in recall-provider selection joined `agent_settings` after it shipped,
+    // so an older database has the table but not this column. Add it idempotently; a
+    // NULL default means every existing agent reads as "use the built-in lexical
+    // ranker", which is the correct, unchanged starting state.
+    if (!this.columnExists("agent_settings", "recall_provider")) {
+      this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN recall_provider TEXT`);
     }
   }
 
@@ -231,6 +239,53 @@ export class AsterismStore {
       const settings = this.agentSettings.clearRecallBudget(agentId);
       this.emit(agentId, "agent.setting_changed", {
         setting: "recallBudget",
+        from,
+        to: null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Set an agent's opt-in recall provider and record the change as
+   * `agent.setting_changed` — the audit trail for an operator switching how an agent
+   * ranks its memory: the `setting`, and the `from`/`to` selection (an enum value, never
+   * an action's arguments, so the log stays references-only). `from` is the prior
+   * selection, or null when it was unset (running on the built-in lexical ranker). The
+   * repository validates the id against the known set at the write boundary. An
+   * unchanged value is a true no-op — no write, no phantom event — the same discipline
+   * as {@link setRecallBudget}.
+   */
+  setRecallProvider(agentId: string, provider: RecallProviderId): AgentSettings {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getRecallProvider(agentId) ?? null;
+      if (from === provider) {
+        const existing = this.agentSettings.get(agentId);
+        if (existing) return existing;
+      }
+      const settings = this.agentSettings.setRecallProvider(agentId, provider);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "recallProvider",
+        from,
+        to: settings.recallProvider ?? null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Clear an agent's recall-provider override, returning it to the built-in lexical
+   * ranker, and record the change as `agent.setting_changed` (`to: null`). A no-op when
+   * the agent had no override set: nothing changes, so nothing is logged, and the
+   * returned row is undefined — symmetric with {@link clearRecallBudget}.
+   */
+  clearRecallProvider(agentId: string): AgentSettings | undefined {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getRecallProvider(agentId) ?? null;
+      if (from === null) return this.agentSettings.get(agentId);
+      const settings = this.agentSettings.clearRecallProvider(agentId);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "recallProvider",
         from,
         to: null,
       });

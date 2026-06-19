@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { AsterismStore } from "./store.js";
+import { openDatabase } from "./db/index.js";
 import type { Agent } from "./types.js";
 
 let store: AsterismStore;
@@ -290,4 +291,134 @@ test("clearStandingThresholds logs to null only for the fields that were set", (
     .at(-1);
   expect(cleared!.payload).toEqual({ setting: "minCleanExecutions", from: 5, to: null });
   expect(settingEvents(alpha.id, "minDistinctTargets")).toBe(0);
+});
+
+// --- recall provider (the opt-in recall ranker selection) --------------------
+
+test("a recall provider is scoped: one agent's selection never appears for another", () => {
+  store.setRecallProvider(alpha.id, "local");
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBe("local");
+  // Beta shares nothing — opting one agent in never opts another in.
+  expect(store.agentSettings.getRecallProvider(beta.id)).toBeUndefined();
+  expect(store.agentSettings.get(beta.id)).toBeUndefined();
+});
+
+test("an unset agent has no recall provider (the built-in lexical ranker)", () => {
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBeUndefined();
+});
+
+test("setRecallProvider validates the id against the known set at the write boundary", () => {
+  // @ts-expect-error — an unknown provider id is rejected, not stored.
+  expect(() => store.setRecallProvider(alpha.id, "gpt-cloud")).toThrow();
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBeUndefined();
+});
+
+test("the recall provider repository methods require an agentId", () => {
+  expect(() => store.agentSettings.getRecallProvider("")).toThrow();
+  expect(() => store.agentSettings.setRecallProvider("", "local")).toThrow();
+  expect(() => store.agentSettings.clearRecallProvider("")).toThrow();
+});
+
+test("setRecallProvider records an agent.setting_changed event, references only", () => {
+  store.setRecallProvider(alpha.id, "local");
+  const event = store.events.tail(alpha.id).find((e) => e.type === "agent.setting_changed");
+  expect(event).toBeDefined();
+  expect(event!.payload).toEqual({ setting: "recallProvider", from: null, to: "local" });
+});
+
+test("setRecallProvider to the unchanged value is a no-op: no phantom event, no row churn", () => {
+  const first = store.setRecallProvider(alpha.id, "local");
+  store.setRecallProvider(alpha.id, "local"); // same value again — records nothing
+  expect(settingEvents(alpha.id, "recallProvider")).toBe(1);
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBe("local");
+  expect(store.agentSettings.get(alpha.id)?.updatedAt).toBe(first.updatedAt);
+});
+
+test("clearRecallProvider returns the agent to the lexical ranker; logs only a real transition", () => {
+  store.setRecallProvider(alpha.id, "local");
+  store.clearRecallProvider(alpha.id);
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBeUndefined();
+  const cleared = store.events
+    .tail(alpha.id)
+    .filter((e) => e.type === "agent.setting_changed")
+    .at(-1);
+  expect(cleared!.payload).toEqual({ setting: "recallProvider", from: "local", to: null });
+
+  // A clear with nothing set emits nothing.
+  const before = settingEvents(beta.id, "recallProvider");
+  store.clearRecallProvider(beta.id);
+  expect(settingEvents(beta.id, "recallProvider")).toBe(before);
+});
+
+test("the recall provider never clobbers the budget or the standing thresholds", () => {
+  store.setRecallBudget(alpha.id, 40);
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  store.setRecallProvider(alpha.id, "local");
+  // All three tunables coexist on the one row.
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBe("local");
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+  // Clearing the provider leaves the others intact.
+  store.clearRecallProvider(alpha.id);
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+});
+
+test("a corrupt recall_provider value reads back as unset, never an unknown selection", () => {
+  // Hold the driver so we can corrupt the row directly — only the validated setter can
+  // write a real selection, so this simulates a row mangled out-of-band.
+  const driver = openDatabase(":memory:");
+  const local = new AsterismStore(driver);
+  try {
+    const agent = local.createAgent({
+      name: "personal",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/personal",
+      trustLevel: "autonomous",
+    });
+    local.setRecallBudget(agent.id, 10); // ensure a settings row exists
+    driver.exec(`UPDATE agent_settings SET recall_provider = 'mystery' WHERE agent_id = '${agent.id}'`);
+    // The mapper coerces an unrecognized selection to unset — the safe default.
+    expect(local.agentSettings.getRecallProvider(agent.id)).toBeUndefined();
+  } finally {
+    local.close();
+  }
+});
+
+test("opening a pre-existing database without agent_settings.recall_provider migrates the column in", () => {
+  const driver = openDatabase(":memory:");
+  // An older schema: agent_settings created before the recall_provider column existed.
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE agent_settings (
+      agent_id TEXT PRIMARY KEY, recall_budget INTEGER,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+  `);
+  const store = new AsterismStore(driver);
+  try {
+    const agent = store.createAgent({
+      name: "personal",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/personal",
+      trustLevel: "autonomous",
+    });
+    // The setter writes recall_provider; it would throw "no such column" un-migrated.
+    expect(store.setRecallProvider(agent.id, "local").recallProvider).toBe("local");
+    expect(store.agentSettings.getRecallProvider(agent.id)).toBe("local");
+  } finally {
+    store.close();
+  }
 });

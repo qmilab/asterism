@@ -51,6 +51,7 @@ import type {
   Capability,
   ExecuteRunOptions,
   ExecuteRunResult,
+  RecallProvider,
   ResumeOutcome,
   RuntimeAdapter,
   TailOptions,
@@ -96,6 +97,20 @@ export interface ServerDeps {
    * triggered by `asterism run` or over HTTP.
    */
   capabilities?: readonly Capability[];
+  /**
+   * The recall provider for this agent's runs, when it has opted into one (resolved
+   * once at startup, the same way `adapter` is). Absent ⇒ the kernel's built-in
+   * lexical ranker. Mirrors the CLI: a run over HTTP frames memory exactly as
+   * `asterism run` would for the same agent.
+   */
+  recall?: RecallProvider;
+  /**
+   * Set when the agent opted into a recall provider that could not be built (e.g. no
+   * embeddings endpoint configured). Like {@link adapterReason} for the model, a run
+   * is refused with this message rather than silently falling back — the
+   * misconfiguration is the operator's to fix, and it stays visible.
+   */
+  recallReason?: string;
 }
 
 /** GET /agents/:agent/runs — the agent's runs, oldest-first (scoped by the repo). */
@@ -162,6 +177,7 @@ function runOptions(deps: ServerDeps, adapter: RuntimeAdapter): ExecuteRunOption
     adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
     ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+    ...(deps.recall ? { recall: deps.recall } : {}),
   };
 }
 
@@ -181,6 +197,12 @@ async function startRun(deps: ServerDeps, req: Request): Promise<Response> {
     // 503: the server is up and reads work, but it cannot run an agent until a
     // model is configured. The reason mirrors what `asterism run` would print.
     return fail(503, deps.adapterReason ?? "No model is configured, so runs cannot execute.");
+  }
+  // The agent opted into a recall provider that could not be built: refuse the run
+  // (rather than silently keyword-rank against the operator's explicit choice), the
+  // same visible-misconfiguration stance the CLI takes.
+  if (deps.recallReason !== undefined) {
+    return fail(503, deps.recallReason);
   }
   // Capture the now-resolved adapter so it narrows inside the streaming closure
   // below (TS does not carry the `!deps.adapter` guard across a nested function).
@@ -222,6 +244,9 @@ async function startRun(deps: ServerDeps, req: Request): Promise<Response> {
 async function confirmRun(deps: ServerDeps, req: Request, runId: string): Promise<Response> {
   if (!deps.adapter) {
     return fail(503, deps.adapterReason ?? "No model is configured, so runs cannot resume.");
+  }
+  if (deps.recallReason !== undefined) {
+    return fail(503, deps.recallReason);
   }
   const adapter = deps.adapter;
 

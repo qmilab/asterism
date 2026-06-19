@@ -489,20 +489,26 @@ still waits for your `--review`.
 asterism config
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
+asterism config recall-budget <agent> <n>  ·  --unset
+asterism config recall-provider <agent> local  ·  --unset
 ```
 
-Choose the model your agents run on. Set one install-wide default, and give any
-single agent its own model when you want it to run on something different. The
+Choose the model your agents run on, and tune how each agent recalls its memory.
+Set one install-wide default model, and give any single agent its own model, its own
+recall budget, or its own recall provider when you want it to differ. The model
 settings live in `.asterism/config.json` and hold **only** which model to use —
-never an API key (keys stay in the [environment](./installation.md#api-keys)).
+never an API key (keys stay in the [environment](./installation.md#api-keys)); the
+per-agent recall settings are kept in the kernel store, scoped to each agent.
 
 | Form | What it does |
 |---|---|
-| `config` (or `config show`) | Show the saved settings and the model each agent resolves to. |
+| `config` (or `config show`) | Show the saved settings and the model, recall budget, and recall provider each agent resolves to. |
 | `config set <id>` | Set the install-wide default model. |
 | `config set <id> --agent <name>` | Pin one agent to its own model. |
 | `config unset` | Clear the install default. |
 | `config unset --agent <name>` | Clear one agent's override. |
+| `config recall-budget <agent> <n>` | Cap how many memories this agent recalls into a run. `--unset` returns it to the default; with no value, shows the current setting. |
+| `config recall-provider <agent> local` | Rank this agent's memory by meaning using a local embeddings endpoint (opt-in; see [Tuning recall](#tuning-recall)). `--unset` returns it to the built-in keyword ranker; with no value, shows the current setting. |
 
 | Option (for `set`) | Description |
 |---|---|
@@ -535,6 +541,49 @@ Per-agent model:
 
 API keys are never stored here — set them in the environment (e.g. OPENAI_API_KEY).
 ```
+
+### Tuning recall
+
+Before each run, an agent recalls the most relevant of its saved memories to frame
+the task. Two per-agent knobs tune that — each scoped to the one agent, never shared:
+
+**Recall budget** — how *many* memories a run may frame. The most relevant are kept
+under the cap; leave it unset to use the built-in default.
+
+```console
+$ asterism config recall-budget work 40
+Set work's recall budget to 40 memories.
+```
+
+**Recall provider** — *how* that relevance is ranked. The default is a built-in
+keyword ranker that needs nothing and makes no network call. You can opt a single
+agent into `local`, which ranks its memory by **meaning** using a local embeddings
+endpoint that **you** run — for example [Ollama](https://ollama.com).
+
+> **Opt-in, and off by default.** Nothing here sends your memory anywhere unless you
+> turn it on *and* point it at your own endpoint. The default install pulls no ML and
+> makes no network call for recall. The embeddings stay between Asterism and your own
+> local endpoint.
+
+Point Asterism at the endpoint with environment variables, then opt the agent in:
+
+| Variable | What it is |
+|---|---|
+| `ASTERISM_RECALL_EMBED_URL` | The embeddings endpoint — an OpenAI-compatible `/embeddings` route, e.g. `http://localhost:11434/v1/embeddings` for Ollama. |
+| `ASTERISM_RECALL_EMBED_MODEL` | The embedding model to use, e.g. `nomic-embed-text`. |
+| `ASTERISM_RECALL_EMBED_KEY` | *(optional)* A bearer token, for endpoints that need one. A purely-local endpoint usually needs none. |
+
+```console
+$ export ASTERISM_RECALL_EMBED_URL=http://localhost:11434/v1/embeddings
+$ export ASTERISM_RECALL_EMBED_MODEL=nomic-embed-text
+$ asterism config recall-provider work local
+Set work's recall provider to local. Configure the endpoint with ASTERISM_RECALL_EMBED_URL and ASTERISM_RECALL_EMBED_MODEL.
+```
+
+If an opted-in agent has no endpoint configured, its runs stop with a clear message
+rather than quietly falling back — so the misconfiguration is visible. If the
+endpoint is configured but *unreachable* during a run, recall degrades to the keyword
+ranker (it still frames correct memories) and says so, rather than failing the run.
 
 ---
 

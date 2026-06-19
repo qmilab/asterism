@@ -20,6 +20,7 @@ COPY package.json bun.lock tsconfig.base.json tsconfig.json ./
 COPY packages/core/package.json        packages/core/package.json
 COPY packages/adapter-pi/package.json  packages/adapter-pi/package.json
 COPY packages/reflect/package.json     packages/reflect/package.json
+COPY packages/recall-local/package.json packages/recall-local/package.json
 COPY packages/server/package.json      packages/server/package.json
 COPY packages/channels/package.json    packages/channels/package.json
 COPY packages/cli/package.json         packages/cli/package.json
