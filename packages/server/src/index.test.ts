@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { AsterismStore } from "@qmilab/asterism-core";
-import type { Agent, Capability, RuntimeAdapter, RunOutput } from "@qmilab/asterism-core";
+import type { Agent, Capability, RecallProvider, RuntimeAdapter, RunOutput } from "@qmilab/asterism-core";
 
 import { handleRequest, serve } from "./index.ts";
 import type { ServerDeps } from "./index.ts";
@@ -171,6 +171,31 @@ test("a run with no model configured is declined with 503", async () => {
   expect(res.status).toBe(503);
   const json = (await res.json()) as { error: string };
   expect(json.error).toContain("ASTERISM_MODEL_ID");
+  expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
+test("a run over HTTP frames memory through the configured recall provider", async () => {
+  const framedFor: string[] = [];
+  const recall: RecallProvider = {
+    recall(input) {
+      framedFor.push(input.agentId);
+      return Promise.resolve(input.candidates);
+    },
+  };
+  const res = await handleRequest(deps({ recall }), post("/agents/personal/runs", { input: "go" }));
+  expect(res.status).toBe(201);
+  expect(framedFor).toEqual([personal.id]);
+});
+
+test("a run is declined with 503 when the agent's recall provider is misconfigured", async () => {
+  const res = await handleRequest(
+    deps({ recallReason: "Set ASTERISM_RECALL_EMBED_URL and ASTERISM_RECALL_EMBED_MODEL." }),
+    post("/agents/personal/runs", { input: "go" }),
+  );
+  expect(res.status).toBe(503);
+  const json = (await res.json()) as { error: string };
+  expect(json.error).toContain("ASTERISM_RECALL_EMBED_URL");
+  // Refused before the kernel ran anything — no run persisted.
   expect(store.runs.list(personal.id)).toHaveLength(0);
 });
 

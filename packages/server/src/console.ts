@@ -50,6 +50,7 @@ import type {
   ExecuteRunResult,
   MemoryQuery,
   MemoryType,
+  RecallProvider,
   ReflectionProvider,
   ReviewState,
   RuntimeAdapter,
@@ -99,6 +100,16 @@ export interface ConsoleDeps {
    * the reflect endpoint returns 503.
    */
   makeReflectionProvider?: (agentName: string) => { provider?: ReflectionProvider; reason?: string };
+  /**
+   * Resolve an agent's opt-in recall provider for a resumed run, keyed by agent name
+   * like {@link makeAdapter}. Unlike the others it returns `{}` (no provider, no
+   * reason) when the agent has NOT opted in — that agent uses the kernel's built-in
+   * lexical ranker. A `reason` means the agent opted in but the provider could not be
+   * built (no endpoint), and confirm refuses with it (mirrors the model 503). Absent
+   * ⇒ every resume uses the built-in ranker. Async because building may lazily load
+   * the opt-in package.
+   */
+  makeRecall?: (agentName: string) => Promise<{ provider?: RecallProvider; reason?: string }>;
 }
 
 /** Resolve an agent by name within the install, or undefined. Scoped reads follow. */
@@ -375,12 +386,18 @@ function rejectMemory(deps: ConsoleDeps, agent: Agent, id: string): Response {
 }
 
 /** The substrate-side host concerns a resume forwards to the kernel, for one agent. */
-function runOptions(deps: ConsoleDeps, agent: Agent, adapter: RuntimeAdapter): ExecuteRunOptions {
+function runOptions(
+  deps: ConsoleDeps,
+  agent: Agent,
+  adapter: RuntimeAdapter,
+  recall?: RecallProvider,
+): ExecuteRunOptions {
   const capabilities = deps.capabilities?.(agent.workspaceDir);
   return {
     adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
     ...(capabilities ? { capabilities } : {}),
+    ...(recall ? { recall } : {}),
   };
 }
 
@@ -395,7 +412,19 @@ async function confirmRun(deps: ConsoleDeps, agent: Agent, runId: string): Promi
   if (!made?.adapter) {
     return fail(503, made?.reason ?? "No model is configured, so runs cannot resume.");
   }
-  const outcome = await resumeRun(deps.store, agent, runId, runOptions(deps, agent, made.adapter));
+  // Resolve the agent's opt-in recall provider (built-in lexical ranker when unset).
+  // An opted-in-but-unconfigured provider refuses the resume, visibly — the same
+  // stance the model 503 above takes — rather than silently keyword-ranking.
+  const recall = await deps.makeRecall?.(agent.name);
+  if (recall?.reason !== undefined) {
+    return fail(503, recall.reason);
+  }
+  const outcome = await resumeRun(
+    deps.store,
+    agent,
+    runId,
+    runOptions(deps, agent, made.adapter, recall?.provider),
+  );
   if (outcome.kind === "not_found") return fail(404, "No such run for this agent.");
   if (outcome.kind === "not_paused") {
     return json(409, {

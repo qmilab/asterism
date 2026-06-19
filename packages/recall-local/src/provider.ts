@@ -97,8 +97,15 @@ export class EmbeddingRecallProvider implements RecallProvider {
         .map((s) => s.memory);
     } catch (error) {
       // The embedder was unavailable or returned garbage. Degrade to the lexical
-      // ranker — correct memories, no crashed run — and let the host be loud.
-      this.onDegrade?.(error);
+      // ranker — correct memories, no crashed run — and let the host be loud. The
+      // notify itself is wrapped: a misbehaving sink must never turn a recoverable
+      // outage into a failed run, so any error from onDegrade is swallowed before we
+      // return the lexical fallback (the contract already says it must not throw).
+      try {
+        this.onDegrade?.(error);
+      } catch {
+        // ignore — the fallback below is what matters.
+      }
       return selectRecall(input);
     }
   }

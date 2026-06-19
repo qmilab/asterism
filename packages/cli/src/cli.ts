@@ -2125,6 +2125,12 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     // rather than failing to serve at all.
     const made = await resolveAdapter(io, home, agent.name);
 
+    // Resolve the agent's opt-in recall provider once, the same way `run` does — so a
+    // run over HTTP frames memory identically. An unset agent uses the built-in
+    // lexical ranker (no provider); opted-in-but-unconfigured carries a reason the
+    // server surfaces as a 503, like a missing model.
+    const recallMade = await resolveRecall(io, store, agent);
+
     // Built once for the served agent, the same way `run` builds it — so a run
     // started over HTTP sees the identical tool catalog, confined to this agent's
     // workspace, that the command line would give it.
@@ -2146,6 +2152,8 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
       authToken: httpToken.token,
       ...(made.adapter ? { adapter: made.adapter } : {}),
       ...(made.reason !== undefined ? { adapterReason: made.reason } : {}),
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
+      ...(recallMade.reason !== undefined ? { recallReason: recallMade.reason } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
       ...(port !== undefined ? { port } : {}),
@@ -2301,6 +2309,14 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       ...(io.capabilities ? { capabilities: io.capabilities } : {}),
       makeAdapter: (agentName) => buildAdapterFn(io.env, { config, agentName }),
       makeReflectionProvider: (agentName) => buildReflectionFn(io.env, { config, agentName }),
+      // Resolve each agent's opt-in recall provider through the SAME `resolveRecall`
+      // the CLI's run/serve/channel paths use, so the dashboard cannot drift on what
+      // "opted in" means or how a misconfiguration is reported. Returns `{}` for an
+      // agent on the built-in lexical ranker.
+      makeRecall: async (agentName) => {
+        const a = findAgentByName(store, agentName);
+        return a ? resolveRecall(io, store, a) : {};
+      },
       // Headless binds a stable port (default) so a remote dashboard can find it; the
       // self-hosted TUI binds an ephemeral loopback port it reads straight back.
       ...(headless
@@ -2429,6 +2445,16 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
     }
     const adapter = made.adapter;
 
+    // Resolve the agent's opt-in recall provider (built-in lexical ranker when unset).
+    // A channel requires a working config to be useful, so an opted-in-but-
+    // unconfigured provider fails the launch rather than starting a bot that would
+    // decline every task — the same fail-fast stance as the missing-model check above.
+    const recallMade = await resolveRecall(io, store, agent);
+    if (recallMade.reason) {
+      io.err(recallMade.reason);
+      return 1;
+    }
+
     // Built the same way `run`/`serve` build it, so a run started from chat sees the
     // identical tool catalog, confined to this agent's workspace.
     const capabilities = io.capabilities?.(agent.workspaceDir);
@@ -2437,6 +2463,7 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
       store,
       agent,
       adapter,
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
       allow,
@@ -2530,6 +2557,14 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
     }
     const adapter = made.adapter;
 
+    // Resolve the agent's opt-in recall provider; fail the launch if it opted in but
+    // is unconfigured, the same fail-fast stance as the missing-model check above.
+    const recallMade = await resolveRecall(io, store, agent);
+    if (recallMade.reason) {
+      io.err(recallMade.reason);
+      return 1;
+    }
+
     // Built the same way `run`/`serve`/`channel telegram` build it, so a run started
     // from Discord sees the identical tool catalog, confined to this agent's workspace.
     const capabilities = io.capabilities?.(agent.workspaceDir);
@@ -2538,6 +2573,7 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
       store,
       agent,
       adapter,
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
       allow,

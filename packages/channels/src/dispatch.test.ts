@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { AsterismStore, resumeRun } from "@qmilab/asterism-core";
-import type { Agent, Capability, RunOutput, RuntimeAdapter } from "@qmilab/asterism-core";
+import type { Agent, Capability, RecallProvider, RunOutput, RuntimeAdapter } from "@qmilab/asterism-core";
 
 import { createDispatcher, isControlReply } from "./dispatch.ts";
 import type { ChannelDeps } from "./dispatch.ts";
@@ -123,6 +123,28 @@ test("an authorized chat runs the bound agent — and only that agent", async ()
   // The run landed on the bound agent, and never on the other one in the store.
   expect(store.runs.list(personal.id)).toHaveLength(1);
   expect(store.runs.list(work.id)).toHaveLength(0);
+});
+
+test("a chat task frames memory through the agent's opt-in recall provider", async () => {
+  const framedFor: string[] = [];
+  const recall: RecallProvider = {
+    recall(input) {
+      framedFor.push(input.agentId);
+      return Promise.resolve(input.candidates);
+    },
+  };
+  const d = createDispatcher(deps({ recall }));
+  await d.handle({ chatId: "100", text: "write the draft" });
+  expect(framedFor).toEqual([personal.id]);
+});
+
+test("a misconfigured recall provider declines the task with the reason — no run starts", async () => {
+  const d = createDispatcher(
+    deps({ recallReason: "Set ASTERISM_RECALL_EMBED_URL and ASTERISM_RECALL_EMBED_MODEL." }),
+  );
+  const out = await d.handle({ chatId: "100", text: "write the draft" });
+  expect(out[0]!.text).toContain("ASTERISM_RECALL_EMBED_URL");
+  expect(store.runs.list(personal.id)).toHaveLength(0);
 });
 
 test("a destructive action pauses and asks; /confirm resumes it through the gate", async () => {

@@ -131,6 +131,25 @@ describe("EmbeddingRecallProvider", () => {
     expect(out.length).toBe(2);
   });
 
+  test("a throwing onDegrade still degrades to the lexical ranker (never aborts the run)", async () => {
+    const candidates = [mem("alpha one"), mem("beta two"), mem("gamma three"), mem("delta four")];
+    const provider = new EmbeddingRecallProvider({
+      embedder: unavailableEmbedder,
+      onDegrade: () => {
+        throw new Error("the sink itself blew up");
+      },
+    });
+    const input: RecallInput = {
+      agentId: "agent-a",
+      query: "alpha",
+      candidates,
+      budget: { maxMemories: 2 },
+    };
+    // The misbehaving sink must not turn a recoverable outage into a failed run.
+    const out = await provider.recall(input);
+    expect(out).toEqual(selectRecall(input));
+  });
+
   test("degrades when the embedder returns the wrong number of vectors", async () => {
     const shortEmbedder: Embedder = {
       embed: (texts) => Promise.resolve(texts.slice(0, 1).map(() => [1, 0])),
