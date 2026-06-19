@@ -148,6 +148,16 @@ export function createHttpEmbedder(config: HttpEmbedderConfig): Embedder {
         if (filled.size !== texts.length) {
           throw new Error("embeddings response was missing a vector");
         }
+        // All vectors must share one positive dimension. Cosine compares over
+        // min(len), so mixed-length vectors would silently mis-rank (two that share
+        // only a prefix could score as highly similar) instead of degrading. A real
+        // embedding model returns a fixed dimension, so a varying or zero length is a
+        // malformed response → treated as unavailable, the provider degrades. (texts
+        // is non-empty here — the empty case returned early — so vectors[0] exists.)
+        const dim = vectors[0]?.length ?? 0;
+        if (dim === 0 || vectors.some((v) => v.length !== dim)) {
+          throw new Error("embeddings response was malformed");
+        }
         return vectors;
       } finally {
         clearTimeout(timer);

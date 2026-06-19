@@ -116,6 +116,23 @@ describe("createHttpEmbedder", () => {
     }
   });
 
+  test("throws on mixed-dimension vectors (cosine over min(len) would mis-rank)", async () => {
+    const f = fakeFetch(200, {
+      data: [
+        { index: 0, embedding: [1, 0, 0] },
+        { index: 1, embedding: [1, 0] }, // shorter — a real model never varies the dimension
+      ],
+    });
+    const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
+    await expect(embedder.embed(["a", "b"])).rejects.toThrow(/malformed/);
+  });
+
+  test("throws on zero-dimension vectors", async () => {
+    const f = fakeFetch(200, { data: [{ index: 0, embedding: [] }] });
+    const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
+    await expect(embedder.embed(["only"])).rejects.toThrow(/malformed/);
+  });
+
   test("throws when the response has the wrong number of vectors", async () => {
     const f = fakeFetch(200, { data: [{ index: 0, embedding: [1] }] });
     const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
