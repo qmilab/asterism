@@ -13,7 +13,15 @@
 // and by real stdin/stdout in bin.ts.
 
 import { TRUST_LEVELS } from "@qmilab/asterism-core";
-import type { Event, Run, ReviewableProposal, TrustLevel } from "@qmilab/asterism-core";
+import type {
+  Event,
+  FirewallFinding,
+  Memory,
+  MemoryType,
+  Run,
+  ReviewableProposal,
+  TrustLevel,
+} from "@qmilab/asterism-core";
 
 import {
   bold,
@@ -66,6 +74,48 @@ export interface DashboardOptions {
 
 type Mode = "roster" | "trust" | "review" | "editing" | "help";
 
+/**
+ * A proposal under review. A freshly-computed (live) one has no `memoryId` and is saved
+ * via `saveMemory`; a queued one — drained from the persisted `proposed` queue a scheduled
+ * `reflect --propose` fills — carries its `memoryId`, so accept/reject TRANSITION it in
+ * place rather than creating a new row. The review card reads the shared display fields, so
+ * one card renders both.
+ */
+export interface ReviewItem {
+  memoryType: MemoryType;
+  content: string;
+  confidence: number;
+  /** The run a live proposal was learned from (passed through on save). Absent on some queued rows. */
+  sourceRunId?: string;
+  findings: readonly FirewallFinding[];
+  /** Set iff this is a persisted `proposed` memory; accept/reject transition it by id. */
+  memoryId?: string;
+}
+
+/** A live (freshly-computed) proposal, ready for review — saved via `saveMemory` on accept. */
+function liveItem(p: ReviewableProposal): ReviewItem {
+  return {
+    memoryType: p.memoryType,
+    content: p.content,
+    confidence: p.confidence,
+    sourceRunId: p.sourceRunId,
+    findings: p.findings,
+  };
+}
+
+/** A queued (persisted `proposed`) memory as a review item — accept/reject transition it by id. */
+function queuedItem(m: Memory): ReviewItem {
+  return {
+    memoryType: m.memoryType,
+    content: m.content,
+    confidence: m.confidence,
+    ...(m.sourceRunId !== undefined ? { sourceRunId: m.sourceRunId } : {}),
+    // A queued proposal was firewall-screened at create, so it carries no display findings.
+    findings: [],
+    memoryId: m.id,
+  };
+}
+
 /** The full UI state — the single input to {@link render}. */
 export interface DashboardState {
   agents: RosterEntry[];
@@ -75,8 +125,8 @@ export interface DashboardState {
   mode: Mode;
   /** Trust chooser cursor (index into TRUST_LEVELS). */
   trustChoice: number;
-  /** Reflect proposals under review, and the cursor into them. */
-  proposals: ReviewableProposal[];
+  /** Proposals under review (live or queued), and the cursor into them. */
+  proposals: ReviewItem[];
   proposalIndex: number;
   /**
    * The agent the proposals under review belong to — captured when reflection ran,
@@ -145,6 +195,7 @@ function eventLine(e: Event): string {
   if (typeof p.effect === "string") bits.push(p.effect);
   if (typeof p.to === "string") bits.push(typeof p.from === "string" ? `${p.from}→${p.to}` : p.to);
   if (typeof p.memoryType === "string") bits.push(p.memoryType);
+  if (typeof p.queued === "number") bits.push(`${p.queued} queued`);
   const detail = bits.length > 0 ? `  ${bits.join(" ")}` : "";
   return `${time}  ${e.type}${detail}`;
 }
@@ -486,15 +537,28 @@ export async function runDashboard(
     }
     if (key.name === "m") {
       return act(async () => {
-        const result = await client.reflect(agent.name);
-        if (result.proposals.length === 0) return `Nothing to reflect on yet for ${agent.name}.`;
-        // Bind the batch to THIS agent (captured at 'm'), not the live selection,
-        // which may have moved while the async reflect was in flight.
-        state.proposals = result.proposals;
+        // Drain the persisted PROPOSED queue first — proposals a scheduled `reflect
+        // --propose` already computed (no model needed). Fall back to a live compute of
+        // the latest run only when the queue is empty, so the manual flow is unchanged.
+        const queue = await client.getMemory(agent.name, { reviewState: "proposed" });
+        let items: ReviewItem[];
+        let note: string;
+        if (queue.length > 0) {
+          items = queue.map(queuedItem);
+          note = `Reviewing ${queue.length} queued ${queue.length === 1 ? "memory" : "memories"} for ${agent.name}.`;
+        } else {
+          const result = await client.reflect(agent.name);
+          if (result.proposals.length === 0) return `Nothing to reflect on yet for ${agent.name}.`;
+          items = result.proposals.map(liveItem);
+          note = `Reviewing ${result.proposals.length} proposed ${result.proposals.length === 1 ? "memory" : "memories"} for ${agent.name}.`;
+        }
+        // Bind the batch to THIS agent (captured at 'm'), not the live selection, which
+        // may have moved while the async reflect was in flight.
+        state.proposals = items;
         state.proposalIndex = 0;
         state.reviewAgent = agent.name;
         state.mode = "review";
-        return `Reviewing ${result.proposals.length} proposed ${result.proposals.length === 1 ? "memory" : "memories"} for ${agent.name}.`;
+        return note;
       });
     }
   }
@@ -556,6 +620,16 @@ export async function runDashboard(
       return draw();
     }
     if (key.name === "r") {
+      // A queued proposal must be REJECTED on the server (it persisted); a live one is
+      // discarded by simply moving past it (nothing was persisted).
+      if (p.memoryId !== undefined) {
+        const memoryId = p.memoryId;
+        void act(async () => {
+          await client.rejectProposal(agentName, memoryId);
+          advanceReview("Rejected.");
+        });
+        return;
+      }
       advanceReview("Rejected.");
       return draw();
     }
@@ -566,15 +640,29 @@ export async function runDashboard(
     }
     if (key.name === "a") {
       void act(async () => {
-        await client.saveMemory(agentName, {
-          memoryType: p.memoryType,
-          content: p.content,
-          confidence: p.confidence,
-          sourceRunId: p.sourceRunId,
-        });
+        await acceptItem(agentName, p);
         advanceReview("Saved.");
       });
     }
+  }
+
+  /**
+   * Persist the human's acceptance of `item` for `agentName`: transition a queued
+   * proposal in place (optionally with an edit), or save a live proposal as a new
+   * accepted memory. The one place the live/queued accept split lives, so the accept
+   * key and the edit-save path stay in step.
+   */
+  async function acceptItem(agentName: string, item: ReviewItem, edited?: string): Promise<void> {
+    if (item.memoryId !== undefined) {
+      await client.acceptProposal(agentName, item.memoryId, edited);
+      return;
+    }
+    await client.saveMemory(agentName, {
+      memoryType: item.memoryType,
+      content: edited ?? item.content,
+      confidence: item.confidence,
+      ...(item.sourceRunId !== undefined ? { sourceRunId: item.sourceRunId } : {}),
+    });
   }
 
   function handleEditKey(key: Key): void {
@@ -596,12 +684,7 @@ export async function runDashboard(
         return draw();
       }
       void act(async () => {
-        await client.saveMemory(agentName, {
-          memoryType: p.memoryType,
-          content,
-          confidence: p.confidence,
-          sourceRunId: p.sourceRunId,
-        });
+        await acceptItem(agentName, p, content);
         advanceReview("Saved (edited).");
       });
       return;

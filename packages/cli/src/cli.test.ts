@@ -1085,6 +1085,144 @@ test("reflect ignores a proposal whose type is not a reviewable memory type", as
   expect(mem).not.toContain("play-by-play");
 });
 
+test("reflect --propose queues proposals to the review pile without accepting any", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([
+      { memoryType: "semantic", content: "the blog lives in ./drafts", confidence: 0.9 },
+      { memoryType: "convention", content: "keep posts short", confidence: 0.6 },
+    ]),
+  });
+
+  const out = await capture(["reflect", "personal", "--propose"], h.io);
+  expect(out).toContain("Queued 2 proposed memories");
+  expect(out).toContain("--review"); // points the human to the drain step
+
+  // Both landed as PROPOSED (inert), nothing accepted — they do not frame runs yet.
+  const mem = await capture(["memory", "inspect", "personal"], h.io);
+  expect(mem).toContain("the blog lives in ./drafts");
+  expect(mem).toContain("proposed");
+  expect(mem).not.toContain("accepted");
+});
+
+test("reflect --propose then --review drains the queue and needs no model to do it", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "a queued lesson", confidence: 0.8 }]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // Drain with a provider builder that THROWS — proving the queue path never builds a model.
+  h.io.makeReflectionProvider = () => {
+    throw new Error("a model was built while draining the queue");
+  };
+  h.io.review = (): ReviewDecision => ({ kind: "accept" });
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("queued");
+  expect(out).toContain("1 saved");
+
+  // The accepted memory now frames the agent (active+accepted); the queue is empty.
+  const mem = await capture(["memory", "inspect", "personal"], h.io);
+  expect(mem).toContain("a queued lesson");
+  expect(mem).toContain("accepted");
+});
+
+test("reflect --review drains the queue by rejecting too (a refused proposal leaves it)", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "a doomed lesson", confidence: 0.8 }]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  h.io.review = (): ReviewDecision => ({ kind: "reject" });
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("0 saved, 1 rejected");
+  // Nothing active; a second review finds the queue empty and falls back to live compute.
+  expect(await capture(["memory", "inspect", "personal"], h.io)).not.toContain("accepted");
+});
+
+test("reflect --review leaves a queued pile intact when run non-interactively (no destructive default-reject)", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "keep me for review", confidence: 0.8 }]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // io.review is unset here — a piped / cron-launched session. Draining would persist a
+  // reject, so the command must REFUSE to drain and leave the pile untouched.
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("waiting");
+  expect(out).not.toContain("rejected");
+  const mem = await capture(["memory", "inspect", "personal"], h.io);
+  expect(mem).toContain("keep me for review");
+  expect(mem).toContain("proposed"); // still queued, not wiped
+});
+
+test("reflect --review reports a concurrently-settled proposal as skipped, not saved", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "race me", confidence: 0.8 }]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // Simulate another review surface settling the proposal mid-review: when the reviewer is
+  // asked, reject it through a SECOND store handle, then return accept here. The CLI's accept
+  // then loses the CAS and must report it skipped, not saved.
+  h.io.review = (): ReviewDecision => {
+    const other = openHomeStore(h);
+    try {
+      const agent = agentNamed(other, "personal");
+      const proposed = other.memories.list(agent.id, { reviewState: "proposed" })[0]!;
+      other.settleProposedMemory(agent.id, proposed.id, "rejected");
+    } finally {
+      other.close();
+    }
+    return { kind: "accept" };
+  };
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("already reviewed elsewhere");
+  expect(out).toContain("0 saved");
+  // The CLI did not activate it — the concurrent reject stands.
+  expect(await capture(["memory", "inspect", "personal"], h.io)).not.toContain("accepted");
+});
+
+test("reflect --propose is idempotent — a second run finds no new work", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "once is enough", confidence: 0.8 }]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+  const second = await capture(["reflect", "personal", "--propose"], h.io);
+  expect(second).toContain("no new runs to reflect on");
+  // Still exactly one queued proposal — never duplicated.
+  const proposed = (await capture(["memory", "inspect", "personal"], h.io)).match(/once is enough/g) ?? [];
+  expect(proposed.length).toBe(1);
+});
+
+test("reflect --propose reports cleanly when there is nothing new to reflect on", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  // No model needed — there is no un-reflected run, so it exits before building one.
+  const out = await capture(["reflect", "personal", "--propose"], h.io);
+  expect(out).toContain("no new runs to reflect on");
+});
+
+test("reflect rejects asking for both --review and --propose at once", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  expect(await runCli(["reflect", "personal", "--review", "--propose"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Choose one");
+});
+
 test("--version prints the version", async () => {
   const h = harness();
   expect(await runCli(["--version"], h.io)).toBe(0);

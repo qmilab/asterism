@@ -29,9 +29,11 @@
 import { bearerToken, fail, json, tokenMatches, unauthorized } from "./http.js";
 
 import {
+  acceptProposedMemory,
   declineRun,
   MemoryFirewallError,
   proposeReviewableMemories,
+  rejectProposedMemory,
   resumeRun,
 } from "@qmilab/asterism-core";
 import {
@@ -301,6 +303,77 @@ async function saveMemory(deps: ConsoleDeps, agent: Agent, req: Request): Promis
   }
 }
 
+/**
+ * POST /agents/:agent/memory/:id/accept — accept a queued PROPOSED memory, optionally
+ * editing it; body { content? }. The human's ratification that turns an inert proposal
+ * (queued by a scheduled `reflect --propose`) into an active + accepted memory. The shared
+ * kernel helper transitions it in place, or — for an edit — re-screens the new content
+ * through the memory firewall (the real gate) and supersedes the original. 404 if no such
+ * memory for this agent; 409 if it is not awaiting review (already accepted/rejected); 422
+ * if an edit is poisoned. Same helpers back `reflect --review`, so CLI and dashboard agree.
+ */
+async function acceptMemory(
+  deps: ConsoleDeps,
+  agent: Agent,
+  id: string,
+  req: Request,
+): Promise<Response> {
+  // Body is optional — an absent or empty body means "accept unchanged".
+  let content: string | undefined;
+  const text = (await req.text()).trim();
+  if (text.length > 0) {
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return fail(400, "Request body must be JSON.");
+    }
+    const raw = (body as { content?: unknown } | null)?.content;
+    if (raw !== undefined && typeof raw !== "string") {
+      return fail(400, 'If given, "content" must be a string.');
+    }
+    if (typeof raw === "string") {
+      // A blank edit is NOT "accept unchanged" — that would silently activate the original a
+      // caller was trying to clear. Reject it like the CLI/dashboard do; to discard a
+      // proposal, call the reject endpoint.
+      if (raw.trim().length === 0) {
+        return fail(400, 'If given, "content" must be a non-empty string (use …/reject to discard).');
+      }
+      content = raw;
+    }
+  }
+
+  try {
+    const outcome = acceptProposedMemory(deps.store, agent, id, content);
+    if (outcome.kind === "not_found") return fail(404, "No such proposed memory for this agent.");
+    if (outcome.kind === "not_proposed") {
+      return fail(409, "Memory is not awaiting review.");
+    }
+    return json(200, { memory: outcome.memory });
+  } catch (err) {
+    if (err instanceof MemoryFirewallError) {
+      // 422: well-formed request, but the firewall refused the edited content. Findings
+      // name what tripped a rule — never the blocked content itself.
+      return json(422, { error: "Blocked by the memory firewall.", findings: err.findings });
+    }
+    throw err; // anything else is an unexpected internal error → the outer 500.
+  }
+}
+
+/**
+ * POST /agents/:agent/memory/:id/reject — reject a queued PROPOSED memory: transition it
+ * `proposed → rejected` so it leaves the review queue. It was never active, so nothing it
+ * framed changes. 404 if no such memory for this agent; 409 if it is not awaiting review.
+ */
+function rejectMemory(deps: ConsoleDeps, agent: Agent, id: string): Response {
+  const outcome = rejectProposedMemory(deps.store, agent, id);
+  if (outcome.kind === "not_found") return fail(404, "No such proposed memory for this agent.");
+  if (outcome.kind === "not_proposed") {
+    return fail(409, "Memory is not awaiting review.");
+  }
+  return json(200, { memory: outcome.memory });
+}
+
 /** The substrate-side host concerns a resume forwards to the kernel, for one agent. */
 function runOptions(deps: ConsoleDeps, agent: Agent, adapter: RuntimeAdapter): ExecuteRunOptions {
   const capabilities = deps.capabilities?.(agent.workspaceDir);
@@ -363,6 +436,8 @@ function declineRunEndpoint(deps: ConsoleDeps, agent: Agent, runId: string): Res
  *   GET  /agents/:a/events                tail events
  *   GET  /agents/:a/memory                list memory
  *   POST /agents/:a/memory                persist an accepted memory
+ *   POST /agents/:a/memory/:m/accept      accept a queued proposed memory
+ *   POST /agents/:a/memory/:m/reject      reject a queued proposed memory
  *   PUT  /agents/:a/trust                 set autonomy level
  *   POST /agents/:a/reflect               propose reviewable memories
  *   POST /agents/:a/runs/:r/confirm       resume a paused run
@@ -395,23 +470,37 @@ export async function handleConsoleRequest(deps: ConsoleDeps, req: Request): Pro
     const agent = findAgent(deps, agentName);
     if (!agent) return fail(404, `No agent named "${agentName}".`);
 
-    // /agents/:a/runs/:r/<confirm|decline> — the 5-segment routes.
+    // The 5-segment routes: /agents/:a/runs/:r/<confirm|decline> and
+    // /agents/:a/memory/:m/<accept|reject>.
     if (segments.length === 5) {
-      if (segments[2] !== "runs") return fail(404, "Not found.");
-      let runId: string;
+      let id: string;
       try {
-        runId = decodeURIComponent(segments[3]!);
+        id = decodeURIComponent(segments[3]!);
       } catch {
         return fail(404, "Not found.");
       }
       const action = segments[4];
-      if (action === "confirm") {
-        if (req.method === "POST") return confirmRun(deps, agent, runId);
-        return fail(405, "Method not allowed.");
+      if (segments[2] === "runs") {
+        if (action === "confirm") {
+          if (req.method === "POST") return confirmRun(deps, agent, id);
+          return fail(405, "Method not allowed.");
+        }
+        if (action === "decline") {
+          if (req.method === "POST") return declineRunEndpoint(deps, agent, id);
+          return fail(405, "Method not allowed.");
+        }
+        return fail(404, "Not found.");
       }
-      if (action === "decline") {
-        if (req.method === "POST") return declineRunEndpoint(deps, agent, runId);
-        return fail(405, "Method not allowed.");
+      if (segments[2] === "memory") {
+        if (action === "accept") {
+          if (req.method === "POST") return acceptMemory(deps, agent, id, req);
+          return fail(405, "Method not allowed.");
+        }
+        if (action === "reject") {
+          if (req.method === "POST") return rejectMemory(deps, agent, id);
+          return fail(405, "Method not allowed.");
+        }
+        return fail(404, "Not found.");
       }
       return fail(404, "Not found.");
     }

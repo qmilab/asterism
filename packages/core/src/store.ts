@@ -22,12 +22,14 @@ import type {
   Credential,
   EventType,
   Memory,
+  ReviewState,
   Run,
   RunStatus,
   Skill,
   StandingThresholds,
   TrustLevel,
 } from "./types.js";
+import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError } from "./firewall.js";
@@ -77,6 +79,13 @@ export class AsterismStore {
   private migrate(): void {
     if (!this.columnExists("runs", "output")) {
       this.driver.exec(`ALTER TABLE runs ADD COLUMN output TEXT`);
+    }
+    // The per-run reflection claim (`reflected_at`) joined `runs` with the
+    // reflection-scheduling slice, so a database created before it has the column
+    // missing. Add it idempotently; a NULL default means every existing run reads as
+    // "not yet reflected", which is the correct starting state.
+    if (!this.columnExists("runs", "reflected_at")) {
+      this.driver.exec(`ALTER TABLE runs ADD COLUMN reflected_at TEXT`);
     }
     // The earned-standing thresholds joined `agent_settings` after it first shipped
     // (with only `recall_budget`), so a database created by that release has the
@@ -481,6 +490,130 @@ export class AsterismStore {
       runId,
     );
     return memory;
+  }
+
+  /**
+   * Settle a PROPOSED memory — the human's accept/reject of a queued proposal — via a
+   * single compare-and-set ({@link MemoryRepository.settleProposed}) and record the
+   * transition as `memory.reviewed` (references only: the memory id and the `from`/`to`
+   * states, never the content). The review queue a scheduled `reflect --propose` fills is
+   * drained through here: accepting flips `proposed → accepted`, rejecting flips
+   * `proposed → rejected`. The CAS is the race guard — two surfaces draining one proposal
+   * (a CLI `reflect --review` and the dashboard, say) cannot both win, so a rejected
+   * proposal can never be resurrected to accepted by a racing accept. `from` is always
+   * `proposed` (the only state the CAS transitions from). Returns the settled row to the
+   * winner — stamping the originating `runId` on the event when the memory carries one — or
+   * undefined to a caller that lost the race or named an unknown / already-settled id, in
+   * which case nothing changes and nothing is logged.
+   */
+  settleProposedMemory(
+    agentId: string,
+    id: string,
+    reviewState: ReviewState,
+  ): Memory | undefined {
+    return this.driver.transaction(() => {
+      const memory = this.memories.settleProposed(agentId, id, reviewState);
+      if (memory) {
+        this.emit(
+          agentId,
+          "memory.reviewed",
+          { memoryId: memory.id, from: "proposed", to: memory.reviewState },
+          memory.sourceRunId,
+        );
+      }
+      return memory;
+    });
+  }
+
+  /**
+   * Accept a queued proposal WITH AN EDIT, atomically. In ONE transaction it CAS-claims the
+   * original out of the queue (`proposed → rejected`, recording `memory.reviewed`) and records
+   * the edited content as a fresh `active + accepted` memory (recording `memory.recorded`).
+   * Atomic so the two writes cannot tear: if the record fails, the claim rolls back and the
+   * proposal stays in the queue — never silently lost. Claiming the original FIRST is what
+   * stops two concurrent edited-accepts from yielding two accepted memories: only the CAS
+   * winner records; a loser gets undefined and writes nothing. The caller has already screened
+   * `content` through the firewall (the hard gate) before calling — identical content, so the
+   * create's own screen cannot newly block it here. Returns the new accepted memory, or
+   * undefined when the CAS lost (a concurrent drain already settled the proposal).
+   */
+  acceptEditedProposal(agentId: string, current: Memory, content: string): Memory | undefined {
+    return this.driver.transaction(() => {
+      const claimed = this.memories.settleProposed(agentId, current.id, "rejected");
+      if (!claimed) return undefined;
+      this.emit(
+        agentId,
+        "memory.reviewed",
+        { memoryId: claimed.id, from: "proposed", to: claimed.reviewState },
+        claimed.sourceRunId,
+      );
+      const memory = this.memories.create(agentId, {
+        memoryType: current.memoryType,
+        content,
+        confidence: current.confidence,
+        ...(current.sourceRunId !== undefined ? { sourceRunId: current.sourceRunId } : {}),
+        reviewState: "accepted",
+        status: "active",
+      });
+      this.emit(
+        agentId,
+        "memory.recorded",
+        {
+          memoryId: memory.id,
+          memoryType: memory.memoryType,
+          reviewState: memory.reviewState,
+          confidence: memory.confidence,
+        },
+        memory.sourceRunId,
+      );
+      return memory;
+    });
+  }
+
+  /**
+   * Atomically CLAIM a run for reflection — a single compare-and-set stamping
+   * `reflected_at` only if still NULL (see {@link RunRepository.claimForReflection}).
+   * Returns the claimed run to the caller that won, or undefined to one that lost (the
+   * run was already reflected by a concurrent `reflect --propose`, or is unknown /
+   * cross-agent). The single-winner guarantee is what serializes overlapping proposers:
+   * only the claim owner queues a run's proposals, so the same run is never double-queued.
+   */
+  claimRunForReflection(agentId: string, runId: string): Run | undefined {
+    return this.driver.transaction(() => this.runs.claimForReflection(agentId, runId));
+  }
+
+  /**
+   * Release a reflection claim (clear `reflected_at`) so the run is reflectable again —
+   * used when the model call for a just-claimed run fails, so a transient failure is
+   * retried rather than dropping the run's reflection.
+   */
+  releaseRunReflection(agentId: string, runId: string): void {
+    this.driver.transaction(() => this.runs.releaseReflection(agentId, runId));
+  }
+
+  /**
+   * Record that a non-interactive `reflect --propose` has reflected on `runId` — a
+   * references-only `reflection.proposed` marker carrying the per-run tally (how many
+   * proposals were queued / withheld / already-known / ignored), never any content. This
+   * marker is what makes re-ticks idempotent: the next `--propose` reads these events to
+   * skip the runs it has already processed, so a repeating timer never re-proposes the
+   * same run. The same flight-recorder pattern the earned-standing reader uses — no new
+   * durable proposer state, just an entry in the append-only log. Emit-only (no row to
+   * write), so it is not wrapped in a transaction, mirroring {@link recordRunResumed}.
+   */
+  recordReflectionProposed(agentId: string, runId: string, tally: ReflectionRunTally): void {
+    this.emit(
+      agentId,
+      "reflection.proposed",
+      {
+        runId,
+        queued: tally.queued,
+        withheld: tally.withheld,
+        alreadyKnown: tally.alreadyKnown,
+        ignored: tally.ignored,
+      },
+      runId,
+    );
   }
 
   /** Attach a markdown skill and record `skill.attached` (name + workspace path). */

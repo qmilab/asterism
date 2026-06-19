@@ -282,6 +282,58 @@ test("runDashboard reflects and accepts a proposed memory through the console", 
   await done;
 });
 
+test("runDashboard drains the persisted proposed queue — accept transitions it in place, no model needed", async () => {
+  // Seed a queued proposal, as a scheduled `reflect --propose` would.
+  const proposed = store.recordMemory(personal.id, {
+    memoryType: "semantic",
+    content: "a queued lesson",
+    confidence: 0.8,
+    reviewState: "proposed",
+    status: "active",
+  });
+  // A provider builder that THROWS if invoked — draining the queue must never build a model.
+  const d = deps({
+    makeReflectionProvider: () => {
+      throw new Error("a model was built while draining the queue");
+    },
+  });
+  const term = fakeTerminal();
+  const done = runDashboard(client(TOKEN, d), term, { refreshMs: 1_000_000 });
+  await flush();
+
+  await term.press({ name: "m" }); // drains the queue (not a live reflect) → shows the queued item
+  expect(term.lastText()).toContain("a queued lesson");
+  await term.press({ name: "a" }); // accept → transitions the SAME row to active+accepted
+  expect(store.memories.listActiveAccepted(personal.id).map((m) => m.id)).toEqual([proposed.id]);
+  expect(store.memories.list(personal.id, { reviewState: "proposed" })).toEqual([]);
+
+  await term.press({ name: "q" });
+  await done;
+});
+
+test("runDashboard rejects a queued proposal through the console", async () => {
+  const proposed = store.recordMemory(personal.id, {
+    memoryType: "semantic",
+    content: "a doomed lesson",
+    confidence: 0.8,
+    reviewState: "proposed",
+    status: "active",
+  });
+  const term = fakeTerminal();
+  const done = runDashboard(client(), term, { refreshMs: 1_000_000 });
+  await flush();
+
+  await term.press({ name: "m" });
+  expect(term.lastText()).toContain("a doomed lesson");
+  await term.press({ name: "r" }); // reject → server transitions it out of the queue
+  await flush();
+  expect(store.memories.get(personal.id, proposed.id)?.reviewState).toBe("rejected");
+  expect(store.memories.listActiveAccepted(personal.id)).toEqual([]);
+
+  await term.press({ name: "q" });
+  await done;
+});
+
 test("runDashboard never draws after quit while an action is still in flight", async () => {
   store.finishRun(personal.id, store.startRun(personal.id, { input: "tidy" }).id, "tidied", "done");
   const d = deps({ makeReflectionProvider: () => ({ provider: stubProvider([

@@ -86,6 +86,8 @@ export const EVENT_TYPES = [
   "run.declined",
   "memory.recorded",
   "memory.blocked",
+  "memory.reviewed",
+  "reflection.proposed",
   "skill.attached",
   "credential.added",
   "credential.rotated",

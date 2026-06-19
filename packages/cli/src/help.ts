@@ -38,6 +38,7 @@ Commands:
   memory inspect <agent>            Review what an agent remembers
   events tail <agent>               Review what an agent has done
   reflect <agent> --review          Review memories an agent proposes to keep
+  reflect <agent> --propose         Queue proposals to review later (schedulable)
   config                            Show or change the model agents run on
   serve <agent>                     Offer an agent over a local HTTP endpoint
   dashboard                         Watch and steer every agent in one live view
@@ -214,13 +215,24 @@ Options:
 Every filter narrows within this agent's own activity — never another's.`,
 
   reflect: `asterism reflect <agent> --review
+asterism reflect <agent> --propose
 
-Look back over an agent's latest work and review the memories it proposes to keep.
-Nothing is saved without your approval — you accept, edit, or reject each one, and
-anything that looks unsafe to remember is flagged for you.
+Turn an agent's work into memories it might keep — always proposed, never saved on
+its own. You stay the one who decides what an agent remembers.
 
-Uses the agent's configured model (\`asterism config\` or ASTERISM_MODEL_ID, and an
-API key, e.g. OPENAI_API_KEY) to draft the proposals.`,
+  --review    Review the proposals waiting for this agent and accept, edit, or reject
+              each one. Anything unsafe to remember is flagged for you. If proposals
+              are already waiting (see --propose), it reviews those — no model needed;
+              otherwise it looks over the agent's latest work and drafts new ones.
+  --propose   Look over the agent's new work and set aside what it might be worth
+              remembering, for you to review later. Saves nothing as active and asks
+              nothing — it just fills the review pile. This is the form you can put on
+              a schedule (see the docs); nothing reflects on a schedule unless you
+              set that up yourself.
+
+Drafting new proposals uses the agent's configured model (\`asterism config\` or
+ASTERISM_MODEL_ID, and an API key, e.g. OPENAI_API_KEY). Reviewing a pile that is
+already waiting needs no model.`,
 
   config: `asterism config
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]

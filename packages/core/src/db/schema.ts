@@ -30,7 +30,13 @@ CREATE TABLE IF NOT EXISTS runs (
   -- is the agent's OWN content, scoped by agent_id like input -- not a secret and
   -- not an event payload (the event log stays reference-only). Nullable until a run
   -- finishes with output.
-  output       TEXT
+  output       TEXT,
+  -- When a reflect --propose tick has reflected on this run (ISO timestamp), or NULL
+  -- if not yet. This is the per-run CLAIM that makes scheduled reflection single-flight:
+  -- a tick atomically claims a run (NULL -> now) before queueing its proposals, so two
+  -- overlapping proposers can't both process the same run and double-queue it. Cleared
+  -- back to NULL if the model call for that run fails, so a transient failure is retried.
+  reflected_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(agent_id);
 

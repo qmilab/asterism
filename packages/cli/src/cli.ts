@@ -22,6 +22,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 
 import { AsterismStore } from "@qmilab/asterism-core";
 import {
+  acceptProposedMemory,
   BUILTIN_SOULS,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
@@ -30,11 +31,14 @@ import {
   MemoryFirewallError,
   proposeReviewableMemories,
   proposeStandingGrants,
+  queueProposedMemories,
+  rejectProposedMemory,
   resolveStandingPolicy,
   resumeRun,
   REVIEW_STATES,
   screenMemory,
   TRUST_LEVELS,
+  unreflectedRuns,
   validateEnum,
 } from "@qmilab/asterism-core";
 import type {
@@ -42,6 +46,7 @@ import type {
   Agent,
   Capability,
   FirewallFinding,
+  Memory,
   MemoryQuery,
   ReflectionProvider,
   ReviewableProposal,
@@ -1265,183 +1270,411 @@ async function followEvents(
 // --- reflect (review loop) / serve (local HTTP endpoint) -------------------
 
 async function cmdReflect(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h", "review"]);
+  const parsed = parseArgs(args, ["help", "h", "review", "propose"]);
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.reflect!);
     return 0;
   }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism reflect <agent> --review");
+    io.err("Usage: asterism reflect <agent> --review   (or --propose to queue unattended)");
     return 1;
   }
-  // `--review` is the only mode in this phase and the documented invocation.
-  // Require it explicitly so reflection never runs in a surprising auto mode.
-  if (parsed.flags.review !== true) {
-    io.err(`Reflection runs in review mode. Re-run with: asterism reflect ${name} --review`);
+  const review = parsed.flags.review === true;
+  const propose = parsed.flags.propose === true;
+  // The two modes are mutually exclusive and one must be chosen — reflection never
+  // runs in a surprising auto mode. `--review` drains the queue for a human; `--propose`
+  // is the non-interactive, schedule-from-cron path that fills it (and never accepts).
+  if (review && propose) {
+    io.err("Choose one: --review (drain the queue) or --propose (queue unattended).");
+    return 1;
+  }
+  if (!review && !propose) {
+    io.err(`Reflection runs in review or propose mode. Re-run with: asterism reflect ${name} --review`);
     return 1;
   }
 
   return withHomeStore(io, async (store, home) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
+    return propose
+      ? runReflectPropose(io, store, home, agent, name)
+      : runReflectReview(io, store, home, agent, name);
+  });
+}
 
-    // Reflect on the agent's most recent run that produced output. The kernel owns
-    // both the selection ("latest run with output") and, below, the "already known"
-    // predicate, so this surface holds no policy. Checked BEFORE building the model
-    // so an agent with nothing to reflect on is told so without needing a model
-    // configured. Phase 0 targets the latest run (the canonical flow is run →
-    // reflect); a future flag can target a specific run.
-    // Check for a reflectable run BEFORE building the model, so an agent with
-    // nothing to reflect on is told so without needing a model configured. The
-    // proposal pipeline below re-selects the same run (the shared kernel helper owns
-    // that policy); this early check only gates the model build.
-    const target = store.runs.latestWithOutput(agent.id);
-    if (!target || target.output === undefined) {
+/**
+ * `reflect --review`: drain the agent's persisted PROPOSED queue when it has one (the
+ * proposals a scheduled `--propose` already computed — these need NO model), otherwise
+ * fall back to today's live compute of the latest run. Queue-if-present-else-live keeps
+ * the manual `run → reflect --review` flow unchanged while making the scheduled queue the
+ * thing a human drains.
+ */
+async function runReflectReview(
+  io: CliIO,
+  store: AsterismStore,
+  home: string,
+  agent: Agent,
+  name: string,
+): Promise<number> {
+  const queued = store.memories.list(agent.id, { reviewState: "proposed" });
+  if (queued.length > 0) return reviewQueueDrain(io, store, agent, name, queued);
+  return reviewLiveCompute(io, store, home, agent, name);
+}
+
+/** The running tally a review loop returns, formatted into the closing `Done — …` line. */
+interface ReviewCounts {
+  accepted: number;
+  rejected: number;
+  blocked: number;
+  errored: number;
+  /** Proposals another surface settled mid-review — the write didn't happen here (queue only). */
+  stale: number;
+}
+
+/**
+ * The outcome of one persist a review-loop callback attempts: `ok` (the write happened) or
+ * `stale` (the proposal was already settled by a concurrent drain — the queue path's CAS lost,
+ * so nothing was written). The live path always returns `ok`; a stale result never happens there.
+ */
+type DrainOutcome = "ok" | "stale";
+
+/** One proposal's display fields, the same for a live-computed and a queued proposal. */
+interface ReviewableView {
+  memoryType: string;
+  content: string;
+  confidence: number;
+  findings: readonly FirewallFinding[];
+}
+
+/**
+ * Drive the accept / edit / reject loop over a batch of proposals — the SHARED presentation
+ * for both review paths (live compute and queue drain), so they can never drift on prompting,
+ * empty-edit handling, the firewall warning, or the per-proposal outcome accounting.
+ * `view(i)` yields proposal `i`'s display fields; `reject(i)` records a rejection (a no-op for
+ * the live path, a queue transition for the drain path); `accept(i, content, edited)` persists
+ * an acceptance and MAY throw `MemoryFirewallError` — the hard gate — which is caught and
+ * counted per-proposal so one bad write never aborts the batch. Both callbacks return a
+ * {@link DrainOutcome}: a `stale` result (a queued proposal a concurrent surface settled first)
+ * is reported as skipped, NOT counted as saved/rejected, so the summary never over-reports
+ * writes that did not happen. With `warnEditRescreen`, an edit that still trips the firewall is
+ * flagged before the accept is attempted.
+ */
+async function driveReviewLoop(
+  io: CliIO,
+  total: number,
+  view: (i: number) => ReviewableView,
+  reject: (i: number) => DrainOutcome,
+  accept: (i: number, content: string, edited: boolean) => DrainOutcome,
+  warnEditRescreen = false,
+): Promise<ReviewCounts> {
+  // Absent reviewer ⇒ reject everything: nothing is accepted without an explicit yes.
+  const review = io.review ?? ((): ReviewDecision => ({ kind: "reject" }));
+  const counts: ReviewCounts = { accepted: 0, rejected: 0, blocked: 0, errored: 0, stale: 0 };
+  // Record a rejection, accounting a concurrent settle as skipped rather than rejected.
+  const recordReject = (i: number, emptyEdit: boolean): void => {
+    if (reject(i) === "stale") {
+      counts.stale++;
+      io.out("  · already reviewed elsewhere — skipped");
+    } else {
+      counts.rejected++;
+      io.out(emptyEdit ? "  ✗ rejected (empty after edit)" : "  ✗ rejected");
+    }
+  };
+  for (let i = 0; i < total; i++) {
+    const v = view(i);
+
+    io.out("");
+    io.out(`(${i + 1}/${total}) ${v.memoryType} · confidence ${v.confidence}`);
+    io.out(`  ${v.content}`);
+    if (v.findings.length > 0) {
+      io.out(
+        `  ⚠ the memory firewall flagged this (${v.findings
+          .map((f) => f.rule)
+          .join(", ")}) — edit to remove the flagged content, or reject it.`,
+      );
+    }
+
+    const decision = await review({
+      index: i + 1,
+      total,
+      memoryType: v.memoryType,
+      content: v.content,
+      confidence: v.confidence,
+      findings: v.findings,
+    });
+
+    if (decision.kind === "reject") {
+      recordReject(i, false);
+      continue;
+    }
+    // Trim, and treat an empty/whitespace edit as a rejection — never accept a blank memory.
+    const edited = decision.kind === "edit";
+    const content = (edited ? decision.content : v.content).trim();
+    if (content.length === 0) {
+      recordReject(i, true);
+      continue;
+    }
+    // Re-screen the EDITED content so the warning matches what is about to be persisted
+    // (the original screen was on the proposal as offered).
+    if (edited && warnEditRescreen) {
+      const editVerdict = screenMemory(content);
+      if (!editVerdict.ok) {
+        io.out(
+          `  ⚠ your edit still trips the memory firewall (${editVerdict.findings
+            .map((f) => f.rule)
+            .join(", ")}).`,
+        );
+      }
+    }
+    try {
+      // The firewall re-screens at persistence (the single hard chokepoint) and refuses a
+      // poisoned write regardless of approval — caught below and counted, not fatal.
+      if (accept(i, content, edited) === "stale") {
+        counts.stale++;
+        io.out("  · already reviewed elsewhere — skipped");
+      } else {
+        counts.accepted++;
+        io.out(edited ? "  ✓ saved (edited)" : "  ✓ saved");
+      }
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        counts.blocked++;
+        io.out(
+          `  ⛔ blocked by the memory firewall — not saved (${err.findings
+            .map((f) => f.rule)
+            .join(", ")})`,
+        );
+      } else {
+        counts.errored++;
+        io.out(`  ⛔ could not save: ${errorMessage(err)}`);
+      }
+    }
+  }
+  return counts;
+}
+
+/** Print the closing `Done — N saved, …` line shared by both review paths. */
+function printReviewSummary(io: CliIO, c: ReviewCounts): void {
+  io.out("");
+  io.out(
+    `Done — ${c.accepted} saved, ${c.rejected} rejected` +
+      `${c.blocked > 0 ? `, ${c.blocked} blocked` : ""}` +
+      `${c.errored > 0 ? `, ${c.errored} errored` : ""}` +
+      `${c.stale > 0 ? `, ${c.stale} already reviewed elsewhere` : ""}.`,
+  );
+}
+
+/**
+ * Drain the persisted `proposed` queue: present each queued proposal and accept / edit /
+ * reject it through the shared kernel helpers ({@link acceptProposedMemory} /
+ * {@link rejectProposedMemory}), which the dashboard uses too — so the surfaces can never
+ * drift on HOW a drain is applied. No model is needed: the proposals are already computed.
+ */
+async function reviewQueueDrain(
+  io: CliIO,
+  store: AsterismStore,
+  agent: Agent,
+  name: string,
+  queued: Memory[],
+): Promise<number> {
+  // Draining a persisted proposal is a DURABLE decision: a reject transitions the row to
+  // `rejected`, not a discard. So in a non-interactive session (no reviewer wired — e.g. a
+  // piped or cron-launched `reflect --review`) the safe-default reject would silently wipe
+  // the whole pile. Refuse to drain unattended; leave it intact for a real review. (The live
+  // path's reject persists nothing, so it stays harmless without a reviewer.)
+  if (!io.review) {
+    io.out(
+      `${queued.length} proposed ${queued.length === 1 ? "memory is" : "memories are"} waiting for ${name}.`,
+    );
+    io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal to go through them.`);
+    return 0;
+  }
+
+  io.out(
+    `Reviewing ${queued.length} queued ${queued.length === 1 ? "memory" : "memories"} for ${name}.`,
+  );
+  io.out("These were proposed unattended; nothing is active unless you accept it.");
+
+  const counts = await driveReviewLoop(
+    io,
+    queued.length,
+    // A queued proposal was firewall-screened at create, so it screens clean now; screen
+    // again only so a display warning would still surface if the rules tightened since.
+    (i) => {
+      const m = queued[i]!;
+      return {
+        memoryType: m.memoryType,
+        content: m.content,
+        confidence: m.confidence,
+        findings: screenMemory(m.content).findings,
+      };
+    },
+    // A `rejected` result is the write we made; anything else means a concurrent surface
+    // already settled this proposal (the CAS lost) — report it stale, don't count a reject.
+    (i) => (rejectProposedMemory(store, agent, queued[i]!.id).kind === "rejected" ? "ok" : "stale"),
+    // Accept in place, or — for an edit — record the re-screened edit and supersede the
+    // original (the kernel helper re-screens, the hard gate; a poisoned edit throws here).
+    // A non-`accepted` result means it was settled elsewhere first — stale, not saved.
+    (i, content, edited) =>
+      acceptProposedMemory(store, agent, queued[i]!.id, edited ? content : undefined).kind ===
+      "accepted"
+        ? "ok"
+        : "stale",
+    true, // warn on a still-poisoned edit before persisting, same as the live path
+  );
+
+  printReviewSummary(io, counts);
+  return 0;
+}
+
+/**
+ * The live, ephemeral review path (today's behavior): compute proposals for the agent's
+ * latest run with output, present each, and persist only the accepted ones. Used when the
+ * persisted queue is empty, so the manual `run → reflect --review` convenience is unchanged.
+ */
+async function reviewLiveCompute(
+  io: CliIO,
+  store: AsterismStore,
+  home: string,
+  agent: Agent,
+  name: string,
+): Promise<number> {
+  // Check for a reflectable run BEFORE building the model, so an agent with nothing to
+  // reflect on is told so without needing a model configured. The proposal pipeline below
+  // re-selects the same run (the shared kernel helper owns that policy); this early check
+  // only gates the model build.
+  const target = store.runs.latestWithOutput(agent.id);
+  if (!target || target.output === undefined) {
+    io.out(`${name} has no completed run with output to reflect on yet.`);
+    return 0;
+  }
+
+  // Build the reflection provider (a hosted model) the same way `run` builds its adapter —
+  // only after the agent and a reflectable run check out. Resolves this agent's own model.
+  const context: ModelResolutionContext = { config: loadConfig(home), agentName: agent.name };
+  const made = io.makeReflectionProvider
+    ? io.makeReflectionProvider(io.env, context)
+    : (await import("./reflect-model.js")).buildReflectionProvider(io.env, context);
+  if (!made.provider) {
+    io.err(made.reason ?? "No model configured for reflection.");
+    return 1;
+  }
+  const provider = made.provider;
+
+  // The shared kernel pipeline: select the run, hand the transcript + already-known
+  // memories to the provider, apply the reflection-only type filter, and screen each
+  // proposal through the memory firewall.
+  let usable: readonly ReviewableProposal[];
+  let ignored: number;
+  try {
+    const result = await proposeReviewableMemories(store, agent, provider);
+    if (result.kind === "no_run") {
       io.out(`${name} has no completed run with output to reflect on yet.`);
       return 0;
     }
-
-    // Build the reflection provider (a hosted model) the same way `run` builds its
-    // adapter — only after the agent and a reflectable run check out. Resolves this
-    // agent's own model, if it has one.
-    const context: ModelResolutionContext = { config: loadConfig(home), agentName: agent.name };
-    const made = io.makeReflectionProvider
-      ? io.makeReflectionProvider(io.env, context)
-      : (await import("./reflect-model.js")).buildReflectionProvider(io.env, context);
-    if (!made.provider) {
-      io.err(made.reason ?? "No model configured for reflection.");
-      return 1;
-    }
-    const provider = made.provider;
-
-    // The shared kernel pipeline: select the run, hand the transcript + already-known
-    // memories to the provider, apply the reflection-only type filter, and screen
-    // each proposal through the memory firewall. The same call backs the dashboard's
-    // console endpoint, so the two surfaces can never drift on what is reviewable.
-    let usable: readonly ReviewableProposal[];
-    let ignored: number;
-    try {
-      const result = await proposeReviewableMemories(store, agent, provider);
-      if (result.kind === "no_run") {
-        io.out(`${name} has no completed run with output to reflect on yet.`);
-        return 0;
-      }
-      usable = result.proposals;
-      ignored = result.ignored;
-    } catch (err) {
-      io.err(`Reflection failed: ${errorMessage(err)}`);
-      return 1;
-    }
-    if (usable.length === 0) {
-      io.out(`${name}: nothing worth remembering from run ${shortId(target.id)}.`);
-      return 0;
-    }
-
-    io.out(
-      `Reviewing ${usable.length} proposed ${usable.length === 1 ? "memory" : "memories"} for ${name} (from run ${shortId(target.id)}).`,
-    );
-    if (ignored > 0) {
-      io.out(`(Ignored ${ignored} proposal(s) with a non-reviewable memory type.)`);
-    }
-    io.out("Nothing is saved unless you accept it.");
-
-    // Absent reviewer ⇒ reject everything: nothing persists without an explicit yes.
-    const review = io.review ?? ((): ReviewDecision => ({ kind: "reject" }));
-    let accepted = 0;
-    let rejected = 0;
-    let blocked = 0;
-    let errored = 0;
-    for (let i = 0; i < usable.length; i++) {
-      const p = usable[i]!;
-      // The firewall findings come from the shared pipeline (screened for display so
-      // the reviewer sees what tripped a rule); the firewall also re-screens at
-      // persistence (`recordMemory`), the real hard gate.
-
-      io.out("");
-      io.out(`(${i + 1}/${usable.length}) ${p.memoryType} · confidence ${p.confidence}`);
-      io.out(`  ${p.content}`);
-      if (p.findings.length > 0) {
-        io.out(
-          `  ⚠ the memory firewall flagged this (${p.findings
-            .map((f) => f.rule)
-            .join(", ")}) — edit to remove the flagged content, or reject it.`,
-        );
-      }
-
-      const decision = await review({
-        index: i + 1,
-        total: usable.length,
-        memoryType: p.memoryType,
-        content: p.content,
-        confidence: p.confidence,
-        findings: p.findings,
-      });
-
-      if (decision.kind === "reject") {
-        rejected++;
-        io.out("  ✗ rejected");
-        continue;
-      }
-      // Trim, and treat an empty/whitespace edit as a rejection — never persist a
-      // blank memory, regardless of what the reviewer returned.
-      const content = (decision.kind === "edit" ? decision.content : p.content).trim();
-      if (content.length === 0) {
-        rejected++;
-        io.out("  ✗ rejected (empty after edit)");
-        continue;
-      }
-      // Re-screen the EDITED content so the warning the reviewer sees matches what
-      // is actually about to be persisted (the original screen was on the proposal).
-      if (decision.kind === "edit") {
-        const editVerdict = screenMemory(content);
-        if (!editVerdict.ok) {
-          io.out(
-            `  ⚠ your edit still trips the memory firewall (${editVerdict.findings
-              .map((f) => f.rule)
-              .join(", ")}).`,
-          );
-        }
-      }
-      try {
-        // The memory firewall re-screens here and refuses a poisoned write
-        // regardless of approval — the single hard chokepoint. Accepted memories
-        // are saved active + accepted, so they frame the agent's future runs.
-        store.recordMemory(agent.id, {
-          memoryType: p.memoryType,
-          content,
-          confidence: p.confidence,
-          sourceRunId: p.sourceRunId,
-          reviewState: "accepted",
-          status: "active",
-        });
-        accepted++;
-        io.out(decision.kind === "edit" ? "  ✓ saved (edited)" : "  ✓ saved");
-      } catch (err) {
-        // A firewall block and a storage error are BOTH per-proposal outcomes — one
-        // bad proposal must not abort the rest of the batch or skip the summary.
-        if (err instanceof MemoryFirewallError) {
-          blocked++;
-          io.out(
-            `  ⛔ blocked by the memory firewall — not saved (${err.findings
-              .map((f) => f.rule)
-              .join(", ")})`,
-          );
-        } else {
-          errored++;
-          io.out(`  ⛔ could not save: ${errorMessage(err)}`);
-        }
-      }
-    }
-
-    io.out("");
-    io.out(
-      `Done — ${accepted} saved, ${rejected} rejected` +
-        `${blocked > 0 ? `, ${blocked} blocked` : ""}` +
-        `${errored > 0 ? `, ${errored} errored` : ""}.`,
-    );
+    usable = result.proposals;
+    ignored = result.ignored;
+  } catch (err) {
+    io.err(`Reflection failed: ${errorMessage(err)}`);
+    return 1;
+  }
+  if (usable.length === 0) {
+    io.out(`${name}: nothing worth remembering from run ${shortId(target.id)}.`);
     return 0;
-  });
+  }
+
+  io.out(
+    `Reviewing ${usable.length} proposed ${usable.length === 1 ? "memory" : "memories"} for ${name} (from run ${shortId(target.id)}).`,
+  );
+  if (ignored > 0) {
+    io.out(`(Ignored ${ignored} proposal(s) with a non-reviewable memory type.)`);
+  }
+  io.out("Nothing is saved unless you accept it.");
+
+  const counts = await driveReviewLoop(
+    io,
+    usable.length,
+    (i) => {
+      const p = usable[i]!;
+      return { memoryType: p.memoryType, content: p.content, confidence: p.confidence, findings: p.findings };
+    },
+    // A live proposal persists nothing until accepted, so a rejection is a no-op — always `ok`.
+    (): DrainOutcome => "ok",
+    // Accepted memories are saved active + accepted, so they frame the agent's future runs.
+    // A live compute is never concurrently settled, so the write always happens (`ok`).
+    (i, content): DrainOutcome => {
+      const p = usable[i]!;
+      store.recordMemory(agent.id, {
+        memoryType: p.memoryType,
+        content,
+        confidence: p.confidence,
+        sourceRunId: p.sourceRunId,
+        reviewState: "accepted",
+        status: "active",
+      });
+      return "ok";
+    },
+    true, // warn on a still-poisoned edit before persisting
+  );
+
+  printReviewSummary(io, counts);
+  return 0;
+}
+
+/**
+ * `reflect --propose`: the non-interactive proposer an operator wires to cron / launchd /
+ * a systemd timer. It reflects on the agent's un-reflected runs and PERSISTS each proposal
+ * to the `proposed` queue — it NEVER accepts. A human drains the queue later with
+ * `reflect --review`. Prints a one-line summary and exits; safe to re-run (idempotent).
+ */
+async function runReflectPropose(
+  io: CliIO,
+  store: AsterismStore,
+  home: string,
+  agent: Agent,
+  name: string,
+): Promise<number> {
+  // Check for un-reflected work BEFORE building the model, so an agent with nothing new to
+  // reflect on exits cleanly without needing a model configured.
+  const pendingWork = unreflectedRuns(store, agent);
+  if (pendingWork.runs.length === 0) {
+    io.out(`${name}: no new runs to reflect on.`);
+    return 0;
+  }
+
+  const context: ModelResolutionContext = { config: loadConfig(home), agentName: agent.name };
+  const made = io.makeReflectionProvider
+    ? io.makeReflectionProvider(io.env, context)
+    : (await import("./reflect-model.js")).buildReflectionProvider(io.env, context);
+  if (!made.provider) {
+    io.err(made.reason ?? "No model configured for reflection.");
+    return 1;
+  }
+
+  let result;
+  try {
+    result = await queueProposedMemories(store, agent, made.provider);
+  } catch (err) {
+    io.err(`Reflection failed: ${errorMessage(err)}`);
+    return 1;
+  }
+
+  const runWord = result.processedRuns.length === 1 ? "run" : "runs";
+  const memWord = result.queued === 1 ? "memory" : "memories";
+  io.out(
+    `Queued ${result.queued} proposed ${memWord} for ${name} from ${result.processedRuns.length} ${runWord}` +
+      `${result.withheld > 0 ? `, ${result.withheld} withheld` : ""}` +
+      `${result.alreadyKnown > 0 ? `, ${result.alreadyKnown} already known` : ""}` +
+      `${result.ignored > 0 ? `, ${result.ignored} ignored` : ""}.`,
+  );
+  if (result.pendingRuns > 0) {
+    io.out(`${result.pendingRuns} more run(s) still pending — re-run to continue.`);
+  }
+  if (result.queued > 0) {
+    io.out(`Review them with: asterism reflect ${name} --review`);
+  }
+  return 0;
 }
 
 // --- config ----------------------------------------------------------------
