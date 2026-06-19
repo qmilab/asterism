@@ -79,9 +79,16 @@ export function createHttpEmbedder(config: HttpEmbedderConfig): Embedder {
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
-      let response: Response;
+      // The timeout must cover the WHOLE request, not just the headers. `fetch`
+      // resolves as soon as the response headers arrive, so clearing the timer right
+      // after it would leave `response.json()` reading the body with no deadline — a
+      // server that sends headers then stalls on the body would hang the run forever.
+      // The abort signal is wired to the response stream too, so an abort mid-body
+      // rejects `response.json()`, which the provider treats as unavailable and
+      // degrades on. So the timer is cleared only in the finally, after the body is
+      // fully read (or the read threw).
       try {
-        response = await doFetch(config.url, {
+        const response = await doFetch(config.url, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -91,54 +98,54 @@ export function createHttpEmbedder(config: HttpEmbedderConfig): Embedder {
           body: JSON.stringify({ model: config.model, input: texts }),
           signal: controller.signal,
         });
+
+        if (!response.ok) {
+          throw new Error(`embeddings endpoint returned ${response.status} ${response.statusText}`);
+        }
+
+        const body = (await response.json()) as EmbeddingsResponse;
+        const data = body.data;
+        if (!Array.isArray(data) || data.length !== texts.length) {
+          throw new Error(
+            `embeddings response had ${Array.isArray(data) ? data.length : "no"} vectors for ${texts.length} inputs`,
+          );
+        }
+
+        // The response may arrive out of order; place each vector at its declared index
+        // so the result lines up positionally with `texts`. `filled` tracks which slots
+        // are taken — a sparse array's holes are invisible to `.some`/`.forEach`, so a
+        // duplicate or out-of-range index is caught here (and surfaces as "malformed",
+        // which the provider treats as unavailable and degrades on) rather than silently
+        // leaving a hole that mis-ranks a memory.
+        const vectors: number[][] = new Array(texts.length);
+        const filled = new Set<number>();
+        data.forEach((item, i) => {
+          // Honor a declared index — number OR numeric string (mirroring the `Number()`
+          // coercion of the embedding values) — falling back to the response position
+          // only when none is given.
+          const declared = item.index;
+          const at = declared === undefined || declared === null ? i : Number(declared);
+          const embedding = item.embedding;
+          if (
+            !Array.isArray(embedding) ||
+            !Number.isInteger(at) ||
+            at < 0 ||
+            at >= texts.length ||
+            filled.has(at)
+          ) {
+            throw new Error("embeddings response was malformed");
+          }
+          filled.add(at);
+          vectors[at] = embedding.map((n) => Number(n));
+        });
+        // Defensive postcondition: every slot must be filled exactly once.
+        if (filled.size !== texts.length) {
+          throw new Error("embeddings response was missing a vector");
+        }
+        return vectors;
       } finally {
         clearTimeout(timer);
       }
-
-      if (!response.ok) {
-        throw new Error(`embeddings endpoint returned ${response.status} ${response.statusText}`);
-      }
-
-      const body = (await response.json()) as EmbeddingsResponse;
-      const data = body.data;
-      if (!Array.isArray(data) || data.length !== texts.length) {
-        throw new Error(
-          `embeddings response had ${Array.isArray(data) ? data.length : "no"} vectors for ${texts.length} inputs`,
-        );
-      }
-
-      // The response may arrive out of order; place each vector at its declared index
-      // so the result lines up positionally with `texts`. `filled` tracks which slots
-      // are taken — a sparse array's holes are invisible to `.some`/`.forEach`, so a
-      // duplicate or out-of-range index is caught here (and surfaces as "malformed",
-      // which the provider treats as unavailable and degrades on) rather than silently
-      // leaving a hole that mis-ranks a memory.
-      const vectors: number[][] = new Array(texts.length);
-      const filled = new Set<number>();
-      data.forEach((item, i) => {
-        // Honor a declared index — number OR numeric string (mirroring the `Number()`
-        // coercion of the embedding values) — falling back to the response position
-        // only when none is given.
-        const declared = item.index;
-        const at = declared === undefined || declared === null ? i : Number(declared);
-        const embedding = item.embedding;
-        if (
-          !Array.isArray(embedding) ||
-          !Number.isInteger(at) ||
-          at < 0 ||
-          at >= texts.length ||
-          filled.has(at)
-        ) {
-          throw new Error("embeddings response was malformed");
-        }
-        filled.add(at);
-        vectors[at] = embedding.map((n) => Number(n));
-      });
-      // Defensive postcondition: every slot must be filled exactly once.
-      if (filled.size !== texts.length) {
-        throw new Error("embeddings response was missing a vector");
-      }
-      return vectors;
     },
   };
 }

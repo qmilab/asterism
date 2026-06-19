@@ -114,6 +114,26 @@ describe("createHttpEmbedder", () => {
     await expect(embedder.embed(["a", "b"])).rejects.toThrow(/vectors/);
   });
 
+  test("the timeout covers the response body, not just the headers", async () => {
+    // A server that returns headers immediately but stalls forever on the body. The
+    // body read only settles if the request is aborted — so this hangs (and the test
+    // times out) unless the abort timer stays armed THROUGH `response.json()`.
+    const impl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal;
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: () =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: impl, timeoutMs: 20 });
+    await expect(embedder.embed(["q"])).rejects.toThrow();
+  });
+
   test("makes no request for an empty input list", async () => {
     let called = false;
     const impl = (async () => {
