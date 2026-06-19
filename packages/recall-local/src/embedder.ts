@@ -120,9 +120,9 @@ export function createHttpEmbedder(config: HttpEmbedderConfig): Embedder {
         const vectors: number[][] = new Array(texts.length);
         const filled = new Set<number>();
         data.forEach((item, i) => {
-          // Honor a declared index — number OR numeric string (mirroring the `Number()`
-          // coercion of the embedding values) — falling back to the response position
-          // only when none is given.
+          // Honor a declared index — number OR numeric string (a position, where a
+          // string is unambiguous) — falling back to the response position when none
+          // is given.
           const declared = item.index;
           const at = declared === undefined || declared === null ? i : Number(declared);
           const embedding = item.embedding;
@@ -131,12 +131,18 @@ export function createHttpEmbedder(config: HttpEmbedderConfig): Embedder {
             !Number.isInteger(at) ||
             at < 0 ||
             at >= texts.length ||
-            filled.has(at)
+            filled.has(at) ||
+            // Every coordinate must be a real, finite number. `Number.isFinite` does
+            // NOT coerce, so a `null` (would coerce to 0), a non-numeric string, or a
+            // NaN/Infinity is rejected as malformed rather than silently mis-ranking
+            // the memory — the response is treated as unavailable and the provider
+            // degrades to the lexical ranker, the same as any other bad response.
+            !embedding.every((n) => Number.isFinite(n))
           ) {
             throw new Error("embeddings response was malformed");
           }
           filled.add(at);
-          vectors[at] = embedding.map((n) => Number(n));
+          vectors[at] = embedding as number[];
         });
         // Defensive postcondition: every slot must be filled exactly once.
         if (filled.size !== texts.length) {

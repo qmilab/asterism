@@ -108,6 +108,14 @@ describe("createHttpEmbedder", () => {
     ]);
   });
 
+  test("throws on malformed coordinates (null / non-numeric / NaN), not silent mis-ranking", async () => {
+    for (const bad of [null, "x", Number.NaN]) {
+      const f = fakeFetch(200, { data: [{ index: 0, embedding: [1, bad, 3] }] });
+      const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
+      await expect(embedder.embed(["only"])).rejects.toThrow(/malformed/);
+    }
+  });
+
   test("throws when the response has the wrong number of vectors", async () => {
     const f = fakeFetch(200, { data: [{ index: 0, embedding: [1] }] });
     const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
