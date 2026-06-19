@@ -75,6 +75,39 @@ describe("createHttpEmbedder", () => {
     await expect(embedder.embed(["q"])).rejects.toThrow(/503/);
   });
 
+  test("throws on a duplicate index rather than returning a vector with a hole", async () => {
+    // Two items claim index 0 → slot 1 would be a sparse hole. The guard must catch it,
+    // not silently return a malformed array (a hole mis-ranks a memory downstream).
+    const f = fakeFetch(200, {
+      data: [
+        { index: 0, embedding: [1, 0] },
+        { index: 0, embedding: [0, 1] },
+      ],
+    });
+    const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
+    await expect(embedder.embed(["a", "b"])).rejects.toThrow(/malformed/);
+  });
+
+  test("throws on an out-of-range index", async () => {
+    const f = fakeFetch(200, { data: [{ index: 5, embedding: [1] }] });
+    const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
+    await expect(embedder.embed(["only"])).rejects.toThrow(/malformed/);
+  });
+
+  test("honors a numeric-string index (coerced, like the embedding values)", async () => {
+    const f = fakeFetch(200, {
+      data: [
+        { index: "1", embedding: [0, 1] },
+        { index: "0", embedding: [1, 0] },
+      ],
+    });
+    const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });
+    expect(await embedder.embed(["first", "second"])).toEqual([
+      [1, 0],
+      [0, 1],
+    ]);
+  });
+
   test("throws when the response has the wrong number of vectors", async () => {
     const f = fakeFetch(200, { data: [{ index: 0, embedding: [1] }] });
     const embedder = createHttpEmbedder({ url: "x", model: "m", fetchImpl: f.fetch });

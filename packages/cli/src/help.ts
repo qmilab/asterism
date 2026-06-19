@@ -284,7 +284,8 @@ run yourself (e.g. Ollama) — set ASTERISM_RECALL_EMBED_URL and
 ASTERISM_RECALL_EMBED_MODEL (and ASTERISM_RECALL_EMBED_KEY if it needs a token). This
 is strictly opt-in and off by default; nothing here sends your memory anywhere unless
 you turn it on and point it at your own endpoint. If that endpoint is unreachable
-during a run, recall quietly falls back to the keyword ranker rather than failing.
+during a run, recall falls back to the keyword ranker (and says so) rather than
+failing.
 
 Options for \`set\`:
   --provider <name>   Provider name. Built-in: openai, anthropic. Default: openai.

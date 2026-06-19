@@ -108,18 +108,34 @@ export function createHttpEmbedder(config: HttpEmbedderConfig): Embedder {
       }
 
       // The response may arrive out of order; place each vector at its declared index
-      // so the result lines up positionally with `texts`.
+      // so the result lines up positionally with `texts`. `filled` tracks which slots
+      // are taken — a sparse array's holes are invisible to `.some`/`.forEach`, so a
+      // duplicate or out-of-range index is caught here (and surfaces as "malformed",
+      // which the provider treats as unavailable and degrades on) rather than silently
+      // leaving a hole that mis-ranks a memory.
       const vectors: number[][] = new Array(texts.length);
+      const filled = new Set<number>();
       data.forEach((item, i) => {
-        const at = typeof item.index === "number" ? item.index : i;
+        // Honor a declared index — number OR numeric string (mirroring the `Number()`
+        // coercion of the embedding values) — falling back to the response position
+        // only when none is given.
+        const declared = item.index;
+        const at = declared === undefined || declared === null ? i : Number(declared);
         const embedding = item.embedding;
-        if (!Array.isArray(embedding) || at < 0 || at >= texts.length) {
+        if (
+          !Array.isArray(embedding) ||
+          !Number.isInteger(at) ||
+          at < 0 ||
+          at >= texts.length ||
+          filled.has(at)
+        ) {
           throw new Error("embeddings response was malformed");
         }
+        filled.add(at);
         vectors[at] = embedding.map((n) => Number(n));
       });
-      // Every slot must be filled — a duplicate/missing index would leave a hole.
-      if (vectors.some((v) => v === undefined)) {
+      // Defensive postcondition: every slot must be filled exactly once.
+      if (filled.size !== texts.length) {
         throw new Error("embeddings response was missing a vector");
       }
       return vectors;
