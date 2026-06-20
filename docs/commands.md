@@ -532,8 +532,11 @@ drafted. Otherwise it looks over the agent's latest completed run and drafts new
 proposals on the spot (which needs a
 [configured model](./installation.md#configuring-a-model)).
 
-In an interactive terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`;
-a non-interactive (piped) session rejects everything — nothing is written.
+In an interactive terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`.
+Outside a terminal — piped, or launched from a scheduler — nothing is ever
+accepted, and a pile already **queued** by `--propose` is left **untouched** (with
+a note to review it in a terminal) rather than silently rejected, since rejecting a
+queued proposal is a durable choice. Either way, nothing is written without you.
 
 ```console
 $ asterism reflect writer --review
