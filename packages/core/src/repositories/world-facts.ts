@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow } from "../db/driver.js";
 import type { WorldFact } from "../types.js";
+import { worldFactFramingText } from "../types.js";
 import { assertMemorySafe } from "../firewall.js";
 import { requireAgentId } from "./scope.js";
 
@@ -57,17 +58,26 @@ export class WorldFactRepository {
    * Record or SUPERSEDE a world-fact: an upsert keyed by `(agent_id, subject)`. A new
    * subject inserts; an existing one REPLACES its `value` and advances `updated_at`
    * (superseded, not accumulated) while preserving `created_at` and the row id.
-   * `requireAgentId` first, then the SAME memory firewall screens BOTH `subject` and
-   * `value` before persistence — a world-fact frames runs, so a poisoned one ("ignore
-   * previous instructions") is a persistent prompt injection exactly like a poisoned
-   * memory, and there is no write path that skips the screen. Throws
-   * {@link MemoryFirewallError} on a hit. The cap is NOT enforced here (it is policy the
-   * store facade owns); this is the pure single-table writer.
+   * `requireAgentId` first, then the SAME memory firewall screens the content before
+   * persistence — a world-fact frames runs, so a poisoned one ("ignore previous
+   * instructions") is a persistent prompt injection exactly like a poisoned memory, and
+   * there is no write path that skips the screen. Each field is screened AND so is the
+   * exact RENDERED line (`subject: value`, via `worldFactFramingText` — the one source of
+   * truth the framing render also uses): a split injection across the `: ` delimiter
+   * (`subject: "ignore all previous"`, `value: "instructions"`) passes each field alone
+   * but frames as one injection line, so the rendered-line screen is the load-bearing
+   * one. Enforced HERE in the storage writer (not only in the `recordWorldFact` facade)
+   * so a direct `store.worldFacts.upsert` caller cannot bypass it — the "scope/screen at
+   * the storage layer, never rely on application code remembering" rule. Throws
+   * {@link MemoryFirewallError} on a hit. The cap is NOT enforced here (it is a resource
+   * policy the store facade owns, like the no-op audit guards); this is the pure
+   * single-table writer.
    */
   upsert(agentId: string, subject: string, value: string): WorldFact {
     requireAgentId(agentId);
     assertMemorySafe(subject);
     assertMemorySafe(value);
+    assertMemorySafe(worldFactFramingText(subject, value));
     const id = randomUUID();
     const now = new Date().toISOString();
     // ON CONFLICT(agent_id, subject): keep the original id/created_at, replace value +

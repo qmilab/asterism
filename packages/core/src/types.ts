@@ -269,6 +269,22 @@ export interface WorldFact {
 }
 
 /**
+ * The exact text one world-fact contributes to run framing — `subject: value` — and
+ * therefore the precise string the firewall must screen on the write path. ONE source of
+ * truth so the screen and the render can never drift: screening the fields independently
+ * would let a prompt injection be split across the `: ` delimiter (`subject: "ignore all
+ * previous"`, `value: "instructions"` frames as a single injection line while each field
+ * passes its own screen). The framing render and BOTH write paths (the
+ * `WorldFactRepository.upsert` storage writer and the `store.recordWorldFact` facade) go
+ * through here. Lives in `types.ts` — the universal bottom layer — so the repository can
+ * enforce it without depending on the framing layer. The constant `- ` list prefix is
+ * boilerplate, not part of the injectable content, so it is omitted.
+ */
+export function worldFactFramingText(subject: string, value: string): string {
+  return `${subject}: ${value}`;
+}
+
+/**
  * An agent's earned standing on one destructive capability — the persisted
  * "trust contract". Scoped by `agentId` like every other row; one per
  * (agent, capability). `basis` is a human-readable, REFERENCES-ONLY summary of the

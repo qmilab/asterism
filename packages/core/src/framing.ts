@@ -21,6 +21,7 @@
 
 import type { RunRequest, ToolRegistry } from "./adapter.js";
 import type { Agent, Memory, Objective, WorldFact } from "./types.js";
+import { worldFactFramingText } from "./types.js";
 
 /**
  * A skill made available to a run: its name and, when loaded, the markdown body.
@@ -51,20 +52,6 @@ export interface FramingContext {
    * last, never mistaken for a ratified lesson.
    */
   worldFacts?: readonly WorldFact[];
-}
-
-/**
- * The exact text one world-fact contributes to run framing — `subject: value` — and
- * therefore the precise string the firewall must screen on the write path. Exported so
- * the screen and the render share ONE source of truth and can never drift: screening the
- * fields independently would let a prompt injection be split across the `: ` delimiter
- * (`subject: "ignore all previous"`, `value: "instructions"` frames as a single
- * injection line while each field passes its own screen). The framing render below and
- * `store.recordWorldFact`'s screen both go through here. The constant `- ` list prefix is
- * boilerplate and not part of the injectable content, so it is omitted.
- */
-export function worldFactFramingText(subject: string, value: string): string {
-  return `${subject}: ${value}`;
 }
 
 /**

@@ -128,7 +128,6 @@ export {
   buildSystemPrompt,
   frameRun,
   resolveSoul,
-  worldFactFramingText,
   BUILTIN_SOULS,
 } from "./framing.js";
 export type {

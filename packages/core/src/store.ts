@@ -40,7 +40,7 @@ import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
-import { worldFactFramingText } from "./framing.js";
+import { worldFactFramingText } from "./types.js";
 
 /**
  * The kernel's persistence surface. Applies the Phase 0 schema and exposes one
@@ -897,9 +897,10 @@ export class AsterismStore {
       // delimiter — `subject: "ignore all previous"`, `value: "instructions"` each pass,
       // but frame as a single injection line — so the combined screen via
       // `worldFactFramingText` (the one source of truth the framing render also uses) is
-      // the load-bearing one; the per-field screens stay as defense-in-depth. This is the
-      // usage-aware screen the store owns (the repository's per-field screen is
-      // framing-agnostic), the same layering the cap follows.
+      // the load-bearing one; the per-field screens stay as defense-in-depth. The
+      // repository's `upsert` enforces this SAME screen (so a direct writer can't bypass
+      // it); the store re-runs it here, firewall-FIRST and OUTSIDE the transaction, so a
+      // blocked write emits `world_fact.blocked` and that audit survives the rollback.
       assertMemorySafe(trimmedSubject);
       assertMemorySafe(trimmedValue);
       assertMemorySafe(worldFactFramingText(trimmedSubject, trimmedValue));
