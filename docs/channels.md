@@ -162,7 +162,7 @@ nothing destructive ever happens unattended, even though no one is "at the keybo
 | `/help` | Show the agent and these commands. |
 | `/start` | A short greeting from the agent. |
 
-## What this surface is — and isn't (Phase 1)
+## What this surface is — and isn't
 
 - **The same boundary as the CLI.** Runs go through the identical path as
   `asterism run`, so trust enforcement, the destructive-action gate, secret

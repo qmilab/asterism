@@ -204,6 +204,116 @@ Attached skill "blog-style" to agent writer.
 
 ---
 
+## `objective`
+
+```
+asterism objective add  <agent> "<text>"
+asterism objective list <agent>
+asterism objective done <agent> <id>
+asterism objective drop <agent> <id>
+```
+
+Give an agent a **standing objective** — what it should be working toward, ongoing.
+Unlike a memory (a lesson it learned and you reviewed), an objective is *current
+purpose* you set and manage. Every active objective frames the agent's runs as
+standing context, so the goal stays in view across many runs. See
+[standing objectives](./concepts.md#standing-objectives).
+
+| Verb | What it does |
+|---|---|
+| `objective add <agent> "<text>"` | Declare a new objective. It starts **active** and begins framing the agent's runs. |
+| `objective list <agent>` | Show the agent's objectives — the active ones that frame runs first, then any proposed for review, then completed/dropped history. |
+| `objective done <agent> <id>` | Mark an objective completed; it stops framing runs. |
+| `objective drop <agent> <id>` | Abandon an objective; it stops framing runs. |
+
+Identify an objective by the short id shown in `objective list`. An objective is the
+named agent's own scoped state — only ever its own, never another agent's — and its
+text is run through the same [safety screen](./concepts.md#reflection) as memory
+before it is saved (a write that trips the screen is refused, not stored). Declaring
+or retiring one is **not** destructive: it touches only the agent's own purpose,
+nothing external.
+
+Reflection can also **propose** objectives it notices the agent working toward —
+surfaced for your approval, never adopted on its own. A proposed objective does not
+frame runs until you accept it; review proposals with
+[`asterism reflect <agent> --review`](#reflect).
+
+```console
+$ asterism objective add writer "keep the launch blog current and on-brand"
+Declared objective a1b2c3d4 for writer.
+
+$ asterism objective list writer
+Objectives for writer (2, 1 active):
+
+• a1b2c3d4 · active
+  keep the launch blog current and on-brand
+  declared 2026-06-20T09:00:00.000Z
+
+• e5f6a7b8 · done
+  ship the Q2 retrospective post
+  declared 2026-06-18T14:00:00.000Z
+
+$ asterism objective done writer a1b2c3d4
+Marked objective a1b2c3d4 done for writer.
+```
+
+An agent with no objectives prints `writer has no objectives yet.` alongside the
+command to declare one. A `done`/`drop` whose id matches nothing — or matches more
+than one — says so rather than guessing.
+
+---
+
+## `notes`
+
+```
+asterism notes inspect <agent>
+asterism notes set     <agent> "<subject>" "<value>"
+asterism notes clear   <agent> "<subject>"
+```
+
+See and manage an agent's **working notes** — its own running record of the current
+situation, kept as `subject: value` pairs. The agent writes these **itself** as it
+works, to carry context from one run into the next, and they frame its later runs.
+They are the agent's *own unverified notes*, distinct from memory: nothing here was
+reviewed by you, so they are shown and framed plainly as the agent's own record,
+**not facts**. See [working notes](./concepts.md#working-notes).
+
+| Verb | What it does |
+|---|---|
+| `notes inspect <agent>` | Show the agent's working notes — its own record, and how full it is. |
+| `notes set <agent> "<subject>" "<value>"` | Set or correct a note yourself. Re-setting a subject **replaces** its value. |
+| `notes clear <agent> "<subject>"` | Remove one note. |
+
+The agent records and forgets its own notes mid-run through its tools; these operator
+verbs are how **you** inspect and revert them. A note is the agent's own scoped
+state — writing or clearing one is never destructive, and never crosses to another
+agent. An agent keeps a **bounded** number of notes; when they are full, clear one
+before a new subject will save. A note you set is run through the same
+[safety screen](./concepts.md#reflection) as the agent's own (a write that trips the
+screen is refused, not stored).
+
+```console
+$ asterism notes inspect writer
+Working notes for writer (2 of 32) — the agent's own unverified record, not facts:
+
+• draft status: intro rewritten, closing still needs a pass
+  updated 2026-06-20T09:14:00.000Z
+• house style: sentence case in headings
+  updated 2026-06-20T09:02:00.000Z
+
+$ asterism notes set writer "draft status" "ready for review"
+Set working note "draft status" for writer.
+
+$ asterism notes clear writer "house style"
+Cleared working note "house style" for writer.
+```
+
+An agent with no working notes says so, with the command to set one. Clearing a
+subject that has no note, or setting one when notes are full, reports the problem
+plainly rather than failing silently.
+
+---
+
 ## `run`
 
 ```
@@ -406,18 +516,20 @@ asterism reflect <agent> --review
 asterism reflect <agent> --propose
 ```
 
-Turn an agent's work into memories it might keep. Reflection only ever **proposes**
-— you stay the one who decides what an agent remembers. There are two halves: one
-fills a review pile, the other lets you go through it. One of `--review` /
-`--propose` is required; reflection never runs in a silent auto mode.
+Turn an agent's work into things it might keep — typed **memories**, and the
+**standing objectives** it could take on. Reflection only ever **proposes**; you
+stay the one who decides what an agent remembers and what it works toward. There are
+two halves: one fills a review pile, the other lets you go through it. One of
+`--review` / `--propose` is required; reflection never runs in a silent auto mode.
 
 ### `--review` — go through the pile
 
 Review the proposals waiting for an agent and **accept**, **edit**, or **reject**
-each one. Anything that looks unsafe to remember is flagged. If proposals are
-already waiting (see `--propose`), it reviews those — no model needed, since they
-are already drafted. Otherwise it looks over the agent's latest completed run and
-drafts new proposals on the spot (which needs a
+each one — memory proposals first, then any standing-objective proposals, in one
+pass. Anything that looks unsafe to remember is flagged. If proposals are already
+waiting (see `--propose`), it reviews those — no model needed, since they are already
+drafted. Otherwise it looks over the agent's latest completed run and drafts new
+proposals on the spot (which needs a
 [configured model](./installation.md#configuring-a-model)).
 
 In an interactive terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`;
@@ -446,12 +558,12 @@ a flagged one anyway, the firewall still refuses to save it (`⛔ blocked`).
 
 ### `--propose` — fill the pile, unattended
 
-Look over an agent's new work and set aside what might be worth remembering, for
-you to review later. It **saves nothing as active and asks nothing** — it just
-adds to the review pile, which you drain with `--review` when you're ready.
-Anything that looks unsafe to remember is held back rather than added. Safe to
-re-run: it only looks at work it hasn't already looked over, and never queues the
-same thing twice.
+Look over an agent's new work and set aside what might be worth keeping — a memory
+to remember, or a standing objective to take on — for you to review later. It
+**saves nothing as active and asks nothing**; it just adds to the review pile, which
+you drain with `--review` when you're ready. Anything that looks unsafe is held back
+rather than added. Safe to re-run: it only looks at work it hasn't already looked
+over, and never queues the same thing twice.
 
 Because `--propose` is unattended, it's the form you can put on a schedule (below).
 Drafting proposals needs a [configured model](./installation.md#configuring-a-model).
@@ -459,6 +571,7 @@ Drafting proposals needs a [configured model](./installation.md#configuring-a-mo
 ```console
 $ asterism reflect writer --propose
 Queued 2 proposed memories for writer from 1 run.
+Queued 1 proposed objective.
 Review them with: asterism reflect writer --review
 ```
 
@@ -511,8 +624,8 @@ WantedBy=timers.target
 ```
 
 Whatever the cadence, the deal is the same: a scheduled run only ever **adds to
-the pile**. An agent never starts remembering something on its own — every memory
-still waits for your `--review`.
+the pile**. An agent never starts remembering — or taking on a new objective — on
+its own; every memory and objective still waits for your `--review`.
 
 ---
 
@@ -879,3 +992,9 @@ to your own Markdown file.
 `episodic` (reflection proposes the first four).
 
 **Event types** — see [the event log](./concepts.md#event-log).
+
+**Environment variables** — model selection (`ASTERISM_MODEL_*`, `ASTERISM_API_KEY`;
+see [`config`](#config)) · HTTP token (`ASTERISM_HTTP_TOKEN`; see [`serve`](#serve)) ·
+channel tokens and allow-lists (`ASTERISM_TELEGRAM_*`, `ASTERISM_DISCORD_*`; see
+[chat channels](./channels.md)) · opt-in recall endpoint
+(`ASTERISM_RECALL_EMBED_URL` / `_MODEL` / `_KEY`; see [Tuning recall](#tuning-recall)).

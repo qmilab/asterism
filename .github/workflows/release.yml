@@ -4,7 +4,7 @@ name: release
 # then the GitHub Release. The container image is published from the SAME tag by the
 # container workflow (.github/workflows/docker.yml), so one tag ships everything.
 #
-# Cut a release by bumping all six package versions (+ the CLI VERSION constant, the
+# Cut a release by bumping all seven package versions (+ the CLI VERSION constant, the
 # CHANGELOG, and a regenerated bun.lock) in a PR, merging it, then tagging vX.Y.Z on
 # the merge commit. This workflow refuses to publish if the tag and the committed
 # versions disagree, so a forgotten bump fails fast instead of mis-publishing.

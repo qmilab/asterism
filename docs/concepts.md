@@ -144,11 +144,70 @@ approve. Nothing is ever written silently. Memories have a type:
 Memory is reviewed, never assumed — see [Reflection](#reflection). Inspect any
 agent's memory with [`asterism memory inspect`](./commands.md#memory-inspect).
 
-Before each run, an agent **recalls** the most relevant of its memories to frame the
-task, capped by a per-agent budget. By default that relevance is judged by keywords,
-needing nothing and making no network call. You can opt a single agent into ranking
-its memory by *meaning* instead, using a local embeddings endpoint you run yourself —
-strictly opt-in and off by default. See [Tuning recall](./commands.md#tuning-recall).
+Before each run, an agent **recalls** only the most relevant of its memories to
+frame the task, so its memory can grow without flooding a run — see
+[Recall](#recall).
+
+## Recall
+
+An agent's memory grows with use, but a single run should be framed by the
+*relevant* few, not the whole pile. Before each run, an agent **recalls** the most
+relevant of its accepted memories and frames only those — capped by a per-agent
+**budget**, so memory can grow without flooding the prompt.
+
+Two per-agent knobs tune recall, each scoped to the one agent and never shared:
+
+- **How many** — the recall budget caps how many memories a run may frame; the most
+  relevant are kept under the cap.
+- **How relevance is judged** — by default a built-in **keyword** ranker that needs
+  nothing and makes no network call. You can opt a single agent into ranking its
+  memory by **meaning** instead, using a local embeddings endpoint you run yourself
+  (for example [Ollama](https://ollama.com)).
+
+Ranking by meaning is **strictly opt-in and off by default**: the default install
+pulls no ML and makes no network call for recall, and nothing leaves your machine
+unless you turn it on and point it at your own endpoint. Tune both knobs with
+[`asterism config`](./commands.md#tuning-recall).
+
+## Standing objectives
+
+Memory is what an agent has *learned*; a **standing objective** is what it is
+*working toward*. Where a memory is an accumulated lesson recalled when relevant, an
+objective is durable, current **purpose** — "keep the launch blog current and
+on-brand," "finish the Q3 migration" — that frames **every** run as standing
+context, so the agent keeps the goal in view across many runs rather than treating
+each task in isolation.
+
+You declare and manage objectives yourself: they start `active` and frame runs until
+you mark them `done` or `drop` them. [Reflection](#reflection) can also *propose* an
+objective it notices the agent working toward — but a proposed objective is inert
+until you accept it. Like memory, an objective is **human-ratified** before it ever
+shapes a run. Manage them with [`asterism objective`](./commands.md#objective).
+
+## Working notes
+
+Objectives and memory are *stable* — purpose you set, lessons you approved. But as it
+works, an agent also needs a picture of the **current situation**: "the intro is
+rewritten, the closing still needs a pass," "the migration is 60% done." That is what
+**working notes** are — the agent's own running record, kept as `subject: value`
+pairs it writes **itself** as it goes, and superseded in place (re-noting a subject
+replaces it; notes don't pile up). They carry context from one run into the next.
+
+This is the one place an agent writes its own framing input without your review, so it
+is governed carefully — and framed honestly:
+
+- **Shown and framed as the agent's own _unverified_ notes, never as fact.** A
+  reader — human or model — always sees them labelled as the agent's own record,
+  distinct from the memory you ratified, so a self-asserted note never reads as
+  something you confirmed.
+- **Screened and bounded.** Each note is run through the same safety screen as memory
+  before it is saved, and an agent keeps only a bounded number of them.
+- **Yours to inspect and revert.** Read, correct, or clear any note with
+  [`asterism notes`](./commands.md#notes); the agent records and forgets its own as
+  it runs.
+- **Scoped and non-destructive.** A note is the agent's own state, scoped to it
+  alone, and writing or clearing one touches nothing external — so it is never a
+  route around the [destructive-action gate](#the-destructive-action-gate).
 
 ## Skills
 
@@ -164,8 +223,8 @@ a key. It is stored for that agent alone, by reference, and is **never printed
 back, written to the event log, or readable by any other agent.** Reading or
 exporting a secret's value is classified destructive, so any tool that surfaced
 one would first have to clear the
-[destructive-action gate](#the-destructive-action-gate) — but the Phase 1 catalog
-ships no such tool: secrets are stored scoped, not yet surfaced into a run at all.
+[destructive-action gate](#the-destructive-action-gate) — but the shipped catalog
+includes no such tool: secrets are stored scoped, not yet surfaced into a run at all.
 
 ## Event log
 
@@ -195,7 +254,7 @@ The event types you will see:
 | `reflection.proposed` | A scheduled `reflect --propose` queued proposals from a run. |
 | `skill.attached` | A skill was attached. |
 | `credential.added` / `credential.rotated` / `credential.removed` | A secret changed. |
-| `secret.read` | A secret value was read out. *(Reserved — no Phase 1 tool reads a secret into a run, so you won't see this yet.)* |
+| `secret.read` | A secret value was read out. *(Reserved — no shipped tool reads a secret into a run, so you won't see this yet.)* |
 
 ## Reflection
 
@@ -213,11 +272,18 @@ it. Run it with [`asterism reflect <agent> --review`](./commands.md#reflect). In
 this phase reflection proposes only `semantic`, `procedural`, `convention`, and
 `negative` memories.
 
+Reflection also proposes **[standing objectives](#standing-objectives)** — durable
+purpose it notices the agent working toward — through the very same review gate: a
+proposed objective is inert until you accept it, exactly as a proposed memory is. A
+single [`reflect --review`](./commands.md#reflect) goes through both, memories first,
+then objectives.
+
 You can also let an agent draft proposals **on a schedule** —
 [`reflect --propose`](./commands.md#schedule-it-yourself) fills a review pile in
 the background for you to go through later. It never accepts anything; an agent
-never starts remembering on its own. And it is never on by default: nothing
-reflects on a schedule unless you wire it to a timer yourself.
+never starts remembering — or taking on an objective — on its own. And it is never
+on by default: nothing reflects on a schedule unless you wire it to a timer
+yourself.
 
 Reflection is model-generated, so the exact proposals and confidence scores
 differ from run to run; the transcripts in these docs are illustrative, not
@@ -229,11 +295,11 @@ Asterism leans on the word *boundary*, so it is worth being exact about which
 boundary exists today.
 
 **What you get now:** each agent's memory, secrets, skills, workspace, trust
-profile, event log, and the tools available to a run are **separate** — scoped
-to that one agent and enforced everywhere data is read or written, including over
-the [local HTTP endpoint](./http.md). One agent cannot read another's memory,
-resolve another's secret, or address another's runs. This is real, tested
-separation.
+profile, event log, standing objectives, working notes, and the tools available to
+a run are **separate** — scoped to that one agent and enforced everywhere data is
+read or written, including over the [local HTTP endpoint](./http.md). One agent
+cannot read another's memory, resolve another's secret, or address another's runs.
+This is real, tested separation.
 
 **What it is not, yet:** this is *logical* separation, not OS-level containment.
 Today's boundary is not a microVM, container, or hardened sandbox, and it does

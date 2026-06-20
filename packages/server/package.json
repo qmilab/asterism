@@ -1,6 +1,6 @@
 {
   "name": "@qmilab/asterism-server",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Local HTTP endpoint for Asterism agents. You probably want @qmilab/asterism.",
   "type": "module",
   "license": "Apache-2.0",

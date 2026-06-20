@@ -10,7 +10,7 @@
 [![Container image](https://github.com/qmilab/asterism/actions/workflows/docker.yml/badge.svg)](https://github.com/qmilab/asterism/actions/workflows/docker.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
 [![Runtime](https://img.shields.io/badge/runtime-Node%2020%2B%20%7C%20Bun%20%7C%20Deno-000000)](#quickstart)
-[![Status](https://img.shields.io/badge/status-Phase%201%20complete-6366f1)](#status)
+[![Status](https://img.shields.io/badge/status-Phase%202%20%C2%B7%20Governed%20Learning-6366f1)](#status)
 
 [**Why**](#why) · [**Quickstart**](#quickstart) · [**What you get**](#what-you-get) · [**Docs**](#documentation) · [**Lodestar**](#pairs-with-lodestar)
 
@@ -77,7 +77,7 @@ asterism events tail client
 Prefer a container? The released image is multi-arch and runs natively on Intel/AMD and Apple Silicon — no `--platform` flag:
 
 ```bash
-docker pull ghcr.io/qmilab/asterism                       # tags: latest · 0.2.1 · 0.2
+docker pull ghcr.io/qmilab/asterism                       # tags: latest · 0.3.0 · 0.3
 docker volume create asterism-data                        # state lives in a named volume
 docker run --rm -v asterism-data:/data ghcr.io/qmilab/asterism init
 ```
@@ -90,7 +90,12 @@ See [Run in a container](./docs/container.md) for the full setup.
 |---|---|
 | **Distinct agents & souls** | Many agents from one install, each its own identity with its own character. → [Concepts](./docs/concepts.md) |
 | **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included. → [Trust](./docs/concepts.md#trust-levels) |
+| **Earned trust contracts** | An agent can *earn* the right to take one capability without pausing — always proposed for your approval, and lost the moment something goes wrong. → [Earned autonomy](./docs/concepts.md#earned-autonomy) |
 | **Reviewable memory** | Typed, scoped per agent, and written only when you approve it. → [Memory](./docs/concepts.md#memory) |
+| **Structured recall** | Each run is framed by the most relevant memories, ranked under a budget; opt a single agent into local-embedding ranking, off by default. → [Recall](./docs/concepts.md#recall) |
+| **Reviewed reflection, on your schedule** | An agent proposes what to remember; you ratify. Run it by hand or put the proposer on a timer — nothing is written on its own. → [Reflect](./docs/commands.md#reflect) |
+| **Standing objectives** | Give an agent durable purpose that frames every run — what it's working toward, not just what it learned. → [Objectives](./docs/concepts.md#standing-objectives) |
+| **Working notes** | The agent's own running picture of its situation, carried run to run — shown as its unverified notes, never as fact. → [Working notes](./docs/concepts.md#working-notes) |
 | **Live dashboard** | Watch and steer every agent — autonomy, approvals, memory — in one terminal view. → [Dashboard](./docs/dashboard.md) |
 | **Chat channels** | Reach one agent from a Telegram or Discord chat. → [Channels](./docs/channels.md) |
 | **Local HTTP endpoint** | Serve one agent over HTTP, with the same guarantees as the CLI. → [HTTP](./docs/http.md) |
@@ -133,7 +138,7 @@ A lodestar is the single star you steer by. An asterism is the grouping you navi
 
 ## Status
 
-**Phase 1 complete** — latest release **v0.2.1**. The local-first core — distinct agents with per-agent memory, secrets, skills, and workspace; souls and roles; dialable trust with the destructive-action gate; reviewable memory — now joined by a live terminal **dashboard**, **Telegram and Discord** channels, a background **service**, a token-protected **HTTP endpoint**, and a multi-arch **container image** that runs natively on Intel/AMD and Apple Silicon. Still ahead: richer cognition, agent-to-agent collaboration, and stronger execution isolation (today's separation is *logical scoping*, not hardened containment — see [What "separate" means today](#what-you-get)).
+**Phase 2 — Governed Learning** · latest release **v0.3.0**. On top of the Phase 1 local-first core — distinct agents with per-agent memory, secrets, skills, and workspace; souls and roles; dialable trust with the destructive-action gate; reviewable memory — and its reach (a live terminal **dashboard**, **Telegram and Discord** channels, a background **service**, a token-protected **HTTP endpoint**, and a multi-arch **container image** for Intel/AMD and Apple Silicon), this release adds the **governed-learning** loop — how an agent improves with you in control: **earned trust contracts** (autonomy earned capability by capability, always proposed for your approval), **structured recall** (the relevant memories ranked into each run, with opt-in local embeddings), **reviewed reflection** you can put on a schedule, **standing objectives**, and the agent's own **working notes**. Memory and objectives are written only when you approve them; the working notes an agent keeps for itself are always shown as its *unverified* record and are yours to clear. Still ahead: agent-to-agent collaboration and stronger execution isolation (today's separation is *logical scoping*, not hardened containment — see [What "separate" means today](#what-you-get)).
 
 ## Contributing & security
 
