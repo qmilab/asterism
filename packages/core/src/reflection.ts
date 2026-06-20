@@ -484,6 +484,16 @@ export async function queueProposals(
 }
 
 /**
+ * @deprecated Renamed to {@link queueProposals}, kept as a backward-compatible alias for
+ * embedders that imported the old name. The behaviour broadened: a tick now also queues
+ * standing-objective proposals when the provider implements `proposeObjectives`. This is
+ * purely additive for existing callers — a memory-only provider behaves exactly as before,
+ * and the extra `objectives` field on the {@link QueueResult} is new, not a change to the
+ * memory counts. Prefer `queueProposals` in new code.
+ */
+export const queueProposedMemories = queueProposals;
+
+/**
  * The outcome of draining one queued proposal — accepting it activates the memory (or
  * a re-screened edit of it), rejecting it terminates it. `not_found` means no such
  * memory for this agent; `not_proposed` means the id exists but is not in the `proposed`

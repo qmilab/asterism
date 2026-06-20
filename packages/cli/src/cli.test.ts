@@ -1309,6 +1309,39 @@ test("a proposed objective stays out of an agent's framing until accepted", asyn
   }
 });
 
+test("reflect --review keeps memoryType on memory items and omits it for objectives (back-compat)", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  // One run yields both a memory and an objective proposal.
+  h.io.makeReflectionProvider = () => ({
+    provider: {
+      async reflect(input) {
+        return [
+          { memoryType: "semantic", content: "a remembered fact", confidence: 0.8, sourceRunId: input.transcript.runId },
+        ];
+      },
+      async proposeObjectives(input) {
+        return [{ content: "a standing goal", confidence: 0.7, sourceRunId: input.transcript.runId }];
+      },
+    },
+  });
+
+  const seen: Array<{ label: string; memoryType: string | undefined }> = [];
+  h.io.review = (item: ReviewItem): ReviewDecision => {
+    seen.push({ label: item.label, memoryType: item.memoryType });
+    return { kind: "reject" };
+  };
+  await runCli(["reflect", "personal", "--review"], h.io);
+
+  // The memory item still carries memoryType (existing hooks keep working); the objective
+  // item omits it and is told apart by its label.
+  const mem = seen.find((s) => s.label === "semantic");
+  const obj = seen.find((s) => s.label === "objective");
+  expect(mem?.memoryType).toBe("semantic");
+  expect(obj).toBeDefined();
+  expect(obj?.memoryType).toBeUndefined();
+});
+
 test("proposed objectives are agent-scoped — one agent's never frame or list under another", async () => {
   const h = harness();
   await withFinishedRun(h, "personal");

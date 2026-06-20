@@ -12,6 +12,7 @@ import {
   acceptProposedMemory,
   DEFAULT_REFLECT_RUN_LIMIT,
   queueProposals,
+  queueProposedMemories,
   rejectProposedMemory,
   unreflectedRuns,
 } from "./reflection.js";
@@ -601,6 +602,22 @@ test("a memory-only provider records no objective.proposed marker (objectives no
     expect(result.objectives.queued).toBe(0);
     // No `proposeObjectives` on the provider ⇒ no objective marker at all (not a zero-count one).
     expect(store.events.list(agent.id).some((e) => e.type === "objective.proposed")).toBe(false);
+  } finally {
+    store.close();
+  }
+});
+
+test("queueProposedMemories remains exported as a backward-compatible alias of queueProposals", async () => {
+  // The renamed export keeps the old name working for existing embedders.
+  expect(queueProposedMemories).toBe(queueProposals);
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const run = finishedRun(store, agent.id, "via the old name");
+    const result = await queueProposedMemories(store, agent, echoProvider());
+    expect(result.queued).toBe(1);
+    expect(result.processedRuns).toEqual([run.id]);
+    expect(store.memories.list(agent.id, { reviewState: "proposed" })).toHaveLength(1);
   } finally {
     store.close();
   }

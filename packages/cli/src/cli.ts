@@ -124,6 +124,12 @@ export interface ReviewItem {
   total: number;
   /** What kind of proposal this is — the memory type for a memory, `"objective"` for an objective. */
   label: string;
+  /**
+   * The memory type, for a memory proposal; ABSENT for an objective. Kept (alongside `label`)
+   * for backward compatibility — existing reviewers may branch on `memoryType`. Use `label`
+   * as the discriminator when an objective must be told apart from a memory.
+   */
+  memoryType?: string;
   content: string;
   /** The provider's confidence, when known. Absent for a queued objective (objectives persist none). */
   confidence?: number;
@@ -1588,6 +1594,8 @@ type DrainOutcome = "ok" | "stale";
 interface ReviewableView {
   /** The kind label shown to the reviewer — a memory type, or `"objective"`. */
   label: string;
+  /** The memory type, for a memory proposal; absent for an objective. Passed through to the reviewer hook. */
+  memoryType?: string;
   content: string;
   /** The provider's confidence, when known. Absent for a queued objective. */
   confidence?: number;
@@ -1649,6 +1657,7 @@ async function driveReviewLoop(
       index: i + 1,
       total,
       label: v.label,
+      ...(v.memoryType !== undefined ? { memoryType: v.memoryType } : {}),
       content: v.content,
       ...(v.confidence !== undefined ? { confidence: v.confidence } : {}),
       findings: v.findings,
@@ -1755,6 +1764,7 @@ async function reviewQueueDrain(
       const m = queued[i]!;
       return {
         label: m.memoryType,
+        memoryType: m.memoryType,
         content: m.content,
         confidence: m.confidence,
         findings: screenMemory(m.content).findings,
@@ -1909,7 +1919,13 @@ async function reviewMemoryLive(
     usable.length,
     (i) => {
       const p = usable[i]!;
-      return { label: p.memoryType, content: p.content, confidence: p.confidence, findings: p.findings };
+      return {
+        label: p.memoryType,
+        memoryType: p.memoryType,
+        content: p.content,
+        confidence: p.confidence,
+        findings: p.findings,
+      };
     },
     // A live proposal persists nothing until accepted, so a rejection is a no-op — always `ok`.
     (): DrainOutcome => "ok",

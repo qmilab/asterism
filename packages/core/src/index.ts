@@ -85,6 +85,7 @@ export {
   proposeReviewableMemories,
   proposeReviewableObjectives,
   queueProposals,
+  queueProposedMemories,
   unreflectedRuns,
   acceptProposedMemory,
   rejectProposedMemory,
