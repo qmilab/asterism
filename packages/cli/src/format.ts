@@ -109,11 +109,13 @@ export function formatMemoryList(
 }
 
 /**
- * Render an agent's standing objectives for `objective list`. Active objectives —
- * the ones that frame runs — come first by store order (oldest-first), with completed
- * and dropped ones kept beneath as history; the count line names how many are active.
- * Each line leads with the short id so `objective done`/`drop` can reference it. Only
- * ever one agent's own objectives — the store read is `agentId`-scoped.
+ * Render an agent's standing objectives for `objective list`. Only `active` AND `accepted`
+ * objectives frame runs, so those come first (oldest-first), then any reflection-PROPOSED
+ * ones awaiting review (inert until accepted), then completed / dropped / rejected ones as
+ * history; the count line names how many actually frame, and how many are proposed. A
+ * non-accepted review state is shown on the line so a proposed objective never reads as one
+ * that frames. Each line leads with the short id so `objective done`/`drop` (and
+ * `reflect --review`) can reference it. Only ever one agent's own objectives — `agentId`-scoped.
  */
 export function formatObjectiveList(
   objectives: readonly Objective[],
@@ -122,16 +124,20 @@ export function formatObjectiveList(
   if (objectives.length === 0) {
     return `${agentName} has no objectives yet. Declare one with: asterism objective add ${agentName} "<text>"`;
   }
-  // Active first (they frame runs), then history — a stable partition of the
-  // already oldest-first list, so order is deterministic within each group.
-  const active = objectives.filter((o) => o.status === "active");
-  const history = objectives.filter((o) => o.status !== "active");
-  const lines: string[] = [
-    `Objectives for ${agentName} (${objectives.length}, ${active.length} active):`,
-    "",
-  ];
-  for (const o of [...active, ...history]) {
-    lines.push(`• ${shortId(o.id)} · ${o.status}`);
+  // Framing set first (active + accepted), then proposals awaiting review, then history —
+  // a stable partition of the already oldest-first list, deterministic within each group.
+  const framing = objectives.filter((o) => o.status === "active" && o.reviewState === "accepted");
+  const proposed = objectives.filter((o) => o.reviewState === "proposed");
+  const seen = new Set([...framing, ...proposed]);
+  const history = objectives.filter((o) => !seen.has(o));
+  const header =
+    `Objectives for ${agentName} (${objectives.length}, ${framing.length} active` +
+    `${proposed.length > 0 ? `, ${proposed.length} proposed` : ""}):`;
+  const lines: string[] = [header, ""];
+  for (const o of [...framing, ...proposed, ...history]) {
+    // Surface a non-accepted review state (proposed / rejected) so it never reads as framing.
+    const review = o.reviewState !== "accepted" ? ` · ${o.reviewState}` : "";
+    lines.push(`• ${shortId(o.id)} · ${o.status}${review}`);
     lines.push(`  ${o.content}`);
     lines.push(`  declared ${o.createdAt}`);
     lines.push("");

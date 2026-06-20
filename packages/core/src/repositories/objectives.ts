@@ -1,23 +1,32 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow, SqlValue } from "../db/driver.js";
-import type { Objective, ObjectiveStatus } from "../types.js";
-import { OBJECTIVE_STATUSES, validateEnum } from "../types.js";
+import type { Objective, ObjectiveStatus, ReviewState } from "../types.js";
+import { OBJECTIVE_STATUSES, REVIEW_STATES, validateEnum } from "../types.js";
 import { assertMemorySafe } from "../firewall.js";
 import { requireAgentId } from "./scope.js";
 
 export interface CreateObjectiveInput {
   content: string;
+  /**
+   * Ratification state on create. Defaults to `accepted` — the operator-declared path,
+   * implicitly ratified by the human typing it. Reflection's proposed-objective path
+   * passes `proposed`, so the row is inert (framing requires `accepted`) until a human
+   * accepts it. Mirrors {@link CreateMemoryInput.reviewState}.
+   */
+  reviewState?: ReviewState;
 }
 
 /**
- * Filter for {@link ObjectiveRepository.list}. The single optional `status` narrows
- * within one agent's objectives (it never reaches across agents — the query is always
- * `agentId`-scoped), and is validated on the read path the same way the write path
- * validates it, so a bad value is a clear error rather than a silent empty result.
+ * Filters for {@link ObjectiveRepository.list}. Both optional and AND-combined, each
+ * narrowing within one agent's objectives (never across agents — the query is always
+ * `agentId`-scoped), and validated on the read path the same way the write path
+ * validates them, so a bad value is a clear error rather than a silent empty result.
  */
 export interface ObjectiveQuery {
   /** Only objectives in this exact lifecycle state. */
   status?: ObjectiveStatus;
+  /** Only objectives in this exact review state (e.g. `proposed`). */
+  reviewState?: ReviewState;
 }
 
 function mapObjective(row: SqlRow): Objective {
@@ -26,6 +35,7 @@ function mapObjective(row: SqlRow): Objective {
     agentId: String(row.agent_id),
     content: String(row.content),
     status: String(row.status) as ObjectiveStatus,
+    reviewState: String(row.review_state) as ReviewState,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -47,21 +57,25 @@ export class ObjectiveRepository {
    * firewall screens the content before persistence — an objective frames runs, so a
    * poisoned one ("ignore previous instructions") is a persistent prompt injection
    * exactly like a poisoned memory, and there is no create path that skips the screen.
-   * Throws {@link MemoryFirewallError} on a hit. `created_at` and `updated_at` start
-   * equal; `updated_at` advances on a later lifecycle change.
+   * Throws {@link MemoryFirewallError} on a hit. `reviewState` defaults to `accepted`
+   * (the operator-declared path); a reflection proposal passes `proposed`, which is
+   * inert until accepted (framing requires `accepted`). `created_at` and `updated_at`
+   * start equal; `updated_at` advances on a later lifecycle or review change.
    */
   create(agentId: string, input: CreateObjectiveInput): Objective {
     requireAgentId(agentId);
     assertMemorySafe(input.content);
+    const reviewState = input.reviewState ?? "accepted";
+    validateEnum(reviewState, REVIEW_STATES, "objective reviewState");
     const id = randomUUID();
     const now = new Date().toISOString();
     const row = this.driver
       .prepare(
-        `INSERT INTO objectives (id, agent_id, content, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO objectives (id, agent_id, content, status, review_state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          RETURNING *`,
       )
-      .get([id, agentId, input.content, "active", now, now]);
+      .get([id, agentId, input.content, "active", reviewState, now, now]);
     if (!row) throw new Error("objective insert did not persist");
     return mapObjective(row);
   }
@@ -91,6 +105,11 @@ export class ObjectiveRepository {
       clauses.push("status = ?");
       params.push(query.status);
     }
+    if (query.reviewState !== undefined) {
+      validateEnum(query.reviewState, REVIEW_STATES, "objective reviewState");
+      clauses.push("review_state = ?");
+      params.push(query.reviewState);
+    }
     const where = clauses.join(" AND ");
     return this.driver
       .prepare(
@@ -101,15 +120,18 @@ export class ObjectiveRepository {
   }
 
   /**
-   * The agent's active objectives — the framing set (the `listActiveAccepted`
-   * analogue for memory). Applies the same `status = 'active'` predicate the framing
-   * layer uses, kept here so surfaces don't re-derive it.
+   * The agent's active, accepted objectives — the framing set, the direct analogue of
+   * memory's {@link MemoryRepository.listActiveAccepted}. Applies the same
+   * `status = 'active' AND review_state = 'accepted'` predicate the framing layer uses,
+   * kept here so surfaces don't re-derive it. A `proposed` objective is excluded — it
+   * is inert until a human accepts it.
    */
-  listActive(agentId: string): Objective[] {
+  listActiveAccepted(agentId: string): Objective[] {
     requireAgentId(agentId);
     return this.driver
       .prepare(
-        `SELECT * FROM objectives WHERE agent_id = ? AND status = 'active'
+        `SELECT * FROM objectives
+           WHERE agent_id = ? AND status = 'active' AND review_state = 'accepted'
            ORDER BY created_at ASC, rowid ASC`,
       )
       .all([agentId])
@@ -135,6 +157,36 @@ export class ObjectiveRepository {
           RETURNING *`,
       )
       .get([status, now, id, agentId]);
+    return row ? mapObjective(row) : undefined;
+  }
+
+  /**
+   * Atomically settle a PROPOSED objective: flip `review_state` from `proposed` to
+   * `reviewState` in a SINGLE compare-and-set, the direct analogue of
+   * {@link MemoryRepository.settleProposed}. The `review_state = 'proposed'`
+   * precondition lives in the UPDATE's WHERE clause, so two concurrent drains over one
+   * proposal cannot both win: the first transitions it and the second matches nothing.
+   * Advances `updated_at` (the review is a real transition). `status` is untouched — an
+   * accepted objective stays `active` (and now frames), a rejected one stays `active`
+   * but no longer frames (review_state gates framing). Returns the settled row to the
+   * winner, or undefined to a caller that lost the race (or named an unknown /
+   * already-settled id).
+   */
+  settleProposed(
+    agentId: string,
+    id: string,
+    reviewState: ReviewState,
+  ): Objective | undefined {
+    requireAgentId(agentId);
+    validateEnum(reviewState, REVIEW_STATES, "objective reviewState");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE objectives SET review_state = ?, updated_at = ?
+          WHERE id = ? AND agent_id = ? AND review_state = 'proposed'
+          RETURNING *`,
+      )
+      .get([reviewState, now, id, agentId]);
     return row ? mapObjective(row) : undefined;
   }
 }

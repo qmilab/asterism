@@ -15,6 +15,7 @@ import {
 } from "@qmilab/asterism-core";
 import type {
   ProposedMemory,
+  ProposedObjective,
   ReflectionInput,
   ReflectionProvider,
 } from "@qmilab/asterism-core";
@@ -133,11 +134,11 @@ function extractJson(raw: string): unknown {
   return undefined;
 }
 
-/** Pull the raw memory entries out of either `{memories: [...]}` or a bare `[...]`. */
-function entriesOf(parsed: unknown): unknown[] {
+/** Pull the raw entries out of either `{<key>: [...]}` or a bare `[...]`. */
+function entriesOf(parsed: unknown, key: string): unknown[] {
   if (Array.isArray(parsed)) return parsed;
-  const memories = (parsed as { memories?: unknown } | null)?.memories;
-  return Array.isArray(memories) ? memories : [];
+  const entries = (parsed as Record<string, unknown> | null)?.[key];
+  return Array.isArray(entries) ? entries : [];
 }
 
 /**
@@ -163,7 +164,7 @@ export function parseProposals(
   raw: string,
   sourceRunId: string,
 ): ProposedMemory[] {
-  const entries = entriesOf(extractJson(raw));
+  const entries = entriesOf(extractJson(raw), "memories");
   const proposals: ProposedMemory[] = [];
   for (const entry of entries) {
     if (entry === null || typeof entry !== "object") continue;
@@ -183,10 +184,78 @@ export function parseProposals(
 }
 
 /**
+ * The objective-reflection instruction. A separate, narrower task from memory reflection:
+ * notice durable, recurring PURPOSE the agent works toward across runs and propose it as a
+ * standing objective — not a one-off lesson (that is memory's job). Pinned to a strict JSON
+ * envelope so parsing is deterministic. Exported so it is reviewable and testable.
+ */
+export const OBJECTIVE_REFLECTION_SYSTEM_PROMPT = `You are the reflection step of an AI agent runtime. You are given the transcript of one task an agent just finished — the task it was asked to do and the output it produced. Your job is to notice when the run points to a DURABLE, STANDING OBJECTIVE the agent should carry across future runs, and propose it for a human to approve.
+
+A standing objective is an ongoing purpose the agent works toward over many runs (e.g. "keep the client's notes folder organized", "drive the Q3 migration to completion"). It is NOT a one-off lesson or fact — those are memories, handled separately. Propose an objective only when the run genuinely suggests a recurring goal worth making explicit.
+
+Be conservative: most runs do NOT warrant a new standing objective. If none is warranted, propose nothing. Never invent a goal the transcript does not support. Do not propose an objective the agent already holds (you will be shown its current objectives).
+
+Hard rules:
+- NEVER include secrets, tokens, passwords, API keys, or any credential value in an objective.
+- Each objective is one clear sentence of ongoing purpose.
+
+Respond with STRICT JSON and nothing else, in exactly this shape:
+{"objectives": [{"content": "the standing objective, one sentence", "confidence": 0.0}]}
+
+"confidence" is a number from 0 to 1. If there is nothing worth proposing, respond with {"objectives": []}.`;
+
+/** Compose the objective-reflection user message: the transcript plus the agent's existing objectives. */
+export function buildObjectiveReflectionUserPrompt(input: ReflectionInput): string {
+  const { transcript, knownMemories } = input;
+  const sections: string[] = [
+    `Task the agent was given:\n${transcript.input}`,
+    `What the agent produced:\n${transcript.output}`,
+  ];
+  // The shared ReflectionInput carries the agent's already-held OBJECTIVES in `knownMemories`
+  // for this call (the dedup hint), per the `proposeObjectives` contract.
+  if (knownMemories && knownMemories.length > 0) {
+    const lines = knownMemories.map((m) => `- ${m}`).join("\n");
+    sections.push(
+      `Standing objectives the agent already has (do not re-propose these):\n${lines}`,
+    );
+  }
+  sections.push(
+    `Propose standing objectives from this run as STRICT JSON: {"objectives": [{"content": ..., "confidence": ...}]}. If nothing is worth proposing, return {"objectives": []}.`,
+  );
+  return sections.join("\n\n");
+}
+
+/**
+ * Turn a model response into validated {@link ProposedObjective} objects, all tagged with
+ * `sourceRunId`. The objective analogue of {@link parseProposals}, equally tolerant: entries
+ * with empty content or a non-object shape are dropped; confidence is clamped; a response that
+ * is not usable JSON yields `[]`. Objectives have no type, so there is no type filter.
+ */
+export function parseObjectiveProposals(
+  raw: string,
+  sourceRunId: string,
+): ProposedObjective[] {
+  const entries = entriesOf(extractJson(raw), "objectives");
+  const proposals: ProposedObjective[] = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const content = typeof record.content === "string" ? record.content.trim() : "";
+    if (content.length === 0) continue;
+    proposals.push({
+      content,
+      confidence: normalizeConfidence(record.confidence),
+      sourceRunId,
+    });
+  }
+  return proposals;
+}
+
+/**
  * The hosted-model {@link ReflectionProvider}. Constructed with a
  * {@link ChatModelClient} (a real HTTP client in production, a fake in tests); it
- * builds the prompt, calls the model once, and parses the result into proposals.
- * It writes nothing — returning proposals is the whole of its job.
+ * builds the prompt, calls the model once per reflection task, and parses the result
+ * into proposals. It writes nothing — returning proposals is the whole of its job.
  */
 export class DefaultReflectionProvider implements ReflectionProvider {
   constructor(private readonly client: ChatModelClient) {}
@@ -197,5 +266,14 @@ export class DefaultReflectionProvider implements ReflectionProvider {
       user: buildReflectionUserPrompt(input),
     });
     return parseProposals(raw, input.transcript.runId);
+  }
+
+  /** Propose NEW standing objectives the run suggests — a separate model call + parser from memory. */
+  async proposeObjectives(input: ReflectionInput): Promise<readonly ProposedObjective[]> {
+    const raw = await this.client.complete({
+      system: OBJECTIVE_REFLECTION_SYSTEM_PROMPT,
+      user: buildObjectiveReflectionUserPrompt(input),
+    });
+    return parseObjectiveProposals(raw, input.transcript.runId);
   }
 }

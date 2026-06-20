@@ -20,7 +20,7 @@
 //      it (a Phase 0 constraint). The subset is checked against `MemoryType` at
 //      compile time so the two can never drift.
 
-import type { Agent, Memory, MemoryType, Run } from "./types.js";
+import type { Agent, Memory, MemoryType, Objective, Run } from "./types.js";
 import type { AsterismStore } from "./store.js";
 import { assertMemorySafe, MemoryFirewallError, screenMemory } from "./firewall.js";
 import type { FirewallFinding } from "./firewall.js";
@@ -89,13 +89,35 @@ export interface ProposedMemory {
 }
 
 /**
- * Turns a run transcript into PROPOSED typed memory writes. The default
- * implementation drives a hosted model and lives in `@qmilab/asterism-reflect`;
- * core depends on no model client, mirroring the RuntimeAdapter seam. Returns a
- * read-only list so a caller can never mistake the result for a writable store.
+ * A single proposed standing objective — the objective analogue of {@link ProposedMemory},
+ * minus `memoryType` (objectives have no type). A provider produces these from a run
+ * transcript ("you keep doing X — make it standing?"); it never persists them. `confidence`
+ * is the provider's own estimate in [0, 1]; `sourceRunId` ties the proposal back to the run
+ * it was noticed in.
+ */
+export interface ProposedObjective {
+  content: string;
+  confidence: number;
+  sourceRunId: string;
+}
+
+/**
+ * Turns a run transcript into PROPOSED writes — typed memories, and (optionally) standing
+ * objectives. The default implementation drives a hosted model and lives in
+ * `@qmilab/asterism-reflect`; core depends on no model client, mirroring the RuntimeAdapter
+ * seam. Every method returns a read-only list so a caller can never mistake the result for a
+ * writable store.
  */
 export interface ReflectionProvider {
   reflect(input: ReflectionInput): Promise<readonly ProposedMemory[]>;
+  /**
+   * Propose NEW standing objectives the run suggests are worth carrying forward. OPTIONAL:
+   * a memory-only provider may omit it, and the kernel then proposes no objectives (graceful
+   * degradation, the replaceable-substrate discipline). When present, the shared
+   * {@link ReflectionInput.knownMemories} field carries the agent's already-held OBJECTIVE
+   * contents (the advisory dedup hint for this call), not its memories.
+   */
+  proposeObjectives?(input: ReflectionInput): Promise<readonly ProposedObjective[]>;
 }
 
 /**
@@ -163,6 +185,63 @@ export async function proposeReviewableMemories(
   return { kind: "proposed", runId: target.id, proposals, ignored: raw.length - usable.length };
 }
 
+/**
+ * A proposed objective readied for human review: the provider's proposal plus the memory
+ * firewall's findings on its content (empty when it screens clean). The objective analogue of
+ * {@link ReviewableProposal}; the findings are advisory (the hard gate is the firewall
+ * re-screen at persistence), shown so the reviewer sees WHAT tripped a rule.
+ */
+export interface ReviewableObjectiveProposal extends ProposedObjective {
+  findings: readonly FirewallFinding[];
+}
+
+/**
+ * The outcome of {@link proposeReviewableObjectives} — the objective analogue of
+ * {@link ProposeResult}: `proposed` (a reflectable run was found and the provider returned
+ * proposals, possibly empty) or `no_run` (no completed run with output to reflect on).
+ */
+export type ProposeObjectivesResult =
+  | { kind: "proposed"; runId: string; proposals: ReviewableObjectiveProposal[] }
+  | { kind: "no_run" };
+
+/**
+ * The objective analogue of {@link proposeReviewableMemories}: the EPHEMERAL, interactive
+ * live path. It selects the same run (a given `runId`, or the agent's latest run with output),
+ * hands the transcript and the agent's already-held OBJECTIVES (the dedup hint) to the
+ * provider's optional `proposeObjectives`, then screens each proposal for display. It only
+ * ever PROPOSES — nothing is persisted (that is the reviewer's accept, where the firewall
+ * re-screens as the real gate). A provider with no `proposeObjectives` yields zero proposals.
+ */
+export async function proposeReviewableObjectives(
+  store: AsterismStore,
+  agent: Agent,
+  provider: ReflectionProvider,
+  options: { runId?: string } = {},
+): Promise<ProposeObjectivesResult> {
+  const target =
+    options.runId !== undefined
+      ? store.runs.get(agent.id, options.runId)
+      : store.runs.latestWithOutput(agent.id);
+  if (!target || target.output === undefined || target.output.trim().length === 0) {
+    return { kind: "no_run" };
+  }
+  if (!provider.proposeObjectives) {
+    return { kind: "proposed", runId: target.id, proposals: [] };
+  }
+
+  const transcript = { runId: target.id, input: target.input, output: target.output };
+  const knownObjectives = store.objectives.listActiveAccepted(agent.id).map((o) => o.content);
+  const raw = await provider.proposeObjectives({
+    agentId: agent.id,
+    transcript,
+    knownMemories: knownObjectives,
+  });
+  const proposals = raw
+    .filter((p) => p.content.trim().length > 0)
+    .map((p) => ({ ...p, findings: screenMemory(p.content).findings }));
+  return { kind: "proposed", runId: target.id, proposals };
+}
+
 // ---------------------------------------------------------------------------
 // Scheduled reflection — the unattended PROPOSER and the human-drained queue.
 //
@@ -221,30 +300,87 @@ export function unreflectedRuns(
   return { runs: candidates.slice(0, limit), pending: Math.max(0, candidates.length - limit) };
 }
 
-/** The aggregate outcome of one `reflect --propose` tick across every run it processed. */
+/**
+ * The aggregate outcome of one `reflect --propose` tick across every run it processed. The
+ * flat counts are the MEMORY tally (unchanged for back-compat); `objectives` is the parallel
+ * objective-proposal tally the same tick produced.
+ */
 export interface QueueResult extends ReflectionRunTally {
   /** Run ids this tick reflected on (each got a `reflection.proposed` marker). */
   processedRuns: string[];
   /** Un-reflected runs left beyond this tick's cap (carried from {@link unreflectedRuns}). */
   pendingRuns: number;
+  /** The per-tick objective-proposal tally (the objective analogue of the flat memory counts). */
+  objectives: ReflectionRunTally;
 }
 
 /**
- * The SCHEDULED counterpart to {@link proposeReviewableMemories}: reflect on the agent's
- * un-reflected runs and PERSIST each proposal to the `proposed` review queue. For every
- * selected run it hands the transcript + already-known memories to the provider, applies
- * the reflection-only type filter, skips any proposal whose exact (trimmed) content is
- * already proposed or accepted (so re-ticks are idempotent and the queue never
- * duplicates), WITHHOLDS a firewall-flagged proposal (the unattended path has no human to
- * edit it — `recordMemory` blocks it and audits `memory.blocked`; it is dropped and
- * counted, never queued), and records a `reflection.proposed` marker per run so the next
- * tick skips it.
- *
- * It only ever writes inert `proposed` rows — it NEVER accepts. The human drains the queue
- * later via {@link acceptProposedMemory} / {@link rejectProposedMemory}. Agent-scoped
- * throughout. The provider's own errors propagate to the caller.
+ * Persist one run's batch of proposals (memory or objective) to the `proposed` queue, applying
+ * the shared per-proposal policy and returning the tally. `normalize` returns the trimmed,
+ * persistable content or `null` for an `ignored` proposal (a non-reviewable type, or empty
+ * content); `persist` writes one `proposed` row and may throw {@link MemoryFirewallError} for a
+ * poisoned proposal (already audited by the store) — which is WITHHELD, not fatal. The exact
+ * (trimmed) content is skipped when already in `seen` (proposed∪accepted, grown as we persist so
+ * two identical proposals in one batch queue once). The shared core of both the memory and the
+ * objective queue paths, so they can never drift on dedup / withhold / ignore accounting.
  */
-export async function queueProposedMemories(
+function queueProposalBatch<P>(
+  raw: readonly P[],
+  seen: Set<string>,
+  normalize: (p: P) => string | null,
+  persist: (content: string, p: P) => void,
+): ReflectionRunTally {
+  const tally: ReflectionRunTally = { queued: 0, withheld: 0, alreadyKnown: 0, ignored: 0 };
+  for (const p of raw) {
+    const content = normalize(p);
+    if (content === null) {
+      tally.ignored++;
+      continue;
+    }
+    if (seen.has(content)) {
+      tally.alreadyKnown++;
+      continue;
+    }
+    try {
+      persist(content, p);
+      seen.add(content);
+      tally.queued++;
+    } catch (err) {
+      // A firewall refusal is an expected per-proposal outcome: the store has already audited
+      // the block (`memory.blocked` / `objective.blocked`), so withhold and move on. Any other
+      // error is a genuine storage failure — rethrown to the run-level catch.
+      if (err instanceof MemoryFirewallError) {
+        tally.withheld++;
+        continue;
+      }
+      throw err;
+    }
+  }
+  return tally;
+}
+
+/**
+ * The SCHEDULED counterpart to {@link proposeReviewableMemories} / {@link proposeReviewableObjectives}:
+ * reflect on the agent's un-reflected runs and PERSIST each proposal — both memories AND standing
+ * objectives — to the `proposed` review queue. Reflection is ONE act per run: a single
+ * `reflected_at` claim covers both kinds, so "this run has been reflected" stays one fact and the
+ * two proposal sets can never diverge on which runs they have seen.
+ *
+ * For every selected run it hands the transcript to the provider (memories via `reflect`,
+ * objectives via the optional `proposeObjectives` — absent ⇒ no objective proposals), skips any
+ * proposal whose exact (trimmed) content is already proposed or accepted (so re-ticks are
+ * idempotent and the queue never duplicates), WITHHOLDS a firewall-flagged proposal (the
+ * unattended path has no human to edit it — the store blocks it and audits the refusal; it is
+ * dropped and counted, never queued), and records a `reflection.proposed` (memory) and, when
+ * objectives were attempted, an `objective.proposed` (objective) marker per run.
+ *
+ * It only ever writes inert `proposed` rows — it NEVER accepts. The human drains the queue later
+ * via {@link acceptProposedMemory} / {@link acceptProposedObjective} (and their reject siblings).
+ * Both model calls happen BEFORE the claim, so a model failure leaves the run UNCLAIMED and
+ * retryable; the re-read dedup set makes the retry idempotent. Agent-scoped throughout; the
+ * provider's own errors propagate to the caller.
+ */
+export async function queueProposals(
   store: AsterismStore,
   agent: Agent,
   provider: ReflectionProvider,
@@ -258,49 +394,46 @@ export async function queueProposedMemories(
     withheld: 0,
     alreadyKnown: 0,
     ignored: 0,
+    objectives: { queued: 0, withheld: 0, alreadyKnown: 0, ignored: 0 },
   };
 
-  // A stable advisory hint for the provider — a start snapshot is fine (it only helps the
-  // model avoid re-proposing known lessons; the real dedup is `seen`, re-read per run below).
+  // Stable advisory hints for the provider — a start snapshot is fine (they only help the model
+  // avoid re-proposing known content; the real dedup is `seen`, re-read per run below).
   const knownMemories = store.memories.listActiveAccepted(agent.id).map((m) => m.content);
+  const knownObjectives = store.objectives.listActiveAccepted(agent.id).map((o) => o.content);
 
   for (const run of runs) {
     // `unreflected` guarantees non-blank output; narrow for the type checker.
     if (run.output === undefined) continue;
     const transcript = { runId: run.id, input: run.input, output: run.output };
-    // Call the model FIRST, then claim. A model failure (or a process death) therefore leaves
+    // Call BOTH models FIRST, then claim. A model failure (or a process death) therefore leaves
     // the run UNCLAIMED and retryable on the next tick — nothing is lost.
-    const raw = await provider.reflect({ agentId: agent.id, transcript, knownMemories });
+    const rawMemories = await provider.reflect({ agentId: agent.id, transcript, knownMemories });
+    const rawObjectives = provider.proposeObjectives
+      ? await provider.proposeObjectives({ agentId: agent.id, transcript, knownMemories: knownObjectives })
+      : undefined;
 
     // CLAIM the run before persisting. A concurrent `reflect --propose` that already processed
-    // this run wins the claim; we lose it and DISCARD our (now-duplicate) proposals, so the
-    // same run is never double-queued. Single-flight without an external lock.
+    // this run wins the claim; we lose it and DISCARD our (now-duplicate) proposals, so the same
+    // run is never double-queued. Single-flight without an external lock.
     if (!store.claimRunForReflection(agent.id, run.id)) continue;
 
     try {
-      // Re-read the dedup set AFTER claiming, so it reflects anything a concurrent proposer or
-      // drain committed while we were on the model. Exact-content skip against proposed∪accepted,
-      // grown as we persist so two of this run's proposals with identical content queue once.
-      const seen = new Set([
+      // Re-read each dedup set AFTER claiming, so it reflects anything a concurrent proposer or
+      // drain committed while we were on the model. Exact-content skip against proposed∪accepted.
+      const memSeen = new Set([
         ...store.memories.listActiveAccepted(agent.id).map((m) => m.content.trim()),
         ...store.memories.list(agent.id, { reviewState: "proposed" }).map((m) => m.content.trim()),
       ]);
-      const tally: ReflectionRunTally = { queued: 0, withheld: 0, alreadyKnown: 0, ignored: 0 };
-      for (const p of raw) {
-        if (!isReflectionMemoryType(p.memoryType)) {
-          tally.ignored++;
-          continue;
-        }
-        const content = p.content.trim();
-        if (content.length === 0) {
-          tally.ignored++;
-          continue;
-        }
-        if (seen.has(content)) {
-          tally.alreadyKnown++;
-          continue;
-        }
-        try {
+      const memTally = queueProposalBatch(
+        rawMemories,
+        memSeen,
+        (p) => {
+          if (!isReflectionMemoryType(p.memoryType)) return null;
+          const content = p.content.trim();
+          return content.length === 0 ? null : content;
+        },
+        (content, p) =>
           store.recordMemory(agent.id, {
             memoryType: p.memoryType,
             content,
@@ -308,27 +441,38 @@ export async function queueProposedMemories(
             sourceRunId: p.sourceRunId,
             reviewState: "proposed",
             status: "active",
-          });
-          seen.add(content);
-          tally.queued++;
-        } catch (err) {
-          // The firewall refusing a poisoned proposal is an expected per-proposal outcome:
-          // `recordMemory` has already audited `memory.blocked`, so withhold and move on. Any
-          // other error is a genuine storage failure — rethrown to the run-level catch below.
-          if (err instanceof MemoryFirewallError) {
-            tally.withheld++;
-            continue;
-          }
-          throw err;
-        }
+          }),
+      );
+      store.recordReflectionProposed(agent.id, run.id, memTally);
+      result.queued += memTally.queued;
+      result.withheld += memTally.withheld;
+      result.alreadyKnown += memTally.alreadyKnown;
+      result.ignored += memTally.ignored;
+
+      // Objective proposals — only when the provider attempted them (a memory-only provider
+      // skips this block entirely, so no misleading `objective.proposed` marker is recorded).
+      if (rawObjectives !== undefined) {
+        const objSeen = new Set([
+          ...store.objectives.listActiveAccepted(agent.id).map((o) => o.content.trim()),
+          ...store.objectives.list(agent.id, { reviewState: "proposed" }).map((o) => o.content.trim()),
+        ]);
+        const objTally = queueProposalBatch(
+          rawObjectives,
+          objSeen,
+          (p) => {
+            const content = p.content.trim();
+            return content.length === 0 ? null : content;
+          },
+          (content) => store.createObjective(agent.id, content, "proposed"),
+        );
+        store.recordObjectiveProposed(agent.id, run.id, objTally);
+        result.objectives.queued += objTally.queued;
+        result.objectives.withheld += objTally.withheld;
+        result.objectives.alreadyKnown += objTally.alreadyKnown;
+        result.objectives.ignored += objTally.ignored;
       }
 
-      store.recordReflectionProposed(agent.id, run.id, tally);
       result.processedRuns.push(run.id);
-      result.queued += tally.queued;
-      result.withheld += tally.withheld;
-      result.alreadyKnown += tally.alreadyKnown;
-      result.ignored += tally.ignored;
     } catch (err) {
       // A storage failure AFTER the claim — release the claim so the run is retried rather
       // than stranded as reflected-but-empty, then propagate (one failure ends the tick).
@@ -338,6 +482,16 @@ export async function queueProposedMemories(
   }
   return result;
 }
+
+/**
+ * @deprecated Renamed to {@link queueProposals}, kept as a backward-compatible alias for
+ * embedders that imported the old name. The behaviour broadened: a tick now also queues
+ * standing-objective proposals when the provider implements `proposeObjectives`. This is
+ * purely additive for existing callers — a memory-only provider behaves exactly as before,
+ * and the extra `objectives` field on the {@link QueueResult} is new, not a change to the
+ * memory counts. Prefer `queueProposals` in new code.
+ */
+export const queueProposedMemories = queueProposals;
 
 /**
  * The outcome of draining one queued proposal — accepting it activates the memory (or
@@ -417,4 +571,79 @@ export function acceptProposedMemory(
   assertMemorySafe(current.content);
   const settled = store.settleProposedMemory(agent.id, id, "accepted");
   return settled ? { kind: "accepted", memory: settled } : drainMiss(store, agent, id);
+}
+
+// ---------------------------------------------------------------------------
+// Objective drain — the byte-for-byte parallel of the memory drain above, for
+// reflection-PROPOSED standing objectives.
+// ---------------------------------------------------------------------------
+
+/**
+ * The objective analogue of {@link DrainResult}: accepting a queued objective proposal
+ * activates it (or a re-screened edit of it) so it frames runs; rejecting it terminates it.
+ * `not_found` means no such objective for this agent; `not_proposed` means the id exists but
+ * is not in the `proposed` queue (already accepted/rejected).
+ */
+export type ObjectiveDrainResult =
+  | { kind: "accepted"; objective: Objective }
+  | { kind: "rejected"; objective: Objective }
+  | { kind: "not_found" }
+  | { kind: "not_proposed" };
+
+/** Read back whether `id` exists at all for this agent — to tell `not_found` from a lost CAS. */
+function objectiveDrainMiss(store: AsterismStore, agent: Agent, id: string): ObjectiveDrainResult {
+  return store.objectives.get(agent.id, id) ? { kind: "not_proposed" } : { kind: "not_found" };
+}
+
+/**
+ * Reject a queued objective proposal: settle `proposed → rejected` via the single-winner CAS
+ * (audited `objective.reviewed`). The row stays as a rejected record; it never framed a run, so
+ * nothing changes. Agent-scoped — a cross-agent or unknown id is `not_found`; an already-settled
+ * one (or a lost race) is `not_proposed`. The objective analogue of {@link rejectProposedMemory}.
+ */
+export function rejectProposedObjective(
+  store: AsterismStore,
+  agent: Agent,
+  id: string,
+): ObjectiveDrainResult {
+  const settled = store.settleProposedObjective(agent.id, id, "rejected");
+  return settled ? { kind: "rejected", objective: settled } : objectiveDrainMiss(store, agent, id);
+}
+
+/**
+ * Accept a queued objective proposal — the human's ratification that turns an inert `proposed`
+ * objective into an `active + accepted` one that frames future runs. The objective analogue of
+ * {@link acceptProposedMemory}, with the same hard-gate firewall discipline on both paths:
+ *
+ * - Unchanged: re-screen the content ({@link assertMemorySafe}) and, if it still passes, settle
+ *   `proposed → accepted` via the single-winner CAS (the re-screen catches a ruleset that
+ *   tightened since the proposal was queued).
+ * - Edited (`editedContent` non-blank and different): screen the NEW content up front (so a
+ *   poisoned edit is refused WITHOUT touching the original), then atomically CAS-claim the
+ *   original `proposed → rejected` and record the edit as a fresh `accepted` objective.
+ *
+ * A blank or identical `editedContent` is treated as "unchanged" (surfaces guard blank edits
+ * before calling). Agent-scoped — a cross-agent or unknown id is `not_found`; an already-settled
+ * one (or a lost race) is `not_proposed`.
+ */
+export function acceptProposedObjective(
+  store: AsterismStore,
+  agent: Agent,
+  id: string,
+  editedContent?: string,
+): ObjectiveDrainResult {
+  const current = store.objectives.get(agent.id, id);
+  if (!current) return { kind: "not_found" };
+  if (current.reviewState !== "proposed") return { kind: "not_proposed" };
+
+  const edited = editedContent?.trim();
+  if (edited !== undefined && edited.length > 0 && edited !== current.content) {
+    assertMemorySafe(edited);
+    const objective = store.acceptEditedObjectiveProposal(agent.id, current, edited);
+    return objective ? { kind: "accepted", objective } : objectiveDrainMiss(store, agent, id);
+  }
+
+  assertMemorySafe(current.content);
+  const settled = store.settleProposedObjective(agent.id, id, "accepted");
+  return settled ? { kind: "accepted", objective: settled } : objectiveDrainMiss(store, agent, id);
 }

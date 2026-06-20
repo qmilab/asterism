@@ -88,11 +88,14 @@ export function buildSystemPrompt(ctx: FramingContext): string {
 
   // Objectives — the agent's standing purpose, placed high (right after who it is,
   // before skills/memory) because it is what shapes everything the run is for. Only
-  // `active` objectives frame a run — `done`/`dropped` ones must never shape
-  // behaviour, the same "only the live subset frames a run" rule memory's
-  // active+accepted predicate enforces. Input order is preserved (the caller passes
-  // them oldest-first); the section is omitted entirely when none are active.
-  const objectives = (ctx.objectives ?? []).filter((o) => o.status === "active");
+  // `active` AND `accepted` objectives frame a run — `done`/`dropped`/`rejected` ones,
+  // and reflection-PROPOSED ones awaiting review, must never shape behaviour. This is
+  // memory's own active+accepted predicate (`isFramable`) applied to objectives, so a
+  // proposed objective is inert until a human accepts it. Input order is preserved (the
+  // caller passes them oldest-first); the section is omitted when none are framable.
+  const objectives = (ctx.objectives ?? []).filter(
+    (o) => o.status === "active" && o.reviewState === "accepted",
+  );
   if (objectives.length > 0) {
     const lines = objectives.map((o) => `- ${o.content}`);
     sections.push(`Your standing objectives:\n${lines.join("\n")}`);

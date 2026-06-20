@@ -3,8 +3,10 @@ import { expect, test } from "bun:test";
 import type { ReflectionInput } from "@qmilab/asterism-core";
 
 import {
+  buildObjectiveReflectionUserPrompt,
   buildReflectionUserPrompt,
   DefaultReflectionProvider,
+  parseObjectiveProposals,
   parseProposals,
 } from "./provider.js";
 import type { ChatModelClient, ChatRequest } from "./model.js";
@@ -140,5 +142,58 @@ test("the provider calls the model with the reflection system prompt and parses 
   expect(proposals[0]?.sourceRunId).toBe(RUN_ID);
   // It sent a system instruction and a user message built from the transcript.
   expect(client.seen[0]?.system).toContain("reflection step");
+  expect(client.seen[0]?.user).toContain("write the blog");
+});
+
+// --- Slice 2: objective proposals ------------------------------------------
+
+test("parseObjectiveProposals reads the {objectives:[…]} envelope and tags the run id", () => {
+  const raw = JSON.stringify({
+    objectives: [
+      { content: "keep the notes folder tidy", confidence: 0.8 },
+      { content: "   ", confidence: 0.5 }, // empty content dropped
+      { content: "drive the migration to done", confidence: 9 }, // confidence clamped
+    ],
+  });
+  const proposals = parseObjectiveProposals(raw, RUN_ID);
+  expect(proposals.map((p) => p.content)).toEqual([
+    "keep the notes folder tidy",
+    "drive the migration to done",
+  ]);
+  expect(proposals[1]?.confidence).toBe(1);
+  expect(proposals.every((p) => p.sourceRunId === RUN_ID)).toBe(true);
+});
+
+test("parseObjectiveProposals tolerates fences/prose and a non-JSON response yields none", () => {
+  const fenced =
+    "Here's one:\n```json\n" +
+    JSON.stringify({ objectives: [{ content: "fenced objective", confidence: 0.7 }] }) +
+    "\n```";
+  expect(parseObjectiveProposals(fenced, RUN_ID).map((p) => p.content)).toEqual(["fenced objective"]);
+  expect(parseObjectiveProposals("nothing worth proposing", RUN_ID)).toEqual([]);
+  expect(parseObjectiveProposals(JSON.stringify({ objectives: [] }), RUN_ID)).toEqual([]);
+});
+
+test("the objective user prompt carries the task, output, and known objectives", () => {
+  const prompt = buildObjectiveReflectionUserPrompt(
+    input({ knownMemories: ["already drives the migration"] }),
+  );
+  expect(prompt).toContain("write the blog");
+  expect(prompt).toContain("done, saved to ./drafts");
+  // The shared `knownMemories` field carries the agent's existing OBJECTIVES for this call.
+  expect(prompt).toContain("already drives the migration");
+  expect(prompt).toContain("Standing objectives the agent already has");
+});
+
+test("proposeObjectives calls the model with the objective system prompt and parses the result", async () => {
+  const client = cannedClient(
+    JSON.stringify({ objectives: [{ content: "keep things tidy", confidence: 0.6 }] }),
+  );
+  const provider = new DefaultReflectionProvider(client);
+  const proposals = await provider.proposeObjectives(input());
+  expect(proposals).toHaveLength(1);
+  expect(proposals[0]?.content).toBe("keep things tidy");
+  expect(proposals[0]?.sourceRunId).toBe(RUN_ID);
+  expect(client.seen[0]?.system).toContain("standing objective");
   expect(client.seen[0]?.user).toContain("write the blog");
 });
