@@ -40,6 +40,23 @@ export const REVIEW_STATES = ["proposed", "accepted", "rejected"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
 
 /**
+ * A standing objective's lifecycle. An objective is operator-declared current
+ * purpose, not an accumulated lesson — so it has a small completion lifecycle
+ * rather than memory's review/archive states:
+ *
+ * - `active`  — the default, and the ONLY state that frames runs. It is what the
+ *               agent is working toward right now, surfaced as standing context on
+ *               every run (not relevance-ranked — objectives are few and all-relevant).
+ * - `done`    — completed; kept for history, no longer framed.
+ * - `dropped` — abandoned; kept for history, no longer framed.
+ *
+ * Only `active` shaping behaviour is the same "only the live subset frames a run"
+ * rule memory's `active + accepted` predicate enforces.
+ */
+export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
+export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];
+
+/**
  * An agent's EARNED autonomy on one destructive capability — the per-capability
  * "trust contract" that sits underneath the coarse, whole-agent {@link TrustLevel}.
  * Progressive, and the *only* value that changes gate behaviour is the top rung:
@@ -88,6 +105,9 @@ export const EVENT_TYPES = [
   "memory.blocked",
   "memory.reviewed",
   "reflection.proposed",
+  "objective.added",
+  "objective.status_changed",
+  "objective.blocked",
   "skill.attached",
   "credential.added",
   "credential.rotated",
@@ -188,6 +208,25 @@ export interface Credential {
   /** Reference into the local secret store — never the plaintext value. */
   valueRef: string;
   createdAt: string;
+}
+
+/**
+ * A standing objective — the agent's durable, operator-declared current purpose,
+ * scoped by `agentId` like every other row. Where memory is accumulated,
+ * relevance-recalled *lessons* ("I prefer X"), an objective is a small, mutable
+ * statement of what the agent is working toward *now* ("finish the Q3 migration"),
+ * carried across runs with a completion lifecycle. Only an `active` objective frames
+ * a run; `done`/`dropped` ones are kept for history. Its `content` frames runs, so it
+ * is firewall-screened on the write path exactly like memory content.
+ */
+export interface Objective {
+  id: string;
+  agentId: string;
+  /** One-line standing purpose. */
+  content: string;
+  status: ObjectiveStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /**

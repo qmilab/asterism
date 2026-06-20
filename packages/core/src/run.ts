@@ -366,6 +366,11 @@ async function runAndPersist(
     const content = readMaybe(options.readFile, s.path);
     return { name: s.name, ...(content !== undefined ? { content } : {}) };
   });
+  // The agent's standing objectives — its durable, operator-declared current purpose,
+  // framed as standing context on every run. Only the `active` ones (the framing set);
+  // a scoped read in the same place skills are resolved, no new seam. Not recall-ranked
+  // or budget-bounded — objectives are few and all-relevant by definition.
+  const objectives = store.objectives.listActive(agent.id);
   // Everything that can fail while turning the agent's identity + task into an
   // executed outcome — recall, framing, and the substrate run — sits INSIDE one
   // guard, so a throw anywhere drives the run to a terminal state instead of
@@ -433,6 +438,7 @@ async function runAndPersist(
       ...(soulText !== undefined ? { soulText } : {}),
       skills,
       memories,
+      objectives,
       input,
       tools,
       signal: abortController.signal,

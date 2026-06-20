@@ -10,6 +10,7 @@ test("usage lists every command in the surface", () => {
     "trust",
     "secrets add",
     "skill add",
+    "objective add",
     "run",
     "confirm",
     "runs <agent>",

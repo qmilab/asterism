@@ -7,7 +7,7 @@ import {
   resolveSoul,
 } from "./framing";
 import { AsterismStore } from "./store";
-import type { Agent, Memory } from "./types";
+import type { Agent, Memory, Objective } from "./types";
 
 const agentFixture: Agent = {
   id: "agent-1",
@@ -29,6 +29,18 @@ function memory(partial: Partial<Memory>): Memory {
     status: "active",
     reviewState: "accepted",
     createdAt: "2026-01-01T00:00:00.000Z",
+    ...partial,
+  };
+}
+
+function objective(partial: Partial<Objective>): Objective {
+  return {
+    id: "o",
+    agentId: agentFixture.id,
+    content: "an objective",
+    status: "active",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
     ...partial,
   };
 }
@@ -97,6 +109,59 @@ describe("buildSystemPrompt — identity, soul, skills, memory", () => {
       ],
     };
     expect(buildSystemPrompt(ctx)).toBe(buildSystemPrompt(ctx));
+  });
+});
+
+describe("buildSystemPrompt — standing objectives", () => {
+  test("frames only active objectives, high (before skills and memory)", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      objectives: [
+        objective({ id: "1", content: "FINISH-MIGRATION" }),
+        objective({ id: "2", content: "TIDY-NOTES" }),
+      ],
+      skills: [{ name: "blog-writer" }],
+      memories: [memory({ content: "REMEMBERED" })],
+    });
+    expect(prompt).toContain("Your standing objectives:");
+    expect(prompt).toContain("- FINISH-MIGRATION");
+    expect(prompt).toContain("- TIDY-NOTES");
+    // Placed before skills and memory.
+    expect(prompt.indexOf("Your standing objectives:")).toBeLessThan(prompt.indexOf("blog-writer"));
+    expect(prompt.indexOf("Your standing objectives:")).toBeLessThan(prompt.indexOf("REMEMBERED"));
+  });
+
+  test("done and dropped objectives never shape the prompt", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      objectives: [
+        objective({ id: "1", content: "ACTIVE-GOAL", status: "active" }),
+        objective({ id: "2", content: "DONE-GOAL", status: "done" }),
+        objective({ id: "3", content: "DROPPED-GOAL", status: "dropped" }),
+      ],
+    });
+    expect(prompt).toContain("ACTIVE-GOAL");
+    expect(prompt).not.toContain("DONE-GOAL");
+    expect(prompt).not.toContain("DROPPED-GOAL");
+  });
+
+  test("the section is omitted entirely when none are active", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      objectives: [objective({ status: "done" })],
+    });
+    expect(prompt).not.toContain("Your standing objectives:");
+  });
+
+  test("preserves input order", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      objectives: [
+        objective({ id: "1", content: "FIRST" }),
+        objective({ id: "2", content: "SECOND" }),
+      ],
+    });
+    expect(prompt.indexOf("FIRST")).toBeLessThan(prompt.indexOf("SECOND"));
   });
 });
 
