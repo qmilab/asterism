@@ -15,8 +15,9 @@ deleting one, and remembers what you approve.
   initialize a workspace, and configure a model.
 - **[Tutorial](./getting-started.md)** — the gentle, end-to-end on-ramp: create an
   agent, run it, watch the destructive-action gate fire, and approve a memory.
-- **[Concepts](./concepts.md)** — agents, souls, roles, trust, memory, skills, and
-  secrets — and exactly what "separate" means today.
+- **[Concepts](./concepts.md)** — agents, souls, roles, trust, memory and recall,
+  skills, secrets, standing objectives, and working notes — and exactly what
+  "separate" means today.
 
 ## Guides
 
@@ -57,11 +58,19 @@ deleting one, and remembers what you approve.
 
 ## About this phase
 
-This documentation covers **Phase 1** — the local-first core plus reach and
-operability: the dashboard, chat channels, the background service, the HTTP
-endpoint, and the container image. Richer cognition, agent-to-agent
-collaboration, and stronger execution isolation come in later
-phases; follow along in the repo's
+This documentation covers **Phase 2 — Governed Learning** (latest release
+**v0.3.0**). It builds on the Phase 1 local-first core — distinct agents with
+per-agent memory, secrets, skills, and workspace; dialable trust with the
+destructive-action gate; reviewable memory — and the reach and operability
+layered on top of it: the dashboard, chat channels, the background service, the
+HTTP endpoint, and the container image. Phase 2 adds **governed learning** —
+how an agent improves with you in control: structured
+[recall](./concepts.md#recall), earned
+[per-capability trust](./concepts.md#earned-autonomy), reviewed
+[reflection](./concepts.md#reflection) you can put on a schedule, standing
+[objectives](./concepts.md#standing-objectives), and the agent's own
+[working notes](./concepts.md#working-notes). Agent-to-agent collaboration and
+stronger execution isolation come in later phases; follow along in the repo's
 [issues](https://github.com/qmilab/asterism/issues). For the precise scope of
 what "separate" guarantees today, see
 [Concepts → What isolation means today](./concepts.md#what-isolation-means-today).
