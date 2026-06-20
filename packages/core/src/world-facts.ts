@@ -69,11 +69,18 @@ function findingSummary(err: MemoryFirewallError): string {
  * a command string.
  *
  * The kernel injects these on every run (`run.ts`), so they are exposed automatically
- * (the run's exposure set is `capabilities.map(c => c.key)`). The `store` + `agentId`
- * are captured here, on the kernel's side of the boundary; the adapter receives only
- * the resulting `execute`.
+ * (the run's exposure set is `capabilities.map(c => c.key)`). The `store`, `agentId`, and
+ * the run's `runId` are captured here, on the kernel's side of the boundary; the adapter
+ * receives only the resulting `execute`. `runId` is threaded into the store writes so the
+ * resulting `world_fact.*` events carry the originating run — including a firewall-BLOCKED
+ * `record_note`, which the gate never records as `action.executed` — keeping the per-run
+ * audit (`events tail --run <id>`) complete.
  */
-export function worldFactCapabilities(store: AsterismStore, agentId: string): Capability[] {
+export function worldFactCapabilities(
+  store: AsterismStore,
+  agentId: string,
+  runId?: string,
+): Capability[] {
   const recordNote: Capability = {
     key: WORLD_FACT_RECORD_KEY,
     effect: "write",
@@ -108,7 +115,7 @@ export function worldFactCapabilities(store: AsterismStore, agentId: string): Ca
           return failure("record_note needs a non-empty 'value'.");
         }
         try {
-          const fact = store.recordWorldFact(agentId, subject, value);
+          const fact = store.recordWorldFact(agentId, subject, value, runId);
           return { output: `Noted '${fact.subject}'.` };
         } catch (err) {
           if (err instanceof MemoryFirewallError) {
@@ -151,7 +158,7 @@ export function worldFactCapabilities(store: AsterismStore, agentId: string): Ca
         // failure rather than throwing across the adapter seam — the invariant this
         // module's header states.
         try {
-          const removed = store.clearWorldFact(agentId, subject);
+          const removed = store.clearWorldFact(agentId, subject, runId);
           return {
             output: removed ? `Forgot '${subject}'.` : `No working note named '${subject}'.`,
           };

@@ -291,7 +291,9 @@ async function runAndPersist(
   const hostCapabilities = (options.capabilities ?? []).filter(
     (c) => !reservedKeys.has(c.key) && !reservedToolNames.has(c.tool.name),
   );
-  const capabilities = [...hostCapabilities, ...worldFactCapabilities(store, agent.id)];
+  // Pass `run.id` so the tools' `world_fact.*` events are tagged with the originating run
+  // (per-run audit completeness, incl. a firewall-blocked record the gate never logs).
+  const capabilities = [...hostCapabilities, ...worldFactCapabilities(store, agent.id, run.id)];
   const profile = trustProfile({
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),

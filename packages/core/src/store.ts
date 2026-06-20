@@ -887,8 +887,15 @@ export class AsterismStore {
    * refusal, so it is not audited. On success: `world_fact.recorded` (references only —
    * the id and whether it superseded an existing note, NEVER the subject/value, which are
    * agent content like memory content).
+   *
+   * `runId` stamps the originating run on the audit events (`world_fact.recorded` /
+   * `world_fact.blocked`) when the write came from a run's `record_note` tool, so a
+   * per-run audit (`events tail --run <id>`) shows the note mutation — and, crucially, a
+   * firewall-BLOCKED attempt, which the gate never records as `action.executed` (that hook
+   * only fires on a non-error tool result). Absent for the operator path (`notes set`),
+   * which is not part of a run.
    */
-  recordWorldFact(agentId: string, subject: string, value: string): WorldFact {
+  recordWorldFact(agentId: string, subject: string, value: string, runId?: string): WorldFact {
     const trimmedSubject = subject.trim();
     const trimmedValue = value.trim();
     try {
@@ -906,7 +913,7 @@ export class AsterismStore {
       assertMemorySafe(worldFactFramingText(trimmedSubject, trimmedValue));
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
-        this.emit(agentId, "world_fact.blocked", { findings: err.findings });
+        this.emit(agentId, "world_fact.blocked", { findings: err.findings }, runId);
       }
       throw err;
     }
@@ -916,10 +923,12 @@ export class AsterismStore {
         throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
       }
       const fact = this.worldFacts.upsert(agentId, trimmedSubject, trimmedValue);
-      this.emit(agentId, "world_fact.recorded", {
-        worldFactId: fact.id,
-        superseded: existing !== undefined,
-      });
+      this.emit(
+        agentId,
+        "world_fact.recorded",
+        { worldFactId: fact.id, superseded: existing !== undefined },
+        runId,
+      );
       return fact;
     });
   }
@@ -933,14 +942,16 @@ export class AsterismStore {
    * no firewall path here. The `subject` is trimmed to match the normalized key
    * {@link recordWorldFact} stores under, so a note set with surrounding whitespace is
    * still clearable. A cross-agent or unknown subject touches nothing and returns
-   * undefined, which the caller uses to tell those apart.
+   * undefined, which the caller uses to tell those apart. `runId` stamps the originating
+   * run on `world_fact.cleared` when the clear came from a run's `forget_note` tool (so
+   * the per-run audit shows it); absent for the operator path (`notes clear`).
    */
-  clearWorldFact(agentId: string, subject: string): WorldFact | undefined {
+  clearWorldFact(agentId: string, subject: string, runId?: string): WorldFact | undefined {
     const trimmedSubject = subject.trim();
     return this.driver.transaction(() => {
       const removed = this.worldFacts.clear(agentId, trimmedSubject);
       if (removed) {
-        this.emit(agentId, "world_fact.cleared", { worldFactId: removed.id });
+        this.emit(agentId, "world_fact.cleared", { worldFactId: removed.id }, runId);
       }
       return removed;
     });
