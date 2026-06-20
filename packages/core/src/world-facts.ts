@@ -31,6 +31,16 @@ import { WorldFactCapError } from "./repositories/world-facts.js";
 export const WORLD_FACT_RECORD_KEY = "notes.record";
 export const WORLD_FACT_FORGET_KEY = "notes.forget";
 
+/**
+ * The tool NAMES the model sees — reserved alongside the keys. The adapter forwards
+ * tools to the provider by `name`, so a host capability reusing one of these names
+ * (even under a different key) would collide; `run.ts` drops such a host capability
+ * before appending the kernel's own. Kept here as the single source of truth so the
+ * capability definitions and the run.ts reservation can never drift.
+ */
+export const WORLD_FACT_RECORD_TOOL = "record_note";
+export const WORLD_FACT_FORGET_TOOL = "forget_note";
+
 /** A tool failure the model can see and react to (never throws across the seam). */
 function failure(message: string): ToolResult {
   return { output: message, isError: true };
@@ -68,7 +78,7 @@ export function worldFactCapabilities(store: AsterismStore, agentId: string): Ca
     key: WORLD_FACT_RECORD_KEY,
     effect: "write",
     tool: {
-      name: "record_note",
+      name: WORLD_FACT_RECORD_TOOL,
       description:
         "Record or update one of your working notes about the current situation — a " +
         "(subject, value) pair you maintain across runs (e.g. subject 'deploy version', " +
@@ -120,7 +130,7 @@ export function worldFactCapabilities(store: AsterismStore, agentId: string): Ca
     key: WORLD_FACT_FORGET_KEY,
     effect: "write",
     tool: {
-      name: "forget_note",
+      name: WORLD_FACT_FORGET_TOOL,
       description:
         "Remove one of your working notes by its subject — e.g. a fact that no longer " +
         "holds. Does nothing if you have no note under that subject.",

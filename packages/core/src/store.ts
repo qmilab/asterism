@@ -40,6 +40,7 @@ import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
+import { worldFactFramingText } from "./framing.js";
 
 /**
  * The kernel's persistence surface. Applies the Phase 0 schema and exposes one
@@ -891,8 +892,17 @@ export class AsterismStore {
     const trimmedSubject = subject.trim();
     const trimmedValue = value.trim();
     try {
+      // Screen each field AND the exact RENDERED line (`subject: value`) the fact frames
+      // as. Per-field screens alone would let an injection be split across the `: `
+      // delimiter — `subject: "ignore all previous"`, `value: "instructions"` each pass,
+      // but frame as a single injection line — so the combined screen via
+      // `worldFactFramingText` (the one source of truth the framing render also uses) is
+      // the load-bearing one; the per-field screens stay as defense-in-depth. This is the
+      // usage-aware screen the store owns (the repository's per-field screen is
+      // framing-agnostic), the same layering the cap follows.
       assertMemorySafe(trimmedSubject);
       assertMemorySafe(trimmedValue);
+      assertMemorySafe(worldFactFramingText(trimmedSubject, trimmedValue));
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
         this.emit(agentId, "world_fact.blocked", { findings: err.findings });

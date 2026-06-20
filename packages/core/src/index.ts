@@ -118,6 +118,8 @@ export {
   worldFactCapabilities,
   WORLD_FACT_RECORD_KEY,
   WORLD_FACT_FORGET_KEY,
+  WORLD_FACT_RECORD_TOOL,
+  WORLD_FACT_FORGET_TOOL,
 } from "./world-facts.js";
 
 // Run framing — composes soul / role / scoped skills / accepted memories into the
@@ -126,6 +128,7 @@ export {
   buildSystemPrompt,
   frameRun,
   resolveSoul,
+  worldFactFramingText,
   BUILTIN_SOULS,
 } from "./framing.js";
 export type {

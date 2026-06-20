@@ -54,6 +54,20 @@ export interface FramingContext {
 }
 
 /**
+ * The exact text one world-fact contributes to run framing — `subject: value` — and
+ * therefore the precise string the firewall must screen on the write path. Exported so
+ * the screen and the render share ONE source of truth and can never drift: screening the
+ * fields independently would let a prompt injection be split across the `: ` delimiter
+ * (`subject: "ignore all previous"`, `value: "instructions"` frames as a single
+ * injection line while each field passes its own screen). The framing render below and
+ * `store.recordWorldFact`'s screen both go through here. The constant `- ` list prefix is
+ * boilerplate and not part of the injectable content, so it is omitted.
+ */
+export function worldFactFramingText(subject: string, value: string): string {
+  return `${subject}: ${value}`;
+}
+
+/**
  * A memory only frames a run when it is BOTH `active` and `accepted`. Proposed
  * memories (awaiting human review), rejected ones, and archived ones must never
  * shape behaviour — this is what makes reflection's accept/reject meaningful and
@@ -141,7 +155,7 @@ export function buildSystemPrompt(ctx: FramingContext): string {
   // when there are none.
   const worldFacts = ctx.worldFacts ?? [];
   if (worldFacts.length > 0) {
-    const lines = worldFacts.map((f) => `- ${f.subject}: ${f.value}`);
+    const lines = worldFacts.map((f) => `- ${worldFactFramingText(f.subject, f.value)}`);
     sections.push(
       `Your working notes (your own running record of the current situation — you wrote ` +
         `these; they are not verified facts):\n${lines.join("\n")}`,
