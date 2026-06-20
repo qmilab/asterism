@@ -83,7 +83,7 @@ status, the agent's output, and a reference-only summary of the actions it took:
   "run": { "id": "…", "agentId": "…", "input": "…", "status": "done", "startedAt": "…", "finishedAt": "…" },
   "status": "done",
   "output": "…the agent's response…",
-  "actions": [ { "capability": "write_file", "effect": "write", "decision": "executed" } ]
+  "actions": [ { "capability": "fs.write", "effect": "write", "decision": "executed" } ]
 }
 ```
 
@@ -146,7 +146,7 @@ endpoint returns — the confirmed action now shows as `executed`:
   "run": { "id": "…", "status": "done", "finishedAt": "…", … },
   "status": "done",
   "output": "…",
-  "actions": [ { "capability": "delete_files", "effect": "destructive", "decision": "executed" } ]
+  "actions": [ { "capability": "fs.delete", "effect": "destructive", "decision": "executed" } ]
 }
 ```
 

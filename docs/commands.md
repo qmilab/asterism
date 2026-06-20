@@ -105,19 +105,52 @@ Before any agent exists it prints `No agents yet. Create one with: asterism new
 
 ```
 asterism trust <agent> <level>
+asterism trust <agent> --review
+asterism trust <agent> show
+asterism trust <agent> revoke <capability>
+asterism trust <agent> threshold [--clean <n>] [--targets <n>]  ·  --unset
 ```
 
-Change how much an agent may do on its own: `propose`, `notify`, or
-`autonomous`. Records an `agent.trust_changed` event.
+Set how much an agent may do on its own — both the overall **level**, and, capability
+by capability, the few destructive actions it has **earned** the right to take without
+pausing for you.
+
+### Set the level
 
 ```console
 $ asterism trust writer autonomous
 Set writer to autonomous.
 ```
 
-Remember: `notify` and `autonomous` both act without asking first. Only the
-[destructive-action gate](./concepts.md#the-destructive-action-gate) still
-pauses them — that gate is independent of trust level.
+`propose`, `notify`, or `autonomous` — see [trust levels](./concepts.md#trust-levels).
+Records an `agent.trust_changed` event. Remember: `notify` and `autonomous` both act
+without asking first. Only the
+[destructive-action gate](./concepts.md#the-destructive-action-gate) still pauses
+them — that gate is independent of trust level.
+
+### Earned autonomy — per-capability grants
+
+The destructive-action gate pauses *every* destructive action by default. An agent can
+**earn** the standing to take one specific capability without that pause — by handling
+it cleanly, several times, across different targets, with nothing declined or failed in
+between. Earned standing is always **proposed for your approval**, never granted
+automatically, and **lost the moment something goes wrong**: a declined or failed action
+on a capability resets it, and it has to be re-earned. A grant only ever lets *that one
+capability* skip the pause — it never weakens the classification, never crosses to
+another capability, and never carries to another agent.
+
+| Form | What it does |
+|---|---|
+| `trust <agent> --review` | Review the capabilities the agent has earned the right to act on without pausing. You grant or decline each; nothing is granted without your yes. |
+| `trust <agent> show` | Show the agent's level, which capabilities now act without pausing, and its earning bar. |
+| `trust <agent> revoke <capability>` | Take a grant back — the capability pauses for your confirmation again. |
+| `trust <agent> threshold [--clean <n>] [--targets <n>]` | Tune how much clean track record review asks for before it proposes a grant: how many confirmed executions (`--clean`), across how many different targets (`--targets`). Set either or both; leave the other as it is. |
+| `trust <agent> threshold --unset` | Clear the custom bar — back to the built-in default. |
+| `trust <agent> threshold` | Show this agent's current earning bar. |
+
+A higher bar only asks for *more* evidence before proposing a grant — it never lets
+anything act without your yes. Granting and revoking are recorded as
+`agent.standing_changed` events; tuning the bar as `agent.setting_changed`.
 
 ---
 
@@ -357,7 +390,7 @@ Activity for writer (3):
 2026-06-10T12:01:00.000Z  run.started  run=a1b2c3d4
   {"runId":"a1b2c3d4-…","status":"pending"}
 2026-06-10T12:01:02.000Z  action.executed  run=a1b2c3d4
-  {"capability":"edit_files","effect":"write"}
+  {"capability":"fs.write","effect":"write"}
 ```
 
 `--follow` prints the current backlog (after any `--limit`/`--type`/`--run`
@@ -538,6 +571,14 @@ Install default model: gpt-4o-mini (provider: openai)
 Per-agent model:
   work  →  claude-opus-4-8 (provider: anthropic)  [agent override]
   personal  →  gpt-4o-mini (provider: openai)  [install default]
+
+Per-agent recall budget:
+  work  →  20  [default]
+  personal  →  20  [default]
+
+Per-agent recall provider:
+  work  →  keyword (built-in)  [default]
+  personal  →  keyword (built-in)  [default]
 
 API keys are never stored here — set them in the environment (e.g. OPENAI_API_KEY).
 ```

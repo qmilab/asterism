@@ -97,6 +97,8 @@ operator surface over your own install; it complements the single-agent
 | `POST /agents/<a>/runs/<run>/decline` | Refuse a paused action; the run ends without it ever running. |
 | `POST /agents/<a>/reflect` | Propose reviewable memories from a run (default: the latest with output). Nothing is persisted. Needs a model (`503` otherwise). |
 | `POST /agents/<a>/memory` | Persist an accepted (or edited) memory. The memory firewall re-screens — a blocked write is `422` with the findings. |
+| `POST /agents/<a>/memory/<id>/accept` | Accept a queued proposal by id (optionally with an edited `content`); the firewall re-screens. Drains the review pile a scheduled [`reflect --propose`](./commands.md#reflect) fills. |
+| `POST /agents/<a>/memory/<id>/reject` | Reject a queued proposal by id — it never becomes active. |
 
 The destructive-action gate is unchanged at the network edge: confirm and decline are
 the two ways to clear a pause, and the grant a confirm makes is bounded to that one

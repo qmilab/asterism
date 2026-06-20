@@ -134,7 +134,7 @@ pauses and asks:
 
 ```text
 ⏸ This needs your OK before I can continue:
-  • delete_files (destructive)
+  • fs.delete (destructive)
 
 Reply /confirm to approve it, or /cancel to leave the run paused.
 ```
