@@ -150,6 +150,7 @@ logs writer-discord`, then re-run with the variable set. (Telegram is identical 
 | `ASTERISM_DISCORD_ALLOW` | `channel discord` | Comma-separated channel ids allowed to drive the agent. Empty ⇒ discovery mode. |
 | *provider key* (e.g. `OPENAI_API_KEY`) | starting runs | Needed to start runs; a `serve` container's read endpoints work without one. |
 | `ASTERISM_MODEL_*` / `ASTERISM_API_KEY` | model selection | Choose the model through the [environment](./installation.md#configuring-a-model) instead of `asterism config`. |
+| `ASTERISM_RECALL_EMBED_URL` / `_MODEL` / `_KEY` | opt-in recall provider | The local embeddings endpoint, for an agent opted into `local` recall ([`config recall-provider`](./commands.md#tuning-recall)). Optional; unset ⇒ the built-in keyword ranker. `_KEY` only if the endpoint needs a token. |
 
 No secret is ever baked into the image — every credential is injected at run time
 with `-e`, exactly as it is sourced from the environment everywhere else in Asterism.

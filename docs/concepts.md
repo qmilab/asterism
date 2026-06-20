@@ -112,6 +112,22 @@ error. So you can clear a multi-step run one confirmation at a time without ever
 double-charging or double-deleting. Reversible work it had already done (an ordinary
 file edit, say) may simply be redone as it picks the task back up.
 
+## Earned autonomy
+
+The gate pauses *every* destructive action by default — but an agent can **earn** the
+standing to take one specific capability without that pause. It earns it by a clean
+track record: handling that capability cleanly, several times, across different
+targets, with nothing declined or failed in between. When it has,
+[`asterism trust <agent> --review`](./commands.md#trust) proposes the grant **for your
+approval** — earned standing is never automatic, and you grant or decline each.
+
+A grant is narrow and fragile by design. It lets *only that one capability* skip the
+pause; it never weakens the classification, never crosses to another capability, and
+never carries to another agent. And it is **lost the moment something goes wrong** — a
+single declined or failed action on the capability resets it, and it has to be
+re-earned. You can revoke a grant yourself at any time, or tune how much evidence an
+agent must show before one is proposed. See [`asterism trust`](./commands.md#trust).
+
 ## Memory
 
 Each agent accumulates **memory** — typed, scoped to that agent, and yours to
@@ -165,12 +181,18 @@ The event types you will see:
 |---|---|
 | `agent.created` | The agent was created. |
 | `agent.trust_changed` | Its trust level was changed. |
+| `agent.standing_changed` | A capability's earned standing changed — a grant given or revoked. |
+| `agent.setting_changed` | A per-agent setting changed (recall budget, recall provider, or an earning threshold). |
 | `run.started` / `run.status_changed` | A run began / changed status. |
 | `run.resumed` | A paused run was confirmed and re-entered, naming the capabilities granted. |
+| `run.declined` | A paused run was declined; it ended without the action ever running. |
 | `action.executed` | A side-effecting action ran. |
+| `action.succeeded` | A side-effecting action completed successfully. |
 | `action.withheld` | A side effect was withheld (returned as a plan under `propose`). |
 | `action.awaiting_confirmation` | A destructive action paused for confirmation. |
 | `memory.recorded` / `memory.blocked` | A memory was saved / refused by the firewall. |
+| `memory.reviewed` | A proposed memory was accepted or rejected in review. |
+| `reflection.proposed` | A scheduled `reflect --propose` queued proposals from a run. |
 | `skill.attached` | A skill was attached. |
 | `credential.added` / `credential.rotated` / `credential.removed` | A secret changed. |
 | `secret.read` | A secret value was read out. *(Reserved — no Phase 1 tool reads a secret into a run, so you won't see this yet.)* |
