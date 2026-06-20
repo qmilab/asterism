@@ -56,21 +56,20 @@ deleting one, and remembers what you approve.
 | Watch and steer every agent at once | [Dashboard](./dashboard.md) |
 | Keep an agent running in the background | [Run as a service](./service.md) |
 
-## About this phase
+## What Asterism does today
 
-This documentation covers **Phase 2 — Governed Learning** (latest release
-**v0.3.0**). It builds on the Phase 1 local-first core — distinct agents with
-per-agent memory, secrets, skills, and workspace; dialable trust with the
-destructive-action gate; reviewable memory — and the reach and operability
-layered on top of it: the dashboard, chat channels, the background service, the
-HTTP endpoint, and the container image. Phase 2 adds **governed learning** —
-how an agent improves with you in control: structured
-[recall](./concepts.md#recall), earned
-[per-capability trust](./concepts.md#earned-autonomy), reviewed
+Asterism runs distinct agents from one local install — each with its own memory,
+secrets, skills, workspace, and autonomy, with a destructive-action gate that holds
+at every trust level. On top of that core it adds **governed learning** — how an
+agent improves with you in control: structured [recall](./concepts.md#recall),
+earned [per-capability trust](./concepts.md#earned-autonomy), reviewed
 [reflection](./concepts.md#reflection) you can put on a schedule, standing
 [objectives](./concepts.md#standing-objectives), and the agent's own
-[working notes](./concepts.md#working-notes). Agent-to-agent collaboration and
-stronger execution isolation come in later phases; follow along in the repo's
-[issues](https://github.com/qmilab/asterism/issues). For the precise scope of
-what "separate" guarantees today, see
+[working notes](./concepts.md#working-notes). You can drive an agent from the live
+dashboard, a Telegram or Discord chat, an HTTP endpoint, or a background service,
+and run the whole thing in a container.
+
+Agent-to-agent collaboration and stronger execution isolation are still ahead;
+follow along in the repo's [issues](https://github.com/qmilab/asterism/issues). For
+the precise scope of what "separate" guarantees today, see
 [Concepts → What isolation means today](./concepts.md#what-isolation-means-today).
