@@ -2454,3 +2454,17 @@ test("objective done on an unknown id is reported, not silently ignored", async 
   expect(await runCli(["objective", "done", "personal", "no-such-id"], h.io)).toBe(1);
   expect(h.err.join("\n")).toContain("No objective matching");
 });
+
+test("objective text beginning with a dash is preserved verbatim (Codex P2)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  // Free-form text that starts with a dash must not be parsed as a flag and dropped.
+  expect(await runCli(["objective", "add", "personal", "--draft the Q3 proposal"], h.io)).toBe(0);
+  const dashes = await capture(["objective", "list", "personal"], h.io);
+  expect(dashes).toContain("--draft the Q3 proposal");
+  // A single leading-dash token too.
+  expect(await runCli(["objective", "add", "personal", "- review the notes folder"], h.io)).toBe(0);
+  const single = await capture(["objective", "list", "personal"], h.io);
+  expect(single).toContain("- review the notes folder");
+});

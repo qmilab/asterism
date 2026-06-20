@@ -862,31 +862,48 @@ function matchAgentObjective(store: AsterismStore, agent: Agent, ref: string): A
 }
 
 async function cmdObjective(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
-  if (helpRequested(parsed)) {
-    io.out(COMMAND_HELP.objective!);
-    return 0;
-  }
-  const sub = parsed.positionals[0];
-  if (sub === "add") return cmdObjectiveAdd(parsed, io);
-  if (sub === "list") return cmdObjectiveList(parsed, io);
-  if (sub === "done") return cmdObjectiveStatus(parsed, "done", "done", io);
-  if (sub === "drop") return cmdObjectiveStatus(parsed, "dropped", "drop", io);
-  if (!sub) {
+  const sub = args[0];
+  if (sub === undefined) {
     io.err(OBJECTIVE_USAGE);
     return 1;
   }
+  if (sub === "--help" || sub === "-h") {
+    io.out(COMMAND_HELP.objective!);
+    return 0;
+  }
+  // Each subcommand takes its remaining args RAW — deliberately NOT through
+  // `parseArgs`. `objective add` carries free-form text, which `parseArgs` would eat
+  // as flags the moment it begins with a dash (`--draft the proposal`, `- step one`),
+  // dropping the very content the help tells the user to pass. There are no flags on
+  // any objective verb, so positional handling loses nothing — the same discipline
+  // `secrets add` uses to keep verbatim secret material intact.
+  const rest = args.slice(1);
+  if (sub === "add") return cmdObjectiveAdd(rest, io);
+  if (sub === "list") return cmdObjectiveList(rest, io);
+  if (sub === "done") return cmdObjectiveStatus(rest, "done", "done", io);
+  if (sub === "drop") return cmdObjectiveStatus(rest, "dropped", "drop", io);
   io.err(`Unknown subcommand: objective ${sub}`);
   io.out(COMMAND_HELP.objective!);
   return 1;
 }
 
+/** Whether the first sub-arg asks for help (`objective <verb> --help`). */
+function objectiveHelp(args: string[], io: CliIO): boolean {
+  if (args[0] === "--help" || args[0] === "-h") {
+    io.out(COMMAND_HELP.objective!);
+    return true;
+  }
+  return false;
+}
+
 /** `asterism objective add <agent> "<text>"` — declare a standing objective. */
-function cmdObjectiveAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
-  const name = parsed.positionals[1];
-  // Join every remaining positional so an unquoted multi-word objective is kept in
-  // full, not silently truncated to the first word (matching `run`'s task handling).
-  const content = parsed.positionals.slice(2).join(" ").trim();
+function cmdObjectiveAdd(args: string[], io: CliIO): Promise<number> {
+  if (objectiveHelp(args, io)) return Promise.resolve(0);
+  const name = args[0];
+  // Every token after the agent, joined and taken VERBATIM — so multi-word text is
+  // kept in full and content that begins with a dash is preserved, not mistaken for
+  // an option (positional, exactly like `secrets add`'s value).
+  const content = args.slice(1).join(" ").trim();
   if (!name || !content) {
     io.err('Usage: asterism objective add <agent> "<text>"');
     return Promise.resolve(1);
@@ -916,8 +933,9 @@ function cmdObjectiveAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
 }
 
 /** `asterism objective list <agent>` — the agent's objectives (active first, then history). */
-function cmdObjectiveList(parsed: ParsedArgs, io: CliIO): Promise<number> {
-  const name = parsed.positionals[1];
+function cmdObjectiveList(args: string[], io: CliIO): Promise<number> {
+  if (objectiveHelp(args, io)) return Promise.resolve(0);
+  const name = args[0];
   if (!name) {
     io.err("Usage: asterism objective list <agent>");
     return Promise.resolve(1);
@@ -936,13 +954,14 @@ function cmdObjectiveList(parsed: ParsedArgs, io: CliIO): Promise<number> {
  * is the lifecycle state it maps to (`done`, or `dropped` for `drop`).
  */
 function cmdObjectiveStatus(
-  parsed: ParsedArgs,
+  args: string[],
   status: ObjectiveStatus,
   verb: string,
   io: CliIO,
 ): Promise<number> {
-  const name = parsed.positionals[1];
-  const ref = parsed.positionals[2];
+  if (objectiveHelp(args, io)) return Promise.resolve(0);
+  const name = args[0];
+  const ref = args[1];
   if (!name || !ref || ref.trim() === "") {
     io.err(`Usage: asterism objective ${verb} <agent> <id>`);
     return Promise.resolve(1);
