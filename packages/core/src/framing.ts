@@ -20,7 +20,8 @@
 // testable; `frameRun` assembles the full `RunRequest`.
 
 import type { RunRequest, ToolRegistry } from "./adapter.js";
-import type { Agent, Memory, Objective } from "./types.js";
+import type { Agent, Memory, Objective, WorldFact } from "./types.js";
+import { worldFactFramingText } from "./types.js";
 
 /**
  * A skill made available to a run: its name and, when loaded, the markdown body.
@@ -44,6 +45,13 @@ export interface FramingContext {
   memories?: readonly Memory[];
   /** The agent's scoped standing objectives (filtered to `active` before use). */
   objectives?: readonly Objective[];
+  /**
+   * The agent's scoped WORLD-FACTS — its own running record of the current situation
+   * ("working notes"). Unlike memory, these are UNVERIFIED and SELF-WRITTEN (no human
+   * review), so they are framed in their own clearly-labelled block, lowest-trust and
+   * last, never mistaken for a ratified lesson.
+   */
+  worldFacts?: readonly WorldFact[];
 }
 
 /**
@@ -123,6 +131,22 @@ export function buildSystemPrompt(ctx: FramingContext): string {
     });
     const lines = byType.map((m) => `- (${m.memoryType}) ${m.content}`);
     sections.push(`What you remember:\n${lines.join("\n")}`);
+  }
+
+  // Working notes — the agent's OWN running record of the current situation, placed
+  // LAST and clearly labelled as unverified. This is the one framing block the agent
+  // wrote itself, without human review (unlike memory, which is ratified), so the label
+  // is load-bearing: a reader (human or model) must never mistake a self-asserted note
+  // for a verified fact (the §4 honesty constraint; CLAUDE.md golden rule 7). Input
+  // order is preserved (the caller passes them oldest-first); the section is omitted
+  // when there are none.
+  const worldFacts = ctx.worldFacts ?? [];
+  if (worldFacts.length > 0) {
+    const lines = worldFacts.map((f) => `- ${worldFactFramingText(f.subject, f.value)}`);
+    sections.push(
+      `Your working notes (your own running record of the current situation — you wrote ` +
+        `these; they are not verified facts):\n${lines.join("\n")}`,
+    );
   }
 
   return sections.join("\n\n");

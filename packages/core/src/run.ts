@@ -23,6 +23,13 @@ import type { RecallBudget, RecallProvider } from "./recall.js";
 import { auditTrustHooks } from "./audit.js";
 import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
 import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
+import {
+  worldFactCapabilities,
+  WORLD_FACT_RECORD_KEY,
+  WORLD_FACT_FORGET_KEY,
+  WORLD_FACT_RECORD_TOOL,
+  WORLD_FACT_FORGET_TOOL,
+} from "./world-facts.js";
 import type { AsterismStore } from "./store.js";
 import type { Agent, Run, RunStatus } from "./types.js";
 
@@ -260,7 +267,33 @@ async function runAndPersist(
   // list is derived from exactly the capabilities the caller handed in (an empty
   // set if none).
   const abortController = new AbortController();
-  const capabilities = options.capabilities ?? [];
+  // The kernel-owned world-fact tools (`record_note` / `forget_note`) are injected on
+  // EVERY run — they are the agent's own bounded, firewalled, capped, audited,
+  // operator-revertible self-state, not a host-environment capability (so "confined by
+  // default", which governs the host catalog, does not gate them; the agent already
+  // always has memory/objectives framing it, and working notes are the writable
+  // sibling). They are appended to whatever the host supplied so they ride the SAME
+  // trust resolution and gate as every other capability: both are `effect: "write"`, so
+  // a `propose` agent withholds them and a `notify`/`autonomous` agent executes +
+  // audits them. The host's `CliIO.capabilities` seam stays store-free — these are the
+  // kernel's own tools over its own state, built where the store lives. Both fresh runs
+  // and resumes funnel through here, so a resumed run keeps them too.
+  //
+  // The world-fact keys AND tool names are RESERVED for the kernel: any host capability
+  // colliding on either is dropped before the kernel's own is appended, so the registry
+  // never carries two tools with the same key OR the same name. The name check matters
+  // independently — the adapter forwards tools to the provider by `tool.name`, so a host
+  // capability reusing `record_note`/`forget_note` under a different key would still
+  // produce a duplicate name that a tool-calling provider rejects. The kernel's tool over
+  // its own state is authoritative for its reserved namespace.
+  const reservedKeys = new Set<string>([WORLD_FACT_RECORD_KEY, WORLD_FACT_FORGET_KEY]);
+  const reservedToolNames = new Set<string>([WORLD_FACT_RECORD_TOOL, WORLD_FACT_FORGET_TOOL]);
+  const hostCapabilities = (options.capabilities ?? []).filter(
+    (c) => !reservedKeys.has(c.key) && !reservedToolNames.has(c.tool.name),
+  );
+  // Pass `run.id` so the tools' `world_fact.*` events are tagged with the originating run
+  // (per-run audit completeness, incl. a firewall-blocked record the gate never logs).
+  const capabilities = [...hostCapabilities, ...worldFactCapabilities(store, agent.id, run.id)];
   const profile = trustProfile({
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),
@@ -372,6 +405,11 @@ async function runAndPersist(
   // same place skills are resolved, no new seam. Not recall-ranked or budget-bounded —
   // objectives are few and all-relevant by definition.
   const objectives = store.objectives.listActiveAccepted(agent.id);
+  // The agent's working notes — its own running record of the current situation, framed
+  // as standing context on every run (a scoped read in the same place objectives/skills
+  // are resolved, no new seam). Framed LAST and clearly labelled as unverified, so a
+  // self-written note is never mistaken for a ratified memory.
+  const worldFacts = store.worldFacts.list(agent.id);
   // Everything that can fail while turning the agent's identity + task into an
   // executed outcome — recall, framing, and the substrate run — sits INSIDE one
   // guard, so a throw anywhere drives the run to a terminal state instead of
@@ -440,6 +478,7 @@ async function runAndPersist(
       skills,
       memories,
       objectives,
+      worldFacts,
       input,
       tools,
       signal: abortController.signal,

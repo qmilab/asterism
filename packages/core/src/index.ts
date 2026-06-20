@@ -110,6 +110,18 @@ export type {
   ObjectiveDrainResult,
 } from "./reflection.js";
 
+// World-facts — the agent's own running record of the current situation ("working
+// notes"), and the FIRST kernel-owned tools (record_note / forget_note). The kernel
+// builds these over its OWN scoped state — distinct from host-environment tools, which
+// it never constructs — and re-enforces firewall + cap on the agent's untrusted output.
+export {
+  worldFactCapabilities,
+  WORLD_FACT_RECORD_KEY,
+  WORLD_FACT_FORGET_KEY,
+  WORLD_FACT_RECORD_TOOL,
+  WORLD_FACT_FORGET_TOOL,
+} from "./world-facts.js";
+
 // Run framing — composes soul / role / scoped skills / accepted memories into the
 // RunRequest's system prompt.
 export {
@@ -182,6 +194,7 @@ export { SkillRepository } from "./repositories/skills.js";
 export type { CreateSkillInput } from "./repositories/skills.js";
 export { ObjectiveRepository } from "./repositories/objectives.js";
 export type { CreateObjectiveInput, ObjectiveQuery } from "./repositories/objectives.js";
+export { WorldFactRepository, DEFAULT_WORLD_FACT_CAP, WorldFactCapError } from "./repositories/world-facts.js";
 export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
 export { CapabilityStandingRepository } from "./repositories/capability-standing.js";

@@ -27,6 +27,7 @@ import {
   BUILTIN_SOULS,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
+  DEFAULT_WORLD_FACT_CAP,
   executeRun,
   MEMORY_TYPES,
   MemoryFirewallError,
@@ -44,6 +45,7 @@ import {
   TRUST_LEVELS,
   unreflectedRuns,
   validateEnum,
+  WorldFactCapError,
 } from "@qmilab/asterism-core";
 import type {
   Action,
@@ -87,6 +89,7 @@ import {
   formatRunActivity,
   formatRunList,
   formatStandingList,
+  formatWorldFactList,
   shortId,
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
@@ -996,6 +999,134 @@ function cmdObjectiveStatus(
     }
     store.setObjectiveStatus(agent.id, match.objective.id, status);
     io.out(`Marked objective ${shortId(match.objective.id)} ${status} for ${name}.`);
+    return 0;
+  });
+}
+
+// --- notes (world-facts) ---------------------------------------------------
+//
+// The agent writes its OWN working notes via the kernel-owned `record_note` /
+// `forget_note` tools mid-run; these operator verbs are the inspect-and-revert side of
+// that (§4: operator-visible and operator-revertible). `notes set` goes through the
+// SAME `recordWorldFact` path the agent's tool does — firewall-screened and capped —
+// so operator-authored content is screened too (defense-in-depth, as objectives screen
+// operator content).
+
+const NOTES_USAGE =
+  'Usage: asterism notes <inspect|set|clear>  ·  inspect <agent>  ·  set <agent> "<subject>" "<value>"  ·  clear <agent> "<subject>"';
+
+function cmdNotes(args: string[], io: CliIO): Promise<number> {
+  const sub = args[0];
+  if (sub === undefined) {
+    io.err(NOTES_USAGE);
+    return Promise.resolve(1);
+  }
+  if (sub === "--help" || sub === "-h") {
+    io.out(COMMAND_HELP.notes!);
+    return Promise.resolve(0);
+  }
+  // Raw positional args — deliberately NOT through `parseArgs`. A note's `subject` and
+  // `value` are free-form and may begin with a dash, which `parseArgs` would eat as
+  // flags; there are no flags on any notes verb, so positional handling loses nothing
+  // (the same discipline `objective add` and `secrets add` use).
+  const rest = args.slice(1);
+  if (sub === "inspect") return cmdNotesInspect(rest, io);
+  if (sub === "set") return cmdNotesSet(rest, io);
+  if (sub === "clear") return cmdNotesClear(rest, io);
+  io.err(`Unknown subcommand: notes ${sub}`);
+  io.out(COMMAND_HELP.notes!);
+  return Promise.resolve(1);
+}
+
+/** Whether the first sub-arg asks for help (`notes <verb> --help`). */
+function notesHelp(args: string[], io: CliIO): boolean {
+  if (args[0] === "--help" || args[0] === "-h") {
+    io.out(COMMAND_HELP.notes!);
+    return true;
+  }
+  return false;
+}
+
+/** `asterism notes inspect <agent>` — the agent's working notes (its own unverified record). */
+function cmdNotesInspect(args: string[], io: CliIO): Promise<number> {
+  if (notesHelp(args, io)) return Promise.resolve(0);
+  const name = args[0];
+  if (!name) {
+    io.err("Usage: asterism notes inspect <agent>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    io.out(formatWorldFactList(store.listWorldFacts(agent.id), agent.name, DEFAULT_WORLD_FACT_CAP));
+    return 0;
+  });
+}
+
+/**
+ * `asterism notes set <agent> "<subject>" "<value>"` — operator-set or -correct a
+ * working note. The subject is the first token after the agent; everything after it is
+ * the value, joined VERBATIM so a multi-word value (and one beginning with a dash) is
+ * preserved (positional, like `objective add`).
+ */
+function cmdNotesSet(args: string[], io: CliIO): Promise<number> {
+  if (notesHelp(args, io)) return Promise.resolve(0);
+  const name = args[0];
+  const subject = args[1];
+  const value = args.slice(2).join(" ").trim();
+  if (!name || !subject || subject.trim() === "" || !value) {
+    io.err('Usage: asterism notes set <agent> "<subject>" "<value>"');
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    // A working note frames runs, so the kernel screens it through the SAME firewall as
+    // memory, and caps it. A blocked or over-cap write is reported plainly (and the
+    // firewall refusal already audited) — never saved.
+    try {
+      store.recordWorldFact(agent.id, subject, value);
+      io.out(`Set working note "${subject}" for ${name}.`);
+      return 0;
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        io.err(
+          `That note can't be saved — it trips the safety screen (${err.findings
+            .map((f) => `${f.category}:${f.rule}`)
+            .join(", ")}).`,
+        );
+        return 1;
+      }
+      if (err instanceof WorldFactCapError) {
+        io.err(
+          `${name}'s working notes are full (${err.cap} max). Clear one with ` +
+            `\`asterism notes clear ${name} "<subject>"\` before adding a new subject.`,
+        );
+        return 1;
+      }
+      throw err;
+    }
+  });
+}
+
+/** `asterism notes clear <agent> "<subject>"` — remove one working note (operator revert). */
+function cmdNotesClear(args: string[], io: CliIO): Promise<number> {
+  if (notesHelp(args, io)) return Promise.resolve(0);
+  const name = args[0];
+  const subject = args.slice(1).join(" ").trim();
+  if (!name || !subject) {
+    io.err('Usage: asterism notes clear <agent> "<subject>"');
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const removed = store.clearWorldFact(agent.id, subject);
+    if (!removed) {
+      io.err(`No working note named "${subject}" for ${name}.`);
+      return 1;
+    }
+    io.out(`Cleared working note "${subject}" for ${name}.`);
     return 0;
   });
 }
@@ -3581,6 +3712,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return dispatchSub("skill", "add", cmdSkillAdd, COMMAND_HELP.skill!, rest, io);
     case "objective":
       return cmdObjective(rest, io);
+    case "notes":
+      return cmdNotes(rest, io);
     case "memory":
       return dispatchSub("memory", "inspect", cmdMemoryInspect, COMMAND_HELP.memory!, rest, io);
     case "events":

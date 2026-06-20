@@ -87,6 +87,27 @@ CREATE TABLE IF NOT EXISTS objectives (
 );
 CREATE INDEX IF NOT EXISTS idx_objectives_agent ON objectives(agent_id);
 
+-- An agent's WORLD-FACTS -- its own running record of the current situation
+-- ("working notes"), scoped by agent_id like every other table. A (subject, value)
+-- the agent maintains ITSELF mid-run; UNIQUE(agent_id, subject) makes a re-write of a
+-- subject an UPSERT (superseded, not accumulated). subject and value are the agent's
+-- own content, scoped by agent_id like memory.content -- and, because they frame runs,
+-- firewall-screened on the write path exactly like memory. This is the one framing
+-- input the agent writes without per-write human review, so the kernel caps the row
+-- count per agent and frames these as the agent's OWN UNVERIFIED notes. A new table
+-- (added after slice 1/2 shipped objectives), so a fresh open picks it up via this
+-- CREATE and no store.migrate() ALTER is needed (only later COLUMNS need that).
+CREATE TABLE IF NOT EXISTS world_facts (
+  id          TEXT PRIMARY KEY,
+  agent_id    TEXT NOT NULL REFERENCES agents(id),
+  subject     TEXT NOT NULL,
+  value       TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  UNIQUE(agent_id, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_world_facts_agent ON world_facts(agent_id);
+
 CREATE TABLE IF NOT EXISTS credentials (
   id          TEXT PRIMARY KEY,
   agent_id    TEXT NOT NULL REFERENCES agents(id),

@@ -7,7 +7,7 @@ import {
   resolveSoul,
 } from "./framing";
 import { AsterismStore } from "./store";
-import type { Agent, Memory, Objective } from "./types";
+import type { Agent, Memory, Objective, WorldFact } from "./types";
 
 const agentFixture: Agent = {
   id: "agent-1",
@@ -40,6 +40,18 @@ function objective(partial: Partial<Objective>): Objective {
     content: "an objective",
     status: "active",
     reviewState: "accepted",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    ...partial,
+  };
+}
+
+function worldFact(partial: Partial<WorldFact>): WorldFact {
+  return {
+    id: "w",
+    agentId: agentFixture.id,
+    subject: "subject",
+    value: "value",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...partial,
@@ -177,6 +189,47 @@ describe("buildSystemPrompt — standing objectives", () => {
       ],
     });
     expect(prompt.indexOf("FIRST")).toBeLessThan(prompt.indexOf("SECOND"));
+  });
+});
+
+describe("buildSystemPrompt — working notes (world-facts)", () => {
+  test("frames notes as the agent's OWN UNVERIFIED record, last (after memory)", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      objectives: [objective({ id: "1", content: "A-GOAL" })],
+      skills: [{ name: "blog-writer" }],
+      memories: [memory({ content: "REMEMBERED" })],
+      worldFacts: [
+        worldFact({ id: "1", subject: "deploy version", value: "v0.2.1" }),
+        worldFact({ id: "2", subject: "migration", value: "60% done" }),
+      ],
+    });
+    expect(prompt).toContain("Your working notes");
+    expect(prompt).toContain("- deploy version: v0.2.1");
+    expect(prompt).toContain("- migration: 60% done");
+    // The honesty constraint is load-bearing: the label must say these are the agent's
+    // own, not verified facts — so a self-written note never reads as a ratified lesson.
+    expect(prompt.toLowerCase()).toContain("not verified facts");
+    // Placed LAST — after objectives, skills, and memory (lowest-trust block).
+    expect(prompt.indexOf("Your working notes")).toBeGreaterThan(prompt.indexOf("A-GOAL"));
+    expect(prompt.indexOf("Your working notes")).toBeGreaterThan(prompt.indexOf("blog-writer"));
+    expect(prompt.indexOf("Your working notes")).toBeGreaterThan(prompt.indexOf("REMEMBERED"));
+  });
+
+  test("the section is omitted entirely when there are no notes", () => {
+    const prompt = buildSystemPrompt({ agent: agentFixture, worldFacts: [] });
+    expect(prompt).not.toContain("Your working notes");
+  });
+
+  test("preserves input order (oldest-first as the kernel frames them)", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      worldFacts: [
+        worldFact({ id: "1", subject: "first-subject", value: "x" }),
+        worldFact({ id: "2", subject: "second-subject", value: "y" }),
+      ],
+    });
+    expect(prompt.indexOf("first-subject")).toBeLessThan(prompt.indexOf("second-subject"));
   });
 });
 
