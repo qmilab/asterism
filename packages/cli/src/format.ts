@@ -12,6 +12,7 @@ import type {
   Run,
   RunEvent,
   TrustLevel,
+  WorldFact,
 } from "@qmilab/asterism-core";
 
 /** First 8 chars of a UUID — enough to recognize, short enough to scan. */
@@ -141,6 +142,33 @@ export function formatObjectiveList(
     lines.push(`  ${o.content}`);
     lines.push(`  declared ${o.createdAt}`);
     lines.push("");
+  }
+  return lines.join("\n").trimEnd();
+}
+
+/**
+ * Render an agent's WORLD-FACTS — its working notes — for `notes inspect`. These are
+ * the agent's OWN unverified record (it wrote them mid-run, no human review), so the
+ * header says so plainly; never present them as verified state. Oldest-first, as the
+ * kernel returns and frames them. The `cap` (when given) is shown so an operator can
+ * see how full the agent's notes are.
+ */
+export function formatWorldFactList(
+  facts: readonly WorldFact[],
+  agentName: string,
+  cap?: number,
+): string {
+  if (facts.length === 0) {
+    return `${agentName} has no working notes yet. The agent records its own as it runs; you can set one with: asterism notes set ${agentName} "<subject>" "<value>"`;
+  }
+  const fill = cap !== undefined ? ` of ${cap}` : "";
+  const lines: string[] = [
+    `Working notes for ${agentName} (${facts.length}${fill}) — the agent's own unverified record, not facts:`,
+    "",
+  ];
+  for (const f of facts) {
+    lines.push(`• ${f.subject}: ${f.value}`);
+    lines.push(`  updated ${f.updatedAt}`);
   }
   return lines.join("\n").trimEnd();
 }

@@ -13,6 +13,7 @@ import { SkillRepository } from "./repositories/skills.js";
 import type { CreateSkillInput } from "./repositories/skills.js";
 import { ObjectiveRepository } from "./repositories/objectives.js";
 import type { ObjectiveQuery } from "./repositories/objectives.js";
+import { WorldFactRepository, DEFAULT_WORLD_FACT_CAP, WorldFactCapError } from "./repositories/world-facts.js";
 import { CredentialRepository } from "./repositories/credentials.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
@@ -33,11 +34,12 @@ import type {
   Skill,
   StandingThresholds,
   TrustLevel,
+  WorldFact,
 } from "./types.js";
 import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
-import { MemoryFirewallError } from "./firewall.js";
+import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
 
 /**
  * The kernel's persistence surface. Applies the Phase 0 schema and exposes one
@@ -51,6 +53,8 @@ export class AsterismStore {
   readonly skills: SkillRepository;
   /** Per-agent standing objectives — the agent's durable, operator-declared purpose. */
   readonly objectives: ObjectiveRepository;
+  /** Per-agent world-facts — the agent's own running record of the current situation ("working notes"). */
+  readonly worldFacts: WorldFactRepository;
   readonly credentials: CredentialRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
@@ -68,6 +72,7 @@ export class AsterismStore {
     this.memories = new MemoryRepository(driver);
     this.skills = new SkillRepository(driver);
     this.objectives = new ObjectiveRepository(driver);
+    this.worldFacts = new WorldFactRepository(driver);
     this.credentials = new CredentialRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
@@ -847,6 +852,78 @@ export class AsterismStore {
   /** An agent's objectives for a surface to render, oldest-first, optionally filtered by status. */
   listObjectives(agentId: string, query?: ObjectiveQuery): Objective[] {
     return this.objectives.list(agentId, query);
+  }
+
+  /**
+   * Record or SUPERSEDE a world-fact ("working note") through the firewall and the cap,
+   * logging the outcome. This is the kernel re-enforcing on the agent's UNTRUSTED
+   * output: a world-fact is the one framing input the agent writes WITHOUT per-write
+   * human review, so the kernel screens it, caps it, and audits it on the way in —
+   * exactly as `enforceRecall` re-imposes the recall guarantees on a provider's output.
+   * Backs BOTH the agent's `record_note` tool and the operator's `notes set`.
+   *
+   * Firewall FIRST — safety precedes the resource bound, so a poisoned write is blocked
+   * + audited (`world_fact.blocked`, findings only — never the content) even when the
+   * agent is at cap. The repository screens again on upsert; that redundancy is
+   * deliberate (the repo is safe on its own and never relies on this wrapper — the same
+   * storage-layer-enforces rule agentId scoping follows). The screen + block-audit sit
+   * OUTSIDE the transaction so a rollback can never erase the audit trail of the block,
+   * the same reason {@link recordMemory} is not transactional.
+   *
+   * Then the cap, read+write under one transaction so a concurrent writer cannot slip a
+   * row in between the count and the insert: only a NEW subject grows the count
+   * (superseding an existing one is free), and a new subject at cap is rejected loudly
+   * with a {@link WorldFactCapError} (no silent eviction) — a resource bound, not a
+   * safety refusal, so it is not audited. On success: `world_fact.recorded` (references
+   * only — the id and whether it superseded an existing note, NEVER the subject/value,
+   * which are agent content like memory content).
+   */
+  recordWorldFact(agentId: string, subject: string, value: string): WorldFact {
+    try {
+      assertMemorySafe(subject);
+      assertMemorySafe(value);
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        this.emit(agentId, "world_fact.blocked", { findings: err.findings });
+      }
+      throw err;
+    }
+    return this.driver.transaction(() => {
+      const existing = this.worldFacts.get(agentId, subject);
+      if (existing === undefined && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
+        throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
+      }
+      const fact = this.worldFacts.upsert(agentId, subject, value);
+      this.emit(agentId, "world_fact.recorded", {
+        worldFactId: fact.id,
+        superseded: existing !== undefined,
+      });
+      return fact;
+    });
+  }
+
+  /**
+   * Remove one world-fact by subject and record `world_fact.cleared` ({@code worldFactId}
+   * only) on a real removal — nothing when no note matched (the no-op-doesn't-log
+   * discipline). Backs BOTH the agent's `forget_note` tool and the operator's
+   * `notes clear` — one store method, two callers, exactly as {@link recordWorldFact}
+   * serves the `record_note` tool and `notes set`. A delete frames nothing, so there is
+   * no firewall path here. A cross-agent or unknown subject touches nothing and returns
+   * undefined, which the caller uses to tell those apart.
+   */
+  clearWorldFact(agentId: string, subject: string): WorldFact | undefined {
+    return this.driver.transaction(() => {
+      const removed = this.worldFacts.clear(agentId, subject);
+      if (removed) {
+        this.emit(agentId, "world_fact.cleared", { worldFactId: removed.id });
+      }
+      return removed;
+    });
+  }
+
+  /** An agent's world-facts for a surface to render (and for run framing), oldest-first. */
+  listWorldFacts(agentId: string): WorldFact[] {
+    return this.worldFacts.list(agentId);
   }
 
   /** Attach a markdown skill and record `skill.attached` (name + workspace path). */

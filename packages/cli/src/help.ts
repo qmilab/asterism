@@ -33,6 +33,7 @@ Commands:
   secrets add <agent> <KEY> [value] Give an agent a private credential
   skill add <agent> <file.md>       Teach an agent a skill from a markdown file
   objective add <agent> "<text>"    Give an agent a standing goal to work toward
+  notes inspect <agent>             See an agent's own working notes (its situation)
   run <agent> "<task>"              Put an agent to work on a task
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
@@ -157,6 +158,26 @@ it keeps the goal in view across many runs. Only ever the named agent's objectiv
 Identify an objective by the short id shown in \`objective list\`. An objective is the
 agent's own scoped state — managing it is never destructive, and never crosses to
 another agent.`,
+
+  notes: `asterism notes inspect <agent>
+asterism notes set     <agent> "<subject>" "<value>"
+asterism notes clear   <agent> "<subject>"
+
+See and manage an agent's working notes — its own running record of the current
+situation, like "deploy version: v0.2.1" or "migration: 60% done". The agent writes
+and updates these itself as it runs (recording a subject again replaces its value), and
+they frame its later runs as context. They are the agent's OWN unverified notes, shown
+and framed as such — never as facts you reviewed (unlike its memory).
+
+  notes inspect <agent>                Show the agent's working notes (its own record).
+  notes set <agent> "<subject>" "<value>"
+                                       Set or correct a note yourself.
+  notes clear <agent> "<subject>"      Remove a note.
+
+A note is the agent's own scoped state — writing or clearing one is never destructive,
+and never crosses to another agent. The agent keeps a bounded number of notes; when
+full, it must clear one before recording a new subject. Notes you set are screened for
+safety exactly like the agent's own.`,
 
   run: `asterism run <agent> "<task>"
 

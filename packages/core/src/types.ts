@@ -110,6 +110,9 @@ export const EVENT_TYPES = [
   "objective.reviewed",
   "objective.proposed",
   "objective.blocked",
+  "world_fact.recorded",
+  "world_fact.blocked",
+  "world_fact.cleared",
   "skill.attached",
   "credential.added",
   "credential.rotated",
@@ -237,6 +240,30 @@ export interface Objective {
    * acting as a backdoor injection.
    */
   reviewState: ReviewState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A WORLD-FACT — the agent's own running record of its current situation, the
+ * writable sibling of memory and objectives, scoped by `agentId` like every other
+ * row. Where memory is accumulated, relevance-recalled *lessons* and an objective is
+ * durable *purpose*, a world-fact is *current, mutable, situational state* the agent
+ * maintains ITSELF mid-run: a `(subject, value)` pair it names and **supersedes**
+ * (re-writing a subject REPLACES its value — superseded, not accumulated; `subject`
+ * is UNIQUE per agent). It is the one piece of run framing the agent writes without
+ * per-write human review, so it is firewall-screened + capped + audited on the write
+ * path, framed as the agent's OWN UNVERIFIED working notes (never as ratified
+ * memory), and operator-visible/revertible. User-facing copy calls these "working
+ * notes"; the entity keeps the thread's `WorldFact` name internally.
+ */
+export interface WorldFact {
+  id: string;
+  agentId: string;
+  /** The key the agent names; UNIQUE per agent (the upsert key). */
+  subject: string;
+  /** The current value; a re-write of the same subject REPLACES it. */
+  value: string;
   createdAt: string;
   updatedAt: string;
 }

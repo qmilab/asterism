@@ -23,6 +23,7 @@ import type { RecallBudget, RecallProvider } from "./recall.js";
 import { auditTrustHooks } from "./audit.js";
 import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
 import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
+import { worldFactCapabilities } from "./world-facts.js";
 import type { AsterismStore } from "./store.js";
 import type { Agent, Run, RunStatus } from "./types.js";
 
@@ -260,7 +261,18 @@ async function runAndPersist(
   // list is derived from exactly the capabilities the caller handed in (an empty
   // set if none).
   const abortController = new AbortController();
-  const capabilities = options.capabilities ?? [];
+  // The kernel-owned world-fact tools (`record_note` / `forget_note`) are injected on
+  // EVERY run — they are the agent's own bounded, firewalled, capped, audited,
+  // operator-revertible self-state, not a host-environment capability (so "confined by
+  // default", which governs the host catalog, does not gate them; the agent already
+  // always has memory/objectives framing it, and working notes are the writable
+  // sibling). They are appended to whatever the host supplied so they ride the SAME
+  // trust resolution and gate as every other capability: both are `effect: "write"`, so
+  // a `propose` agent withholds them and a `notify`/`autonomous` agent executes +
+  // audits them. The host's `CliIO.capabilities` seam stays store-free — these are the
+  // kernel's own tools over its own state, built where the store lives. Both fresh runs
+  // and resumes funnel through here, so a resumed run keeps them too.
+  const capabilities = [...(options.capabilities ?? []), ...worldFactCapabilities(store, agent.id)];
   const profile = trustProfile({
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),
@@ -372,6 +384,11 @@ async function runAndPersist(
   // same place skills are resolved, no new seam. Not recall-ranked or budget-bounded —
   // objectives are few and all-relevant by definition.
   const objectives = store.objectives.listActiveAccepted(agent.id);
+  // The agent's working notes — its own running record of the current situation, framed
+  // as standing context on every run (a scoped read in the same place objectives/skills
+  // are resolved, no new seam). Framed LAST and clearly labelled as unverified, so a
+  // self-written note is never mistaken for a ratified memory.
+  const worldFacts = store.worldFacts.list(agent.id);
   // Everything that can fail while turning the agent's identity + task into an
   // executed outcome — recall, framing, and the substrate run — sits INSIDE one
   // guard, so a throw anywhere drives the run to a terminal state instead of
@@ -440,6 +457,7 @@ async function runAndPersist(
       skills,
       memories,
       objectives,
+      worldFacts,
       input,
       tools,
       signal: abortController.signal,
