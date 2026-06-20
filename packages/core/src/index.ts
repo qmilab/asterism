@@ -172,6 +172,8 @@ export { MemoryRepository } from "./repositories/memories.js";
 export type { CreateMemoryInput, MemoryQuery } from "./repositories/memories.js";
 export { SkillRepository } from "./repositories/skills.js";
 export type { CreateSkillInput } from "./repositories/skills.js";
+export { ObjectiveRepository } from "./repositories/objectives.js";
+export type { CreateObjectiveInput, ObjectiveQuery } from "./repositories/objectives.js";
 export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
 export { CapabilityStandingRepository } from "./repositories/capability-standing.js";

@@ -11,6 +11,8 @@ import { MemoryRepository } from "./repositories/memories.js";
 import type { CreateMemoryInput } from "./repositories/memories.js";
 import { SkillRepository } from "./repositories/skills.js";
 import type { CreateSkillInput } from "./repositories/skills.js";
+import { ObjectiveRepository } from "./repositories/objectives.js";
+import type { ObjectiveQuery } from "./repositories/objectives.js";
 import { CredentialRepository } from "./repositories/credentials.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
@@ -22,6 +24,8 @@ import type {
   Credential,
   EventType,
   Memory,
+  Objective,
+  ObjectiveStatus,
   ReviewState,
   RecallProviderId,
   Run,
@@ -45,6 +49,8 @@ export class AsterismStore {
   readonly runs: RunRepository;
   readonly memories: MemoryRepository;
   readonly skills: SkillRepository;
+  /** Per-agent standing objectives — the agent's durable, operator-declared purpose. */
+  readonly objectives: ObjectiveRepository;
   readonly credentials: CredentialRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
@@ -61,6 +67,7 @@ export class AsterismStore {
     this.runs = new RunRepository(driver);
     this.memories = new MemoryRepository(driver);
     this.skills = new SkillRepository(driver);
+    this.objectives = new ObjectiveRepository(driver);
     this.credentials = new CredentialRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
@@ -669,6 +676,71 @@ export class AsterismStore {
       },
       runId,
     );
+  }
+
+  /**
+   * Declare a standing objective through the firewall, logging the outcome either
+   * way. On success: `objective.added` (references only — the objective id, NEVER the
+   * content, consistent with `memory.recorded` logging id/type and never content). On
+   * a firewall refusal: `objective.blocked` (the findings, never the blocked content)
+   * — committed independently, then the error rethrows, so the refusal stays on the
+   * record. Not wrapped in a transaction for exactly that reason: a rollback would
+   * erase the audit trail of the block. The mirror of {@link recordMemory}, because an
+   * objective frames runs and so is screened — and audited — exactly like memory.
+   */
+  createObjective(agentId: string, content: string): Objective {
+    let objective: Objective;
+    try {
+      objective = this.objectives.create(agentId, { content });
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        this.emit(agentId, "objective.blocked", { findings: err.findings });
+      }
+      throw err;
+    }
+    this.emit(agentId, "objective.added", {
+      objectiveId: objective.id,
+      status: objective.status,
+    });
+    return objective;
+  }
+
+  /**
+   * Advance a standing objective's lifecycle (`active` → `done` | `dropped`, or back)
+   * and record `objective.status_changed` with the `from`/`to` references — the same
+   * shape as `setRunStatus` / `setCapabilityStanding`, never the content. A no-op when
+   * the status is unchanged: nothing is written, nothing is logged (the event log
+   * records real transitions only, the same discipline as `setRecallBudget`). A
+   * cross-agent or unknown objective touches nothing and emits nothing — returns
+   * undefined, which the caller uses to tell those apart.
+   */
+  setObjectiveStatus(
+    agentId: string,
+    id: string,
+    status: ObjectiveStatus,
+  ): Objective | undefined {
+    return this.driver.transaction(() => {
+      const current = this.objectives.get(agentId, id);
+      if (!current) return undefined;
+      // Unchanged status is a true no-op — no write, no phantom event. `current.status`
+      // is a stored (already-validated) value, so an invalid `status` can never equal
+      // it and still reaches the repository's write-boundary validation below.
+      if (current.status === status) return current;
+      const objective = this.objectives.setStatus(agentId, id, status);
+      if (objective) {
+        this.emit(agentId, "objective.status_changed", {
+          objectiveId: id,
+          from: current.status,
+          to: objective.status,
+        });
+      }
+      return objective;
+    });
+  }
+
+  /** An agent's objectives for a surface to render, oldest-first, optionally filtered by status. */
+  listObjectives(agentId: string, query?: ObjectiveQuery): Objective[] {
+    return this.objectives.list(agentId, query);
   }
 
   /** Attach a markdown skill and record `skill.attached` (name + workspace path). */

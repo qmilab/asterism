@@ -49,6 +49,8 @@ import type {
   FirewallFinding,
   Memory,
   MemoryQuery,
+  Objective,
+  ObjectiveStatus,
   RecallProvider,
   RecallProviderId,
   ReflectionProvider,
@@ -77,6 +79,7 @@ import {
   formatEventLines,
   formatEventList,
   formatMemoryList,
+  formatObjectiveList,
   formatRunActivity,
   formatRunList,
   formatStandingList,
@@ -824,6 +827,144 @@ async function cmdSkillAdd(args: string[], io: CliIO): Promise<number> {
     copyFileSync(sourcePath, destPath);
     store.attachSkill(agent.id, { name: skillName, path: destPath });
     io.out(`Attached skill "${skillName}" to agent ${name}.`);
+    return 0;
+  });
+}
+
+// --- objective -------------------------------------------------------------
+
+const OBJECTIVE_USAGE =
+  'Usage: asterism objective <add|list|done|drop>  ·  add <agent> "<text>"  ·  list <agent>  ·  done|drop <agent> <id>';
+
+/** Objectives in one agent whose id equals, or uniquely begins with, `ref`. */
+function matchObjectives(store: AsterismStore, agent: Agent, ref: string): Objective[] {
+  const exact = store.objectives.get(agent.id, ref);
+  if (exact) return [exact];
+  return store.objectives.list(agent.id).filter((o) => o.id.startsWith(ref));
+}
+
+/**
+ * Resolve an objective reference — a full id or a unique short-id prefix, the same
+ * short id `objective list` prints — to one objective within a SINGLE agent's scope.
+ * Resolution runs entirely through `store.objectives` (agent-scoped), so a reference
+ * can only ever name one of this agent's own objectives, never reach across agents.
+ */
+type AgentObjectiveMatch =
+  | { kind: "ok"; objective: Objective }
+  | { kind: "not_found" }
+  | { kind: "ambiguous" };
+
+function matchAgentObjective(store: AsterismStore, agent: Agent, ref: string): AgentObjectiveMatch {
+  const objectives = matchObjectives(store, agent, ref);
+  if (objectives.length === 0) return { kind: "not_found" };
+  if (objectives.length > 1) return { kind: "ambiguous" };
+  return { kind: "ok", objective: objectives[0]! };
+}
+
+async function cmdObjective(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.objective!);
+    return 0;
+  }
+  const sub = parsed.positionals[0];
+  if (sub === "add") return cmdObjectiveAdd(parsed, io);
+  if (sub === "list") return cmdObjectiveList(parsed, io);
+  if (sub === "done") return cmdObjectiveStatus(parsed, "done", "done", io);
+  if (sub === "drop") return cmdObjectiveStatus(parsed, "dropped", "drop", io);
+  if (!sub) {
+    io.err(OBJECTIVE_USAGE);
+    return 1;
+  }
+  io.err(`Unknown subcommand: objective ${sub}`);
+  io.out(COMMAND_HELP.objective!);
+  return 1;
+}
+
+/** `asterism objective add <agent> "<text>"` — declare a standing objective. */
+function cmdObjectiveAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const name = parsed.positionals[1];
+  // Join every remaining positional so an unquoted multi-word objective is kept in
+  // full, not silently truncated to the first word (matching `run`'s task handling).
+  const content = parsed.positionals.slice(2).join(" ").trim();
+  if (!name || !content) {
+    io.err('Usage: asterism objective add <agent> "<text>"');
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    // The objective frames runs, so the kernel screens it through the SAME firewall
+    // as memory on the write path. A blocked one is reported plainly (and the kernel
+    // has already audited the refusal) — never saved.
+    try {
+      const objective = store.createObjective(agent.id, content);
+      io.out(`Declared objective ${shortId(objective.id)} for ${name}.`);
+      return 0;
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        io.err(
+          `That objective can't be saved — it trips the safety screen (${err.findings
+            .map((f) => `${f.category}:${f.rule}`)
+            .join(", ")}).`,
+        );
+        return 1;
+      }
+      throw err;
+    }
+  });
+}
+
+/** `asterism objective list <agent>` — the agent's objectives (active first, then history). */
+function cmdObjectiveList(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const name = parsed.positionals[1];
+  if (!name) {
+    io.err("Usage: asterism objective list <agent>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    io.out(formatObjectiveList(store.listObjectives(agent.id), agent.name));
+    return 0;
+  });
+}
+
+/**
+ * `asterism objective done|drop <agent> <id>` — advance an objective's lifecycle so it
+ * stops framing runs. `verb` is the word the user typed (for the usage line); `status`
+ * is the lifecycle state it maps to (`done`, or `dropped` for `drop`).
+ */
+function cmdObjectiveStatus(
+  parsed: ParsedArgs,
+  status: ObjectiveStatus,
+  verb: string,
+  io: CliIO,
+): Promise<number> {
+  const name = parsed.positionals[1];
+  const ref = parsed.positionals[2];
+  if (!name || !ref || ref.trim() === "") {
+    io.err(`Usage: asterism objective ${verb} <agent> <id>`);
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const match = matchAgentObjective(store, agent, ref);
+    if (match.kind === "not_found") {
+      io.err(`No objective matching "${ref}" for ${name}.`);
+      return 1;
+    }
+    if (match.kind === "ambiguous") {
+      io.err(`"${ref}" matches more than one of ${name}'s objectives — use a longer id.`);
+      return 1;
+    }
+    if (match.objective.status === status) {
+      io.out(`Objective ${shortId(match.objective.id)} is already ${status}.`);
+      return 0;
+    }
+    store.setObjectiveStatus(agent.id, match.objective.id, status);
+    io.out(`Marked objective ${shortId(match.objective.id)} ${status} for ${name}.`);
     return 0;
   });
 }
@@ -3261,6 +3402,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return dispatchSub("secrets", "add", cmdSecretsAdd, COMMAND_HELP.secrets!, rest, io);
     case "skill":
       return dispatchSub("skill", "add", cmdSkillAdd, COMMAND_HELP.skill!, rest, io);
+    case "objective":
+      return cmdObjective(rest, io);
     case "memory":
       return dispatchSub("memory", "inspect", cmdMemoryInspect, COMMAND_HELP.memory!, rest, io);
     case "events":

@@ -8,6 +8,7 @@ import type {
   CapabilityGrant,
   Event,
   Memory,
+  Objective,
   Run,
   RunEvent,
   TrustLevel,
@@ -102,6 +103,37 @@ export function formatMemoryList(
     lines.push(`  ${m.content}`);
     const source = m.sourceRunId ? ` · from run ${shortId(m.sourceRunId)}` : "";
     lines.push(`  recorded ${m.createdAt}${source}`);
+    lines.push("");
+  }
+  return lines.join("\n").trimEnd();
+}
+
+/**
+ * Render an agent's standing objectives for `objective list`. Active objectives —
+ * the ones that frame runs — come first by store order (oldest-first), with completed
+ * and dropped ones kept beneath as history; the count line names how many are active.
+ * Each line leads with the short id so `objective done`/`drop` can reference it. Only
+ * ever one agent's own objectives — the store read is `agentId`-scoped.
+ */
+export function formatObjectiveList(
+  objectives: readonly Objective[],
+  agentName: string,
+): string {
+  if (objectives.length === 0) {
+    return `${agentName} has no objectives yet. Declare one with: asterism objective add ${agentName} "<text>"`;
+  }
+  // Active first (they frame runs), then history — a stable partition of the
+  // already oldest-first list, so order is deterministic within each group.
+  const active = objectives.filter((o) => o.status === "active");
+  const history = objectives.filter((o) => o.status !== "active");
+  const lines: string[] = [
+    `Objectives for ${agentName} (${objectives.length}, ${active.length} active):`,
+    "",
+  ];
+  for (const o of [...active, ...history]) {
+    lines.push(`• ${shortId(o.id)} · ${o.status}`);
+    lines.push(`  ${o.content}`);
+    lines.push(`  declared ${o.createdAt}`);
     lines.push("");
   }
   return lines.join("\n").trimEnd();

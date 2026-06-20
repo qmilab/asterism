@@ -20,7 +20,7 @@
 // testable; `frameRun` assembles the full `RunRequest`.
 
 import type { RunRequest, ToolRegistry } from "./adapter.js";
-import type { Agent, Memory } from "./types.js";
+import type { Agent, Memory, Objective } from "./types.js";
 
 /**
  * A skill made available to a run: its name and, when loaded, the markdown body.
@@ -42,6 +42,8 @@ export interface FramingContext {
   skills?: readonly SkillContext[];
   /** The agent's scoped memories (filtered to active + accepted before use). */
   memories?: readonly Memory[];
+  /** The agent's scoped standing objectives (filtered to `active` before use). */
+  objectives?: readonly Objective[];
 }
 
 /**
@@ -83,6 +85,18 @@ export function buildSystemPrompt(ctx: FramingContext): string {
       ? `Your character and operating style:\n${soul}`
       : `Your character is defined by the soul "${agent.soulRef}".`,
   );
+
+  // Objectives — the agent's standing purpose, placed high (right after who it is,
+  // before skills/memory) because it is what shapes everything the run is for. Only
+  // `active` objectives frame a run — `done`/`dropped` ones must never shape
+  // behaviour, the same "only the live subset frames a run" rule memory's
+  // active+accepted predicate enforces. Input order is preserved (the caller passes
+  // them oldest-first); the section is omitted entirely when none are active.
+  const objectives = (ctx.objectives ?? []).filter((o) => o.status === "active");
+  if (objectives.length > 0) {
+    const lines = objectives.map((o) => `- ${o.content}`);
+    sections.push(`Your standing objectives:\n${lines.join("\n")}`);
+  }
 
   // Skills — names always; bodies inlined when provided.
   const skills = ctx.skills ?? [];

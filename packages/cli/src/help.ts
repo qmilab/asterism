@@ -32,6 +32,7 @@ Commands:
   trust <agent> --review            Grant capabilities an agent has earned to act on
   secrets add <agent> <KEY> [value] Give an agent a private credential
   skill add <agent> <file.md>       Teach an agent a skill from a markdown file
+  objective add <agent> "<text>"    Give an agent a standing goal to work toward
   run <agent> "<task>"              Put an agent to work on a task
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
@@ -136,6 +137,26 @@ standard input when piped.`,
 
 Teach an agent a skill from a markdown file. The file is copied into the agent's
 own workspace; other agents cannot see it.`,
+
+  objective: `asterism objective add  <agent> "<text>"
+asterism objective list <agent>
+asterism objective done <agent> <id>
+asterism objective drop <agent> <id>
+
+Give an agent a standing objective — what it should be working toward, ongoing. Unlike
+a memory (something it learned and you reviewed), an objective is current purpose you
+set and manage. Every active objective frames the agent's runs as standing context, so
+it keeps the goal in view across many runs. Only ever the named agent's objectives.
+
+  objective add <agent> "<text>"   Declare a new objective (it starts active).
+  objective list <agent>           Show the agent's objectives — the active ones that
+                                   frame its runs, then completed and dropped history.
+  objective done <agent> <id>      Mark an objective completed; it stops framing runs.
+  objective drop <agent> <id>      Abandon an objective; it stops framing runs.
+
+Identify an objective by the short id shown in \`objective list\`. An objective is the
+agent's own scoped state — managing it is never destructive, and never crosses to
+another agent.`,
 
   run: `asterism run <agent> "<task>"
 
