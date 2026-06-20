@@ -112,6 +112,15 @@ export class AsterismStore {
     if (!this.columnExists("agent_settings", "recall_provider")) {
       this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN recall_provider TEXT`);
     }
+    // The objective review state joined `objectives` after slice 1 first shipped the
+    // table (reflection now PROPOSES objectives, gated by a review state). Add it
+    // idempotently with DEFAULT 'accepted': every pre-existing objective was
+    // operator-declared, hence implicitly ratified — so it stays framable. A constant
+    // default (not NULL) is required because this column gates framing: every objective
+    // must be definitively framable (`accepted`) or not, never ambiguous.
+    if (!this.columnExists("objectives", "review_state")) {
+      this.driver.exec(`ALTER TABLE objectives ADD COLUMN review_state TEXT NOT NULL DEFAULT 'accepted'`);
+    }
   }
 
   /** Whether `table` has a column named `column` (via PRAGMA table_info). */
@@ -680,18 +689,27 @@ export class AsterismStore {
 
   /**
    * Declare a standing objective through the firewall, logging the outcome either
-   * way. On success: `objective.added` (references only — the objective id, NEVER the
-   * content, consistent with `memory.recorded` logging id/type and never content). On
-   * a firewall refusal: `objective.blocked` (the findings, never the blocked content)
-   * — committed independently, then the error rethrows, so the refusal stays on the
-   * record. Not wrapped in a transaction for exactly that reason: a rollback would
-   * erase the audit trail of the block. The mirror of {@link recordMemory}, because an
-   * objective frames runs and so is screened — and audited — exactly like memory.
+   * way. On success: `objective.added` (references only — the objective id, status and
+   * reviewState, NEVER the content, consistent with `memory.recorded` logging
+   * id/type/reviewState and never content). On a firewall refusal: `objective.blocked`
+   * (the findings, never the blocked content) — committed independently, then the error
+   * rethrows, so the refusal stays on the record. Not wrapped in a transaction for
+   * exactly that reason: a rollback would erase the audit trail of the block. The mirror
+   * of {@link recordMemory}, because an objective frames runs and so is screened — and
+   * audited — exactly like memory.
+   *
+   * `reviewState` defaults to `accepted` (the operator-declared CLI path). Reflection's
+   * proposed-objective path passes `proposed`, so the row is inert (framing requires
+   * `accepted`) until a human accepts it — and the `objective.added` audit shows it was
+   * queued, not declared.
    */
-  createObjective(agentId: string, content: string): Objective {
+  createObjective(agentId: string, content: string, reviewState?: ReviewState): Objective {
     let objective: Objective;
     try {
-      objective = this.objectives.create(agentId, { content });
+      objective = this.objectives.create(agentId, {
+        content,
+        ...(reviewState !== undefined ? { reviewState } : {}),
+      });
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
         this.emit(agentId, "objective.blocked", { findings: err.findings });
@@ -701,8 +719,96 @@ export class AsterismStore {
     this.emit(agentId, "objective.added", {
       objectiveId: objective.id,
       status: objective.status,
+      reviewState: objective.reviewState,
     });
     return objective;
+  }
+
+  /**
+   * Settle a PROPOSED objective — the human's accept/reject of a reflection-queued
+   * proposal — via a single compare-and-set ({@link ObjectiveRepository.settleProposed})
+   * and record the transition as `objective.reviewed` (references only: the objective id
+   * and the `from`/`to` states, never the content). The direct analogue of
+   * {@link settleProposedMemory}: accepting flips `proposed → accepted` (the objective is
+   * `active`, so it now frames runs), rejecting flips `proposed → rejected` (it never
+   * framed, so nothing changes). The CAS is the race guard — two surfaces draining one
+   * proposal cannot both win. `from` is always `proposed`. Returns the settled row to the
+   * winner, or undefined to a caller that lost the race or named an unknown /
+   * already-settled id, in which case nothing changes and nothing is logged.
+   */
+  settleProposedObjective(
+    agentId: string,
+    id: string,
+    reviewState: ReviewState,
+  ): Objective | undefined {
+    return this.driver.transaction(() => {
+      const objective = this.objectives.settleProposed(agentId, id, reviewState);
+      if (objective) {
+        this.emit(agentId, "objective.reviewed", {
+          objectiveId: objective.id,
+          from: "proposed",
+          to: objective.reviewState,
+        });
+      }
+      return objective;
+    });
+  }
+
+  /**
+   * Accept a queued objective proposal WITH AN EDIT, atomically — the direct analogue of
+   * {@link acceptEditedProposal}. In ONE transaction it CAS-claims the original out of the
+   * queue (`proposed → rejected`, recording `objective.reviewed`) and records the edited
+   * content as a fresh `active + accepted` objective (recording `objective.added`). Atomic
+   * so the two writes cannot tear: if the record fails, the claim rolls back and the
+   * proposal stays in the queue. Claiming the original FIRST is what stops two concurrent
+   * edited-accepts from yielding two accepted objectives: only the CAS winner records. The
+   * caller has already screened `content` through the firewall (the hard gate) before
+   * calling. Returns the new accepted objective, or undefined when the CAS lost.
+   */
+  acceptEditedObjectiveProposal(
+    agentId: string,
+    current: Objective,
+    content: string,
+  ): Objective | undefined {
+    return this.driver.transaction(() => {
+      const claimed = this.objectives.settleProposed(agentId, current.id, "rejected");
+      if (!claimed) return undefined;
+      this.emit(agentId, "objective.reviewed", {
+        objectiveId: claimed.id,
+        from: "proposed",
+        to: claimed.reviewState,
+      });
+      const objective = this.objectives.create(agentId, { content, reviewState: "accepted" });
+      this.emit(agentId, "objective.added", {
+        objectiveId: objective.id,
+        status: objective.status,
+        reviewState: objective.reviewState,
+      });
+      return objective;
+    });
+  }
+
+  /**
+   * Record that a non-interactive `reflect --propose` has reflected objectives on
+   * `runId` — a references-only `objective.proposed` marker carrying the per-run tally
+   * (how many proposals were queued / withheld / already-known / ignored), never any
+   * content. The objective analogue of {@link recordReflectionProposed}, emitted
+   * alongside it so the memory marker stays byte-for-byte and the objective marker is its
+   * clean mirror. Emit-only (no row to write), so not wrapped in a transaction.
+   */
+  recordObjectiveProposed(agentId: string, runId: string, tally: ReflectionRunTally): void {
+    this.emit(
+      agentId,
+      "objective.proposed",
+      {
+        runId,
+        queued: tally.queued,
+        withheld: tally.withheld,
+        alreadyKnown: tally.alreadyKnown,
+        ignored: tally.ignored,
+      },
+      runId,
+    );
   }
 
   /**

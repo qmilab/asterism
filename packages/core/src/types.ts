@@ -107,6 +107,8 @@ export const EVENT_TYPES = [
   "reflection.proposed",
   "objective.added",
   "objective.status_changed",
+  "objective.reviewed",
+  "objective.proposed",
   "objective.blocked",
   "skill.attached",
   "credential.added",
@@ -215,9 +217,10 @@ export interface Credential {
  * scoped by `agentId` like every other row. Where memory is accumulated,
  * relevance-recalled *lessons* ("I prefer X"), an objective is a small, mutable
  * statement of what the agent is working toward *now* ("finish the Q3 migration"),
- * carried across runs with a completion lifecycle. Only an `active` objective frames
- * a run; `done`/`dropped` ones are kept for history. Its `content` frames runs, so it
- * is firewall-screened on the write path exactly like memory content.
+ * carried across runs with a completion lifecycle. Only an `active` AND `accepted`
+ * objective frames a run; `done`/`dropped`/`rejected` ones are kept for history. Its
+ * `content` frames runs, so it is firewall-screened on the write path exactly like
+ * memory content.
  */
 export interface Objective {
   id: string;
@@ -225,6 +228,15 @@ export interface Objective {
   /** One-line standing purpose. */
   content: string;
   status: ObjectiveStatus;
+  /**
+   * Ratification state, reusing memory's {@link ReviewState}. An operator-declared
+   * objective is `accepted`; reflection PROPOSES a `proposed` one that is INERT —
+   * framing requires `active` AND `accepted`, so a proposal never shapes a run until a
+   * human accepts it (accept → `accepted`, reject → `rejected`). The same property that
+   * makes memory's accept/reject meaningful and keeps an unreviewed proposal from
+   * acting as a backdoor injection.
+   */
+  reviewState: ReviewState;
   createdAt: string;
   updatedAt: string;
 }

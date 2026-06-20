@@ -39,6 +39,7 @@ function objective(partial: Partial<Objective>): Objective {
     agentId: agentFixture.id,
     content: "an objective",
     status: "active",
+    reviewState: "accepted",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...partial,
@@ -143,6 +144,20 @@ describe("buildSystemPrompt — standing objectives", () => {
     expect(prompt).toContain("ACTIVE-GOAL");
     expect(prompt).not.toContain("DONE-GOAL");
     expect(prompt).not.toContain("DROPPED-GOAL");
+  });
+
+  test("a proposed (or rejected) objective is inert — only accepted ones frame", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      objectives: [
+        objective({ id: "1", content: "ACCEPTED-GOAL", reviewState: "accepted" }),
+        objective({ id: "2", content: "PROPOSED-GOAL", reviewState: "proposed" }),
+        objective({ id: "3", content: "REJECTED-GOAL", reviewState: "rejected" }),
+      ],
+    });
+    expect(prompt).toContain("ACCEPTED-GOAL");
+    expect(prompt).not.toContain("PROPOSED-GOAL");
+    expect(prompt).not.toContain("REJECTED-GOAL");
   });
 
   test("the section is omitted entirely when none are active", () => {

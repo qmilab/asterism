@@ -238,18 +238,21 @@ Every filter narrows within this agent's own activity — never another's.`,
   reflect: `asterism reflect <agent> --review
 asterism reflect <agent> --propose
 
-Turn an agent's work into memories it might keep — always proposed, never saved on
-its own. You stay the one who decides what an agent remembers.
+Turn an agent's work into things it might keep — memories it could remember, and
+standing objectives it could take on — always proposed, never adopted on its own. You
+stay the one who decides what an agent remembers and what it works toward.
 
   --review    Review the proposals waiting for this agent and accept, edit, or reject
-              each one. Anything unsafe to remember is flagged for you. If proposals
-              are already waiting (see --propose), it reviews those — no model needed;
-              otherwise it looks over the agent's latest work and drafts new ones.
+              each one — memories first, then standing objectives. Anything unsafe is
+              flagged for you. If proposals are already waiting (see --propose), it
+              reviews those — no model needed; otherwise it looks over the agent's
+              latest work and drafts new ones. An accepted objective frames every later
+              run; a proposed one does nothing until you accept it.
   --propose   Look over the agent's new work and set aside what it might be worth
-              remembering, for you to review later. Saves nothing as active and asks
-              nothing — it just fills the review pile. This is the form you can put on
-              a schedule (see the docs); nothing reflects on a schedule unless you
-              set that up yourself.
+              remembering or working toward, for you to review later. Saves nothing as
+              active and asks nothing — it just fills the review pile. This is the form
+              you can put on a schedule (see the docs); nothing reflects on a schedule
+              unless you set that up yourself.
 
 Drafting new proposals uses the agent's configured model (\`asterism config\` or
 ASTERISM_MODEL_ID, and an API key, e.g. OPENAI_API_KEY). Reviewing a pile that is

@@ -1223,6 +1223,113 @@ test("reflect rejects asking for both --review and --propose at once", async () 
   expect(h.err.join("\n")).toContain("Choose one");
 });
 
+// --- Slice 2: reflection proposes standing objectives (CLI) ----------------
+
+/** A reflection stand-in proposing one objective per run, with no memory proposals. */
+function fakeObjectiveReflection(contents: string[]): ReflectionProvider {
+  return {
+    async reflect() {
+      return [];
+    },
+    async proposeObjectives(input) {
+      return contents.map((content) => ({
+        content,
+        confidence: 0.7,
+        sourceRunId: input.transcript.runId,
+      }));
+    },
+  };
+}
+
+test("reflect --propose queues objectives as inert proposals; --review accepts them with no model", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeObjectiveReflection(["keep the notes folder tidy"]),
+  });
+  const proposeOut = await capture(["reflect", "personal", "--propose"], h.io);
+  expect(proposeOut).toContain("Queued 1 proposed objective");
+
+  // Proposed = inert: `objective list` shows it as proposed, not framing.
+  const listed = await capture(["objective", "list", "personal"], h.io);
+  expect(listed).toContain("keep the notes folder tidy");
+  expect(listed).toContain("proposed");
+  expect(listed).toContain("0 active, 1 proposed");
+
+  // Drain with a model builder that THROWS — proving the queue drain needs no model.
+  h.io.makeReflectionProvider = () => {
+    throw new Error("a model was built while draining the objective queue");
+  };
+  h.io.review = (): ReviewDecision => ({ kind: "accept" });
+  const reviewOut = await capture(["reflect", "personal", "--review"], h.io);
+  expect(reviewOut).toContain("1 saved");
+
+  // Now it frames: active + accepted.
+  const after = await capture(["objective", "list", "personal"], h.io);
+  expect(after).toContain("1 active");
+  expect(after).not.toContain("proposed");
+});
+
+test("reflect --review (live) proposes objectives from the latest run for acceptance", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeObjectiveReflection(["drive the migration to completion"]),
+  });
+  h.io.review = (item: ReviewItem): ReviewDecision =>
+    item.label === "objective" ? { kind: "accept" } : { kind: "reject" };
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("proposed objective");
+  expect(out).toContain("1 saved");
+
+  const listed = await capture(["objective", "list", "personal"], h.io);
+  expect(listed).toContain("drive the migration to completion");
+  expect(listed).toContain("1 active");
+});
+
+test("a proposed objective stays out of an agent's framing until accepted", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeObjectiveReflection(["a goal awaiting review"]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // The kernel's framing set excludes the proposal — it is inert until ratified.
+  const store = openHomeStore(h);
+  try {
+    const agent = agentNamed(store, "personal");
+    expect(store.objectives.listActiveAccepted(agent.id)).toEqual([]);
+    expect(store.objectives.list(agent.id, { reviewState: "proposed" }).map((o) => o.content)).toEqual([
+      "a goal awaiting review",
+    ]);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposed objectives are agent-scoped — one agent's never frame or list under another", async () => {
+  const h = harness();
+  await withFinishedRun(h, "personal");
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeObjectiveReflection(["personal-only objective"]),
+  });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // Work never sees personal's proposed objective.
+  const workList = await capture(["objective", "list", "work"], h.io);
+  expect(workList).not.toContain("personal-only objective");
+  const store = openHomeStore(h);
+  try {
+    const work = agentNamed(store, "work");
+    expect(store.objectives.list(work.id, { reviewState: "proposed" })).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
 test("--version prints the version", async () => {
   const h = harness();
   expect(await runCli(["--version"], h.io)).toBe(0);

@@ -7,6 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsterismStore } from "./store";
+import { openDatabase } from "./db/index.js";
 import { MemoryFirewallError } from "./firewall";
 import type { Agent } from "./types";
 
@@ -49,7 +50,7 @@ describe("objective repository — create + read", () => {
     expect(() => store.objectives.create("", { content: "x" })).toThrow();
     expect(() => store.objectives.get("", "id")).toThrow();
     expect(() => store.objectives.list("")).toThrow();
-    expect(() => store.objectives.listActive("")).toThrow();
+    expect(() => store.objectives.listActiveAccepted("")).toThrow();
     expect(() => store.objectives.setStatus("", "id", "done")).toThrow();
   });
 
@@ -70,7 +71,7 @@ describe("objective repository — create + read", () => {
     const c = store.objectives.create(alice.id, { content: "to be dropped" });
     store.objectives.setStatus(alice.id, b.id, "done");
     store.objectives.setStatus(alice.id, c.id, "dropped");
-    expect(store.objectives.listActive(alice.id).map((o) => o.id)).toEqual([a.id]);
+    expect(store.objectives.listActiveAccepted(alice.id).map((o) => o.id)).toEqual([a.id]);
   });
 });
 
@@ -81,7 +82,7 @@ describe("objective isolation — the agent is the boundary", () => {
     // Read: cross-agent get/list never surface it.
     expect(store.objectives.get(bob.id, o.id)).toBeUndefined();
     expect(store.objectives.list(bob.id)).toEqual([]);
-    expect(store.objectives.listActive(bob.id)).toEqual([]);
+    expect(store.objectives.listActiveAccepted(bob.id)).toEqual([]);
 
     // Write: cross-agent setStatus is a no-op returning undefined, and alice's
     // objective is untouched.
@@ -160,4 +161,168 @@ describe("objective lifecycle — audited, references-only, no-op safe", () => {
     expect(store.setObjectiveStatus(alice.id, "no-such-id", "done")).toBeUndefined();
     expect(store.events.tail(alice.id).length).toBe(before);
   });
+});
+
+// --- Slice 2: reflection-PROPOSED objectives, human-ratified ---------------
+//
+// The same discipline as memory's review queue, applied to objectives: a `proposed`
+// objective is INERT (framing requires active+accepted), settled by a single-winner CAS,
+// audited references-only — accept activates it, reject terminates it.
+
+describe("objective review state — create defaults + the framing set", () => {
+  test("create defaults to accepted; a proposal is created `proposed`", () => {
+    const declared = store.objectives.create(alice.id, { content: "operator goal" });
+    expect(declared.reviewState).toBe("accepted");
+    const proposed = store.objectives.create(alice.id, {
+      content: "reflection's idea",
+      reviewState: "proposed",
+    });
+    expect(proposed.reviewState).toBe("proposed");
+    // A bad reviewState is rejected at the write boundary, not silently stored.
+    expect(() =>
+      store.objectives.create(alice.id, { content: "x", reviewState: "bogus" as never }),
+    ).toThrow();
+  });
+
+  test("listActiveAccepted excludes proposed and rejected — only ratified, active objectives frame", () => {
+    const accepted = store.objectives.create(alice.id, { content: "accepted goal" });
+    const proposed = store.objectives.create(alice.id, {
+      content: "proposed goal",
+      reviewState: "proposed",
+    });
+    store.objectives.create(alice.id, { content: "rejected goal", reviewState: "rejected" });
+    expect(store.objectives.listActiveAccepted(alice.id).map((o) => o.id)).toEqual([accepted.id]);
+    // The proposal is still readable through the unfiltered list / by review-state filter.
+    expect(store.objectives.list(alice.id, { reviewState: "proposed" }).map((o) => o.id)).toEqual([
+      proposed.id,
+    ]);
+    expect(() =>
+      store.objectives.list(alice.id, { reviewState: "bogus" as never }),
+    ).toThrow();
+  });
+});
+
+describe("objective settleProposed — single-winner CAS", () => {
+  test("accept flips proposed → accepted for the owner and advances updated_at", () => {
+    const p = store.objectives.create(alice.id, {
+      content: "settle me",
+      reviewState: "proposed",
+    });
+    const settled = store.objectives.settleProposed(alice.id, p.id, "accepted");
+    expect(settled?.reviewState).toBe("accepted");
+    expect(settled?.status).toBe("active"); // status untouched — it now frames
+    expect(settled!.updatedAt >= p.updatedAt).toBe(true);
+    // It now appears in the framing set.
+    expect(store.objectives.listActiveAccepted(alice.id).map((o) => o.id)).toEqual([p.id]);
+  });
+
+  test("a second settle loses the CAS (already settled) and an unknown / cross-agent id is undefined", () => {
+    const p = store.objectives.create(alice.id, {
+      content: "race me",
+      reviewState: "proposed",
+    });
+    expect(store.objectives.settleProposed(alice.id, p.id, "accepted")?.reviewState).toBe("accepted");
+    // No longer `proposed`, so the CAS matches nothing.
+    expect(store.objectives.settleProposed(alice.id, p.id, "rejected")).toBeUndefined();
+    expect(store.objectives.settleProposed(alice.id, "no-such-id", "accepted")).toBeUndefined();
+    // Cross-agent settle never reaches alice's row.
+    const q = store.objectives.create(alice.id, { content: "mine", reviewState: "proposed" });
+    expect(store.objectives.settleProposed(bob.id, q.id, "accepted")).toBeUndefined();
+    expect(store.objectives.get(alice.id, q.id)?.reviewState).toBe("proposed");
+  });
+});
+
+describe("objective review orchestration — audited references-only", () => {
+  test("createObjective(proposed) audits objective.added with reviewState, never content", () => {
+    const o = store.createObjective(alice.id, "a proposed standing goal", "proposed");
+    expect(o.reviewState).toBe("proposed");
+    const added = store.events.tail(alice.id).find((e) => e.type === "objective.added");
+    const payload = added!.payload as { objectiveId?: string; status?: string; reviewState?: string };
+    expect(payload).toEqual({ objectiveId: o.id, status: "active", reviewState: "proposed" });
+    expect(JSON.stringify(payload)).not.toContain("standing goal");
+  });
+
+  test("settleProposedObjective records objective.reviewed with from/to references only", () => {
+    const p = store.createObjective(alice.id, "review me", "proposed");
+    const settled = store.settleProposedObjective(alice.id, p.id, "accepted");
+    expect(settled?.reviewState).toBe("accepted");
+    const ev = store.events.tail(alice.id).find((e) => e.type === "objective.reviewed");
+    const payload = ev!.payload as { objectiveId?: string; from?: string; to?: string };
+    expect(payload).toEqual({ objectiveId: p.id, from: "proposed", to: "accepted" });
+    expect(JSON.stringify(payload)).not.toContain("review me");
+    // An unknown id settles nothing and logs nothing.
+    const before = store.events.tail(alice.id).length;
+    expect(store.settleProposedObjective(alice.id, "no-such-id", "rejected")).toBeUndefined();
+    expect(store.events.tail(alice.id).length).toBe(before);
+  });
+
+  test("acceptEditedObjectiveProposal rejects the original and records a fresh accepted objective", () => {
+    const p = store.createObjective(alice.id, "rough draft goal", "proposed");
+    const created = store.acceptEditedObjectiveProposal(alice.id, p, "the edited standing goal");
+    expect(created?.reviewState).toBe("accepted");
+    expect(created?.content).toBe("the edited standing goal");
+    // The original is superseded (rejected), the edit is the one that frames.
+    expect(store.objectives.get(alice.id, p.id)?.reviewState).toBe("rejected");
+    expect(store.objectives.listActiveAccepted(alice.id).map((o) => o.content)).toEqual([
+      "the edited standing goal",
+    ]);
+    // Both transitions are audited: a review of the original + an add of the edit.
+    const types = store.events.tail(alice.id).map((e) => e.type);
+    expect(types).toContain("objective.reviewed");
+    expect(types).toContain("objective.added");
+  });
+
+  test("recordObjectiveProposed audits objective.proposed counts only", () => {
+    const run = store.startRun(alice.id, { input: "do a thing" });
+    store.recordObjectiveProposed(alice.id, run.id, {
+      queued: 2,
+      withheld: 1,
+      alreadyKnown: 0,
+      ignored: 3,
+    });
+    const ev = store.events.tail(alice.id).find((e) => e.type === "objective.proposed");
+    expect(ev!.payload).toEqual({
+      runId: run.id,
+      queued: 2,
+      withheld: 1,
+      alreadyKnown: 0,
+      ignored: 3,
+    });
+  });
+
+  test("a proposed objective is agent-scoped — another agent cannot settle it", () => {
+    const p = store.createObjective(alice.id, "alice's proposal", "proposed");
+    expect(store.settleProposedObjective(bob.id, p.id, "accepted")).toBeUndefined();
+    expect(store.objectives.get(alice.id, p.id)?.reviewState).toBe("proposed");
+    expect(store.events.tail(bob.id).some((e) => e.type === "objective.reviewed")).toBe(false);
+  });
+});
+
+test("opening a pre-slice-2 objectives table migrates review_state in as 'accepted'", () => {
+  const driver = openDatabase(":memory:");
+  // An older schema: the slice-1 objectives table, before review_state existed, with a row.
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE objectives (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    INSERT INTO agents (id, name, role, soul_ref, workspace_dir, trust_level, created_at)
+      VALUES ('a1', 'alice', 'r', 'casual-helper', '/tmp/a', 'autonomous', '2026-01-01T00:00:00.000Z');
+    INSERT INTO objectives (id, agent_id, content, status, created_at, updated_at)
+      VALUES ('o1', 'a1', 'pre-existing goal', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+  `);
+  const migrated = new AsterismStore(driver);
+  try {
+    // The pre-existing operator-declared objective backfills as `accepted`, so it still frames.
+    const row = migrated.objectives.get("a1", "o1");
+    expect(row?.reviewState).toBe("accepted");
+    expect(migrated.objectives.listActiveAccepted("a1").map((o) => o.id)).toEqual(["o1"]);
+  } finally {
+    migrated.close();
+  }
 });

@@ -83,23 +83,30 @@ export {
   DEFAULT_REFLECT_RUN_LIMIT,
   isReflectionMemoryType,
   proposeReviewableMemories,
-  queueProposedMemories,
+  proposeReviewableObjectives,
+  queueProposals,
   unreflectedRuns,
   acceptProposedMemory,
   rejectProposedMemory,
+  acceptProposedObjective,
+  rejectProposedObjective,
 } from "./reflection.js";
 export type {
   ReflectionMemoryType,
   RunTranscript,
   ReflectionInput,
   ProposedMemory,
+  ProposedObjective,
   ReflectionProvider,
   ReviewableProposal,
+  ReviewableObjectiveProposal,
   ProposeResult,
+  ProposeObjectivesResult,
   ReflectionRunTally,
   UnreflectedRuns,
   QueueResult,
   DrainResult,
+  ObjectiveDrainResult,
 } from "./reflection.js";
 
 // Run framing — composes soul / role / scoped skills / accepted memories into the

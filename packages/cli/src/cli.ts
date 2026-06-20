@@ -23,6 +23,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { AsterismStore } from "@qmilab/asterism-core";
 import {
   acceptProposedMemory,
+  acceptProposedObjective,
   BUILTIN_SOULS,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
@@ -30,10 +31,12 @@ import {
   MEMORY_TYPES,
   MemoryFirewallError,
   proposeReviewableMemories,
+  proposeReviewableObjectives,
   proposeStandingGrants,
-  queueProposedMemories,
+  queueProposals,
   RECALL_PROVIDER_IDS,
   rejectProposedMemory,
+  rejectProposedObjective,
   resolveStandingPolicy,
   resumeRun,
   REVIEW_STATES,
@@ -54,6 +57,7 @@ import type {
   RecallProvider,
   RecallProviderId,
   ReflectionProvider,
+  ReviewableObjectiveProposal,
   ReviewableProposal,
   Run,
   RuntimeAdapter,
@@ -113,19 +117,21 @@ import { HTTP_TOKEN_ENV, resolveConsoleToken, resolveHttpToken } from "./http-to
 import type { ResolvedHttpToken } from "./http-token.js";
 import { VERSION } from "./version.js";
 
-/** A proposed memory presented for review, with any firewall findings on it. */
+/** A proposed memory or objective presented for review, with any firewall findings on it. */
 export interface ReviewItem {
   /** 1-based position in the batch. */
   index: number;
   total: number;
-  memoryType: string;
+  /** What kind of proposal this is — the memory type for a memory, `"objective"` for an objective. */
+  label: string;
   content: string;
-  confidence: number;
+  /** The provider's confidence, when known. Absent for a queued objective (objectives persist none). */
+  confidence?: number;
   /** Firewall findings on the proposed content; empty when it screens clean. */
   findings: readonly FirewallFinding[];
 }
 
-/** The reviewer's verdict on one proposed memory during `reflect --review`. */
+/** The reviewer's verdict on one proposed memory or objective during `reflect --review`. */
 export type ReviewDecision =
   | { kind: "accept" }
   | { kind: "edit"; content: string }
@@ -1531,11 +1537,11 @@ async function cmdReflect(args: string[], io: CliIO): Promise<number> {
 }
 
 /**
- * `reflect --review`: drain the agent's persisted PROPOSED queue when it has one (the
- * proposals a scheduled `--propose` already computed — these need NO model), otherwise
- * fall back to today's live compute of the latest run. Queue-if-present-else-live keeps
- * the manual `run → reflect --review` flow unchanged while making the scheduled queue the
- * thing a human drains.
+ * `reflect --review`: drain the agent's persisted PROPOSED queues when either has rows (the
+ * proposals a scheduled `--propose` already computed — these need NO model), otherwise fall
+ * back to a live compute of the latest run. Both memories AND standing objectives are reviewed
+ * — memories first, then objectives — so one `reflect --review` drains everything reflection
+ * proposed. Queue-if-present-else-live keeps the manual `run → reflect --review` flow unchanged.
  */
 async function runReflectReview(
   io: CliIO,
@@ -1544,9 +1550,21 @@ async function runReflectReview(
   agent: Agent,
   name: string,
 ): Promise<number> {
-  const queued = store.memories.list(agent.id, { reviewState: "proposed" });
-  if (queued.length > 0) return reviewQueueDrain(io, store, agent, name, queued);
-  return reviewLiveCompute(io, store, home, agent, name);
+  const queuedMemories = store.memories.list(agent.id, { reviewState: "proposed" });
+  const queuedObjectives = store.objectives.list(agent.id, { reviewState: "proposed" });
+  // A persisted queue (from `--propose`) is drained, never re-computed: if EITHER queue has
+  // rows we are in drain mode, and we drain whichever kinds have rows — no model needed.
+  if (queuedMemories.length > 0 || queuedObjectives.length > 0) {
+    let code = 0;
+    if (queuedMemories.length > 0) {
+      code = (await reviewQueueDrain(io, store, agent, name, queuedMemories)) || code;
+    }
+    if (queuedObjectives.length > 0) {
+      code = (await reviewObjectiveQueueDrain(io, store, agent, name, queuedObjectives)) || code;
+    }
+    return code;
+  }
+  return reviewLive(io, store, home, agent, name);
 }
 
 /** The running tally a review loop returns, formatted into the closing `Done — …` line. */
@@ -1568,9 +1586,11 @@ type DrainOutcome = "ok" | "stale";
 
 /** One proposal's display fields, the same for a live-computed and a queued proposal. */
 interface ReviewableView {
-  memoryType: string;
+  /** The kind label shown to the reviewer — a memory type, or `"objective"`. */
+  label: string;
   content: string;
-  confidence: number;
+  /** The provider's confidence, when known. Absent for a queued objective. */
+  confidence?: number;
   findings: readonly FirewallFinding[];
 }
 
@@ -1612,7 +1632,10 @@ async function driveReviewLoop(
     const v = view(i);
 
     io.out("");
-    io.out(`(${i + 1}/${total}) ${v.memoryType} · confidence ${v.confidence}`);
+    io.out(
+      `(${i + 1}/${total}) ${v.label}` +
+        (v.confidence !== undefined ? ` · confidence ${v.confidence}` : ""),
+    );
     io.out(`  ${v.content}`);
     if (v.findings.length > 0) {
       io.out(
@@ -1625,9 +1648,9 @@ async function driveReviewLoop(
     const decision = await review({
       index: i + 1,
       total,
-      memoryType: v.memoryType,
+      label: v.label,
       content: v.content,
-      confidence: v.confidence,
+      ...(v.confidence !== undefined ? { confidence: v.confidence } : {}),
       findings: v.findings,
     });
 
@@ -1731,7 +1754,7 @@ async function reviewQueueDrain(
     (i) => {
       const m = queued[i]!;
       return {
-        memoryType: m.memoryType,
+        label: m.memoryType,
         content: m.content,
         confidence: m.confidence,
         findings: screenMemory(m.content).findings,
@@ -1756,29 +1779,79 @@ async function reviewQueueDrain(
 }
 
 /**
- * The live, ephemeral review path (today's behavior): compute proposals for the agent's
- * latest run with output, present each, and persist only the accepted ones. Used when the
- * persisted queue is empty, so the manual `run → reflect --review` convenience is unchanged.
+ * Drain the persisted `proposed` OBJECTIVE queue — the objective analogue of
+ * {@link reviewQueueDrain}, through the shared kernel helpers ({@link acceptProposedObjective} /
+ * {@link rejectProposedObjective}). No model is needed: the proposals are already computed. As
+ * with memory, an unattended (no-reviewer) session refuses to drain — a reject is a DURABLE
+ * transition, so a default-reject would wipe the pile — and leaves it intact for a real review.
  */
-async function reviewLiveCompute(
+async function reviewObjectiveQueueDrain(
+  io: CliIO,
+  store: AsterismStore,
+  agent: Agent,
+  name: string,
+  queued: Objective[],
+): Promise<number> {
+  if (!io.review) {
+    io.out(
+      `${queued.length} proposed ${queued.length === 1 ? "objective is" : "objectives are"} waiting for ${name}.`,
+    );
+    io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal to go through them.`);
+    return 0;
+  }
+
+  io.out(
+    `Reviewing ${queued.length} queued ${queued.length === 1 ? "objective" : "objectives"} for ${name}.`,
+  );
+  io.out("These were proposed unattended; nothing frames a run unless you accept it.");
+
+  const counts = await driveReviewLoop(
+    io,
+    queued.length,
+    // Objectives persist no confidence, so the view carries none (the display omits it). Re-screen
+    // only so a display warning would surface if the firewall rules tightened since the proposal.
+    (i) => {
+      const o = queued[i]!;
+      return { label: "objective", content: o.content, findings: screenMemory(o.content).findings };
+    },
+    (i) =>
+      rejectProposedObjective(store, agent, queued[i]!.id).kind === "rejected" ? "ok" : "stale",
+    (i, content, edited) =>
+      acceptProposedObjective(store, agent, queued[i]!.id, edited ? content : undefined).kind ===
+      "accepted"
+        ? "ok"
+        : "stale",
+    true, // warn on a still-poisoned edit before persisting, same as the memory path
+  );
+
+  printReviewSummary(io, counts);
+  return 0;
+}
+
+/**
+ * The live, ephemeral review path: compute proposals for the agent's latest run with output,
+ * present each, and persist only the accepted ones. Used when both persisted queues are empty,
+ * so the manual `run → reflect --review` convenience is unchanged. Reviews memories then
+ * objectives, building the model + selecting the run ONCE for both.
+ */
+async function reviewLive(
   io: CliIO,
   store: AsterismStore,
   home: string,
   agent: Agent,
   name: string,
 ): Promise<number> {
-  // Check for a reflectable run BEFORE building the model, so an agent with nothing to
-  // reflect on is told so without needing a model configured. The proposal pipeline below
-  // re-selects the same run (the shared kernel helper owns that policy); this early check
-  // only gates the model build.
+  // Check for a reflectable run BEFORE building the model, so an agent with nothing to reflect
+  // on is told so without needing a model configured. Both sections re-select the same run (the
+  // shared kernel helpers own that policy); this early check only gates the model build.
   const target = store.runs.latestWithOutput(agent.id);
   if (!target || target.output === undefined) {
     io.out(`${name} has no completed run with output to reflect on yet.`);
     return 0;
   }
 
-  // Build the reflection provider (a hosted model) the same way `run` builds its adapter —
-  // only after the agent and a reflectable run check out. Resolves this agent's own model.
+  // Build the reflection provider (a hosted model) once — both the memory and objective sections
+  // use it. Resolves this agent's own model, the same way `run` builds its adapter.
   const context: ModelResolutionContext = { config: loadConfig(home), agentName: agent.name };
   const made = io.makeReflectionProvider
     ? io.makeReflectionProvider(io.env, context)
@@ -1789,13 +1862,25 @@ async function reviewLiveCompute(
   }
   const provider = made.provider;
 
-  // The shared kernel pipeline: select the run, hand the transcript + already-known
-  // memories to the provider, apply the reflection-only type filter, and screen each
-  // proposal through the memory firewall.
+  const memCode = await reviewMemoryLive(io, store, agent, name, target, provider);
+  const objCode = await reviewObjectiveLive(io, store, agent, name, target, provider);
+  // Either section failing (a model error) surfaces as a non-zero exit; both clean ⇒ 0.
+  return memCode || objCode;
+}
+
+/** The live memory section of {@link reviewLive}: propose memories for `target`, review, persist accepts. */
+async function reviewMemoryLive(
+  io: CliIO,
+  store: AsterismStore,
+  agent: Agent,
+  name: string,
+  target: Run,
+  provider: ReflectionProvider,
+): Promise<number> {
   let usable: readonly ReviewableProposal[];
   let ignored: number;
   try {
-    const result = await proposeReviewableMemories(store, agent, provider);
+    const result = await proposeReviewableMemories(store, agent, provider, { runId: target.id });
     if (result.kind === "no_run") {
       io.out(`${name} has no completed run with output to reflect on yet.`);
       return 0;
@@ -1824,7 +1909,7 @@ async function reviewLiveCompute(
     usable.length,
     (i) => {
       const p = usable[i]!;
-      return { memoryType: p.memoryType, content: p.content, confidence: p.confidence, findings: p.findings };
+      return { label: p.memoryType, content: p.content, confidence: p.confidence, findings: p.findings };
     },
     // A live proposal persists nothing until accepted, so a rejection is a no-op — always `ok`.
     (): DrainOutcome => "ok",
@@ -1840,6 +1925,55 @@ async function reviewLiveCompute(
         reviewState: "accepted",
         status: "active",
       });
+      return "ok";
+    },
+    true, // warn on a still-poisoned edit before persisting
+  );
+
+  printReviewSummary(io, counts);
+  return 0;
+}
+
+/** The live objective section of {@link reviewLive}: propose objectives for `target`, review, persist accepts. */
+async function reviewObjectiveLive(
+  io: CliIO,
+  store: AsterismStore,
+  agent: Agent,
+  name: string,
+  target: Run,
+  provider: ReflectionProvider,
+): Promise<number> {
+  let usable: readonly ReviewableObjectiveProposal[];
+  try {
+    const result = await proposeReviewableObjectives(store, agent, provider, { runId: target.id });
+    if (result.kind === "no_run") return 0;
+    usable = result.proposals;
+  } catch (err) {
+    io.err(`Objective reflection failed: ${errorMessage(err)}`);
+    return 1;
+  }
+  if (usable.length === 0) {
+    io.out(`${name}: nothing worth proposing as a standing objective from run ${shortId(target.id)}.`);
+    return 0;
+  }
+
+  io.out(
+    `Reviewing ${usable.length} proposed ${usable.length === 1 ? "objective" : "objectives"} for ${name} (from run ${shortId(target.id)}).`,
+  );
+  io.out("Nothing frames a run unless you accept it.");
+
+  const counts = await driveReviewLoop(
+    io,
+    usable.length,
+    (i) => {
+      const p = usable[i]!;
+      return { label: "objective", content: p.content, confidence: p.confidence, findings: p.findings };
+    },
+    // A live proposal persists nothing until accepted, so a rejection is a no-op — always `ok`.
+    (): DrainOutcome => "ok",
+    // An accepted objective is saved active + accepted, so it frames the agent's future runs.
+    (i, content): DrainOutcome => {
+      store.createObjective(agent.id, content, "accepted");
       return "ok";
     },
     true, // warn on a still-poisoned edit before persisting
@@ -1881,7 +2015,7 @@ async function runReflectPropose(
 
   let result;
   try {
-    result = await queueProposedMemories(store, agent, made.provider);
+    result = await queueProposals(store, agent, made.provider);
   } catch (err) {
     io.err(`Reflection failed: ${errorMessage(err)}`);
     return 1;
@@ -1895,10 +2029,18 @@ async function runReflectPropose(
       `${result.alreadyKnown > 0 ? `, ${result.alreadyKnown} already known` : ""}` +
       `${result.ignored > 0 ? `, ${result.ignored} ignored` : ""}.`,
   );
+  const obj = result.objectives;
+  const objWord = obj.queued === 1 ? "objective" : "objectives";
+  io.out(
+    `Queued ${obj.queued} proposed ${objWord}` +
+      `${obj.withheld > 0 ? `, ${obj.withheld} withheld` : ""}` +
+      `${obj.alreadyKnown > 0 ? `, ${obj.alreadyKnown} already known` : ""}` +
+      `${obj.ignored > 0 ? `, ${obj.ignored} ignored` : ""}.`,
+  );
   if (result.pendingRuns > 0) {
     io.out(`${result.pendingRuns} more run(s) still pending — re-run to continue.`);
   }
-  if (result.queued > 0) {
+  if (result.queued > 0 || obj.queued > 0) {
     io.out(`Review them with: asterism reflect ${name} --review`);
   }
   return 0;

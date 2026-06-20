@@ -62,20 +62,28 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 CREATE INDEX IF NOT EXISTS idx_skills_agent ON skills(agent_id);
 
--- An agent's standing objectives -- durable, operator-declared current purpose,
--- scoped by agent_id like every other table. status is 'active' | 'done' |
--- 'dropped'; only 'active' frames a run (done/dropped are kept for history). content
--- is the agent's own content, scoped by agent_id like memory.content -- and, because
--- it frames runs, firewall-screened on the write path exactly like memory. A new
--- table, so a fresh open picks it up via this CREATE; no store.migrate() ALTER is
--- needed (only later COLUMNS need that).
+-- An agent's standing objectives -- durable current purpose, scoped by agent_id
+-- like every other table. status is 'active' | 'done' | 'dropped'; content is the
+-- agent's own content, scoped by agent_id like memory.content -- and, because it
+-- frames runs, firewall-screened on the write path exactly like memory.
+--
+-- review_state ('proposed' | 'accepted' | 'rejected', the canonical ReviewState
+-- memory uses) governs ratification: an operator-declared objective is 'accepted'
+-- (the create default); reflection PROPOSES a 'proposed' one that is INERT until a
+-- human accepts it. ONLY 'active' AND 'accepted' frames a run -- so a proposed
+-- objective never shapes behaviour until ratified, and done/dropped/rejected ones
+-- are kept for history. A fresh open picks the column up via this CREATE; an older
+-- database that already has the (slice-1) table gets it via the additive ALTER in
+-- store.migrate() with DEFAULT 'accepted' (every pre-slice-2 objective was
+-- operator-declared, hence implicitly ratified).
 CREATE TABLE IF NOT EXISTS objectives (
-  id          TEXT PRIMARY KEY,
-  agent_id    TEXT NOT NULL REFERENCES agents(id),
-  content     TEXT NOT NULL,
-  status      TEXT NOT NULL,
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL
+  id           TEXT PRIMARY KEY,
+  agent_id     TEXT NOT NULL REFERENCES agents(id),
+  content      TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  review_state TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_objectives_agent ON objectives(agent_id);
 
