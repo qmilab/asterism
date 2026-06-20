@@ -23,7 +23,7 @@ import type { RecallBudget, RecallProvider } from "./recall.js";
 import { auditTrustHooks } from "./audit.js";
 import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } from "./trust.js";
 import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
-import { worldFactCapabilities } from "./world-facts.js";
+import { worldFactCapabilities, WORLD_FACT_RECORD_KEY, WORLD_FACT_FORGET_KEY } from "./world-facts.js";
 import type { AsterismStore } from "./store.js";
 import type { Agent, Run, RunStatus } from "./types.js";
 
@@ -272,7 +272,14 @@ async function runAndPersist(
   // audits them. The host's `CliIO.capabilities` seam stays store-free — these are the
   // kernel's own tools over its own state, built where the store lives. Both fresh runs
   // and resumes funnel through here, so a resumed run keeps them too.
-  const capabilities = [...(options.capabilities ?? []), ...worldFactCapabilities(store, agent.id)];
+  //
+  // The world-fact keys are RESERVED for the kernel: any host capability colliding on one
+  // is dropped before the kernel's own is appended, so the registry never carries two
+  // tools with the same key/name (which a tool-calling provider would reject) — the
+  // kernel's tool over its own state is authoritative for its reserved namespace.
+  const reservedKeys = new Set<string>([WORLD_FACT_RECORD_KEY, WORLD_FACT_FORGET_KEY]);
+  const hostCapabilities = (options.capabilities ?? []).filter((c) => !reservedKeys.has(c.key));
+  const capabilities = [...hostCapabilities, ...worldFactCapabilities(store, agent.id)];
   const profile = trustProfile({
     level: agent.trustLevel,
     capabilities: capabilities.map((c) => c.key),

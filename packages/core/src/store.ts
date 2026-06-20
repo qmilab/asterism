@@ -870,18 +870,29 @@ export class AsterismStore {
    * OUTSIDE the transaction so a rollback can never erase the audit trail of the block,
    * the same reason {@link recordMemory} is not transactional.
    *
-   * Then the cap, read+write under one transaction so a concurrent writer cannot slip a
-   * row in between the count and the insert: only a NEW subject grows the count
-   * (superseding an existing one is free), and a new subject at cap is rejected loudly
-   * with a {@link WorldFactCapError} (no silent eviction) — a resource bound, not a
-   * safety refusal, so it is not audited. On success: `world_fact.recorded` (references
-   * only — the id and whether it superseded an existing note, NEVER the subject/value,
-   * which are agent content like memory content).
+   * Then the cap, read+write under one transaction. The `subject` (the upsert KEY) and
+   * `value` are NORMALIZED by trimming first, so set / supersede / clear agree on
+   * identity regardless of caller whitespace — the agent's `record_note`, the operator's
+   * `notes set`, and `notes clear` all key by the trimmed subject (callers reject an
+   * empty subject/value before calling, so the trimmed forms are non-empty here). Within
+   * one process the synchronous transaction serializes the read and the write so the cap
+   * holds exactly; across separate connections to the same file a deferred transaction
+   * takes its write lock only at the INSERT, so two processes adding DISTINCT new
+   * subjects could each read a stale count and briefly overshoot the cap by one or two —
+   * benign (no eviction, the bound is soft) and rare, never a same-subject double (the
+   * UNIQUE(agent_id, subject) upsert collapses that). Only a NEW subject grows the count
+   * (superseding is free); a new subject at cap is rejected loudly with a
+   * {@link WorldFactCapError} (no silent eviction) — a resource bound, not a safety
+   * refusal, so it is not audited. On success: `world_fact.recorded` (references only —
+   * the id and whether it superseded an existing note, NEVER the subject/value, which are
+   * agent content like memory content).
    */
   recordWorldFact(agentId: string, subject: string, value: string): WorldFact {
+    const trimmedSubject = subject.trim();
+    const trimmedValue = value.trim();
     try {
-      assertMemorySafe(subject);
-      assertMemorySafe(value);
+      assertMemorySafe(trimmedSubject);
+      assertMemorySafe(trimmedValue);
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
         this.emit(agentId, "world_fact.blocked", { findings: err.findings });
@@ -889,11 +900,11 @@ export class AsterismStore {
       throw err;
     }
     return this.driver.transaction(() => {
-      const existing = this.worldFacts.get(agentId, subject);
+      const existing = this.worldFacts.get(agentId, trimmedSubject);
       if (existing === undefined && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
         throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
       }
-      const fact = this.worldFacts.upsert(agentId, subject, value);
+      const fact = this.worldFacts.upsert(agentId, trimmedSubject, trimmedValue);
       this.emit(agentId, "world_fact.recorded", {
         worldFactId: fact.id,
         superseded: existing !== undefined,
@@ -908,12 +919,15 @@ export class AsterismStore {
    * discipline). Backs BOTH the agent's `forget_note` tool and the operator's
    * `notes clear` — one store method, two callers, exactly as {@link recordWorldFact}
    * serves the `record_note` tool and `notes set`. A delete frames nothing, so there is
-   * no firewall path here. A cross-agent or unknown subject touches nothing and returns
+   * no firewall path here. The `subject` is trimmed to match the normalized key
+   * {@link recordWorldFact} stores under, so a note set with surrounding whitespace is
+   * still clearable. A cross-agent or unknown subject touches nothing and returns
    * undefined, which the caller uses to tell those apart.
    */
   clearWorldFact(agentId: string, subject: string): WorldFact | undefined {
+    const trimmedSubject = subject.trim();
     return this.driver.transaction(() => {
-      const removed = this.worldFacts.clear(agentId, subject);
+      const removed = this.worldFacts.clear(agentId, trimmedSubject);
       if (removed) {
         this.emit(agentId, "world_fact.cleared", { worldFactId: removed.id });
       }

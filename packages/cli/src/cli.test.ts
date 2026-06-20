@@ -2617,6 +2617,17 @@ test("notes set supersedes a subject; notes clear removes it", async () => {
   expect(await runCli(["notes", "clear", "personal", "deploy"], h.io)).toBe(1);
 });
 
+test("a note set with surrounding whitespace is still clearable (subject is normalized)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  expect(await runCli(["notes", "set", "personal", "  deploy  ", "v0.2.1"], h.io)).toBe(0);
+  // Stored under the trimmed key, so the trimmed subject clears it.
+  const listing = await capture(["notes", "inspect", "personal"], h.io);
+  expect(listing).toContain("deploy: v0.2.1");
+  expect(await runCli(["notes", "clear", "personal", "deploy"], h.io)).toBe(0);
+});
+
 test("a poisoned working note is refused and not saved", async () => {
   const h = harness();
   await runCli(["init"], h.io);

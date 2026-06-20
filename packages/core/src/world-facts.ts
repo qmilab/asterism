@@ -91,7 +91,12 @@ export function worldFactCapabilities(store: AsterismStore, agentId: string): Ca
         if (subject === undefined || subject.trim() === "") {
           return failure("record_note needs a non-empty 'subject'.");
         }
-        if (value === undefined) return failure("record_note needs a string 'value'.");
+        // Reject an empty / whitespace-only value too, so the agent's tool and the
+        // operator's `notes set` agree (the CLI rejects empty values): a blank note
+        // conveys nothing and would just consume a cap slot and frame an empty line.
+        if (value === undefined || value.trim() === "") {
+          return failure("record_note needs a non-empty 'value'.");
+        }
         try {
           const fact = store.recordWorldFact(agentId, subject, value);
           return { output: `Noted '${fact.subject}'.` };
@@ -131,10 +136,18 @@ export function worldFactCapabilities(store: AsterismStore, agentId: string): Ca
         if (subject === undefined || subject.trim() === "") {
           return failure("forget_note needs a non-empty 'subject'.");
         }
-        const removed = store.clearWorldFact(agentId, subject);
-        return {
-          output: removed ? `Forgot '${subject}'.` : `No working note named '${subject}'.`,
-        };
+        // Guard the store call the same way record_note does, so an unexpected error
+        // (e.g. a transaction/DB fault in clearWorldFact) becomes a model-visible tool
+        // failure rather than throwing across the adapter seam — the invariant this
+        // module's header states.
+        try {
+          const removed = store.clearWorldFact(agentId, subject);
+          return {
+            output: removed ? `Forgot '${subject}'.` : `No working note named '${subject}'.`,
+          };
+        } catch {
+          return failure("Could not clear the note.");
+        }
       },
     },
   };
