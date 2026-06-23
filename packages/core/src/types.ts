@@ -335,6 +335,21 @@ export type RecallProviderId = (typeof RECALL_PROVIDER_IDS)[number];
 export const COGNITION_PROVIDER_IDS = ["lodestar"] as const;
 export type CognitionProviderId = (typeof COGNITION_PROVIDER_IDS)[number];
 
+/**
+ * How much a cognition trace CAPTURES per tool call, beyond the references-only baseline.
+ * The baseline (references only — tool name, output size, a keyed fingerprint, the error
+ * flag — never content) is the absence of a selection (no row / NULL), never a value here,
+ * so this lists only the OPT-IN escalation: `"content"` ALSO records the tool output's
+ * content, behind the kernel's redaction boundary (`redactForTrace` — secret-aware,
+ * bounded, firewall-screened). Capturing content is a deliberate escalation of what the
+ * host-owned trace stores, kept separate from {@link COGNITION_PROVIDER_IDS} (whether a
+ * run is traced at all) so the safe references-only default holds unless an operator opts
+ * in. Meaningful only when `cognitionProvider` is set — capture has nowhere to land
+ * otherwise. Same opt-in discipline as the provider enums above.
+ */
+export const COGNITION_CAPTURE_MODES = ["content"] as const;
+export type CognitionCaptureMode = (typeof COGNITION_CAPTURE_MODES)[number];
+
 export interface AgentSettings {
   agentId: string;
   /**
@@ -358,6 +373,15 @@ export interface AgentSettings {
    * `core` never imports Lodestar. Observe-only: it records, it never gates.
    */
   cognitionProvider?: CognitionProviderId;
+  /**
+   * Per-agent escalation of how much the cognition trace captures. `undefined` ⇒ unset,
+   * so the trace records references only (the safe slice-1 baseline: no content). The only
+   * non-default value is `"content"`, which ALSO records redacted tool-output content (via
+   * the kernel's `redactForTrace` boundary). Inert unless `cognitionProvider` is also set —
+   * there is no trace to enrich otherwise. The host reads this and tells the wrapper how
+   * much to record; the kernel stores the SELECTION only.
+   */
+  cognitionCapture?: CognitionCaptureMode;
   /**
    * Per-agent override of the earned-standing earning bar: the minimum clean,
    * confirmed destructive executions a capability needs to be PROPOSED for an

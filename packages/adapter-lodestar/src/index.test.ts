@@ -63,6 +63,22 @@ function erroringTool(): ScopedTool {
   };
 }
 
+/** Benign text in {@link mixedOutputTool}'s output — must SHOW in a content-mode trace. */
+const BENIGN = "status ok for build 42";
+
+/**
+ * A scoped tool whose output mixes benign content with a secret — to prove content mode
+ * captures the benign part but the redaction boundary scrubs the secret.
+ */
+function mixedOutputTool(): ScopedTool {
+  return {
+    name: "report",
+    description: "returns mixed content",
+    inputSchema: {},
+    execute: () => ({ output: `${BENIGN}\nleaked key: ${SECRET}\ndone` }),
+  };
+}
+
 /** A scoped tool that throws — to prove a throw still propagates through the wrapper. */
 function throwingTool(): ScopedTool {
   return {
@@ -140,6 +156,16 @@ function runTraced(dir: string, agentId: string, tool: ScopedTool): Promise<RunO
   return wrapped.run(requestFor(workspaceIn(dir), tool)).output;
 }
 
+/** Like {@link runTraced}, but with content capture opted in (`captureContent: true`). */
+function runTracedContent(dir: string, agentId: string, tool: ScopedTool): Promise<RunOutput> {
+  const wrapped = wrapWithLodestar(toolDrivingAdapter(tool.name), {
+    agentId,
+    traceRoot: traceRootIn(dir),
+    captureContent: true,
+  });
+  return wrapped.run(requestFor(workspaceIn(dir), tool)).output;
+}
+
 test("the wrapper returns the inner adapter's output unchanged", async () => {
   await withWorkspace(async (dir) => {
     const output = await runTraced(dir, "agent-a", secretEchoTool());
@@ -212,6 +238,41 @@ test("cross-agent isolation: a trace never surfaces under another agent's id", a
     await runTraced(dir, "agent-a", secretEchoTool());
     // Reading the SAME root for a different agent yields nothing — the trace is partitioned
     // by agent id, so agent-b cannot read agent-a's trace even pointed at the same root.
+    expect(await renderTrace(traceRootIn(dir), "agent-b")).toBeUndefined();
+  });
+});
+
+test("references mode (the default) records NO content — output text is absent from the trace", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", mixedOutputTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("report"); // the tool name (a reference) is recorded...
+    expect(report).not.toContain(BENIGN); // ...but no output content, even benign content
+  });
+});
+
+test("content mode captures REDACTED content — benign text shows, the secret is scrubbed", async () => {
+  await withWorkspace(async (dir) => {
+    await runTracedContent(dir, "agent-a", mixedOutputTool());
+
+    // Even with content ON, the secret never lands on disk — the redaction boundary scrubs
+    // it BEFORE the write (this is the whole point of slice 2a).
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk).not.toContain(SECRET);
+
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain(BENIGN); // benign content IS captured (the new capability)
+    expect(report).not.toContain(SECRET); // the secret is redacted out
+    expect(report).toContain("[redacted:secret]"); // and marked
+    expect(report).toContain("redactions: secrets="); // the redaction summary shows
+  });
+});
+
+test("cross-agent isolation holds in content mode: A's captured content never surfaces under B", async () => {
+  await withWorkspace(async (dir) => {
+    await runTracedContent(dir, "agent-a", mixedOutputTool());
+    // Agent B reading the same root sees nothing — content is partitioned per agent id, so
+    // B can never read A's captured content (the golden-rule cross-agent test, content path).
     expect(await renderTrace(traceRootIn(dir), "agent-b")).toBeUndefined();
   });
 });

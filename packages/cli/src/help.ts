@@ -266,11 +266,14 @@ never a way to see another agent's.
 A trace exists only for an agent you opted in with
 \`asterism config cognition-provider <agent> lodestar\`. It is observe-only: recording a
 trace never changes what an agent may do (a destructive action still pauses for the
-same confirmation), and this first version records references only — which tool ran,
+same confirmation). By default the trace records references only — which tool ran,
 whether it succeeded, how much it returned — never the contents of a tool's input or
-output, so it cannot leak a secret. The trace is kept in the install's own storage,
-outside the agent's workspace, so the agent cannot reach or tamper with its own record.
-An agent with no trace yet is told how to start one.`,
+output. You can opt in to recording the redacted CONTENT of what each tool returned with
+\`asterism config cognition-capture <agent> content\`; even then, secrets and obvious
+injection are scrubbed out and the input arguments are never kept, so a trace cannot leak
+a credential. The trace is kept in the install's own storage, outside the agent's
+workspace, so the agent cannot reach or tamper with its own record. An agent with no
+trace yet is told how to start one.`,
 
   reflect: `asterism reflect <agent> --review
 asterism reflect <agent> --propose
@@ -301,6 +304,7 @@ asterism config unset [--agent <name>]
 asterism config recall-budget <agent> <n>  ·  --unset
 asterism config recall-provider <agent> local  ·  --unset
 asterism config cognition-provider <agent> lodestar  ·  --unset
+asterism config cognition-capture <agent> content  ·  references
 
 Choose the model your agents run on, and tune how much — and how — each agent
 remembers into a run. Set one install-wide default model, and give any single agent
@@ -337,6 +341,15 @@ its runs when you want it to differ.
                                         Stop recording a trace (the default).
   asterism config cognition-provider <agent>
                                         Show this agent's current cognition provider.
+  asterism config cognition-capture <agent> content
+                                        Also record the redacted content each tool
+                                        returned (secrets scrubbed out), not just
+                                        references. Needs a trace turned on above.
+  asterism config cognition-capture <agent> references
+                                        Go back to recording references only (the
+                                        default — no content).
+  asterism config cognition-capture <agent>
+                                        Show this agent's current capture setting.
 
 Where a model comes from, most specific first: an agent's own model, then the
 ASTERISM_MODEL_* environment variables, then the install default, then built-in

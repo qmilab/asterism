@@ -23,6 +23,7 @@ import type {
   CapabilityGrant,
   CapabilityStanding,
   Credential,
+  CognitionCaptureMode,
   CognitionProviderId,
   EventType,
   Memory,
@@ -124,6 +125,13 @@ export class AsterismStore {
     // "use the default Pi loop, no trace" — the correct, unchanged starting state.
     if (!this.columnExists("agent_settings", "cognition_provider")) {
       this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN cognition_provider TEXT`);
+    }
+    // The cognition CAPTURE mode joined `agent_settings` after the provider (slice 2a: an
+    // opt-in escalation to record redacted content, not just references). Add it
+    // idempotently; a NULL default means every existing agent reads as "references only",
+    // the unchanged, safe slice-1 starting state.
+    if (!this.columnExists("agent_settings", "cognition_capture")) {
+      this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN cognition_capture TEXT`);
     }
     // The objective review state joined `objectives` after slice 1 first shipped the
     // table (reflection now PROPOSES objectives, gated by a review state). Add it
@@ -361,6 +369,51 @@ export class AsterismStore {
       const settings = this.agentSettings.clearCognitionProvider(agentId);
       this.emit(agentId, "agent.setting_changed", {
         setting: "cognitionProvider",
+        from,
+        to: null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Set an agent's cognition CAPTURE mode and record the change as `agent.setting_changed`
+   * — the audit trail for an operator escalating how much the trace records (references →
+   * redacted content): the `setting`, and the `from`/`to` selection (an enum value, never
+   * an action's arguments, so the log stays references-only). `from` is the prior mode, or
+   * null when it was the references-only default. The repository validates the id at the
+   * write boundary. An unchanged value is a true no-op — the same discipline as
+   * {@link setCognitionProvider}.
+   */
+  setCognitionCapture(agentId: string, mode: CognitionCaptureMode): AgentSettings {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getCognitionCapture(agentId) ?? null;
+      if (from === mode) {
+        const existing = this.agentSettings.get(agentId);
+        if (existing) return existing;
+      }
+      const settings = this.agentSettings.setCognitionCapture(agentId, mode);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "cognitionCapture",
+        from,
+        to: settings.cognitionCapture ?? null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Clear an agent's cognition-capture escalation, returning it to the references-only
+   * baseline (no content), and record the change as `agent.setting_changed` (`to: null`).
+   * A no-op when the agent had no override set — symmetric with {@link clearCognitionProvider}.
+   */
+  clearCognitionCapture(agentId: string): AgentSettings | undefined {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getCognitionCapture(agentId) ?? null;
+      if (from === null) return this.agentSettings.get(agentId);
+      const settings = this.agentSettings.clearCognitionCapture(agentId);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "cognitionCapture",
         from,
         to: null,
       });

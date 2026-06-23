@@ -25,6 +25,7 @@ import {
   acceptProposedMemory,
   acceptProposedObjective,
   BUILTIN_SOULS,
+  COGNITION_CAPTURE_MODES,
   COGNITION_PROVIDER_IDS,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
@@ -52,6 +53,7 @@ import type {
   Action,
   Agent,
   Capability,
+  CognitionCaptureMode,
   CognitionProviderId,
   FirewallFinding,
   Memory,
@@ -230,9 +232,15 @@ export interface CliIO {
    * Absent ⇒ the default wiring lazily imports `@qmilab/asterism-adapter-lodestar`.
    * Only consulted for an agent whose `cognitionProvider` setting is SET; an unset
    * agent's adapter is returned unchanged and this is never called. Observe-only: the
-   * wrapper records a trace, it never gates.
+   * wrapper records a trace, it never gates. `captureContent` carries the agent's
+   * resolved capture escalation (the `cognitionCapture` setting): true ⇒ also record
+   * redacted output content, false ⇒ references only.
    */
-  makeCognitionAdapter?: (adapter: RuntimeAdapter, agentId: string) => RuntimeAdapter;
+  makeCognitionAdapter?: (
+    adapter: RuntimeAdapter,
+    agentId: string,
+    captureContent: boolean,
+  ) => RuntimeAdapter;
   /**
    * Render an agent's recorded cognition trace for `asterism trace`. Absent ⇒ the
    * default wiring lazily imports the Lodestar renderer. Returns `undefined` when the
@@ -424,10 +432,15 @@ async function wrapCognition(
 ): Promise<RuntimeAdapter> {
   const selection = store.agentSettings.getCognitionProvider(agent.id);
   if (selection === undefined) return adapter; // default: the Pi loop, no trace
+  // The capture escalation is a SEPARATE opt-in: references-only unless `cognitionCapture`
+  // is "content". Resolved here (agentId-scoped) and passed as an explicit flag — the
+  // wrapper reads no setting itself (golden rule 2). Inert without a provider, so it is
+  // only consulted on this opted-in path.
+  const captureContent = store.agentSettings.getCognitionCapture(agent.id) === "content";
   // Today the only selection is "lodestar"; the kernel validated it at the write boundary.
-  if (io.makeCognitionAdapter) return io.makeCognitionAdapter(adapter, agent.id);
+  if (io.makeCognitionAdapter) return io.makeCognitionAdapter(adapter, agent.id, captureContent);
   const { wrapWithLodestar } = await import("@qmilab/asterism-adapter-lodestar");
-  return wrapWithLodestar(adapter, { agentId: agent.id, traceRoot });
+  return wrapWithLodestar(adapter, { agentId: agent.id, traceRoot, captureContent });
 }
 
 /**
@@ -2329,6 +2342,7 @@ async function cmdConfig(args: string[], io: CliIO): Promise<number> {
   if (sub === "recall-budget") return cmdConfigRecallBudget(parsed, io);
   if (sub === "recall-provider") return cmdConfigRecallProvider(parsed, io);
   if (sub === "cognition-provider") return cmdConfigCognitionProvider(parsed, io);
+  if (sub === "cognition-capture") return cmdConfigCognitionCapture(parsed, io);
   io.err(`Unknown subcommand: config ${sub}`);
   io.out(COMMAND_HELP.config!);
   return 1;
@@ -2640,6 +2654,75 @@ function cmdConfigCognitionProvider(parsed: ParsedArgs, io: CliIO): Promise<numb
         ? ` Its runs now record an auditable trace — read it with \`asterism trace ${agentName}\`.`
         : "";
     io.out(`Set ${agentName}'s cognition provider to ${valueRaw}.${hint}`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism config cognition-capture <agent> [content|references]` / `--unset` — escalate
+ * HOW MUCH an agent's cognition trace records, or read the current setting. `content` ALSO
+ * records each tool output's redacted content (behind the kernel's redaction boundary —
+ * secret-aware, bounded, firewall-screened); `references` (the default) records references
+ * only — tool name, size, a keyed fingerprint, the error flag — never content. `references`
+ * and `--unset` both return to that baseline. Capture is a SEPARATE opt-in from the trace
+ * itself (`config cognition-provider`): it is inert until a cognition provider is set, since
+ * there is no trace to enrich otherwise. The kernel validates and stores the selection
+ * (agentId-scoped); this surface only parses, calls, and formats.
+ */
+function cmdConfigCognitionCapture(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const agentName = parsed.positionals[1];
+  if (!agentName) {
+    io.err("Usage: asterism config cognition-capture <agent> content|references  ·  --unset");
+    return Promise.resolve(1);
+  }
+  const unset = parsed.flags.unset === true;
+  const valueRaw = parsed.positionals[2];
+
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, agentName);
+    if (!agent) return noAgent(io, agentName);
+
+    // `references` is the operator-facing name for the baseline, which the kernel stores as
+    // "unset" (NULL) — so both `--unset` and an explicit `references` clear the column.
+    if (unset || valueRaw === "references") {
+      const had = store.agentSettings.getCognitionCapture(agent.id);
+      if (had === undefined) {
+        io.out(`${agentName} already captures references only — nothing to change.`);
+        return 0;
+      }
+      store.clearCognitionCapture(agent.id);
+      io.out(`${agentName}'s trace captures references only again (no content).`);
+      return 0;
+    }
+
+    // No value and no `--unset`: read the current setting rather than change it.
+    if (valueRaw === undefined) {
+      const current = store.agentSettings.getCognitionCapture(agent.id);
+      io.out(
+        current !== undefined
+          ? `${agentName}'s cognition capture: ${current} (redacted output content is recorded).`
+          : `${agentName} captures references only (the default — no content).`,
+      );
+      return 0;
+    }
+
+    if (!(COGNITION_CAPTURE_MODES as readonly string[]).includes(valueRaw)) {
+      io.err(
+        `Unknown cognition capture mode "${valueRaw}". Choose: content, references ` +
+          "(or --unset for references only).",
+      );
+      return 1;
+    }
+    store.setCognitionCapture(agent.id, valueRaw as CognitionCaptureMode);
+    // Honest UX: content capture does nothing until a cognition provider is also set, since
+    // there is no trace for it to enrich. Point the operator at the missing half.
+    const note =
+      store.agentSettings.getCognitionProvider(agent.id) === undefined
+        ? ` Note: this is inert until you opt in to a trace — \`asterism config cognition-provider ${agentName} lodestar\`.`
+        : "";
+    io.out(
+      `Set ${agentName}'s cognition capture to content — its trace now records redacted output content.${note}`,
+    );
     return 0;
   });
 }

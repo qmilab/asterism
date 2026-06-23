@@ -65,6 +65,21 @@ export type {
   FirewallVerdict,
 } from "./firewall.js";
 
+// The redaction boundary — the kernel's policy for what tool CONTENT is safe to
+// persist into an auditable trace. A secret-VALUE-aware, bounded scrub over and
+// above the firewall (`redactForTrace`), applied at the cognition-trace capture
+// point. Pure; no I/O, no secret reader.
+export {
+  DEFAULT_TRACE_CONTENT_MAX_BYTES,
+  SECRET_VALUE_RULES,
+  redactForTrace,
+} from "./redaction.js";
+export type {
+  RedactionRule,
+  RedactionSummary,
+  RedactionResult,
+} from "./redaction.js";
+
 // The local secret store — holds credential plaintext behind a scoped `read`;
 // the credentials table stores only the `valueRef` into it.
 export {
