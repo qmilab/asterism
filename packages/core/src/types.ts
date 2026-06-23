@@ -350,6 +350,25 @@ export type CognitionProviderId = (typeof COGNITION_PROVIDER_IDS)[number];
 export const COGNITION_CAPTURE_MODES = ["content"] as const;
 export type CognitionCaptureMode = (typeof COGNITION_CAPTURE_MODES)[number];
 
+/**
+ * Install-wide kernel defaults — the single-row sibling of {@link AgentSettings}, holding
+ * values that apply across every agent unless one overrides them. Each field is an OVERRIDE
+ * where `undefined` means "unset, use the kernel's built-in constant". Resolution precedence
+ * for a value present in both: a per-agent {@link AgentSettings} field wins over the matching
+ * install-wide default here, which in turn wins over the kernel constant. NOT agent-scoped —
+ * the deliberate, narrow exception for genuinely install-wide configuration.
+ */
+export interface InstallSettings {
+  /**
+   * Install-wide default recall budget — the maximum memories a run may frame, for any agent
+   * without its own `recallBudget`. `undefined` ⇒ unset, so the kernel falls back to
+   * {@link DEFAULT_RECALL_BUDGET}.
+   */
+  recallBudget?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentSettings {
   agentId: string;
   /**

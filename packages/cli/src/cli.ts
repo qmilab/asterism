@@ -2328,9 +2328,10 @@ async function cmdTrace(args: string[], io: CliIO): Promise<number> {
 }
 
 async function cmdConfig(args: string[], io: CliIO): Promise<number> {
-  // `--unset` is a boolean here so `config recall-budget <agent> --unset` never
-  // tries to consume a following token as its value.
-  const parsed = parseArgs(args, ["help", "h", "unset"]);
+  // `--unset` and `--default` are booleans here so `config recall-budget <agent> --unset`
+  // and `config recall-budget --default <n>` never consume a following token as a value
+  // (the budget `<n>` must stay a positional).
+  const parsed = parseArgs(args, ["help", "h", "unset", "default"]);
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.config!);
     return 0;
@@ -2388,20 +2389,32 @@ function cmdConfigShow(io: CliIO): Promise<number> {
     }
 
     io.out("");
+    // The install-wide default sits between the built-in constant and a per-agent override;
+    // surface it so the per-agent lines below can name where an un-set agent's value comes from.
+    const installBudget = store.installSettings.getRecallBudget();
+    const constant = DEFAULT_RECALL_BUDGET.maxMemories;
+    io.out(
+      installBudget !== undefined
+        ? `Install-wide recall budget: ${installBudget}  (built-in fallback: ${constant})`
+        : `Install-wide recall budget: (none — built-in default ${constant})`,
+    );
     io.out("Per-agent recall budget:");
     if (agents.length === 0) {
       io.out("  (no agents yet)");
     } else {
       // How many memories each agent's runs may frame. An unset agent resolves to the
-      // kernel default; the kernel owns that resolution (`resolveRecallBudget`), so this
-      // only reads the stored override and labels its source.
+      // install-wide default if one is set, else the kernel constant; the kernel owns that
+      // resolution (`resolveRecallBudget`), so this only reads the stored values and labels
+      // the source.
       for (const agent of agents) {
         const budget = store.agentSettings.getRecallBudget(agent.id);
-        io.out(
-          budget !== undefined
-            ? `  ${agent.name}  →  ${budget}  [set]`
-            : `  ${agent.name}  →  ${DEFAULT_RECALL_BUDGET.maxMemories}  [default]`,
-        );
+        if (budget !== undefined) {
+          io.out(`  ${agent.name}  →  ${budget}  [set]`);
+        } else if (installBudget !== undefined) {
+          io.out(`  ${agent.name}  →  ${installBudget}  [install-wide default]`);
+        } else {
+          io.out(`  ${agent.name}  →  ${constant}  [default]`);
+        }
       }
     }
 
@@ -2459,9 +2472,13 @@ function cmdConfigShow(io: CliIO): Promise<number> {
  * effective-value resolution — this surface only parses, calls, and formats.
  */
 function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  // `--default` operates on the INSTALL-WIDE default (no agent), which sits between the
+  // kernel constant and a per-agent override; otherwise it's a per-agent setting.
+  if (parsed.flags.default === true) return cmdConfigInstallRecallBudget(parsed, io);
+
   const agentName = parsed.positionals[1];
   if (!agentName) {
-    io.err("Usage: asterism config recall-budget <agent> <n>  ·  --unset");
+    io.err("Usage: asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>");
     return Promise.resolve(1);
   }
   const unset = parsed.flags.unset === true;
@@ -2471,11 +2488,18 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // tried to set. Catch it as an invalid value rather than letting it vanish and fall
   // through to the read-only "show" path as a silent no-op.
   const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
-  const DEFAULT = DEFAULT_RECALL_BUDGET.maxMemories;
+  const CONSTANT = DEFAULT_RECALL_BUDGET.maxMemories;
 
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, agentName);
     if (!agent) return noAgent(io, agentName);
+
+    // The effective default an un-set agent falls back to: the install-wide default if one
+    // is configured, else the kernel constant — so the messages name the value the agent
+    // ACTUALLY uses, not always the built-in 20.
+    const installDefault = store.installSettings.getRecallBudget();
+    const effective = installDefault ?? CONSTANT;
+    const effectiveLabel = installDefault !== undefined ? "install-wide default" : "default";
 
     if (unset) {
       // Decide the message from the PRIOR value, not row existence: a cleared row
@@ -2483,11 +2507,11 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
       // not "was something set". Skip the write entirely when nothing was set.
       const had = store.agentSettings.getRecallBudget(agent.id);
       if (had === undefined) {
-        io.out(`${agentName} had no recall budget set — it already uses the default (${DEFAULT}).`);
+        io.out(`${agentName} had no recall budget set — it already uses the ${effectiveLabel} (${effective}).`);
         return 0;
       }
       store.clearRecallBudget(agent.id);
-      io.out(`Cleared ${agentName}'s recall budget — it uses the default (${DEFAULT}) again.`);
+      io.out(`Cleared ${agentName}'s recall budget — it uses the ${effectiveLabel} (${effective}) again.`);
       return 0;
     }
 
@@ -2497,7 +2521,7 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
       io.out(
         current !== undefined
           ? `${agentName}'s recall budget: ${current} ${current === 1 ? "memory" : "memories"}.`
-          : `${agentName} uses the default recall budget (${DEFAULT} memories).`,
+          : `${agentName} uses the ${effectiveLabel} recall budget (${effective} memories).`,
       );
       return 0;
     }
@@ -2513,6 +2537,55 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
     }
     store.setRecallBudget(agent.id, budget);
     io.out(`Set ${agentName}'s recall budget to ${budget} ${budget === 1 ? "memory" : "memories"}.`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism config recall-budget --default <n>` / `--default --unset` / `--default` —
+ * set, clear, or read the INSTALL-WIDE default recall budget. It applies to every agent
+ * without its own per-agent override, and itself sits above the kernel's built-in constant
+ * — so the precedence an operator sees is: per-agent setting > this install-wide default >
+ * built-in. The kernel resolves all three in one place (`resolveRecallBudget`), so this verb
+ * only stores the value; every run surface picks it up without further wiring.
+ */
+function cmdConfigInstallRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const unset = parsed.flags.unset === true;
+  // With `--default` consuming the verb intent, the value is the next positional after
+  // `recall-budget` (positional[0]); a bare negative still arrives as a digit-only flag key.
+  const valueRaw = parsed.positionals[1];
+  const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
+  const CONSTANT = DEFAULT_RECALL_BUDGET.maxMemories;
+
+  return withHomeStore(io, (store) => {
+    if (unset) {
+      const had = store.installSettings.getRecallBudget();
+      if (had === undefined) {
+        io.out(`No install-wide recall budget was set — agents already use the built-in default (${CONSTANT}).`);
+        return 0;
+      }
+      store.installSettings.clearRecallBudget();
+      io.out(`Cleared the install-wide recall budget — agents without their own setting use the built-in default (${CONSTANT}) again.`);
+      return 0;
+    }
+
+    if (valueRaw === undefined && !negativeValue) {
+      const current = store.installSettings.getRecallBudget();
+      io.out(
+        current !== undefined
+          ? `Install-wide recall budget: ${current} ${current === 1 ? "memory" : "memories"} (for any agent without its own).`
+          : `No install-wide recall budget set — agents use the built-in default (${CONSTANT} memories).`,
+      );
+      return 0;
+    }
+
+    const budget = valueRaw !== undefined ? intFlag(valueRaw) : undefined;
+    if (budget === undefined || budget <= 0) {
+      io.err("The recall budget must be a positive whole number.");
+      return 1;
+    }
+    store.installSettings.setRecallBudget(budget);
+    io.out(`Set the install-wide recall budget to ${budget} ${budget === 1 ? "memory" : "memories"} — every agent without its own override now uses it.`);
     return 0;
   });
 }

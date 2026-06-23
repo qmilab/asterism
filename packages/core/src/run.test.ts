@@ -1391,6 +1391,40 @@ test("resolveRecallBudget returns the agent's own override, scoped per agent", (
   expect(resolveRecallBudget(store, work)).toEqual(DEFAULT_RECALL_BUDGET);
 });
 
+test("resolveRecallBudget uses the install-wide default when an agent has no override", () => {
+  const work = store.createAgent({
+    name: "work",
+    role: "",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "propose",
+  });
+  store.installSettings.setRecallBudget(7);
+  // No per-agent setting on either agent → both resolve to the install-wide default,
+  // not the kernel constant. One install setting, every agent.
+  expect(resolveRecallBudget(store, agent)).toEqual({ maxMemories: 7 });
+  expect(resolveRecallBudget(store, work)).toEqual({ maxMemories: 7 });
+});
+
+test("a per-agent override wins over the install-wide default; the constant is the floor", () => {
+  const work = store.createAgent({
+    name: "work",
+    role: "",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work",
+    trustLevel: "propose",
+  });
+  store.installSettings.setRecallBudget(7);
+  store.setRecallBudget(agent.id, 3);
+  // Precedence: per-agent (3) for `agent`; install-wide (7) for the un-overridden `work`.
+  expect(resolveRecallBudget(store, agent)).toEqual({ maxMemories: 3 });
+  expect(resolveRecallBudget(store, work)).toEqual({ maxMemories: 7 });
+  // Clearing the install-wide default drops `work` back to the kernel constant.
+  store.installSettings.clearRecallBudget();
+  expect(resolveRecallBudget(store, work)).toEqual(DEFAULT_RECALL_BUDGET);
+  expect(resolveRecallBudget(store, agent)).toEqual({ maxMemories: 3 });
+});
+
 test("a per-agent recall budget bites in framing without any host override", async () => {
   // The configured per-agent budget must flow through run.ts's resolver into framing —
   // no `options.recallBudget` passed, exactly the CLI/HTTP path. Budget 2, five

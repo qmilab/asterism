@@ -203,4 +203,21 @@ CREATE TABLE IF NOT EXISTS agent_settings (
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL
 );
+
+-- Install-wide kernel settings: a SINGLE row (enforced by the CHECK) holding defaults
+-- that sit BETWEEN the kernel's built-in constant and a per-agent override. This is the
+-- install's own database, so an install-scoped row is the natural home — and resolving it
+-- here (not in surface config) keeps the kernel the single owner of "effective value", so
+-- every run surface reads the same default without each one threading it through. The
+-- agent IS the isolation boundary for per-agent data; this table is the deliberate, narrow
+-- exception for genuinely install-wide defaults (it carries no agent data). NULL on a
+-- column ⇒ that default is unset, so resolution falls through to the kernel constant.
+CREATE TABLE IF NOT EXISTS install_settings (
+  singleton     INTEGER PRIMARY KEY CHECK (singleton = 1),
+  -- Install-wide default recall budget, or NULL ⇒ the kernel constant. A per-agent
+  -- override (agent_settings.recall_budget) still wins over this.
+  recall_budget INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
 `;
