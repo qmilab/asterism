@@ -48,6 +48,20 @@ const SECRET_SAMPLES: Record<string, { input: string; secret: string }> = {
     input: "Authorization: Bearer abc123XYZ.tokenpart_value-9 sent",
     secret: "abc123XYZ.tokenpart_value-9",
   },
+  "basic auth credential": {
+    input: "header Authorization: Basic dXNlcjpwYXNzd29yZA== ok",
+    secret: "dXNlcjpwYXNzd29yZA==",
+  },
+  "Google API key": {
+    input: "fetch ?key=AIzaSyB1234567890abcdefghijklmnopqrstuv now",
+    secret: "AIzaSyB1234567890abcdefghijklmnopqrstuv",
+  },
+  "Stripe key": {
+    // Assembled from fragments so no contiguous Stripe-shaped key literal exists in source
+    // (GitHub push protection flags even an obviously-fake one); it's a redaction fixture.
+    input: `stripe ${"sk_live" + "_FAKExxxx00000000"} charged`,
+    secret: "sk_live" + "_FAKExxxx00000000",
+  },
   "URL credentials": {
     input: "db at postgres://dbuser:s3cr3tpw@db.host:5432/app ready",
     secret: "s3cr3tpw",
@@ -101,6 +115,22 @@ describe("redactForTrace — secret-value scrub", () => {
     const single = redactForTrace("ACCESS_KEY='singlequotedsecret9' rest");
     expect(single.content).not.toContain("singlequotedsecret9");
     expect(single.content).toContain("[redacted:value]");
+  });
+
+  test("a multi-word QUOTED value is redacted whole, not just up to the first space", () => {
+    // The value runs to the closing quote, so a passphrase with spaces does not leak its tail.
+    const dq = redactForTrace('password = "correct horse battery staple"');
+    expect(dq.content).not.toContain("horse");
+    expect(dq.content).not.toContain("staple");
+    expect(dq.content).toBe('password = "[redacted:value]"');
+
+    const sq = redactForTrace("client_secret: 'two words here'");
+    expect(sq.content).not.toContain("words");
+    expect(sq.content).toBe("client_secret: '[redacted:value]'");
+
+    // An UNQUOTED value still stops at the first delimiter (surrounding prose survives).
+    const bare = redactForTrace("API_KEY=tok123 and the rest is prose");
+    expect(bare.content).toBe("API_KEY=[redacted:value] and the rest is prose");
   });
 
   test("URL-embedded credentials are scrubbed, host kept", () => {
@@ -215,5 +245,15 @@ describe("redactForTrace — control characters", () => {
     const { content } = redactForTrace("key sk-abcd\x00EFGH1234ijklMNOP5678 end");
     expect(content).not.toContain("EFGH1234ijklMNOP5678");
     expect(content).toContain("[redacted:value]");
+  });
+
+  test("bidi and zero-width chars are stripped (Trojan-Source + zero-width evasion)", () => {
+    // U+200B (zero-width space) splits a secret; U+202E (RLO) is a Trojan-Source bidi override.
+    const { content, summary } = redactForTrace(
+      "tok sk-abcd\u200bEFGH1234ijklMNOP5678 then \u202emalicious\u202c tail",
+    );
+    expect(content).not.toContain("EFGH1234ijklMNOP5678"); // secret rejoined, then redacted
+    expect(content).toContain("[redacted:value]");
+    expect(summary.controlsStripped).toBe(3); // U+200B, U+202E, U+202C
   });
 });

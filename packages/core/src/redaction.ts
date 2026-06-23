@@ -115,6 +115,13 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
     pattern: /\b([Bb]earer)\s+[A-Za-z0-9._~+/=-]{8,}/g,
     replace: (_m, scheme) => `${scheme} ${SECRET_MARK}`,
   },
+  // `Basic <base64>` (an Authorization header value) — base64 of `user:password`, often
+  // short enough to slip the high-entropy catch-all. Keep the scheme word, redact the rest.
+  {
+    name: "basic auth credential",
+    pattern: /\b([Bb]asic)\s+[A-Za-z0-9+/=]{8,}/g,
+    replace: (_m, scheme) => `${scheme} ${SECRET_MARK}`,
+  },
   // Credentials embedded in a URL — `scheme://user:password@host`, `postgres://u:p@h/db`.
   // Keep the scheme + host shape; redact only the `user:password` userinfo.
   {
@@ -125,12 +132,16 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
   // `KEY = value` / `"api_key": "value"` / `TOKEN='value'` assignments — scrub the VALUE,
   // keep the (optionally quoted) key name + separator + opening quote so the trace still
   // shows a secret was set, not what it was. Handles bare, double-quoted (JSON), and
-  // single-quoted forms. The value lookahead `(?!\[redacted:)` refuses to match an
+  // single-quoted forms. The value lookahead `(?!\[redacted)` refuses to match an
   // already-inserted marker, so a value redacted by an earlier rule is never counted twice.
+  // The value branch is quote-aware: when an opening quote matched (`vq`, detected by the
+  // `(?<=["'])` lookbehind) the value runs to the CLOSING quote so a multi-word quoted
+  // secret (`password = "two words"`) is redacted whole, not just up to the first space;
+  // an unquoted value still stops at the first delimiter. Both branches stop at a newline.
   {
     name: "secret assignment value",
     pattern:
-      /(["']?)([A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET))\1(\s*[:=]\s*)(["']?)(?!\[redacted)[^\s,;}"']+/gi,
+      /(["']?)([A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET))\1(\s*[:=]\s*)(["']?)(?!\[redacted)(?:(?<=["'])[^"'\n]*|[^\s,;}"'\n]+)/gi,
     replace: (_m, kq, key, sep, vq) => `${kq}${key}${kq}${sep}${vq}${SECRET_MARK}`,
   },
   // OpenAI / Anthropic-style `sk-…` (and `sk-ant-…`) keys.
@@ -143,6 +154,13 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
   { name: "Slack token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi },
   // GitLab personal access token.
   { name: "GitLab PAT", pattern: /\bglpat-[A-Za-z0-9_-]{16,}\b/g },
+  // Google API key — `AIza` + 35 chars (39 total), one UNDER the 40-char catch-all, so it
+  // needs a dedicated rule or it slips entirely (a very common `?key=AIza…` URL form).
+  { name: "Google API key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  // Stripe-style keys — `sk_live_` / `rk_live_` / `pk_live_` (and `_test_`). The `sk- api
+  // key` rule needs a HYPHEN; Stripe uses an UNDERSCORE, and the canonical 32-char form is
+  // under the catch-all. (`pk_` is publishable, not secret — redacting it is harmless.)
+  { name: "Stripe key", pattern: /\b[srp]k_(?:live|test)_[0-9A-Za-z]{10,}\b/g },
   // High-entropy catch-all: a 40+ char token mixing lower/upper/digit (the shape of a
   // random key, almost never an English word). Conservative — it may scrub a long
   // opaque id, which for an audit trace is the safe direction.
@@ -155,12 +173,24 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
 ];
 
 /**
- * Control characters to strip from captured content: every C0 control EXCEPT tab (\t) and
- * newline (\n), plus DEL. This removes ANSI/OSC escape introducers (ESC, \x1b), carriage
- * returns, and NUL — so reading a trace cannot drive an operator's terminal, and a secret
- * cannot be split by a control char to slip past {@link SECRET_VALUE_RULES}.
+ * Characters to strip from captured content before it is stored or rendered. Three classes,
+ * all of which can either drive an operator's terminal when the trace is read OR be used to
+ * evade the secret rules / falsify the audit display:
+ *
+ *   - C0 controls except tab (\t) and newline (\n), plus DEL and the C1 controls (`\x7f-\x9f`)
+ *     — ANSI/OSC escape introducers (ESC `\x1b`, 8-bit CSI `\x9b`), CR, NUL.
+ *   - Bidi overrides (U+202A-202E, U+2066-2069, U+200E, U+200F) -- the Trojan-Source
+ *     class (CVE-2021-42574): they can reorder the rendered audit so it reads differently from
+ *     what ran. An audit artifact must not be reorderable.
+ *   - Zero-width / separator chars (U+200B-200D, U+2028, U+2029, U+FEFF) -- invisible,
+ *     and can SPLIT a secret token (`sk-AAA<U+200B>BBB`) so it slips past {@link SECRET_VALUE_RULES};
+ *     stripping them first rejoins the token into a matchable run.
+ *
+ * Stripped FIRST (before the secret rules), so the evasion vectors are closed before matching.
  */
-const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f]/g;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g;
 
 /**
  * Truncate `raw` to at most `maxBytes` UTF-8 bytes WITHOUT splitting a multibyte
