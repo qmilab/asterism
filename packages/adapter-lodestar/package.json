@@ -1,14 +1,7 @@
 {
-  "name": "@qmilab/asterism",
+  "name": "@qmilab/asterism-adapter-lodestar",
   "version": "0.3.0",
-  "description": "Many agents. One runtime. Separate lives. Run distinct local AI agents — each with its own soul, memory, secrets, skills, workspace, and autonomy level.",
-  "keywords": [
-    "ai",
-    "agents",
-    "cli",
-    "local-first",
-    "autonomy"
-  ],
+  "description": "Optional cognition layer: wraps an Asterism run to record an auditable trace via Lodestar. You probably want @qmilab/asterism.",
   "type": "module",
   "license": "Apache-2.0",
   "homepage": "https://github.com/qmilab/asterism#readme",
@@ -16,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/qmilab/asterism.git",
-    "directory": "packages/cli"
+    "directory": "packages/adapter-lodestar"
   },
   "engines": {
     "node": ">=20.0.0",
@@ -28,9 +21,6 @@
   "files": [
     "dist"
   ],
-  "bin": {
-    "asterism": "./dist/bin.js"
-  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -45,11 +35,8 @@
   },
   "dependencies": {
     "@qmilab/asterism-core": "workspace:*",
-    "@qmilab/asterism-adapter-pi": "workspace:*",
-    "@qmilab/asterism-adapter-lodestar": "workspace:*",
-    "@qmilab/asterism-reflect": "workspace:*",
-    "@qmilab/asterism-recall-local": "workspace:*",
-    "@qmilab/asterism-server": "workspace:*",
-    "@qmilab/asterism-channels": "workspace:*"
+    "@qmilab/lodestar-core": "0.4.0",
+    "@qmilab/lodestar-event-log": "0.4.0",
+    "@qmilab/lodestar-trace": "0.4.0"
   }
 }

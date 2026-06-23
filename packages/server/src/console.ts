@@ -90,10 +90,16 @@ export interface ConsoleDeps {
   capabilities?: (workspaceDir: string) => readonly Capability[];
   /**
    * Build the run substrate for an agent (to confirm/resume a paused run). Keyed by
-   * agent name so each agent's own model pin is honored. Absent (or returning no
-   * adapter) ⇒ confirm returns 503 — the read/management endpoints still work.
+   * agent name so each agent's own model pin is honored. May be async (the host wraps
+   * an opted-in agent's adapter in its cognition provider, which loads lazily), so the
+   * call site awaits it. Absent (or returning no adapter) ⇒ confirm returns 503 — the
+   * read/management endpoints still work.
    */
-  makeAdapter?: (agentName: string) => { adapter?: RuntimeAdapter; reason?: string };
+  makeAdapter?: (
+    agentName: string,
+  ) =>
+    | { adapter?: RuntimeAdapter; reason?: string }
+    | Promise<{ adapter?: RuntimeAdapter; reason?: string }>;
   /**
    * Build the reflection provider for an agent (to propose reviewable memories).
    * Keyed by agent name, same as {@link makeAdapter}. Absent (or no provider) ⇒
@@ -408,7 +414,7 @@ function runOptions(
  * pauses it again. Buffered (no SSE here — the dashboard re-reads the timeline).
  */
 async function confirmRun(deps: ConsoleDeps, agent: Agent, runId: string): Promise<Response> {
-  const made = deps.makeAdapter?.(agent.name);
+  const made = await deps.makeAdapter?.(agent.name);
   if (!made?.adapter) {
     return fail(503, made?.reason ?? "No model is configured, so runs cannot resume.");
   }

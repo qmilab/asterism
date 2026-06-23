@@ -25,6 +25,7 @@ import {
   acceptProposedMemory,
   acceptProposedObjective,
   BUILTIN_SOULS,
+  COGNITION_PROVIDER_IDS,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
   DEFAULT_WORLD_FACT_CAP,
@@ -51,6 +52,7 @@ import type {
   Action,
   Agent,
   Capability,
+  CognitionProviderId,
   FirewallFinding,
   Memory,
   MemoryQuery,
@@ -115,6 +117,7 @@ import {
   dbPath,
   findHome,
   isValidAgentName,
+  tracesDir,
 } from "./paths.js";
 import { HTTP_TOKEN_ENV, resolveConsoleToken, resolveHttpToken } from "./http-token.js";
 import type { ResolvedHttpToken } from "./http-token.js";
@@ -222,6 +225,24 @@ export interface CliIO {
     provider?: RecallProvider;
     reason?: string;
   };
+  /**
+   * Wrap a run adapter in an agent's opt-in cognition provider (the auditable trace).
+   * Absent ⇒ the default wiring lazily imports `@qmilab/asterism-adapter-lodestar`.
+   * Only consulted for an agent whose `cognitionProvider` setting is SET; an unset
+   * agent's adapter is returned unchanged and this is never called. Observe-only: the
+   * wrapper records a trace, it never gates.
+   */
+  makeCognitionAdapter?: (adapter: RuntimeAdapter, agentId: string) => RuntimeAdapter;
+  /**
+   * Render an agent's recorded cognition trace for `asterism trace`. Absent ⇒ the
+   * default wiring lazily imports the Lodestar renderer. Returns `undefined` when the
+   * agent has recorded no trace. The first argument is the host TRACE ROOT (the install
+   * home's `traces/`, off the agent workspace); reads only the agent's own partition.
+   */
+  renderCognitionTrace?: (
+    traceRoot: string,
+    agentId: string,
+  ) => Promise<string | undefined>;
   /**
    * Decide a proposed memory's fate during `reflect --review`. Absent ⇒ reject
    * every proposal, so nothing persists — the same safe default as `confirm`.
@@ -368,12 +389,45 @@ function noAgent(io: CliIO, name: string): number {
 async function resolveAdapter(
   io: CliIO,
   home: string,
-  agentName: string,
+  agent: Agent,
+  store: AsterismStore,
 ): Promise<{ adapter?: RuntimeAdapter; reason?: string }> {
-  const context: ModelResolutionContext = { config: loadConfig(home), agentName };
-  return io.makeAdapter
+  const context: ModelResolutionContext = { config: loadConfig(home), agentName: agent.name };
+  const made = io.makeAdapter
     ? io.makeAdapter(io.env, context)
     : (await import("./model.js")).buildAdapter(io.env, context);
+  if (!made.adapter) return made;
+  // Cognition wrapping is applied HERE — the single seam every run-bearing surface
+  // (run, confirm, serve, console, channels) resolves its adapter through — so they
+  // cannot drift on whether a run is traced. An agent with no `cognitionProvider`
+  // setting is returned unchanged (the default Pi loop, no trace); an opted-in agent
+  // has its adapter wrapped, lazily, so the default install never loads Lodestar.
+  return { ...made, adapter: await wrapCognition(io, store, agent, made.adapter, tracesDir(home)) };
+}
+
+/**
+ * Wrap a run adapter in the agent's opt-in cognition provider, or return it unchanged
+ * when the agent has not opted in. The selection is `agentId`-scoped
+ * (`getCognitionProvider`), so it is resolved only from the agent's own setting. The
+ * provider package is imported LAZILY and ONLY on the opted-in path, mirroring recall —
+ * an install that never opts in never loads Lodestar. Observe-only: the wrapper records
+ * an auditable trace, it never gates (the kernel stays the sole trust authority). The
+ * trace is written under `traceRoot` (the install home's `traces/`), OUTSIDE the agent's
+ * tool-writable workspace, so the agent cannot tamper with its own audit trail.
+ */
+async function wrapCognition(
+  io: CliIO,
+  store: AsterismStore,
+  agent: Agent,
+  adapter: RuntimeAdapter,
+  traceRoot: string,
+): Promise<RuntimeAdapter> {
+  const selection = store.agentSettings.getCognitionProvider(agent.id);
+  if (selection === undefined) return adapter; // default: the Pi loop, no trace
+  // Today the only selection is "lodestar"; the kernel validated it at the write boundary.
+  if (io.makeCognitionAdapter) return io.makeCognitionAdapter(adapter, agent.id);
+  const { wrapWithLodestar } = await import("@qmilab/asterism-adapter-lodestar");
+  return wrapWithLodestar(adapter, { agentId: agent.id, traceRoot });
 }
 
 /**
@@ -1157,7 +1211,7 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     // uninitialized workspace or unknown agent fails like every other command
     // (and no adapter is constructed for a run that cannot proceed). The agent's
     // name resolves its own model override, if it has one.
-    const made = await resolveAdapter(io, home, agent.name);
+    const made = await resolveAdapter(io, home, agent, store);
     if (!made.adapter) {
       io.err(made.reason ?? "No model configured.");
       return 1;
@@ -1320,7 +1374,7 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
 
     // The resume runs through the same model that started it — resolve it for the
     // owning agent so a per-agent model is honored on resume too.
-    const made = await resolveAdapter(io, home, agent.name);
+    const made = await resolveAdapter(io, home, agent, store);
     if (!made.adapter) {
       io.err(made.reason ?? "No model configured.");
       return 1;
@@ -2208,6 +2262,58 @@ function hasSettings(settings: ModelSettings | undefined): settings is ModelSett
   return settings !== undefined && Object.keys(settings).length > 0;
 }
 
+/**
+ * `asterism trace <agent>` — render the agent's recorded cognition trace as a Lodestar
+ * trust report. Only meaningful for an agent opted into a cognition provider (`config
+ * cognition-provider <agent> lodestar`); an agent with no trace gets a friendly pointer
+ * rather than an empty report. Reads only the agent's OWN trace, under its confined
+ * workspace, scoped by its id — it cannot surface another agent's trace. The renderer is
+ * imported lazily, so a `trace` on an agent that never opted in still does not pull
+ * Lodestar into the default path until this command actually runs.
+ */
+async function cmdTrace(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.trace!);
+    return 0;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism trace <agent>");
+    return 1;
+  }
+  return withHomeStore(io, async (store, home) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+
+    const renderTrace =
+      io.renderCognitionTrace ??
+      (await import("@qmilab/asterism-adapter-lodestar")).renderTrace;
+    // Read from the host trace root (the install home's `traces/`), the SAME place the
+    // wrapper wrote to — never the agent workspace. A read failure (corrupt log, schema
+    // mismatch, unreadable file) is surfaced as an error, NOT silently reported as "no
+    // trace", which would hide the corruption.
+    let report: string | undefined;
+    try {
+      report = await renderTrace(tracesDir(home), agent.id);
+    } catch (err) {
+      io.err(`Could not read ${name}'s trace (the log may be corrupt): ${errorMessage(err)}`);
+      return 1;
+    }
+    if (report === undefined) {
+      const optedIn = store.agentSettings.getCognitionProvider(agent.id) !== undefined;
+      io.out(
+        optedIn
+          ? `${name} has recorded no trace yet — run it once and check back.`
+          : `${name} records no trace. Opt in with:  asterism config cognition-provider ${name} lodestar`,
+      );
+      return 0;
+    }
+    io.out(report);
+    return 0;
+  });
+}
+
 async function cmdConfig(args: string[], io: CliIO): Promise<number> {
   // `--unset` is a boolean here so `config recall-budget <agent> --unset` never
   // tries to consume a following token as its value.
@@ -2222,6 +2328,7 @@ async function cmdConfig(args: string[], io: CliIO): Promise<number> {
   if (sub === "unset") return cmdConfigUnset(parsed, io);
   if (sub === "recall-budget") return cmdConfigRecallBudget(parsed, io);
   if (sub === "recall-provider") return cmdConfigRecallProvider(parsed, io);
+  if (sub === "cognition-provider") return cmdConfigCognitionProvider(parsed, io);
   io.err(`Unknown subcommand: config ${sub}`);
   io.out(COMMAND_HELP.config!);
   return 1;
@@ -2304,6 +2411,23 @@ function cmdConfigShow(io: CliIO): Promise<number> {
       );
       if (embedSet.length > 0) {
         io.out(`  (local-embeddings endpoint configured: ${embedSet.join(", ")})`);
+      }
+    }
+
+    io.out("");
+    io.out("Per-agent cognition provider:");
+    if (agents.length === 0) {
+      io.out("  (no agents yet)");
+    } else {
+      // Whether an agent's runs record an auditable trace. Unset ⇒ the default Pi loop
+      // with no trace; an opted-in agent names its provider (e.g. lodestar).
+      for (const agent of agents) {
+        const provider = store.agentSettings.getCognitionProvider(agent.id);
+        io.out(
+          provider !== undefined
+            ? `  ${agent.name}  →  ${provider}  [set]`
+            : `  ${agent.name}  →  ${DEFAULT_COGNITION_PROVIDER_LABEL}  [default]`,
+        );
       }
     }
 
@@ -2449,6 +2573,77 @@ function cmdConfigRecallProvider(parsed: ParsedArgs, io: CliIO): Promise<number>
   });
 }
 
+/** How the default (unset) cognition provider is described in CLI output. */
+const DEFAULT_COGNITION_PROVIDER_LABEL = "none (no trace)";
+
+/**
+ * `asterism config cognition-provider <agent> [lodestar]` / `--unset` — opt an agent
+ * into a cognition provider that records an auditable trace of its runs, or read the
+ * current one. `lodestar` wraps the agent's runs in the Lodestar cognition layer (see
+ * `asterism trace`); `--unset` returns to the default (no trace); neither shows the
+ * current setting. Observe-only: the trace records what a run did, it never gates — the
+ * kernel stays the sole trust authority. The kernel validates the id (agentId-scoped)
+ * and stores it; this surface only parses, calls, and formats. It does not build the
+ * wrapper — that happens at run time, only for an opted-in agent.
+ */
+function cmdConfigCognitionProvider(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const agentName = parsed.positionals[1];
+  if (!agentName) {
+    io.err(
+      `Usage: asterism config cognition-provider <agent> ${COGNITION_PROVIDER_IDS.join("|")}  ·  --unset`,
+    );
+    return Promise.resolve(1);
+  }
+  const unset = parsed.flags.unset === true;
+  const valueRaw = parsed.positionals[2];
+
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, agentName);
+    if (!agent) return noAgent(io, agentName);
+
+    if (unset) {
+      // Decide the message from the PRIOR value, not row existence (a cleared row
+      // persists with a NULL selection to keep created_at) — mirrors recall-provider.
+      const had = store.agentSettings.getCognitionProvider(agent.id);
+      if (had === undefined) {
+        io.out(`${agentName} was already recording no trace — nothing to unset.`);
+        return 0;
+      }
+      store.clearCognitionProvider(agent.id);
+      io.out(`Cleared ${agentName}'s cognition provider — its runs record no trace again.`);
+      return 0;
+    }
+
+    // No value and no `--unset`: read the current setting rather than change it.
+    if (valueRaw === undefined) {
+      const current = store.agentSettings.getCognitionProvider(agent.id);
+      io.out(
+        current !== undefined
+          ? `${agentName}'s cognition provider: ${current}.`
+          : `${agentName} records ${DEFAULT_COGNITION_PROVIDER_LABEL} (the default).`,
+      );
+      return 0;
+    }
+
+    // Validate the id here so a typo gets a clear CLI message naming the choices,
+    // rather than surfacing the kernel's write-boundary error.
+    if (!(COGNITION_PROVIDER_IDS as readonly string[]).includes(valueRaw)) {
+      io.err(
+        `Unknown cognition provider "${valueRaw}". Choose one of: ${COGNITION_PROVIDER_IDS.join(", ")} ` +
+          "(or --unset for no trace).",
+      );
+      return 1;
+    }
+    store.setCognitionProvider(agent.id, valueRaw as CognitionProviderId);
+    const hint =
+      valueRaw === "lodestar"
+        ? ` Its runs now record an auditable trace — read it with \`asterism trace ${agentName}\`.`
+        : "";
+    io.out(`Set ${agentName}'s cognition provider to ${valueRaw}.${hint}`);
+    return 0;
+  });
+}
+
 /** `asterism config set <id> [flags] [--agent <name>]` — write a default or override. */
 function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   for (const flag of ["agent", ...MODEL_FLAGS] as const) {
@@ -2572,7 +2767,7 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
     // model. A missing model is not fatal for serving: the read endpoints work
     // regardless, and a run started without one is declined with a clear message
     // rather than failing to serve at all.
-    const made = await resolveAdapter(io, home, agent.name);
+    const made = await resolveAdapter(io, home, agent, store);
 
     // Resolve the agent's opt-in recall provider once, the same way `run` does — so a
     // run over HTTP frames memory identically. An unset agent uses the built-in
@@ -2756,7 +2951,17 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       authToken: consoleToken.token,
       readFile: (p) => readFileSync(p, "utf8"),
       ...(io.capabilities ? { capabilities: io.capabilities } : {}),
-      makeAdapter: (agentName) => buildAdapterFn(io.env, { config, agentName }),
+      // Wrap each opted-in agent's adapter in its cognition provider — the SAME
+      // `wrapCognition` the CLI's run/serve/channel paths use — so a run resumed from
+      // the dashboard is traced exactly like one started from the CLI (no surface drifts
+      // on whether a run is recorded). An agent that has not opted in is unaffected and
+      // loads no Lodestar.
+      makeAdapter: async (agentName) => {
+        const made = buildAdapterFn(io.env, { config, agentName });
+        const a = findAgentByName(store, agentName);
+        if (!made.adapter || !a) return made;
+        return { ...made, adapter: await wrapCognition(io, store, a, made.adapter, tracesDir(home)) };
+      },
       makeReflectionProvider: (agentName) => buildReflectionFn(io.env, { config, agentName }),
       // Resolve each agent's opt-in recall provider through the SAME `resolveRecall`
       // the CLI's run/serve/channel paths use, so the dashboard cannot drift on what
@@ -2887,7 +3092,7 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
     // Unlike `serve` (whose read endpoints work without one), a chat channel has no
     // value without a model — every message is a task. Require it, and decline
     // clearly rather than starting a bot that can answer nothing.
-    const made = await resolveAdapter(io, home, agent.name);
+    const made = await resolveAdapter(io, home, agent, store);
     if (!made.adapter) {
       io.err(made.reason ?? "No model configured.");
       return 1;
@@ -2999,7 +3204,7 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
 
     // Like Telegram, a chat channel has no value without a model — every message is
     // a task. Require it, and decline clearly rather than starting an idle bot.
-    const made = await resolveAdapter(io, home, agent.name);
+    const made = await resolveAdapter(io, home, agent, store);
     if (!made.adapter) {
       io.err(made.reason ?? "No model configured.");
       return 1;
@@ -3718,6 +3923,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return dispatchSub("memory", "inspect", cmdMemoryInspect, COMMAND_HELP.memory!, rest, io);
     case "events":
       return dispatchSub("events", "tail", cmdEventsTail, COMMAND_HELP.events!, rest, io);
+    case "trace":
+      return cmdTrace(rest, io);
     default:
       io.err(`Unknown command: ${command}`);
       io.out(USAGE);

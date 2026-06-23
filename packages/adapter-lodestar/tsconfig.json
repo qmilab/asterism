@@ -10,24 +10,6 @@
   "references": [
     {
       "path": "../core"
-    },
-    {
-      "path": "../adapter-pi"
-    },
-    {
-      "path": "../adapter-lodestar"
-    },
-    {
-      "path": "../reflect"
-    },
-    {
-      "path": "../recall-local"
-    },
-    {
-      "path": "../server"
-    },
-    {
-      "path": "../channels"
     }
   ],
   "exclude": [

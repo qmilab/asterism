@@ -39,6 +39,7 @@ Commands:
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
   events tail <agent>               Review what an agent has done
+  trace <agent>                     Review an agent's recorded cognition trace (opt-in)
   reflect <agent> --review          Review memories an agent proposes to keep
   reflect <agent> --propose         Queue proposals to review later (schedulable)
   config                            Show or change the model agents run on
@@ -256,6 +257,21 @@ Options:
 
 Every filter narrows within this agent's own activity — never another's.`,
 
+  trace: `asterism trace <agent>
+
+Review an agent's recorded cognition trace — an auditable record of what each of its
+runs did, tool by tool, rendered as a report. Only the named agent's own trace; it is
+never a way to see another agent's.
+
+A trace exists only for an agent you opted in with
+\`asterism config cognition-provider <agent> lodestar\`. It is observe-only: recording a
+trace never changes what an agent may do (a destructive action still pauses for the
+same confirmation), and this first version records references only — which tool ran,
+whether it succeeded, how much it returned — never the contents of a tool's input or
+output, so it cannot leak a secret. The trace is kept in the install's own storage,
+outside the agent's workspace, so the agent cannot reach or tamper with its own record.
+An agent with no trace yet is told how to start one.`,
+
   reflect: `asterism reflect <agent> --review
 asterism reflect <agent> --propose
 
@@ -284,11 +300,12 @@ asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <pr
 asterism config unset [--agent <name>]
 asterism config recall-budget <agent> <n>  ·  --unset
 asterism config recall-provider <agent> local  ·  --unset
+asterism config cognition-provider <agent> lodestar  ·  --unset
 
 Choose the model your agents run on, and tune how much — and how — each agent
 remembers into a run. Set one install-wide default model, and give any single agent
-its own model, its own recall budget, or its own recall provider when you want it to
-differ.
+its own model, its own recall budget, its own recall provider, or an auditable trace of
+its runs when you want it to differ.
 
   asterism config                       Show the current setup: the model each agent
                                         resolves to, and its recall budget.
@@ -312,6 +329,14 @@ differ.
                                         Go back to the built-in keyword ranker.
   asterism config recall-provider <agent>
                                         Show this agent's current recall provider.
+  asterism config cognition-provider <agent> lodestar
+                                        Record an auditable trace of this agent's runs
+                                        (opt-in, off by default; read it with
+                                        \`asterism trace\`).
+  asterism config cognition-provider <agent> --unset
+                                        Stop recording a trace (the default).
+  asterism config cognition-provider <agent>
+                                        Show this agent's current cognition provider.
 
 Where a model comes from, most specific first: an agent's own model, then the
 ASTERISM_MODEL_* environment variables, then the install default, then built-in
@@ -331,6 +356,16 @@ is strictly opt-in and off by default; nothing here sends your memory anywhere u
 you turn it on and point it at your own endpoint. If that endpoint is unreachable
 during a run, recall falls back to the keyword ranker (and says so) rather than
 failing.
+
+Cognition provider records an auditable trace of an agent's runs — what each tool did,
+in order — so you can review it after the fact with \`asterism trace\`. The default is
+off (no trace). Opt an agent into \`lodestar\` to record one, kept locally in the
+install's own storage (outside the agent's workspace, so the agent cannot tamper with
+its own record) and never shared with another agent. It is observe-only: the trace
+records what a run did, it never changes what the agent is allowed to do — a destructive
+action still pauses for the same confirmation. This first version records references
+only (which tool ran, success or failure, output size) — never the contents of a tool's
+input or output, so it cannot leak a secret.
 
 Options for \`set\`:
   --provider <name>   Provider name. Built-in: openai, anthropic. Default: openai.

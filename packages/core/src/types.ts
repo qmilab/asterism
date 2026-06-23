@@ -322,6 +322,19 @@ export interface CapabilityGrant {
 export const RECALL_PROVIDER_IDS = ["local"] as const;
 export type RecallProviderId = (typeof RECALL_PROVIDER_IDS)[number];
 
+/**
+ * The cognition providers an agent can be opted into, beyond the default Pi loop. The
+ * default substrate is the absence of a selection (no row / NULL), never a value here —
+ * so this lists only the OPT-IN alternatives. `"lodestar"` wraps the run in the Lodestar
+ * cognition layer (`@qmilab/asterism-adapter-lodestar`), which records an auditable
+ * epistemic trace of what the agent observed and did. The kernel stores the SELECTION
+ * only; the host builds the wrapped adapter, so `core` never imports Lodestar — the same
+ * discipline as {@link RECALL_PROVIDER_IDS}. Observe-only: the wrapper records a trace,
+ * it never gates — Asterism's kernel stays the sole trust authority (golden rules 2, 4).
+ */
+export const COGNITION_PROVIDER_IDS = ["lodestar"] as const;
+export type CognitionProviderId = (typeof COGNITION_PROVIDER_IDS)[number];
+
 export interface AgentSettings {
   agentId: string;
   /**
@@ -337,6 +350,14 @@ export interface AgentSettings {
    * host reads this and wires the opt-in package in, so `core` stays ML-free.
    */
   recallProvider?: RecallProviderId;
+  /**
+   * Per-agent opt-in to an alternative cognition provider — whether a run is wrapped in
+   * an auditable cognition trace. `undefined` ⇒ unset, so the kernel uses the default Pi
+   * loop with no trace. The only non-default value is `"lodestar"`; the kernel stores the
+   * SELECTION but never builds the wrapper — the host reads this and wraps the adapter, so
+   * `core` never imports Lodestar. Observe-only: it records, it never gates.
+   */
+  cognitionProvider?: CognitionProviderId;
   /**
    * Per-agent override of the earned-standing earning bar: the minimum clean,
    * confirmed destructive executions a capability needs to be PROPOSED for an

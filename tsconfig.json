@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/core" },
     { "path": "packages/adapter-pi" },
+    { "path": "packages/adapter-lodestar" },
     { "path": "packages/reflect" },
     { "path": "packages/recall-local" },
     { "path": "packages/server" },
