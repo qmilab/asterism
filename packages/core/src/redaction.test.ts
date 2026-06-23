@@ -44,6 +44,14 @@ const SECRET_SAMPLES: Record<string, { input: string; secret: string }> = {
     input: "ci token glpat-ABCDEFGHIJ1234567890 set",
     secret: "glpat-ABCDEFGHIJ1234567890",
   },
+  "bearer token": {
+    input: "Authorization: Bearer abc123XYZ.tokenpart_value-9 sent",
+    secret: "abc123XYZ.tokenpart_value-9",
+  },
+  "URL credentials": {
+    input: "db at postgres://dbuser:s3cr3tpw@db.host:5432/app ready",
+    secret: "s3cr3tpw",
+  },
   "secret assignment value": {
     input: "API_KEY=supersecretvalue123 was loaded",
     secret: "supersecretvalue123",
@@ -65,7 +73,7 @@ describe("redactForTrace — secret-value scrub", () => {
       expect(sample, `missing SECRET_SAMPLES entry for "${rule.name}"`).toBeDefined();
       const { content, summary } = redactForTrace(sample!.input);
       expect(content, `"${rule.name}" left the secret in place`).not.toContain(sample!.secret);
-      expect(content).toContain("[redacted:secret]");
+      expect(content).toContain("[redacted:value]");
       expect(summary.secretsRedacted).toBeGreaterThanOrEqual(1);
     }
   });
@@ -80,8 +88,31 @@ describe("redactForTrace — secret-value scrub", () => {
   test("the secret assignment rule keeps the key name, redacts only the value", () => {
     const { content } = redactForTrace("GITHUB_TOKEN=ghxyzfakevalue plus more");
     expect(content).toContain("GITHUB_TOKEN=");
-    expect(content).toContain("[redacted:secret]");
+    expect(content).toContain("[redacted:value]");
     expect(content).not.toContain("ghxyzfakevalue");
+  });
+
+  test("structured assignments — JSON (quoted key) and single-quoted — are scrubbed", () => {
+    const json = redactForTrace('{"api_key": "jsonsecretvalue42", "ok": true}');
+    expect(json.content).not.toContain("jsonsecretvalue42");
+    expect(json.content).toContain("[redacted:value]");
+    expect(json.content).toContain('"ok": true'); // non-secret fields survive
+
+    const single = redactForTrace("ACCESS_KEY='singlequotedsecret9' rest");
+    expect(single.content).not.toContain("singlequotedsecret9");
+    expect(single.content).toContain("[redacted:value]");
+  });
+
+  test("URL-embedded credentials are scrubbed, host kept", () => {
+    const { content } = redactForTrace("conn postgres://admin:hunter2pw@db.internal:5432/app");
+    expect(content).not.toContain("hunter2pw");
+    expect(content).toContain("postgres://[redacted:value]@db.internal:5432/app");
+  });
+
+  test("a Bearer token is scrubbed but the scheme word is kept", () => {
+    const { content } = redactForTrace("Authorization: Bearer eyhdr.long_bearer_token_value123");
+    expect(content).not.toContain("long_bearer_token_value123");
+    expect(content).toContain("Bearer [redacted:value]");
   });
 
   test("every occurrence is scrubbed, not just the first (global)", () => {
@@ -91,6 +122,14 @@ describe("redactForTrace — secret-value scrub", () => {
     expect(content).not.toContain("sk-aaaaBBBB1111ccccDDDD");
     expect(content).not.toContain("sk-eeeeFFFF2222ggggHHHH");
     expect(summary.secretsRedacted).toBe(2);
+  });
+
+  test("a known token inside an assignment is counted once, not twice", () => {
+    // The value rule runs before the provider rules and its lookahead refuses an already-
+    // inserted marker — so `API_KEY=sk-…` redacts once, not once per matching rule.
+    const { content, summary } = redactForTrace("API_KEY=sk-abcdEFGH1234ijklMNOP5678");
+    expect(content).not.toContain("sk-abcdEFGH1234ijklMNOP5678");
+    expect(summary.secretsRedacted).toBe(1);
   });
 });
 
@@ -152,9 +191,29 @@ describe("redactForTrace — bounding and benign content", () => {
     expect(summary).toEqual({
       truncated: false,
       originalBytes: 0,
+      controlsStripped: 0,
       secretsRedacted: 0,
       injectionRedacted: 0,
       exfiltrationRedacted: 0,
     });
+  });
+});
+
+describe("redactForTrace — control characters", () => {
+  test("ANSI/OSC escapes and other control chars are stripped, tab and newline kept", () => {
+    const { content, summary } = redactForTrace("red\x1b[31mtext\x07\r\nline2\there");
+    expect(content).not.toContain("\x1b"); // ESC gone, so the sequence is inert
+    expect(content).not.toContain("\x07"); // BEL gone
+    expect(content).not.toContain("\r"); // CR gone
+    expect(content).toContain("\n"); // newline kept
+    expect(content).toContain("\there"); // tab kept
+    expect(summary.controlsStripped).toBe(3); // ESC, BEL, CR (\t and \n are kept)
+  });
+
+  test("a secret split by a control char cannot evade the value rules", () => {
+    // Control chars are stripped FIRST, so `sk-\x00<rest>` rejoins into a matchable token.
+    const { content } = redactForTrace("key sk-abcd\x00EFGH1234ijklMNOP5678 end");
+    expect(content).not.toContain("EFGH1234ijklMNOP5678");
+    expect(content).toContain("[redacted:value]");
   });
 });

@@ -269,11 +269,13 @@ trace never changes what an agent may do (a destructive action still pauses for 
 same confirmation). By default the trace records references only — which tool ran,
 whether it succeeded, how much it returned — never the contents of a tool's input or
 output. You can opt in to recording the redacted CONTENT of what each tool returned with
-\`asterism config cognition-capture <agent> content\`; even then, secrets and obvious
-injection are scrubbed out and the input arguments are never kept, so a trace cannot leak
-a credential. The trace is kept in the install's own storage, outside the agent's
-workspace, so the agent cannot reach or tamper with its own record. An agent with no
-trace yet is told how to start one.`,
+\`asterism config cognition-capture <agent> content\`; even then, the input arguments are
+never kept, common secret shapes (keys, tokens, passwords, private keys) are scrubbed out,
+and the captured text is bounded and stripped of terminal-control characters. That scrub is
+best-effort, not a guarantee — leave content capture off for an agent that routinely handles
+secrets you cannot risk in an audit record. The trace is kept in the install's own storage,
+outside the agent's workspace, so the agent cannot reach or tamper with its own record. An
+agent with no trace yet is told how to start one.`,
 
   reflect: `asterism reflect <agent> --review
 asterism reflect <agent> --propose

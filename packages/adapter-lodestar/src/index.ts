@@ -371,6 +371,7 @@ function formatRedaction(redaction: unknown): string | undefined {
   if (typeof s.secretsRedacted === "number" && s.secretsRedacted > 0) parts.push(`secrets=${s.secretsRedacted}`);
   if (typeof s.injectionRedacted === "number" && s.injectionRedacted > 0) parts.push(`injection=${s.injectionRedacted}`);
   if (typeof s.exfiltrationRedacted === "number" && s.exfiltrationRedacted > 0) parts.push(`exfiltration=${s.exfiltrationRedacted}`);
+  if (typeof s.controlsStripped === "number" && s.controlsStripped > 0) parts.push(`controls=${s.controlsStripped}`);
   if (s.truncated === true) {
     parts.push(typeof s.originalBytes === "number" ? `truncated from ${s.originalBytes} bytes` : "truncated");
   }

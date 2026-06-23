@@ -263,7 +263,7 @@ test("content mode captures REDACTED content — benign text shows, the secret i
     const report = await renderTrace(traceRootIn(dir), "agent-a");
     expect(report).toContain(BENIGN); // benign content IS captured (the new capability)
     expect(report).not.toContain(SECRET); // the secret is redacted out
-    expect(report).toContain("[redacted:secret]"); // and marked
+    expect(report).toContain("[redacted:value]"); // and marked
     expect(report).toContain("redactions: secrets="); // the redaction summary shows
   });
 });

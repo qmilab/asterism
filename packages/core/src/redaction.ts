@@ -32,10 +32,16 @@ import { MEMORY_FIREWALL_RULES } from "./firewall.js";
 /** Default cap on the bytes of tool content captured into the trace (per call). */
 export const DEFAULT_TRACE_CONTENT_MAX_BYTES = 4096;
 
-/** A single named secret-value pattern. Mirrors `FirewallRule`, minus the category. */
+/**
+ * A single named secret-value pattern. Mirrors `FirewallRule`, minus the category. An
+ * optional `replace` keeps part of the match (e.g. a key name or a URL scheme) and redacts
+ * only the secret portion; when absent the whole match becomes {@link SECRET_MARK}. The
+ * replace args are `String.prototype.replace`'s — the match, then the capture groups.
+ */
 export interface RedactionRule {
   readonly name: string;
   readonly pattern: RegExp;
+  readonly replace?: (match: string, ...groups: string[]) => string;
 }
 
 /**
@@ -48,6 +54,12 @@ export interface RedactionSummary {
   readonly truncated: boolean;
   /** Byte length of the ORIGINAL (pre-truncation, pre-redaction) content. */
   readonly originalBytes: number;
+  /**
+   * How many control characters were stripped (ANSI/OSC escapes, CR, NUL, etc.). Stripped
+   * FIRST, so they can neither drive an operator's terminal when the trace is read nor be
+   * used to split a secret token and evade the patterns below.
+   */
+  readonly controlsStripped: number;
   /** How many secret-shaped values were scrubbed (across every {@link SECRET_VALUE_RULES} rule). */
   readonly secretsRedacted: number;
   /** How many injection-phrasing spans were scrubbed (firewall injection rules). */
@@ -62,8 +74,13 @@ export interface RedactionResult {
   readonly summary: RedactionSummary;
 }
 
-/** Replacement markers — ASCII so they render cleanly in a terminal trace and never re-leak. */
-const SECRET_MARK = "[redacted:secret]";
+// Replacement markers — ASCII so they render cleanly in a terminal trace and never re-leak.
+// Deliberately keyword-free: a marker must contain NONE of the firewall's secret nouns
+// (`secret`, `token`, `key`, `password`, `credential`, …) so the firewall span scrub (which
+// runs AFTER the secret scrub) cannot re-match an already-inserted marker — hence
+// `[redacted:value]`, not `[redacted:secret]`. The assignment rule's `(?!\[redacted)`
+// lookahead complements this, refusing to re-scrub any marker in a value position.
+const SECRET_MARK = "[redacted:value]";
 const INJECTION_MARK = "[redacted:injection]";
 const EXFILTRATION_MARK = "[redacted:exfiltration]";
 
@@ -78,16 +95,43 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
   // A secret-store reference must never be persisted outside the credential table /
   // event log — same rule the firewall enforces, applied here as a value scrub.
   { name: "secret-store reference", pattern: /\bsecret:\/\/\S+/gi },
-  // PEM private-key blocks (RSA/EC/OPENSSH/…). Multiline; non-greedy to the matching END.
+  // PEM private-key blocks (RSA/EC/OPENSSH/…). Multiline; non-greedy to the matching END,
+  // OR — when truncation removed the END marker — to end of content, so a key fragment is
+  // never persisted just because its terminator fell past the byte cap.
   {
     name: "PEM private key block",
-    pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
   },
   // JWTs — three base64url segments. Caught before the generic high-entropy rule so
   // the whole token (dots and all) goes as one unit.
   {
     name: "JSON Web Token",
     pattern: /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g,
+  },
+  // `Bearer <token>` (an Authorization header value). Keep the scheme word, redact the
+  // token. Runs before the assignment rule so the token (not just the word "Bearer") goes.
+  {
+    name: "bearer token",
+    pattern: /\b([Bb]earer)\s+[A-Za-z0-9._~+/=-]{8,}/g,
+    replace: (_m, scheme) => `${scheme} ${SECRET_MARK}`,
+  },
+  // Credentials embedded in a URL — `scheme://user:password@host`, `postgres://u:p@h/db`.
+  // Keep the scheme + host shape; redact only the `user:password` userinfo.
+  {
+    name: "URL credentials",
+    pattern: /\b([a-z][a-z0-9+.-]*:\/\/)[^\s:/@]+:[^\s:/@]+@/gi,
+    replace: (_m, scheme) => `${scheme}${SECRET_MARK}@`,
+  },
+  // `KEY = value` / `"api_key": "value"` / `TOKEN='value'` assignments — scrub the VALUE,
+  // keep the (optionally quoted) key name + separator + opening quote so the trace still
+  // shows a secret was set, not what it was. Handles bare, double-quoted (JSON), and
+  // single-quoted forms. The value lookahead `(?!\[redacted:)` refuses to match an
+  // already-inserted marker, so a value redacted by an earlier rule is never counted twice.
+  {
+    name: "secret assignment value",
+    pattern:
+      /(["']?)([A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET))\1(\s*[:=]\s*)(["']?)(?!\[redacted)[^\s,;}"']+/gi,
+    replace: (_m, kq, key, sep, vq) => `${kq}${key}${kq}${sep}${vq}${SECRET_MARK}`,
   },
   // OpenAI / Anthropic-style `sk-…` (and `sk-ant-…`) keys.
   { name: "sk- api key", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
@@ -99,14 +143,6 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
   { name: "Slack token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi },
   // GitLab personal access token.
   { name: "GitLab PAT", pattern: /\bglpat-[A-Za-z0-9_-]{16,}\b/g },
-  // `KEY = value` / `TOKEN: value` assignments — scrub the VALUE, keep the key name so
-  // the trace still shows that a secret was set, not what it was. The key half is the
-  // capture group; the replacer re-emits it followed by the marker.
-  {
-    name: "secret assignment value",
-    pattern:
-      /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY))\b(\s*[:=]\s*)("?)[^\s"']+\3/gi,
-  },
   // High-entropy catch-all: a 40+ char token mixing lower/upper/digit (the shape of a
   // random key, almost never an English word). Conservative — it may scrub a long
   // opaque id, which for an audit trace is the safe direction.
@@ -117,6 +153,14 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
   // Long pure-hex runs (sha-1/256 digests, hex-encoded secrets).
   { name: "long hex run", pattern: /\b[0-9a-fA-F]{40,}\b/g },
 ];
+
+/**
+ * Control characters to strip from captured content: every C0 control EXCEPT tab (\t) and
+ * newline (\n), plus DEL. This removes ANSI/OSC escape introducers (ESC, \x1b), carriage
+ * returns, and NUL — so reading a trace cannot drive an operator's terminal, and a secret
+ * cannot be split by a control char to slip past {@link SECRET_VALUE_RULES}.
+ */
+const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f]/g;
 
 /**
  * Truncate `raw` to at most `maxBytes` UTF-8 bytes WITHOUT splitting a multibyte
@@ -148,11 +192,16 @@ function globalize(pattern: RegExp): RegExp {
  * Redact tool content for the trace. The boundary, applied in order:
  *
  *   1. BOUND — truncate to `maxBytes` (default {@link DEFAULT_TRACE_CONTENT_MAX_BYTES}),
- *      capping what lands on disk and the blast radius of any miss below.
- *   2. SECRET-VALUE SCRUB — replace every {@link SECRET_VALUE_RULES} match with a marker.
- *      This is the layer the firewall lacks: it targets the raw VALUES tool output
- *      carries, not just injection/exfiltration phrasings.
- *   3. FIREWALL SPAN SCRUB — run the {@link MEMORY_FIREWALL_RULES} over the scrubbed text
+ *      capping what lands on disk and the blast radius of any miss below. First, so the
+ *      regexes below run on at most `maxBytes` — which bounds their cost (no catastrophic
+ *      backtracking blow-up on a megabyte of adversarial input).
+ *   2. STRIP CONTROL CHARS — remove ANSI/OSC escapes, CR, NUL, etc. ({@link CONTROL_CHARS}).
+ *      So reading the trace cannot drive an operator's terminal, AND a secret cannot be
+ *      split by a control char to evade the value rules below.
+ *   3. SECRET-VALUE SCRUB — replace every {@link SECRET_VALUE_RULES} match (a rule may keep
+ *      a key name / URL scheme and redact only the secret). This is the layer the firewall
+ *      lacks: it targets the raw VALUES tool output carries, not just phrasings.
+ *   4. FIREWALL SPAN SCRUB — run the {@link MEMORY_FIREWALL_RULES} over the scrubbed text
  *      and replace each match with a category marker. Injection content is neutralised
  *      before it could ever become belief → memory (slice 2b re-screens at accept too —
  *      defense in depth); any exfiltration phrasing the value-scrub missed is caught.
@@ -167,23 +216,25 @@ export function redactForTrace(
   const maxBytes = opts.maxBytes ?? DEFAULT_TRACE_CONTENT_MAX_BYTES;
   const bounded = truncateUtf8(raw, maxBytes);
 
-  // 2. Secret-value scrub.
+  // 2. Strip control characters (counting how many).
+  let controlsStripped = 0;
+  let content = bounded.text.replace(CONTROL_CHARS, () => {
+    controlsStripped++;
+    return "";
+  });
+
+  // 3. Secret-value scrub. Each rule may carry its own `replace` (keep a key/scheme, redact
+  // the secret); the default replaces the whole match with the marker. The count is the
+  // number of matches across all rules.
   let secretsRedacted = 0;
-  let content = bounded.text;
   for (const rule of SECRET_VALUE_RULES) {
-    content = content.replace(globalize(rule.pattern), (...args) => {
+    content = content.replace(globalize(rule.pattern), (match: string, ...groups: unknown[]): string => {
       secretsRedacted++;
-      // The "secret assignment value" rule keeps the key name + separator (groups 1, 2)
-      // and redacts only the value; every other rule replaces its whole match.
-      if (rule.name === "secret assignment value") {
-        const [, key, sep] = args as [string, string, string];
-        return `${key}${sep}${SECRET_MARK}`;
-      }
-      return SECRET_MARK;
+      return rule.replace ? rule.replace(match, ...(groups as string[])) : SECRET_MARK;
     });
   }
 
-  // 3. Firewall span scrub, per category.
+  // 4. Firewall span scrub, per category.
   let injectionRedacted = 0;
   let exfiltrationRedacted = 0;
   for (const rule of MEMORY_FIREWALL_RULES) {
@@ -202,6 +253,7 @@ export function redactForTrace(
     summary: {
       truncated: bounded.truncated,
       originalBytes: bounded.originalBytes,
+      controlsStripped,
       secretsRedacted,
       injectionRedacted,
       exfiltrationRedacted,
