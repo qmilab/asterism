@@ -2473,8 +2473,11 @@ function cmdConfigShow(io: CliIO): Promise<number> {
  */
 function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // `--default` operates on the INSTALL-WIDE default (no agent), which sits between the
-  // kernel constant and a per-agent override; otherwise it's a per-agent setting.
-  if (parsed.flags.default === true) return cmdConfigInstallRecallBudget(parsed, io);
+  // kernel constant and a per-agent override; otherwise it's a per-agent setting. Route on
+  // the flag being DEFINED, not `=== true`: the parser records `--default 30` as `true` (it
+  // is registered boolean) but the inline `--default=30` as the string `"30"`, and BOTH mean
+  // install-wide mode.
+  if (parsed.flags.default !== undefined) return cmdConfigInstallRecallBudget(parsed, io);
 
   const agentName = parsed.positionals[1];
   if (!agentName) {
@@ -2551,9 +2554,12 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
  */
 function cmdConfigInstallRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
   const unset = parsed.flags.unset === true;
-  // With `--default` consuming the verb intent, the value is the next positional after
-  // `recall-budget` (positional[0]); a bare negative still arrives as a digit-only flag key.
-  const valueRaw = parsed.positionals[1];
+  // The budget can arrive two ways: `--default 30` (registered boolean ⇒ `30` is the next
+  // positional after `recall-budget`) or `--default=30` (the parser's inline form ⇒ the value
+  // is the flag's own string). A bare negative (`--default -5`) still arrives as a digit-only
+  // flag key, caught by `negativeValue` below.
+  const valueRaw =
+    typeof parsed.flags.default === "string" ? parsed.flags.default : parsed.positionals[1];
   const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
   const CONSTANT = DEFAULT_RECALL_BUDGET.maxMemories;
 

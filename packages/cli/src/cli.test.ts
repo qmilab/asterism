@@ -2334,6 +2334,22 @@ test("config recall-budget --default sets the install-wide default (not a per-ag
   }
 });
 
+test("config recall-budget --default=<n> (inline form) routes to the install-wide path", async () => {
+  // The parser records `--default=30` as the string "30", not boolean true; the dispatch
+  // must still treat it as install-wide mode (not fall through to the per-agent usage error).
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "recall-budget", "--default=30"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set the install-wide recall budget to 30 memories");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.installSettings.getRecallBudget()).toBe(30);
+  } finally {
+    store.close();
+  }
+});
+
 test("config recall-budget --default shows and clears the install-wide default", async () => {
   const h = harness();
   await runCli(["init"], h.io);
