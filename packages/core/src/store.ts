@@ -17,6 +17,7 @@ import { WorldFactRepository, DEFAULT_WORLD_FACT_CAP, WorldFactCapError } from "
 import { CredentialRepository } from "./repositories/credentials.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
+import { InstallSettingsRepository } from "./repositories/install-settings.js";
 import type {
   Agent,
   AgentSettings,
@@ -63,6 +64,8 @@ export class AsterismStore {
   readonly capabilityStanding: CapabilityStandingRepository;
   /** Per-agent kernel settings — the operator-configurable tunables (e.g. recall budget). */
   readonly agentSettings: AgentSettingsRepository;
+  /** Install-wide kernel defaults — a single row, resolved BELOW a per-agent setting. */
+  readonly installSettings: InstallSettingsRepository;
   /** The local plaintext-bearing secret store; credentials reference into it. */
   readonly secrets: SecretStore;
   readonly events: EventRepository;
@@ -79,6 +82,7 @@ export class AsterismStore {
     this.credentials = new CredentialRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
+    this.installSettings = new InstallSettingsRepository(driver);
     this.secrets = new SecretStore(driver);
     this.events = new EventRepository(driver);
   }

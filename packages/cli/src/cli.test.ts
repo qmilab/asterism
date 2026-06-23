@@ -2319,6 +2319,92 @@ test("config show lists each agent's recall budget, set or default", async () =>
   expect(shown).toContain("work  →  20  [default]");
 });
 
+test("config recall-budget --default sets the install-wide default (not a per-agent setting)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "recall-budget", "--default", "30"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set the install-wide recall budget to 30 memories");
+
+  const store = openHomeStore(h);
+  try {
+    // Stored as an install-wide kernel setting (single row), not against any agent.
+    expect(store.installSettings.getRecallBudget()).toBe(30);
+  } finally {
+    store.close();
+  }
+});
+
+test("config recall-budget --default=<n> (inline form) routes to the install-wide path", async () => {
+  // The parser records `--default=30` as the string "30", not boolean true; the dispatch
+  // must still treat it as install-wide mode (not fall through to the per-agent usage error).
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "recall-budget", "--default=30"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set the install-wide recall budget to 30 memories");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.installSettings.getRecallBudget()).toBe(30);
+  } finally {
+    store.close();
+  }
+});
+
+test("config recall-budget --default shows and clears the install-wide default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await capture(["config", "recall-budget", "--default"], h.io)).toContain(
+    "No install-wide recall budget set",
+  );
+  await runCli(["config", "recall-budget", "--default", "30"], h.io);
+  expect(await capture(["config", "recall-budget", "--default"], h.io)).toContain(
+    "Install-wide recall budget: 30",
+  );
+
+  h.out.length = 0;
+  expect(await runCli(["config", "recall-budget", "--default", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("built-in default");
+  // A second unset reports there was nothing set.
+  h.out.length = 0;
+  expect(await runCli(["config", "recall-budget", "--default", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("No install-wide recall budget was set");
+});
+
+test("config recall-budget --default rejects a value that is not a positive whole number", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  for (const bad of ["0", "-5", "abc", "2.5"]) {
+    h.err.length = 0;
+    expect(await runCli(["config", "recall-budget", "--default", bad], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("positive whole number");
+  }
+  const store = openHomeStore(h);
+  try {
+    expect(store.installSettings.getRecallBudget()).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("the install-wide default applies to an un-set agent; a per-agent budget still wins", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["config", "recall-budget", "--default", "30"], h.io);
+  await runCli(["config", "recall-budget", "personal", "40"], h.io);
+
+  // `work` has no override → it reports the install-wide default as the value it uses.
+  expect(await capture(["config", "recall-budget", "work"], h.io)).toContain(
+    "install-wide default recall budget (30 memories)",
+  );
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("Install-wide recall budget: 30");
+  expect(shown).toContain("personal  →  40  [set]"); // per-agent wins
+  expect(shown).toContain("work  →  30  [install-wide default]"); // falls back to install-wide
+});
+
 test("config recall-provider sets a per-agent provider, persisted in the kernel store", async () => {
   const h = harness();
   await runCli(["init"], h.io);

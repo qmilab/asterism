@@ -214,5 +214,6 @@ export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
 export { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 export { AgentSettingsRepository } from "./repositories/agent-settings.js";
+export { InstallSettingsRepository } from "./repositories/install-settings.js";
 export { EventRepository } from "./repositories/events.js";
 export type { AppendEventInput, TailOptions } from "./repositories/events.js";

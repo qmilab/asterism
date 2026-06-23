@@ -131,19 +131,28 @@ export interface ExecuteRunResult {
 }
 
 /**
- * Resolve the effective recall budget for an agent's run: the agent's own
- * per-agent override if set, else the kernel default ({@link DEFAULT_RECALL_BUDGET}).
- * The kernel owns this resolution so every surface (CLI, HTTP, a future dashboard)
- * gets the same effective value from one place and can never drift on it — the same
- * reason the run flow itself lives in one call. The read is `agentId`-scoped, so an
- * agent's budget is resolved only from its own setting, never another's.
+ * Resolve the effective recall budget for an agent's run, in precedence order:
  *
- * An explicit `options.recallBudget` still wins over this (see {@link ExecuteRunOptions});
+ *   1. the agent's own per-agent override (`agent_settings.recall_budget`), else
+ *   2. the install-wide default (`install_settings.recall_budget`), else
+ *   3. the kernel's built-in constant ({@link DEFAULT_RECALL_BUDGET}).
+ *
+ * The kernel owns this resolution so every surface (CLI, HTTP, the dashboard, channels)
+ * gets the same effective value from one place and can never drift on it — the same reason
+ * the run flow itself lives in one call, and why the install-wide default is read HERE from
+ * the kernel store rather than threaded in by each surface. The per-agent read is
+ * `agentId`-scoped, so an agent's own override is resolved only from its own setting; the
+ * install-wide row carries no agent data.
+ *
+ * An explicit `options.recallBudget` still wins over all three (see {@link ExecuteRunOptions});
  * this is the resolution for the normal path where no host override is supplied.
  */
 export function resolveRecallBudget(store: AsterismStore, agent: Agent): RecallBudget {
-  const override = store.agentSettings.getRecallBudget(agent.id);
-  return override !== undefined ? { maxMemories: override } : DEFAULT_RECALL_BUDGET;
+  const perAgent = store.agentSettings.getRecallBudget(agent.id);
+  if (perAgent !== undefined) return { maxMemories: perAgent };
+  const installDefault = store.installSettings.getRecallBudget();
+  if (installDefault !== undefined) return { maxMemories: installDefault };
+  return DEFAULT_RECALL_BUDGET;
 }
 
 /** Read a file's text via the injected reader, or undefined if it cannot be read. */

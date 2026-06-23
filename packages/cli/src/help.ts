@@ -303,7 +303,7 @@ already waiting needs no model.`,
   config: `asterism config
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
-asterism config recall-budget <agent> <n>  ·  --unset
+asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>
 asterism config recall-provider <agent> local  ·  --unset
 asterism config cognition-provider <agent> lodestar  ·  --unset
 asterism config cognition-capture <agent> content  ·  references
@@ -327,6 +327,11 @@ its runs when you want it to differ.
                                         Clear it, so the agent uses the default again.
   asterism config recall-budget <agent>
                                         Show this agent's current recall budget.
+  asterism config recall-budget --default <n>
+                                        Set the install-wide default budget for every
+                                        agent without its own (·  --default --unset to
+                                        clear, ·  --default to show). Precedence: a
+                                        per-agent budget, then this, then the built-in.
   asterism config recall-provider <agent> local
                                         Rank this agent's memory by meaning, using a
                                         local embeddings endpoint (opt-in, off by
