@@ -2393,6 +2393,151 @@ test("config show lists each agent's recall provider, set or default", async () 
   expect(shown).toContain("work  →  keyword (built-in)  [default]");
 });
 
+// --- cognition provider (the opt-in Lodestar trace) -------------------------
+
+test("config cognition-provider sets a per-agent provider, persisted in the kernel store", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["config", "cognition-provider", "personal", "lodestar"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set personal's cognition provider to lodestar");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCognitionProvider(agentNamed(store, "personal").id)).toBe(
+      "lodestar",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("config cognition-provider with no value shows the current setting", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await capture(["config", "cognition-provider", "personal"], h.io)).toContain(
+    "none (no trace) (the default)",
+  );
+  await runCli(["config", "cognition-provider", "personal", "lodestar"], h.io);
+  expect(await capture(["config", "cognition-provider", "personal"], h.io)).toContain(
+    "cognition provider: lodestar",
+  );
+});
+
+test("config cognition-provider rejects an unknown provider id and persists nothing", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["config", "cognition-provider", "personal", "spyware"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Unknown cognition provider");
+  const store = openHomeStore(h);
+  try {
+    expect(
+      store.agentSettings.getCognitionProvider(agentNamed(store, "personal").id),
+    ).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("config cognition-provider --unset clears the override, then is a no-op", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "cognition-provider", "personal", "lodestar"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["config", "cognition-provider", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("record no trace again");
+
+  h.out.length = 0;
+  expect(await runCli(["config", "cognition-provider", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("nothing to unset");
+});
+
+test("config show lists each agent's cognition provider, set or default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["config", "cognition-provider", "personal", "lodestar"], h.io);
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("Per-agent cognition provider:");
+  expect(shown).toContain("personal  →  lodestar  [set]");
+  // The other agent is unaffected — a per-agent setting never crosses agents.
+  expect(shown).toContain("work  →  none (no trace)  [default]");
+});
+
+test("a run is wrapped for cognition ONLY for an opted-in agent", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  // Spy on the cognition wrapper: record which agent ids it is asked to wrap, and pass
+  // the adapter through unchanged. The default lazy import is never reached.
+  const wrappedFor: string[] = [];
+  h.io.makeCognitionAdapter = (adapter, agentId) => {
+    wrappedFor.push(agentId);
+    return adapter;
+  };
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "autonomous"], h.io);
+  await runCli(["config", "cognition-provider", "personal", "lodestar"], h.io);
+
+  const store = openHomeStore(h);
+  const personalId = agentNamed(store, "personal").id;
+  store.close();
+
+  await runCli(["run", "personal", "do a thing"], h.io); // opted in → wrapped
+  await runCli(["run", "work", "do a thing"], h.io); // opted out → NOT wrapped
+
+  expect(wrappedFor).toEqual([personalId]);
+});
+
+test("trace points an opted-out agent at how to opt in, and renders a recorded trace", async () => {
+  const h = harness();
+  // Inject the renderer so the test never depends on a built dist (mirrors how every
+  // other substrate seam is faked). undefined ⇒ "no trace recorded".
+  let canned: string | undefined;
+  h.io.renderCognitionTrace = async () => canned;
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // No trace + not opted in → a pointer to the opt-in command.
+  expect(await capture(["trace", "personal"], h.io)).toContain(
+    "config cognition-provider personal lodestar",
+  );
+
+  // A recorded trace is printed verbatim.
+  canned = "# Trust report\n- observation.recorded: write_file";
+  expect(await capture(["trace", "personal"], h.io)).toContain("observation.recorded: write_file");
+});
+
+test("trace reports an unknown agent rather than rendering nothing", async () => {
+  const h = harness();
+  h.io.renderCognitionTrace = async () => undefined;
+  await runCli(["init"], h.io);
+  expect(await runCli(["trace", "ghost"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("ghost");
+});
+
+test("trace surfaces a read failure as an error, never as 'no trace'", async () => {
+  const h = harness();
+  // A corrupt/unreadable log makes the renderer throw — the command must report the
+  // failure and exit non-zero, not quietly claim the agent has no trace.
+  h.io.renderCognitionTrace = async () => {
+    throw new Error("corrupt NDJSON line");
+  };
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  expect(await runCli(["trace", "personal"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("corrupt");
+});
+
 test("a run uses the injected recall provider only for an opted-in agent", async () => {
   const h = harness();
   h.io.makeAdapter = () => ({ adapter: fakeAdapter });

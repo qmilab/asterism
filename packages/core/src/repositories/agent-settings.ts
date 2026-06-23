@@ -1,6 +1,16 @@
 import type { SqlDriver, SqlRow } from "../db/driver.js";
-import type { AgentSettings, RecallProviderId, StandingThresholds } from "../types.js";
-import { RECALL_PROVIDER_IDS, validateEnum, validatePositiveInt } from "../types.js";
+import type {
+  AgentSettings,
+  CognitionProviderId,
+  RecallProviderId,
+  StandingThresholds,
+} from "../types.js";
+import {
+  COGNITION_PROVIDER_IDS,
+  RECALL_PROVIDER_IDS,
+  validateEnum,
+  validatePositiveInt,
+} from "../types.js";
 import { requireAgentId } from "./scope.js";
 
 /** A NULLable integer column → a number, or undefined when NULL/absent. */
@@ -19,6 +29,7 @@ function mapSettings(row: SqlRow): AgentSettings {
   const minCleanExecutions = intOrUnset(row.min_clean_executions);
   const minDistinctTargets = intOrUnset(row.min_distinct_targets);
   const recallProvider = textOrUnset(row.recall_provider);
+  const cognitionProvider = textOrUnset(row.cognition_provider);
   return {
     agentId: String(row.agent_id),
     ...(recallBudget !== undefined ? { recallBudget } : {}),
@@ -29,6 +40,9 @@ function mapSettings(row: SqlRow): AgentSettings {
     // (the safe default) rather than surface an unrecognized selection to the host.
     ...(recallProvider !== undefined && isRecallProviderId(recallProvider)
       ? { recallProvider }
+      : {}),
+    ...(cognitionProvider !== undefined && isCognitionProviderId(cognitionProvider)
+      ? { cognitionProvider }
       : {}),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -45,6 +59,11 @@ function textOrUnset(value: unknown): string | undefined {
 /** Whether `value` is a recognized opt-in recall provider id. */
 function isRecallProviderId(value: string): value is RecallProviderId {
   return (RECALL_PROVIDER_IDS as readonly string[]).includes(value);
+}
+
+/** Whether `value` is a recognized opt-in cognition provider id. */
+function isCognitionProviderId(value: string): value is CognitionProviderId {
+  return (COGNITION_PROVIDER_IDS as readonly string[]).includes(value);
 }
 
 /**
@@ -190,6 +209,59 @@ export class AgentSettingsRepository {
     const row = this.driver
       .prepare(
         `UPDATE agent_settings SET recall_provider = NULL, updated_at = ?
+           WHERE agent_id = ? RETURNING *`,
+      )
+      .get([now, agentId]);
+    return row ? mapSettings(row) : undefined;
+  }
+
+  /**
+   * An agent's opt-in cognition-provider selection, or undefined when unset (no row, or
+   * the column is NULL) — the host reads this and, when set, wraps the run adapter in the
+   * matching opt-in provider; unset ⇒ the default Pi loop with no trace. Scoped to
+   * `agentId`, so it can only ever return one agent's own selection.
+   */
+  getCognitionProvider(agentId: string): CognitionProviderId | undefined {
+    return this.get(agentId)?.cognitionProvider;
+  }
+
+  /**
+   * Set an agent's opt-in cognition provider. Validates the id against the known set at
+   * the write boundary (the kernel never trusts a surface to have checked), then upserts
+   * ONLY the `cognition_provider` column — every other setting is left untouched.
+   * `created_at` is preserved across updates; `updated_at` advances on every change.
+   */
+  setCognitionProvider(agentId: string, provider: CognitionProviderId): AgentSettings {
+    requireAgentId(agentId);
+    const value = validateEnum(provider, COGNITION_PROVIDER_IDS, "cognition provider");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `INSERT INTO agent_settings (agent_id, cognition_provider, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           cognition_provider = excluded.cognition_provider,
+           updated_at = excluded.updated_at
+         RETURNING *`,
+      )
+      .get([agentId, value, now, now]);
+    if (!row) throw new Error("agent settings upsert did not persist");
+    return mapSettings(row);
+  }
+
+  /**
+   * Clear an agent's cognition-provider override (back to the default Pi loop, no trace)
+   * by setting only that column to NULL. Returns the updated row, or undefined when the
+   * agent had no settings row at all (nothing to clear) — symmetric with
+   * {@link clearRecallProvider}. The row itself is kept even when every override is now
+   * NULL, so a later setting preserves `created_at`.
+   */
+  clearCognitionProvider(agentId: string): AgentSettings | undefined {
+    requireAgentId(agentId);
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE agent_settings SET cognition_provider = NULL, updated_at = ?
            WHERE agent_id = ? RETURNING *`,
       )
       .get([now, agentId]);

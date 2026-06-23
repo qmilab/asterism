@@ -47,7 +47,7 @@ jobs:
       - name: Verify the tag matches the committed package versions
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          for pkg in core adapter-pi reflect recall-local server channels cli; do
+          for pkg in core adapter-pi adapter-lodestar reflect recall-local server channels cli; do
             v="$(node -p "require('./packages/$pkg/package.json').version")"
             if [ "$v" != "$tag" ]; then
               echo "::error::Tag $GITHUB_REF_NAME (=$tag) != packages/$pkg version $v. Bump every package to $tag (and the CLI VERSION constant + bun.lock) before tagging." >&2
@@ -75,7 +75,7 @@ jobs:
           # version from the lockfile — then published from that tarball with npm.
           # Idempotent: a version already on the registry is skipped, so a re-run
           # completes a partial publish rather than failing on the first conflict.
-          for pkg in core adapter-pi reflect recall-local server channels cli; do
+          for pkg in core adapter-pi adapter-lodestar reflect recall-local server channels cli; do
             dir="packages/$pkg"
             name="$(node -p "require('./$dir/package.json').name")"
             version="$(node -p "require('./$dir/package.json').version")"

@@ -31,10 +31,27 @@ export const CONFIG_FILE_NAME = "config.json";
  * workspace (which an agent can write and a future target could expose).
  */
 export const HTTP_TOKENS_DIR_NAME = "http-tokens";
+/**
+ * Subdirectory holding per-agent cognition traces (the opt-in Lodestar audit log).
+ * Like the HTTP tokens, these live in the home and NEVER in the agent's workspace: the
+ * workspace is agent-writable, so a trace stored there could be disabled or tampered
+ * with by the very agent it audits — which would defeat an audit trail. Events are
+ * partitioned by agentId inside, so one agent's trace is never reachable through another's.
+ */
+export const TRACES_DIR_NAME = "traces";
 
 /** Absolute path to the database file given an install's home directory. */
 export function dbPath(home: string): string {
   return join(home, DB_FILE_NAME);
+}
+
+/**
+ * The install's cognition-trace root — the Lodestar event-log root for `asterism trace`,
+ * partitioned by agentId within. Outside every agent workspace (a sibling of `agents/`),
+ * so an agent's own file tools cannot reach, disable, or tamper with its audit trail.
+ */
+export function tracesDir(home: string): string {
+  return join(home, TRACES_DIR_NAME);
 }
 
 /** Absolute path to the config file given an install's home directory. */

@@ -23,6 +23,7 @@ import type {
   CapabilityGrant,
   CapabilityStanding,
   Credential,
+  CognitionProviderId,
   EventType,
   Memory,
   Objective,
@@ -117,6 +118,12 @@ export class AsterismStore {
     // ranker", which is the correct, unchanged starting state.
     if (!this.columnExists("agent_settings", "recall_provider")) {
       this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN recall_provider TEXT`);
+    }
+    // The cognition provider joined `agent_settings` last (thread 6: an opt-in auditable
+    // trace). Add it idempotently; a NULL default means every existing agent reads as
+    // "use the default Pi loop, no trace" — the correct, unchanged starting state.
+    if (!this.columnExists("agent_settings", "cognition_provider")) {
+      this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN cognition_provider TEXT`);
     }
     // The objective review state joined `objectives` after slice 1 first shipped the
     // table (reflection now PROPOSES objectives, gated by a review state). Add it
@@ -308,6 +315,52 @@ export class AsterismStore {
       const settings = this.agentSettings.clearRecallProvider(agentId);
       this.emit(agentId, "agent.setting_changed", {
         setting: "recallProvider",
+        from,
+        to: null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Set an agent's opt-in cognition provider and record the change as
+   * `agent.setting_changed` — the audit trail for an operator switching how a run is
+   * traced: the `setting`, and the `from`/`to` selection (an enum value, never an action's
+   * arguments, so the log stays references-only). `from` is the prior selection, or null
+   * when it was unset (the default Pi loop, no trace). The repository validates the id
+   * against the known set at the write boundary. An unchanged value is a true no-op — no
+   * write, no phantom event — the same discipline as {@link setRecallProvider}.
+   */
+  setCognitionProvider(agentId: string, provider: CognitionProviderId): AgentSettings {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getCognitionProvider(agentId) ?? null;
+      if (from === provider) {
+        const existing = this.agentSettings.get(agentId);
+        if (existing) return existing;
+      }
+      const settings = this.agentSettings.setCognitionProvider(agentId, provider);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "cognitionProvider",
+        from,
+        to: settings.cognitionProvider ?? null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Clear an agent's cognition-provider override, returning it to the default Pi loop with
+   * no trace, and record the change as `agent.setting_changed` (`to: null`). A no-op when
+   * the agent had no override set: nothing changes, so nothing is logged, and the returned
+   * row is undefined — symmetric with {@link clearRecallProvider}.
+   */
+  clearCognitionProvider(agentId: string): AgentSettings | undefined {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getCognitionProvider(agentId) ?? null;
+      if (from === null) return this.agentSettings.get(agentId);
+      const settings = this.agentSettings.clearCognitionProvider(agentId);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "cognitionProvider",
         from,
         to: null,
       });
