@@ -188,6 +188,12 @@ CREATE TABLE IF NOT EXISTS agent_settings (
   -- trace). The kernel stores the selection only; the host wraps the adapter, so core
   -- never imports Lodestar. Observe-only -- it records, it never gates. NULL ⇒ default.
   cognition_provider   TEXT,
+  -- How much the cognition trace captures, or NULL for the references-only baseline (the
+  -- default: no content). The only non-NULL value today is 'content', which also records
+  -- redacted tool-output content behind the kernel's redaction boundary. A deliberate
+  -- escalation kept separate from cognition_provider; inert unless that is set. NULL ⇒
+  -- references only, like every other column here.
+  cognition_capture    TEXT,
   -- The earning bar for a per-capability standing grant, overriding the kernel
   -- DEFAULT_STANDING_POLICY for this agent: how many clean confirmed executions,
   -- across how many distinct targets, a destructive capability must clear to be

@@ -14,16 +14,24 @@
 // handed no store, no credential reader, and no memory writer: it decorates the
 // kernel-scoped tool registry and writes a log, nothing more.
 //
-// REFERENCES-ONLY (slice 1). The trace records, per tool call, the tool NAME, an
-// invocation id, the output's byte length + a KEYED fingerprint, and whether it
-// errored — NEVER the raw input arguments or the raw output text. The fingerprint is
-// an HMAC under a per-run random key (minted in memory, never persisted), NOT a bare
-// hash: a plain digest of a low-entropy output (a short token, a yes/no) could be
-// dictionary-attacked offline by anyone who can read the trace, so a bare hash would
+// TWO CAPTURE MODES. By DEFAULT the trace is REFERENCES-ONLY: per tool call it records
+// the tool NAME, an invocation id, the output's byte length + a KEYED fingerprint, and
+// whether it errored — NEVER the raw input arguments or the raw output text. The
+// fingerprint is an HMAC under a per-run random key (minted in memory, never persisted),
+// NOT a bare hash: a plain digest of a low-entropy output (a short token, a yes/no) could
+// be dictionary-attacked offline by anyone who can read the trace, so a bare hash would
 // quietly break the no-leak property. This mirrors the kernel's own `actionFingerprint`
 // (a keyed HMAC) discipline, keeping the trace consistent with Asterism's event log
-// ("references, never values"). Content-bearing capture behind a redaction boundary is
-// a deliberate later slice.
+// ("references, never values").
+//
+// When the host opts an agent in (`captureContent`), the trace ALSO records each tool
+// output's CONTENT — but only AFTER it passes through the kernel's redaction boundary
+// (`redactForTrace`): a secret-aware, bounded, firewall-screened scrub that replaces
+// secret values and injection/exfiltration spans with markers and caps the bytes stored.
+// Raw output never reaches the log. Capturing content is a deliberate, separate operator
+// escalation (the `cognitionCapture` setting), not implied by turning the trace on; the
+// references-only default is the safe baseline. The redaction policy lives in `core` (the
+// kernel owns what is safe to persist); this package only applies it at the capture point.
 //
 // ISOLATION + INTEGRITY. The trace is written to a HOST-CONTROLLED root the host passes
 // in (`traceRoot`), NEVER under the agent's own `workspaceDir`: the workspace is
@@ -38,8 +46,9 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { EventLogReader, EventLogWriter } from "@qmilab/lodestar-event-log";
 import type { EventEnvelope, Observation } from "@qmilab/lodestar-core";
 import { projectChain, renderReport } from "@qmilab/lodestar-trace";
-import { createToolRegistry } from "@qmilab/asterism-core";
+import { createToolRegistry, redactForTrace } from "@qmilab/asterism-core";
 import type {
+  RedactionSummary,
   RunHandle,
   RunRequest,
   RuntimeAdapter,
@@ -47,8 +56,14 @@ import type {
   ToolResult,
 } from "@qmilab/asterism-core";
 
-/** The schema key the trace stamps on each tool-result observation. */
+/** The schema key for a REFERENCES-ONLY tool-result observation (the default). */
 const TOOL_RESULT_SCHEMA = "asterism.tool_result@1";
+/**
+ * The schema key for a CONTENT-bearing tool-result observation — a SUPERSET of `@1`
+ * (every reference field, plus the redacted content + its redaction summary). A distinct
+ * version so a reader (and a future claim extractor in slice 2b) can tell the two apart.
+ */
+const TOOL_RESULT_CONTENT_SCHEMA = "asterism.tool_result@2";
 /** Semver of the `observation.recorded` event shape this writer emits. */
 const EVENT_SCHEMA_VERSION = "1.0.0";
 
@@ -66,6 +81,15 @@ export interface LodestarWrapOptions {
    * `traces/` dir; events land under `${traceRoot}/${agentId}/`.
    */
   traceRoot: string;
+  /**
+   * Whether to ALSO record each tool output's content (default `false` ⇒ references only,
+   * the safe slice-1 baseline). When `true`, the content is passed through the kernel's
+   * `redactForTrace` boundary (secret-aware, bounded, firewall-screened) BEFORE it is
+   * stored — raw output never lands in the trace. The host reads the agent's
+   * `cognitionCapture` setting and sets this; the wrapper still sees no store/setting, only
+   * this explicit flag (golden rule 2).
+   */
+  captureContent?: boolean;
 }
 
 /**
@@ -88,41 +112,74 @@ class TraceRecorder {
     private readonly agentId: string,
     private readonly sessionId: string,
     logRoot: string,
+    /**
+     * When true, `recordResult` ALSO stores the output's REDACTED content (a superset of
+     * the references). When false (the default), the trace is references-only — byte-for-byte
+     * slice 1. The mode is fixed per run by the host; the recorder never reads a setting.
+     */
+    private readonly captureContent: boolean = false,
   ) {
     this.writer = new EventLogWriter(logRoot);
   }
 
-  /** Record a completed tool call — references only (name, output size, keyed fingerprint, error flag). */
+  /**
+   * Record a completed tool call. Always references (name, output size, keyed fingerprint,
+   * error flag); when `captureContent`, ALSO the redacted output content + its redaction
+   * summary, under the content-bearing schema. Raw output is passed through the kernel's
+   * `redactForTrace` boundary first — it never reaches the log unredacted.
+   */
   async recordResult(tool: string, result: ToolResult): Promise<void> {
     const output = result.output ?? "";
-    await this.append(tool, {
+    const references = {
       tool,
       output_bytes: Buffer.byteLength(output, "utf8"),
       // A KEYED fingerprint under the per-run key — never a bare hash (see `outputKey`).
-      // Reveals only whether an output recurred WITHIN this run; it is non-reversible.
+      // Reveals only whether an output recurred WITHIN this run; it is non-reversible. Always
+      // over the RAW output (so recurrence is exact), never printed.
       output_fingerprint: createHmac("sha256", this.outputKey)
         .update(output)
         .digest("hex")
         .slice(0, 32),
       is_error: result.isError === true,
+    };
+    if (!this.captureContent) {
+      await this.append(tool, TOOL_RESULT_SCHEMA, references);
+      return;
+    }
+    // Content mode: redact at the boundary, then store the redacted content + counts-only
+    // summary alongside the references. `redactForTrace` is the kernel's policy — the
+    // adapter only applies it, holding no secret reader.
+    const redacted = redactForTrace(output);
+    await this.append(tool, TOOL_RESULT_CONTENT_SCHEMA, {
+      ...references,
+      content: redacted.content,
+      redaction: redacted.summary,
     });
   }
 
-  /** Record a tool call that threw — the invocation happened; the outcome was an error. */
+  /**
+   * Record a tool call that threw — the invocation happened; the outcome was an error.
+   * Always references-only: a throw produced no output, so there is nothing to capture even
+   * in content mode.
+   */
   async recordThrow(tool: string): Promise<void> {
-    await this.append(tool, { tool, threw: true, is_error: true });
+    await this.append(tool, TOOL_RESULT_SCHEMA, { tool, threw: true, is_error: true });
   }
 
   /**
-   * Append one `observation.recorded` event. `payload` is a references-only summary —
-   * NEVER raw arguments or output text. The observation is stamped `internal` and
-   * `raw`; it is a record of "tool X ran and returned N bytes", not the content.
+   * Append one `observation.recorded` event under `schema`. `summary` is either a
+   * references-only summary (`@1`) or references PLUS already-REDACTED content (`@2`) —
+   * NEVER raw arguments or raw output text. The observation is stamped `internal` and `raw`.
    */
-  private async append(tool: string, summary: Record<string, unknown>): Promise<void> {
+  private async append(
+    tool: string,
+    schema: string,
+    summary: Record<string, unknown>,
+  ): Promise<void> {
     const now = new Date().toISOString();
     const observation: Observation = {
       id: randomUUID(),
-      schema: TOOL_RESULT_SCHEMA,
+      schema,
       payload: summary,
       source: { tool, invocation_id: randomUUID(), captured_at: now },
       context: { session_id: this.sessionId, project_id: this.agentId, actor_id: this.agentId },
@@ -172,12 +229,13 @@ function wrapTool(tool: ScopedTool, recorder: TraceRecorder): ScopedTool {
 }
 
 /**
- * Wrap a {@link RuntimeAdapter} so each run records a references-only Lodestar trace
- * to its confined workspace. The inner adapter (e.g. Pi) drives the loop UNCHANGED —
- * this decorator only swaps the tool registry for one whose tools record themselves.
- * Returns a `RuntimeAdapter`; nothing about the run's behaviour changes except that a
- * trace is written. A fresh `session_id` is minted per run, so each run is its own
- * Lodestar session within the agent's project.
+ * Wrap a {@link RuntimeAdapter} so each run records a Lodestar trace to the host trace
+ * root. The inner adapter (e.g. Pi) drives the loop UNCHANGED — this decorator only swaps
+ * the tool registry for one whose tools record themselves. Returns a `RuntimeAdapter`;
+ * nothing about the run's behaviour changes except that a trace is written. A fresh
+ * `session_id` is minted per run, so each run is its own Lodestar session within the
+ * agent's project. By default the trace is references-only; with `options.captureContent`
+ * it also records each output's REDACTED content (via the kernel's `redactForTrace`).
  */
 export function wrapWithLodestar(
   inner: RuntimeAdapter,
@@ -186,8 +244,14 @@ export function wrapWithLodestar(
   return {
     run(request: RunRequest): RunHandle {
       // The trace root is the HOST-provided dir (off the agent-writable workspace), not
-      // anything derived from `request.workspaceDir`.
-      const recorder = new TraceRecorder(options.agentId, randomUUID(), options.traceRoot);
+      // anything derived from `request.workspaceDir`. The capture mode is the host's
+      // explicit flag (default references only) — the wrapper reads no setting itself.
+      const recorder = new TraceRecorder(
+        options.agentId,
+        randomUUID(),
+        options.traceRoot,
+        options.captureContent === true,
+      );
       const wrappedTools = request.tools.list().map((tool) => wrapTool(tool, recorder));
       return inner.run({ ...request, tools: createToolRegistry(wrappedTools) });
     },
@@ -252,12 +316,16 @@ function earliestSeq(events: readonly EventEnvelope[]): number {
   return min;
 }
 
-/** The references-only summary this layer stores in each observation's payload. */
+/** The summary this layer stores in each observation's payload (references; content in `@2`). */
 interface ToolCallRef {
   tool?: unknown;
   output_bytes?: unknown;
   is_error?: unknown;
   threw?: unknown;
+  /** Present only in content mode (`@2`): the ALREADY-REDACTED output content. */
+  content?: unknown;
+  /** Present only in content mode (`@2`): the counts-only redaction summary. */
+  redaction?: unknown;
 }
 
 /**
@@ -265,7 +333,10 @@ interface ToolCallRef {
  * Lodestar's report omits. One numbered line per `observation.recorded`: the tool, its
  * status (`ok` / `error` for a non-throwing error result / `threw` for an exception), and
  * the output's byte length (a reference, never its contents). The fingerprint is kept in
- * the log for recurrence checks but not printed (it carries no human-readable signal).
+ * the log for recurrence checks but not printed (it carries no human-readable signal). In
+ * content mode, the already-REDACTED content and a redaction summary are shown indented
+ * beneath the call — the content has already passed the redaction boundary, so nothing
+ * printed here is raw output.
  */
 function toolCallLines(sessionEvents: readonly EventEnvelope[]): string[] {
   const lines: string[] = [];
@@ -278,6 +349,31 @@ function toolCallLines(sessionEvents: readonly EventEnvelope[]): string[] {
     const status = ref.threw === true ? "threw" : ref.is_error === true ? "error" : "ok";
     const bytes = typeof ref.output_bytes === "number" ? `${ref.output_bytes} bytes` : "—";
     lines.push(`  ${lines.length + 1}. ${tool}  [${status}]  ${bytes}`);
+    const redactionLine = formatRedaction(ref.redaction);
+    if (redactionLine) lines.push(`       redactions: ${redactionLine}`);
+    if (typeof ref.content === "string") {
+      // The content is already redacted + bounded; indent each line under the call.
+      for (const contentLine of ref.content.split("\n")) lines.push(`       │ ${contentLine}`);
+    }
   }
   return lines;
+}
+
+/**
+ * A compact, non-zero-only redaction summary for one tool call, or `undefined` when nothing
+ * was redacted or truncated (a clean content capture needs no summary line). Reads the
+ * counts-only summary defensively — it is `unknown` off the log.
+ */
+function formatRedaction(redaction: unknown): string | undefined {
+  if (redaction === null || typeof redaction !== "object") return undefined;
+  const s = redaction as Partial<RedactionSummary>;
+  const parts: string[] = [];
+  if (typeof s.secretsRedacted === "number" && s.secretsRedacted > 0) parts.push(`secrets=${s.secretsRedacted}`);
+  if (typeof s.injectionRedacted === "number" && s.injectionRedacted > 0) parts.push(`injection=${s.injectionRedacted}`);
+  if (typeof s.exfiltrationRedacted === "number" && s.exfiltrationRedacted > 0) parts.push(`exfiltration=${s.exfiltrationRedacted}`);
+  if (typeof s.controlsStripped === "number" && s.controlsStripped > 0) parts.push(`controls=${s.controlsStripped}`);
+  if (s.truncated === true) {
+    parts.push(typeof s.originalBytes === "number" ? `truncated from ${s.originalBytes} bytes` : "truncated");
+  }
+  return parts.length > 0 ? parts.join(", ") : undefined;
 }

@@ -2473,6 +2473,114 @@ test("config show lists each agent's cognition provider, set or default", async 
   expect(shown).toContain("work  →  none (no trace)  [default]");
 });
 
+test("config cognition-capture content sets it; warns it is inert without a trace", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // No cognition provider yet → the message warns the capture is inert until one is set.
+  expect(await runCli(["config", "cognition-capture", "personal", "content"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("records redacted output content");
+  expect(h.out.join("\n")).toContain("inert until you opt in to a trace");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCognitionCapture(agentNamed(store, "personal").id)).toBe(
+      "content",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("config cognition-capture content drops the inert warning once a trace is on", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "cognition-provider", "personal", "lodestar"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["config", "cognition-capture", "personal", "content"], h.io)).toBe(0);
+  expect(h.out.join("\n")).not.toContain("inert");
+});
+
+test("config cognition-capture with no value shows the current setting", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await capture(["config", "cognition-capture", "personal"], h.io)).toContain(
+    "captures references only (the default",
+  );
+  await runCli(["config", "cognition-capture", "personal", "content"], h.io);
+  expect(await capture(["config", "cognition-capture", "personal"], h.io)).toContain(
+    "cognition capture: content",
+  );
+});
+
+test("config cognition-capture references (and --unset) returns to references only", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "cognition-capture", "personal", "content"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["config", "cognition-capture", "personal", "references"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("references only again");
+
+  // Already at the baseline → a no-op, by either spelling.
+  h.out.length = 0;
+  expect(await runCli(["config", "cognition-capture", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("nothing to change");
+});
+
+test("config cognition-capture rejects an unknown mode and persists nothing", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["config", "cognition-capture", "personal", "everything"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Unknown cognition capture mode");
+  const store = openHomeStore(h);
+  try {
+    expect(
+      store.agentSettings.getCognitionCapture(agentNamed(store, "personal").id),
+    ).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("the resolved capture mode is threaded to the cognition wrapper", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  const captured: Array<{ agentId: string; captureContent: boolean }> = [];
+  h.io.makeCognitionAdapter = (adapter, agentId, captureContent) => {
+    captured.push({ agentId, captureContent });
+    return adapter;
+  };
+  await runCli(["init"], h.io);
+  await runCli(["new", "deep", "--trust", "autonomous"], h.io);
+  await runCli(["new", "shallow", "--trust", "autonomous"], h.io);
+  // Both are traced; only `deep` captures content.
+  await runCli(["config", "cognition-provider", "deep", "lodestar"], h.io);
+  await runCli(["config", "cognition-capture", "deep", "content"], h.io);
+  await runCli(["config", "cognition-provider", "shallow", "lodestar"], h.io);
+
+  const store = openHomeStore(h);
+  const deepId = agentNamed(store, "deep").id;
+  const shallowId = agentNamed(store, "shallow").id;
+  store.close();
+
+  await runCli(["run", "deep", "do a thing"], h.io);
+  await runCli(["run", "shallow", "do a thing"], h.io);
+
+  expect(captured).toEqual([
+    { agentId: deepId, captureContent: true },
+    { agentId: shallowId, captureContent: false },
+  ]);
+});
+
 test("a run is wrapped for cognition ONLY for an opted-in agent", async () => {
   const h = harness();
   h.io.makeAdapter = () => ({ adapter: fakeAdapter });

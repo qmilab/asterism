@@ -1,11 +1,13 @@
 import type { SqlDriver, SqlRow } from "../db/driver.js";
 import type {
   AgentSettings,
+  CognitionCaptureMode,
   CognitionProviderId,
   RecallProviderId,
   StandingThresholds,
 } from "../types.js";
 import {
+  COGNITION_CAPTURE_MODES,
   COGNITION_PROVIDER_IDS,
   RECALL_PROVIDER_IDS,
   validateEnum,
@@ -30,6 +32,7 @@ function mapSettings(row: SqlRow): AgentSettings {
   const minDistinctTargets = intOrUnset(row.min_distinct_targets);
   const recallProvider = textOrUnset(row.recall_provider);
   const cognitionProvider = textOrUnset(row.cognition_provider);
+  const cognitionCapture = textOrUnset(row.cognition_capture);
   return {
     agentId: String(row.agent_id),
     ...(recallBudget !== undefined ? { recallBudget } : {}),
@@ -43,6 +46,9 @@ function mapSettings(row: SqlRow): AgentSettings {
       : {}),
     ...(cognitionProvider !== undefined && isCognitionProviderId(cognitionProvider)
       ? { cognitionProvider }
+      : {}),
+    ...(cognitionCapture !== undefined && isCognitionCaptureMode(cognitionCapture)
+      ? { cognitionCapture }
       : {}),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -64,6 +70,11 @@ function isRecallProviderId(value: string): value is RecallProviderId {
 /** Whether `value` is a recognized opt-in cognition provider id. */
 function isCognitionProviderId(value: string): value is CognitionProviderId {
   return (COGNITION_PROVIDER_IDS as readonly string[]).includes(value);
+}
+
+/** Whether `value` is a recognized opt-in cognition capture mode. */
+function isCognitionCaptureMode(value: string): value is CognitionCaptureMode {
+  return (COGNITION_CAPTURE_MODES as readonly string[]).includes(value);
 }
 
 /**
@@ -262,6 +273,59 @@ export class AgentSettingsRepository {
     const row = this.driver
       .prepare(
         `UPDATE agent_settings SET cognition_provider = NULL, updated_at = ?
+           WHERE agent_id = ? RETURNING *`,
+      )
+      .get([now, agentId]);
+    return row ? mapSettings(row) : undefined;
+  }
+
+  /**
+   * An agent's cognition-capture escalation, or undefined when unset (no row, or the
+   * column is NULL) — the host reads this and, when `"content"`, tells the trace wrapper to
+   * record redacted content; unset ⇒ references only. Scoped to `agentId`, so it returns one
+   * agent's own selection.
+   */
+  getCognitionCapture(agentId: string): CognitionCaptureMode | undefined {
+    return this.get(agentId)?.cognitionCapture;
+  }
+
+  /**
+   * Set an agent's cognition-capture mode. Validates the id against the known set at the
+   * write boundary (the kernel never trusts a surface to have checked), then upserts ONLY
+   * the `cognition_capture` column — every other setting is left untouched. `created_at` is
+   * preserved across updates; `updated_at` advances on every change.
+   */
+  setCognitionCapture(agentId: string, mode: CognitionCaptureMode): AgentSettings {
+    requireAgentId(agentId);
+    const value = validateEnum(mode, COGNITION_CAPTURE_MODES, "cognition capture mode");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `INSERT INTO agent_settings (agent_id, cognition_capture, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           cognition_capture = excluded.cognition_capture,
+           updated_at = excluded.updated_at
+         RETURNING *`,
+      )
+      .get([agentId, value, now, now]);
+    if (!row) throw new Error("agent settings upsert did not persist");
+    return mapSettings(row);
+  }
+
+  /**
+   * Clear an agent's cognition-capture escalation (back to references only) by setting only
+   * that column to NULL. Returns the updated row, or undefined when the agent had no
+   * settings row at all (nothing to clear) — symmetric with {@link clearCognitionProvider}.
+   * The row itself is kept even when every override is now NULL, so a later setting
+   * preserves `created_at`.
+   */
+  clearCognitionCapture(agentId: string): AgentSettings | undefined {
+    requireAgentId(agentId);
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE agent_settings SET cognition_capture = NULL, updated_at = ?
            WHERE agent_id = ? RETURNING *`,
       )
       .get([now, agentId]);

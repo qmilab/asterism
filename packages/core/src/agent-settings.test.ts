@@ -422,3 +422,120 @@ test("opening a pre-existing database without agent_settings.recall_provider mig
     store.close();
   }
 });
+
+// --- cognition capture mode (slice 2a opt-in: references → redacted content) ---
+
+test("an unset agent captures references only (no cognition_capture)", () => {
+  expect(store.agentSettings.getCognitionCapture(alpha.id)).toBeUndefined();
+});
+
+test("cognition capture is scoped: one agent's escalation never appears for another", () => {
+  store.setCognitionCapture(alpha.id, "content");
+  expect(store.agentSettings.getCognitionCapture(alpha.id)).toBe("content");
+  expect(store.agentSettings.getCognitionCapture(beta.id)).toBeUndefined();
+});
+
+test("setCognitionCapture validates the mode against the known set at the write boundary", () => {
+  // @ts-expect-error — an unknown capture mode is rejected, not stored.
+  expect(() => store.setCognitionCapture(alpha.id, "everything")).toThrow();
+  expect(store.agentSettings.getCognitionCapture(alpha.id)).toBeUndefined();
+});
+
+test("the cognition capture repository methods require an agentId", () => {
+  expect(() => store.agentSettings.getCognitionCapture("")).toThrow();
+  expect(() => store.agentSettings.setCognitionCapture("", "content")).toThrow();
+  expect(() => store.agentSettings.clearCognitionCapture("")).toThrow();
+});
+
+test("setCognitionCapture records an agent.setting_changed event, references only", () => {
+  store.setCognitionCapture(alpha.id, "content");
+  const event = store.events
+    .tail(alpha.id)
+    .find((e) => e.type === "agent.setting_changed");
+  expect(event!.payload).toEqual({ setting: "cognitionCapture", from: null, to: "content" });
+});
+
+test("setCognitionCapture to the unchanged value is a no-op: no phantom event, no row churn", () => {
+  const first = store.setCognitionCapture(alpha.id, "content");
+  store.setCognitionCapture(alpha.id, "content"); // same value again — records nothing
+  expect(settingEvents(alpha.id, "cognitionCapture")).toBe(1);
+  expect(store.agentSettings.get(alpha.id)?.updatedAt).toBe(first.updatedAt);
+});
+
+test("clearCognitionCapture returns the agent to references-only; logs only a real transition", () => {
+  store.setCognitionCapture(alpha.id, "content");
+  store.clearCognitionCapture(alpha.id);
+  expect(store.agentSettings.getCognitionCapture(alpha.id)).toBeUndefined();
+  const cleared = store.events
+    .tail(alpha.id)
+    .filter((e) => e.type === "agent.setting_changed")
+    .at(-1);
+  expect(cleared!.payload).toEqual({ setting: "cognitionCapture", from: "content", to: null });
+
+  // A clear with nothing set emits nothing.
+  const before = settingEvents(beta.id, "cognitionCapture");
+  store.clearCognitionCapture(beta.id);
+  expect(settingEvents(beta.id, "cognitionCapture")).toBe(before);
+});
+
+test("cognition capture is orthogonal to the provider — neither clobbers the other", () => {
+  store.setCognitionProvider(alpha.id, "lodestar");
+  store.setCognitionCapture(alpha.id, "content");
+  expect(store.agentSettings.getCognitionProvider(alpha.id)).toBe("lodestar");
+  expect(store.agentSettings.getCognitionCapture(alpha.id)).toBe("content");
+  // Clearing the capture leaves the provider (the trace itself) intact.
+  store.clearCognitionCapture(alpha.id);
+  expect(store.agentSettings.getCognitionProvider(alpha.id)).toBe("lodestar");
+  expect(store.agentSettings.getCognitionCapture(alpha.id)).toBeUndefined();
+});
+
+test("a corrupt cognition_capture value reads back as unset, never an unknown mode", () => {
+  // Hold the driver so we can mangle the row out-of-band — only the validated setter can
+  // write a real mode, so this simulates a corrupted row.
+  const driver = openDatabase(":memory:");
+  const local = new AsterismStore(driver);
+  try {
+    const agent = local.createAgent({
+      name: "personal",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/personal",
+      trustLevel: "autonomous",
+    });
+    local.setRecallBudget(agent.id, 10); // ensure a settings row exists
+    driver.exec(`UPDATE agent_settings SET cognition_capture = 'mystery' WHERE agent_id = '${agent.id}'`);
+    expect(local.agentSettings.getCognitionCapture(agent.id)).toBeUndefined();
+  } finally {
+    local.close();
+  }
+});
+
+test("opening a pre-existing database without agent_settings.cognition_capture migrates it in", () => {
+  const driver = openDatabase(":memory:");
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE agent_settings (
+      agent_id TEXT PRIMARY KEY, recall_budget INTEGER,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+  `);
+  const local = new AsterismStore(driver);
+  try {
+    const agent = local.createAgent({
+      name: "personal",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/personal",
+      trustLevel: "autonomous",
+    });
+    // The setter writes cognition_capture; it would throw "no such column" un-migrated.
+    expect(local.setCognitionCapture(agent.id, "content").cognitionCapture).toBe("content");
+    expect(local.agentSettings.getCognitionCapture(agent.id)).toBe("content");
+  } finally {
+    local.close();
+  }
+});
