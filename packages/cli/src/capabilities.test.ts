@@ -14,7 +14,7 @@
 //   - subject references are controlled + normalized (file:<workspace-relative-path>).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -99,5 +99,342 @@ describe("file tools emit structured observations", () => {
   test("the subject reference is workspace-relative and normalized", async () => {
     const result = await run("write_file", { path: "a/b/c.txt", content: "x" });
     expect(result.observation!.facts[0]!.subject).toBe("file:a/b/c.txt");
+  });
+});
+
+// The read-only richer tools (slice T2): list_dir / stat / find. All are `effect: "read"`
+// (they always run, withheld at no trust level), confined to the workspace, and emit
+// structured facts — a COUNT fact first (authoritative total) plus per-entry existence
+// facts. The discipline under test:
+//
+//   - list_dir → entry_count + one file:/dir: exists fact per entry; deterministic order.
+//   - stat     → exists (+ size_bytes for a file); a missing path fails with NO observation.
+//   - find     → recursive name match → match_count + per-match exists facts; never follows
+//                a symlink (so it cannot loop or escape) and stays inside the workspace.
+//   - all three permit reading the workspace ROOT, but refuse a climb-OUT.
+describe("read-only tools emit structured observations", () => {
+  let workspace: string;
+
+  beforeEach(() => {
+    workspace = mkdtempSync(join(tmpdir(), "asterism-read-caps-"));
+  });
+  afterEach(() => {
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  function tool(name: string): ScopedTool {
+    const cap = workspaceCapabilities(workspace).find((c) => c.tool.name === name);
+    if (!cap) throw new Error(`no such tool in catalog: ${name}`);
+    return cap.tool;
+  }
+  function run(name: string, args: unknown): Promise<ToolResult> | ToolResult {
+    return tool(name).execute({ args });
+  }
+
+  test("the read tools are all effect:read (they run at every trust level)", () => {
+    const caps = workspaceCapabilities(workspace);
+    for (const key of ["fs.list", "fs.stat", "fs.find"]) {
+      expect(caps.find((c) => c.key === key)?.effect).toBe("read");
+    }
+  });
+
+  // ---- list_dir ----
+
+  test("list_dir reports an entry count and one exists fact per entry, sorted", async () => {
+    await run("write_file", { path: "b.md", content: "x" });
+    await run("write_file", { path: "a.txt", content: "x" });
+    await run("write_file", { path: "sub/inner.txt", content: "x" }); // creates dir sub/
+
+    const result = await run("list_dir", { path: "." });
+    expect(result.isError).toBeUndefined();
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.list@1",
+      facts: [
+        { subject: "dir:.", relation: "entry_count", object: 3 },
+        { subject: "file:a.txt", relation: "exists", object: true },
+        { subject: "file:b.md", relation: "exists", object: true },
+        { subject: "dir:sub", relation: "exists", object: true },
+      ],
+    });
+    expect(result.output).toContain("contains 3 entries");
+    expect(result.output).toContain("sub/"); // a directory is rendered with a trailing slash
+  });
+
+  test("list_dir defaults to the workspace root and uses a dir:. subject", async () => {
+    await run("write_file", { path: "only.txt", content: "x" });
+    const result = await run("list_dir", {}); // no path → workspace root
+    expect(result.observation!.facts[0]).toEqual({
+      subject: "dir:.",
+      relation: "entry_count",
+      object: 1,
+    });
+    expect(result.observation!.facts[1]!.subject).toBe("file:only.txt");
+  });
+
+  test("list_dir on an empty folder reports a zero count and no entry facts", async () => {
+    mkdirSync(join(workspace, "empty"));
+    const result = await run("list_dir", { path: "empty" });
+    expect(result.observation!.facts).toEqual([
+      { subject: "dir:empty", relation: "entry_count", object: 0 },
+    ]);
+    expect(result.output).toContain("is empty");
+  });
+
+  test("list_dir bounds the per-entry facts but the count fact stays the true total", async () => {
+    for (let i = 0; i < 70; i++) {
+      await run("write_file", { path: `f${String(i).padStart(2, "0")}.txt`, content: "x" });
+    }
+    const result = await run("list_dir", { path: "." });
+    const facts = result.observation!.facts;
+    // Count fact (1) + at most 63 entry facts = the recorder's 64-fact cap, never more…
+    expect(facts.length).toBe(64);
+    // …yet the count fact reports the real total, so bounding never hides the true size.
+    expect(facts[0]).toEqual({ subject: "dir:.", relation: "entry_count", object: 70 });
+  });
+
+  test("list_dir refuses a path that climbs out of the workspace", async () => {
+    const result = await run("list_dir", { path: "../.." });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("must be a path inside this agent's workspace");
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("list_dir on a missing folder fails with no observation", async () => {
+    const result = await run("list_dir", { path: "nope" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  // ---- stat ----
+
+  test("stat reports a file's existence and size", async () => {
+    await run("write_file", { path: "doc.txt", content: "twelve bytes" }); // 12 UTF-8 bytes
+    const result = await run("stat", { path: "doc.txt" });
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.stat@1",
+      facts: [
+        { subject: "file:doc.txt", relation: "exists", object: true },
+        { subject: "file:doc.txt", relation: "size_bytes", object: 12 },
+      ],
+    });
+    expect(result.output).toContain("12 bytes");
+  });
+
+  test("stat reports a folder's existence with no size fact", async () => {
+    await run("write_file", { path: "d/inner.txt", content: "x" });
+    const result = await run("stat", { path: "d" });
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.stat@1",
+      facts: [{ subject: "dir:d", relation: "exists", object: true }],
+    });
+    expect(result.output).toContain("is a folder");
+  });
+
+  test("stat on a missing path fails with no observation — nothing to record", async () => {
+    const result = await run("stat", { path: "ghost.txt" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("stat refuses a path that climbs out of the workspace", async () => {
+    const result = await run("stat", { path: "../secret" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  // ---- find ----
+
+  test("find matches names recursively and reports a match count plus per-match facts", async () => {
+    await run("write_file", { path: "notes.md", content: "x" });
+    await run("write_file", { path: "docs/readme.md", content: "x" });
+    await run("write_file", { path: "src/auth.ts", content: "x" });
+    await run("write_file", { path: "src/util.ts", content: "x" });
+
+    const result = await run("find", { pattern: "*.md" });
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.find@1",
+      facts: [
+        { subject: "dir:.", relation: "match_count", object: 2 },
+        { subject: "file:docs/readme.md", relation: "exists", object: true },
+        { subject: "file:notes.md", relation: "exists", object: true },
+      ],
+    });
+    expect(result.output).toContain("docs/readme.md");
+    expect(result.output).toContain("notes.md");
+    expect(result.output).not.toContain("auth.ts");
+  });
+
+  test("find can be scoped to a subfolder and matches an exact name", async () => {
+    await run("write_file", { path: "src/auth.ts", content: "x" });
+    await run("write_file", { path: "other/auth.ts", content: "x" });
+    const result = await run("find", { pattern: "auth.ts", path: "src" });
+    expect(result.observation!.facts).toEqual([
+      { subject: "dir:src", relation: "match_count", object: 1 },
+      { subject: "file:src/auth.ts", relation: "exists", object: true },
+    ]);
+    expect(result.output).not.toContain("other/auth.ts"); // the search was scoped to src/
+  });
+
+  test("find reports a zero count when nothing matches", async () => {
+    await run("write_file", { path: "a.txt", content: "x" });
+    const result = await run("find", { pattern: "*.xyz" });
+    expect(result.observation!.facts).toEqual([
+      { subject: "dir:.", relation: "match_count", object: 0 },
+    ]);
+    expect(result.output).toContain("No entries");
+  });
+
+  test("find never follows a symlink — so it cannot loop or escape the workspace", async () => {
+    await run("write_file", { path: "real/inside.txt", content: "x" });
+    // A self-referential symlink: descending into it would loop forever. find must treat it
+    // as a leaf file: node (lstat semantics), never recurse, and terminate.
+    symlinkSync(workspace, join(workspace, "loop"));
+    const result = await run("find", { pattern: "*" });
+    expect(result.isError).toBeUndefined();
+    const bySubject = new Map(result.observation!.facts.map((f) => [f.subject, f]));
+    // The symlink is recorded as a file: leaf, never a dir: descended into.
+    expect(bySubject.get("file:loop")).toBeDefined();
+    expect(bySubject.has("dir:loop")).toBe(false);
+    // And the real subtree below it is still found exactly once (no loop multiplied it).
+    expect(bySubject.get("file:real/inside.txt")).toBeDefined();
+  });
+
+  test("find refuses a search root that climbs out of the workspace", async () => {
+    const result = await run("find", { pattern: "*", path: ".." });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("find fails loudly when the search root is missing — not a silent empty result", async () => {
+    await run("write_file", { path: "real.txt", content: "x" });
+    const result = await run("find", { pattern: "*", path: "no-such-dir" });
+    // A typoed root must fail (like list_dir/stat), never look like a valid empty search.
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Could not search");
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("find fails when the search root is a file, not a folder", async () => {
+    await run("write_file", { path: "a.txt", content: "x" });
+    const result = await run("find", { pattern: "*", path: "a.txt" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("find omits the count fact when the walk is truncated — no authoritative partial count", async () => {
+    for (const name of ["m1.md", "m2.md", "m3.md", "m4.md", "m5.md"]) {
+      await run("write_file", { path: name, content: "x" });
+    }
+    // A node cap below the entry count forces truncation mid-walk. `found.length` is then only
+    // a partial total, so the structured observation must NOT record it as match_count.
+    const cappedFind = workspaceCapabilities(workspace, { maxFindNodes: 3 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await cappedFind.execute({ args: { pattern: "*.md" } });
+    expect(result.isError).toBeUndefined();
+    // No match_count at all — a partial count would persist a false total / false absence…
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    // …but the matches actually seen are still recorded, as true `exists` facts.
+    expect(result.observation!.facts.length).toBeGreaterThan(0);
+    expect(result.observation!.facts.every((f) => f.relation === "exists")).toBe(true);
+    expect(result.output).toContain("may be incomplete");
+  });
+
+  test("find omits the count fact when the depth limit leaves a subtree unexplored", async () => {
+    await run("write_file", { path: "top.md", content: "x" });
+    await run("write_file", { path: "deep/inner.md", content: "x" }); // a match below the root
+    // maxFindDepth 0 ⇒ the root's `deep/` subtree is never descended, so a real match below it
+    // is unexamined: the walk must report incomplete and NOT assert an authoritative count.
+    const shallowFind = workspaceCapabilities(workspace, { maxFindDepth: 0 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await shallowFind.execute({ args: { pattern: "*.md" } });
+    expect(result.isError).toBeUndefined();
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    // top.md, seen at the root, is still a true exists fact.
+    expect(
+      result.observation!.facts.some(
+        (f) => f.subject === "file:top.md" && f.relation === "exists",
+      ),
+    ).toBe(true);
+    expect(result.output).toContain("incomplete");
+  });
+
+  // ---- symlinked-root escape (read tools must not follow a symlink out of the workspace) ----
+
+  test("list_dir refuses a symlinked root that resolves outside the workspace", () => {
+    // A symlink INSIDE the workspace pointing at an external directory. The lexical confinement
+    // check accepts it (the path text stays inside), but readdirSync would follow it and leak an
+    // outside tree — so the realpath guard must refuse it.
+    const outside = mkdtempSync(join(tmpdir(), "asterism-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "x");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = run("list_dir", { path: "escape" }) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("resolves outside this agent's workspace");
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("find refuses a symlinked root that resolves outside the workspace", () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "x");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = run("find", { pattern: "*", path: "escape" }) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("stat refuses a path through a symlinked directory that points outside the workspace", () => {
+    // lstat does not follow a FINAL-component symlink, but it DOES follow an intermediate one:
+    // `escape/secret.txt` (escape -> /outside) would otherwise leak the outside file's size.
+    const outside = mkdtempSync(join(tmpdir(), "asterism-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "twelve bytes");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = run("stat", { path: "escape/secret.txt" }) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("resolves outside this agent's workspace");
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("find honors the scan budget before descending into a directory", async () => {
+    await run("write_file", { path: "a.md", content: "x" });
+    await run("write_file", { path: "bigdir/inside.md", content: "x" });
+    // Budget = 2: the root's two entries (a.md, then bigdir) exactly spend it, so bigdir must
+    // not be descended — its contents must not surface, and the walk reports incomplete.
+    const cappedFind = workspaceCapabilities(workspace, { maxFindNodes: 2 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await cappedFind.execute({ args: { pattern: "*.md" } });
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    // inside.md lives under the un-descended bigdir, so it must not appear as a fact.
+    expect(result.observation!.facts.some((f) => f.subject === "file:bigdir/inside.md")).toBe(false);
+    expect(result.output).toContain("may be incomplete");
+  });
+
+  test("find scans at most the budget from a single large directory (bounded read)", async () => {
+    // Eight sibling files, budget 3: the bounded read stops after 3, so only 3 are ever scanned
+    // — the directory is never fully materialized before the cap applies. The walk is truncated.
+    for (let i = 0; i < 8; i++) {
+      await run("write_file", { path: `f${i}.txt`, content: "x" });
+    }
+    const cappedFind = workspaceCapabilities(workspace, { maxFindNodes: 3 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await cappedFind.execute({ args: { pattern: "*.txt" } });
+    expect(result.observation!.facts.filter((f) => f.relation === "exists")).toHaveLength(3);
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    expect(result.output).toContain("may be incomplete");
   });
 });
