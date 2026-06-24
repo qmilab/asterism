@@ -27,10 +27,31 @@
 // is also host-owned and agent-unreachable (see adapter-lodestar); this layer is the
 // content half of that defense in depth.
 
+import type { ObservedFact, ToolObservation } from "./adapter.js";
 import { MEMORY_FIREWALL_RULES } from "./firewall.js";
 
 /** Default cap on the bytes of tool content captured into the trace (per call). */
 export const DEFAULT_TRACE_CONTENT_MAX_BYTES = 4096;
+
+/**
+ * Default cap on the number of structured facts recorded from a single observation. Each fact
+ * field is already bounded by {@link DEFAULT_TRACE_CONTENT_MAX_BYTES}, but without a count cap a
+ * tool could flood the trace by SPLITTING data across many facts (the per-field cap alone leaves
+ * the `@3` payload unbounded). The two caps together bound the whole observation. Generous for
+ * the shipped tools (which emit 1–2 facts); raise it per-call via `redactObservation`'s `maxFacts`.
+ */
+export const DEFAULT_MAX_OBSERVATION_FACTS = 64;
+
+/**
+ * Bounds for the recursive walk of a fact's `object`. A custom tool's `object` is untrusted and
+ * could be cyclic, deeply nested, or huge — without bounds the walk could overflow the stack or
+ * run unbounded, and a throw there (swallowed by the trace recorder) would DROP the whole call.
+ * `DEPTH` caps nesting (stack safety); `NODES` is a budget on values visited ACROSS the whole
+ * observation (so total time + persisted size stay bounded even across many facts). Past a bound
+ * the offending substructure becomes a marker; legitimate small fact objects are untouched.
+ */
+const MAX_FACT_OBJECT_DEPTH = 16;
+const MAX_FACT_OBJECT_NODES = 256;
 
 /**
  * A single named secret-value pattern. Mirrors `FirewallRule`, minus the category. An
@@ -66,6 +87,12 @@ export interface RedactionSummary {
   readonly injectionRedacted: number;
   /** How many exfiltration-phrasing spans were scrubbed (firewall exfiltration rules). */
   readonly exfiltrationRedacted: number;
+  /**
+   * How many structured facts were DROPPED because the observation exceeded the per-call fact
+   * cap ({@link redactObservation}). Present only on an observation's summary — content
+   * redaction never drops facts, so {@link redactForTrace} omits it.
+   */
+  readonly factsDropped?: number;
 }
 
 /** The redacted content plus the counts-only account of what was removed. */
@@ -83,6 +110,10 @@ export interface RedactionResult {
 const SECRET_MARK = "[redacted:value]";
 const INJECTION_MARK = "[redacted:injection]";
 const EXFILTRATION_MARK = "[redacted:exfiltration]";
+// Structural markers for the bounded fact-object walk (redactObservation) — a part of an
+// untrusted `object` that exceeds the depth/node bounds, or a back-edge to an ancestor.
+const OVERSIZED_MARK = "[redacted:oversized]";
+const CYCLE_MARK = "[redacted:cycle]";
 
 // ---------------------------------------------------------------------------
 // Secret-VALUE rules — aimed at the raw tokens tool output commonly carries.
@@ -287,6 +318,141 @@ export function redactForTrace(
       secretsRedacted,
       injectionRedacted,
       exfiltrationRedacted,
+    },
+  };
+}
+
+/** A redacted {@link ToolObservation} plus the counts-only account of what its facts triggered. */
+export interface ObservationRedactionResult {
+  readonly observation: ToolObservation;
+  /** The per-field {@link RedactionSummary}s aggregated across every scrubbed fact field. */
+  readonly summary: RedactionSummary;
+}
+
+/**
+ * Redact a structured tool observation for the trace — the SAME boundary applied to
+ * captured content, mapped over a fact's secret-bearing fields so a path or value that
+ * trips a secret rule is scrubbed in the fact too. Which fields are screened, and why:
+ *
+ *   - `subject` — always a string (a `file:`/`dir:`/`repo:` reference). Screened: a
+ *     token-shaped path segment is exactly the kind of value the rules catch.
+ *   - `object` — typed `unknown`, so EVERY STRING is scrubbed wherever it appears: a
+ *     top-level string, an array element, a nested object value, AND a nested object key. The
+ *     boundary must hold for ANY emitter, not just the shipped tools — a custom tool could
+ *     nest a secret-shaped string as a value or as a map key, so the scrub recurses rather
+ *     than checking only the top level. Numbers/booleans/null pass through (they cannot carry
+ *     a secret token); a structural key matches no rule and is returned unchanged.
+ *   - `relation` and `schema` — meant to be a tool-declared CLOSED vocabulary, but for a
+ *     THIRD-PARTY tool that is only a contract expectation, not enforced (and a central
+ *     registry can't know an emitter's schemas). They are persisted + rendered even in
+ *     references mode, so they pass the same scrubber: a real verb/schema (`exists`,
+ *     `asterism.fs.write@1`) matches no rule and is returned unchanged; a secret-shaped one
+ *     (a tool that derived it from a URL/header) is redacted rather than trusted.
+ *
+ * Facts beyond `maxFacts` ({@link DEFAULT_MAX_OBSERVATION_FACTS}) are DROPPED and counted in
+ * `summary.factsDropped`: with each field already byte-capped, the count cap is what keeps the
+ * whole `@3` payload bounded against a tool that splits data across many facts.
+ *
+ * Returns the redacted observation and a counts-only {@link RedactionSummary} aggregated
+ * across every scrubbed field — never the removed spans. Pure, like {@link redactForTrace}:
+ * no I/O, no secret reader, deterministic.
+ */
+export function redactObservation(
+  observation: ToolObservation,
+  opts: { maxBytes?: number; maxFacts?: number } = {},
+): ObservationRedactionResult {
+  const maxFacts = opts.maxFacts ?? DEFAULT_MAX_OBSERVATION_FACTS;
+  let truncated = false;
+  let originalBytes = 0;
+  let controlsStripped = 0;
+  let secretsRedacted = 0;
+  let injectionRedacted = 0;
+  let exfiltrationRedacted = 0;
+
+  // Scrub one string field through the content boundary, folding its counts into the
+  // running aggregate so the summary covers the whole observation.
+  const scrub = (value: string): string => {
+    const r = redactForTrace(value, opts);
+    truncated = truncated || r.summary.truncated;
+    originalBytes += r.summary.originalBytes;
+    controlsStripped += r.summary.controlsStripped;
+    secretsRedacted += r.summary.secretsRedacted;
+    injectionRedacted += r.summary.injectionRedacted;
+    exfiltrationRedacted += r.summary.exfiltrationRedacted;
+    return r.content;
+  };
+
+  // Recursively scrub every string in a fact's `object`, wherever it sits — a top-level
+  // string, an array element, a nested object VALUE, or a nested object KEY. The boundary
+  // cannot assume the shipped tools' shapes: a custom tool could nest a secret-shaped string
+  // as a value OR as a key (a map keyed by a URL with credentials), and an @3 fact is
+  // persisted + rendered even in references mode, so an unscrubbed key would leak. Keys are
+  // scrubbed too — a structural key (`origin`, `ahead`) matches no rule and is returned
+  // unchanged; only a secret-shaped one is replaced. Numbers/booleans/null pass through.
+  //
+  // The walk is BOUNDED and total (never throws): depth, a shared node budget, and cycle
+  // detection cap an untrusted, possibly cyclic/huge/deep object, and the result is always
+  // JSON-safe (a bigint is stringified) so persisting it can never throw and drop the call.
+  const seen = new WeakSet<object>();
+  let nodeBudget = MAX_FACT_OBJECT_NODES;
+  const redactValue = (value: unknown, depth: number): unknown => {
+    if (typeof value === "string") return scrub(value);
+    // A bigint would throw on JSON serialization — stringify (and scrub) it so the trace write
+    // is always safe. Other primitives (number/boolean) and null/undefined serialize fine.
+    if (typeof value === "bigint") return scrub(value.toString());
+    if (value === null || typeof value !== "object") return value;
+    if (depth >= MAX_FACT_OBJECT_DEPTH) return OVERSIZED_MARK;
+    if (seen.has(value)) return CYCLE_MARK; // a back-edge to an ancestor (also unserializable)
+    seen.add(value);
+    let result: unknown;
+    if (Array.isArray(value)) {
+      const out: unknown[] = [];
+      for (const item of value) {
+        if (nodeBudget <= 0) {
+          out.push(OVERSIZED_MARK);
+          break;
+        }
+        nodeBudget--;
+        out.push(redactValue(item, depth + 1));
+      }
+      result = out;
+    } else {
+      const out: Record<string, unknown> = {};
+      for (const key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (nodeBudget <= 0) {
+          out["[truncated]"] = OVERSIZED_MARK;
+          break;
+        }
+        nodeBudget--;
+        out[scrub(key)] = redactValue((value as Record<string, unknown>)[key], depth + 1);
+      }
+      result = out;
+    }
+    seen.delete(value); // only the current ancestry path is "seen" — a DAG is not a cycle
+    return result;
+  };
+
+  // Cap the fact COUNT before scrubbing — excess facts are dropped, not just unrendered, so a
+  // flood never lands on disk. Each surviving field is still byte-capped by `scrub`.
+  const kept = observation.facts.slice(0, Math.max(0, maxFacts));
+  const factsDropped = observation.facts.length - kept.length;
+  const facts: ObservedFact[] = kept.map((fact) => ({
+    subject: scrub(fact.subject),
+    relation: scrub(fact.relation),
+    object: redactValue(fact.object, 0),
+  }));
+
+  return {
+    observation: { schema: scrub(observation.schema), facts },
+    summary: {
+      truncated,
+      originalBytes,
+      controlsStripped,
+      secretsRedacted,
+      injectionRedacted,
+      exfiltrationRedacted,
+      factsDropped,
     },
   };
 }

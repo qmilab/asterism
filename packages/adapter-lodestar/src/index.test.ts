@@ -22,6 +22,7 @@ import type {
   RunRequest,
   RuntimeAdapter,
   ScopedTool,
+  ToolObservation,
 } from "@qmilab/asterism-core";
 import { renderTrace, wrapWithLodestar } from "./index.js";
 
@@ -76,6 +77,111 @@ function mixedOutputTool(): ScopedTool {
     description: "returns mixed content",
     inputSchema: {},
     execute: () => ({ output: `${BENIGN}\nleaked key: ${SECRET}\ndone` }),
+  };
+}
+
+/** A scoped tool that emits a clean structured observation (benign facts) alongside its output. */
+function factEmittingTool(): ScopedTool {
+  return {
+    name: "writer",
+    description: "writes and reports structured facts",
+    inputSchema: {},
+    execute: () => ({
+      output: "Wrote 42 bytes to 'notes/todo.md'.",
+      observation: {
+        schema: "asterism.fs.write@1",
+        facts: [
+          { subject: "file:notes/todo.md", relation: "size_bytes", object: 42 },
+          { subject: "file:notes/todo.md", relation: "exists", object: true },
+        ],
+      },
+    }),
+  };
+}
+
+/** A tool whose observation SUBJECT carries a secret-shaped path — to prove facts are redacted. */
+function secretFactTool(): ScopedTool {
+  return {
+    name: "leaky",
+    description: "emits a fact whose subject looks like a secret",
+    inputSchema: {},
+    execute: () => ({
+      output: "ok",
+      observation: {
+        schema: "asterism.fs.read@1",
+        facts: [{ subject: `file:config/${SECRET}`, relation: "size_bytes", object: 7 }],
+      },
+    }),
+  };
+}
+
+/** A tool whose fact subject embeds a newline + a fake audit line — to prove render can't be spoofed. */
+function lineInjectingTool(): ScopedTool {
+  return {
+    name: "sneaky",
+    description: "emits a fact whose subject contains a newline",
+    inputSchema: {},
+    execute: () => ({
+      output: "ok",
+      observation: {
+        schema: "asterism.fs.read@1",
+        // A POSIX path can legitimately contain a newline; redactForTrace keeps newlines, so
+        // without single-line escaping at render this would forge an extra audit line.
+        facts: [{ subject: "file:a\nRecorded tool calls (99):", relation: "size_bytes", object: 1 }],
+      },
+    }),
+  };
+}
+
+/** A tool that returns a MALFORMED observation (no facts array) — as an untyped JS tool might. */
+function malformedObservationTool(): ScopedTool {
+  return {
+    name: "malformed",
+    description: "returns an observation with no facts array",
+    inputSchema: {},
+    execute: () => ({
+      output: "still useful",
+      // Despite the TS contract, a third-party/JS tool can hand back this shape at runtime.
+      observation: { schema: "asterism.bad@1" } as unknown as ToolObservation,
+    }),
+  };
+}
+
+/** A tool that emits `n` facts in one call — to prove the per-observation fact cap holds. */
+function manyFactsTool(n: number): ScopedTool {
+  return {
+    name: "lister",
+    description: "emits many facts",
+    inputSchema: {},
+    execute: () => ({
+      output: "listed",
+      observation: {
+        schema: "asterism.fs.list@1",
+        facts: Array.from({ length: n }, (_, i) => ({
+          subject: `file:f${i}.txt`,
+          relation: "exists",
+          object: true,
+        })),
+      },
+    }),
+  };
+}
+
+/** A tool whose fact object is CYCLIC — to prove the recorder bounds it instead of crashing/dropping. */
+function cyclicFactTool(): ScopedTool {
+  const cyclic: Record<string, unknown> = { name: "loop" };
+  cyclic.self = cyclic;
+  return {
+    name: "cyclic",
+    description: "emits a fact with a cyclic object",
+    inputSchema: {},
+    execute: () => ({
+      output: "ok",
+      observation: {
+        schema: "asterism.x@1",
+        facts: [{ subject: "file:a", relation: "shape", object: cyclic }],
+      },
+    }),
   };
 }
 
@@ -334,5 +440,140 @@ test("renderTrace surfaces a corrupt log as an error, not as 'no trace'", async 
     await mkdir(projectDir, { recursive: true });
     await writeFile(join(projectDir, "2026-06-23.ndjson"), "{not valid json\n");
     await expect(renderTrace(traceRootIn(dir), "agent-a")).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Structured facts (slice T1) — a tool's `observation` is recorded under @3,
+// redacted at the same boundary as content, partitioned per agent like the rest.
+// ---------------------------------------------------------------------------
+
+test("a tool's structured facts are recorded under @3 and rendered in the report", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", factEmittingTool());
+
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk).toContain("asterism.tool_result@3"); // the trace-record superset schema
+    expect(onDisk).toContain("asterism.fs.write@1"); // the observation's own fact schema
+
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("facts (asterism.fs.write@1):");
+    expect(report).toContain("file:notes/todo.md size_bytes = 42");
+    expect(report).toContain("file:notes/todo.md exists = true");
+  });
+});
+
+test("facts ride the redaction boundary — a secret-shaped fact subject never reaches the log", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", secretFactTool());
+
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(onDisk).not.toContain(SECRET); // the secret-shaped path is scrubbed IN the fact
+    expect(onDisk).toContain("[redacted:value]");
+
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).not.toContain(SECRET);
+    expect(report).toContain("fact redactions: secrets="); // the fact-redaction summary shows
+  });
+});
+
+test("facts are recorded in REFERENCES mode too (no content), proving they are reference-grade", async () => {
+  await withWorkspace(async (dir) => {
+    // A references-only run (the default) with a fact-emitting tool: the facts ARE recorded,
+    // but the human-readable output content is NOT — facts are references, not content.
+    await runTraced(dir, "agent-a", factEmittingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("file:notes/todo.md size_bytes = 42"); // facts present...
+    expect(report).not.toContain("Wrote 42 bytes"); // ...but the output content is absent
+  });
+});
+
+test("content mode with facts records BOTH the redacted content and the facts (@3 superset)", async () => {
+  await withWorkspace(async (dir) => {
+    await runTracedContent(dir, "agent-a", factEmittingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("Wrote 42 bytes"); // the benign content is captured...
+    expect(report).toContain("file:notes/todo.md size_bytes = 42"); // ...alongside the facts
+  });
+});
+
+test("cross-agent isolation holds for facts: A's recorded facts never surface under B", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", factEmittingTool());
+    // The facts ride the same agent-id partition as the rest of the trace.
+    expect(await renderTrace(traceRootIn(dir), "agent-b")).toBeUndefined();
+  });
+});
+
+test("the call count reports CALLS, not rendered lines, even when facts add extra lines", async () => {
+  await withWorkspace(async (dir) => {
+    // factEmittingTool emits TWO facts in ONE call. The header counts CALLS, so it must read
+    // "(1)" — not "(3)" for the call line plus its two fact lines.
+    await runTraced(dir, "agent-a", factEmittingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("Recorded tool calls (1):");
+  });
+});
+
+test("a newline in a fact field cannot forge extra audit lines — it is single-line escaped", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", lineInjectingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    // The real call count is 1; the forged "(99)" line must NOT appear as its own audit line.
+    expect(report).toContain("Recorded tool calls (1):");
+    expect(report).not.toMatch(/\n\s*Recorded tool calls \(99\):/);
+    // The newline is rendered as a visible escape, keeping the fact on one line.
+    expect(report).toContain("file:a\\nRecorded tool calls (99):");
+  });
+});
+
+test("a malformed observation degrades to references — the call is recorded, never dropped", async () => {
+  await withWorkspace(async (dir) => {
+    // The observation has no valid `facts` array. Reading `.facts.length` would throw, and the
+    // wrapper's `.catch` would swallow it — dropping the WHOLE call from the trace. The guard
+    // must instead fall back to the @1 references record so the call still appears in the audit.
+    await runTraced(dir, "agent-a", malformedObservationTool());
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk).toContain("asterism.tool_result@1"); // references recorded...
+    expect(onDisk).not.toContain("asterism.tool_result@3"); // ...not the @3 facts record
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("malformed  [ok]"); // the call is present in the audit
+  });
+});
+
+test("a flood of facts is capped on disk and the drop is surfaced in the audit", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", manyFactsTool(70)); // 70 > the default cap of 64
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("fact redactions: facts dropped=6"); // 70 - 64
+    // Only the capped facts were stored, so only that many render.
+    const factLines = (report ?? "").split("\n").filter((l) => l.includes("exists = true"));
+    expect(factLines).toHaveLength(64);
+  });
+});
+
+test("a cyclic fact object never crashes the recorder or drops the call — it is bounded and recorded", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", cyclicFactTool());
+    const onDisk = await readTreeText(traceRootIn(dir));
+    // The call IS recorded with its facts (not lost to a swallowed stack overflow), cycle marked.
+    expect(onDisk).toContain("asterism.tool_result@3");
+    expect(onDisk).toContain("[redacted:cycle]");
+    // And the trace reads back without throwing.
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("cyclic  [ok]");
+  });
+});
+
+test("a no-facts call in references mode is unchanged — still @1, no observation field", async () => {
+  await withWorkspace(async (dir) => {
+    // The byte-for-byte property: a tool that emits no observation records the slice-1
+    // record exactly — @1, and nothing fact-shaped on disk.
+    await runTraced(dir, "agent-a", secretEchoTool());
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk).toContain("asterism.tool_result@1");
+    expect(onDisk).not.toContain("asterism.tool_result@3");
+    expect(onDisk).not.toContain("fact_redaction");
   });
 });

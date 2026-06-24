@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_MAX_OBSERVATION_FACTS,
   DEFAULT_TRACE_CONTENT_MAX_BYTES,
   SECRET_VALUE_RULES,
   redactForTrace,
+  redactObservation,
 } from "./redaction";
 
 // One representative (fake) secret per named rule. The coverage test below asserts
@@ -255,5 +257,221 @@ describe("redactForTrace — control characters", () => {
     expect(content).not.toContain("EFGH1234ijklMNOP5678"); // secret rejoined, then redacted
     expect(content).toContain("[redacted:value]");
     expect(summary.controlsStripped).toBe(3); // U+200B, U+202E, U+202C
+  });
+});
+
+describe("redactObservation — structured facts pass the same boundary", () => {
+  test("ordinary facts (paths, sizes, flags) pass through untouched with a zeroed summary", () => {
+    const { observation, summary } = redactObservation({
+      schema: "asterism.fs.write@1",
+      facts: [
+        { subject: "file:notes/todo.md", relation: "size_bytes", object: 412 },
+        { subject: "file:notes/todo.md", relation: "exists", object: true },
+      ],
+    });
+    expect(observation.schema).toBe("asterism.fs.write@1");
+    expect(observation.facts).toEqual([
+      { subject: "file:notes/todo.md", relation: "size_bytes", object: 412 },
+      { subject: "file:notes/todo.md", relation: "exists", object: true },
+    ]);
+    expect(summary.secretsRedacted).toBe(0);
+    expect(summary.injectionRedacted).toBe(0);
+    expect(summary.exfiltrationRedacted).toBe(0);
+    expect(summary.truncated).toBe(false);
+  });
+
+  test("a secret-shaped path SUBJECT is scrubbed in the fact and counted", () => {
+    const { observation, summary } = redactObservation({
+      schema: "asterism.fs.read@1",
+      facts: [
+        // A path segment shaped like an sk- key trips the value rules.
+        { subject: "file:config/sk-abcdEFGH1234ijklMNOP5678", relation: "size_bytes", object: 12 },
+      ],
+    });
+    const fact = observation.facts[0]!;
+    expect(fact.subject).not.toContain("sk-abcdEFGH1234ijklMNOP5678");
+    expect(fact.subject).toContain("[redacted:value]");
+    expect(fact.object).toBe(12); // the numeric object is untouched
+    expect(summary.secretsRedacted).toBe(1);
+  });
+
+  test("a string OBJECT that trips a rule is scrubbed; numeric/boolean objects are left as-is", () => {
+    const { observation, summary } = redactObservation({
+      schema: "asterism.example@1",
+      facts: [
+        { subject: "repo:.", relation: "remote_url", object: "https://user:p4ssw0rd@host/repo.git" },
+        { subject: "repo:.", relation: "ahead", object: 2 },
+        { subject: "repo:.", relation: "detached", object: false },
+      ],
+    });
+    expect(observation.facts[0]!.object).not.toContain("p4ssw0rd");
+    expect(observation.facts[0]!.object).toContain("[redacted:value]");
+    expect(observation.facts[1]!.object).toBe(2);
+    expect(observation.facts[2]!.object).toBe(false);
+    expect(summary.secretsRedacted).toBe(1);
+  });
+
+  test("a real relation and schema pass the scrubber unchanged (they match no rule)", () => {
+    const { observation, summary } = redactObservation({
+      schema: "asterism.fs.delete@1",
+      facts: [{ subject: "dir:dist", relation: "exists", object: false }],
+    });
+    expect(observation.schema).toBe("asterism.fs.delete@1");
+    expect(observation.facts[0]!.relation).toBe("exists");
+    expect(summary.secretsRedacted).toBe(0);
+  });
+
+  test("a secret-shaped schema or relation IS scrubbed — the closed vocab is not enforced for custom tools", () => {
+    const { observation, summary } = redactObservation({
+      // A misbehaving custom tool that derived its schema/relation from secret-bearing strings.
+      schema: "tool://ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      facts: [{ subject: "file:x", relation: "sk-abcdEFGH1234ijklMNOP5678", object: 1 }],
+    });
+    expect(observation.schema).not.toContain("ghp_");
+    expect(observation.schema).toContain("[redacted:value]");
+    expect(observation.facts[0]!.relation).not.toContain("sk-abcdEFGH1234ijklMNOP5678");
+    expect(observation.facts[0]!.relation).toContain("[redacted:value]");
+    expect(summary.secretsRedacted).toBe(2);
+  });
+
+  test("the summary aggregates redactions across every scrubbed field", () => {
+    const { summary } = redactObservation({
+      schema: "asterism.example@1",
+      facts: [
+        { subject: "file:sk-abcdEFGH1234ijklMNOP5678", relation: "size_bytes", object: 1 },
+        { subject: "file:ok", relation: "token", object: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" },
+      ],
+    });
+    // Two separate fields (one subject, one object) each carried a secret-shaped token.
+    expect(summary.secretsRedacted).toBe(2);
+  });
+
+  test("string leaves nested in an array or object are scrubbed too — the boundary holds for any emitter", () => {
+    // `object` is typed `unknown`; a custom tool could nest a secret-shaped string inside a
+    // structured value. The scrub must reach every string leaf, not just a top-level string.
+    const { observation, summary } = redactObservation({
+      schema: "asterism.custom@1",
+      facts: [
+        {
+          subject: "repo:.",
+          relation: "remotes",
+          object: {
+            origin: "https://user:p4ssw0rd@host/repo.git",
+            tags: ["clean", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"],
+            count: 2,
+          },
+        },
+      ],
+    });
+    const obj = observation.facts[0]!.object as { origin: string; tags: string[]; count: number };
+    expect(obj.origin).not.toContain("p4ssw0rd"); // a secret in a nested object value...
+    expect(obj.origin).toContain("[redacted:value]");
+    expect(obj.tags[1]).not.toContain("ghp_"); // ...and one in a nested array element...
+    expect(obj.tags[1]).toContain("[redacted:value]");
+    expect(obj.count).toBe(2); // ...while a number leaf is left untouched.
+    expect(summary.secretsRedacted).toBe(2); // both nested secrets counted
+  });
+
+  test("a cyclic fact object is bounded — the back-edge becomes a marker, never throws", () => {
+    const cyclic: Record<string, unknown> = { name: "loop" };
+    cyclic.self = cyclic;
+    const { observation } = redactObservation({
+      schema: "asterism.x@1",
+      facts: [{ subject: "file:a", relation: "shape", object: cyclic }],
+    });
+    const obj = observation.facts[0]!.object as Record<string, unknown>;
+    expect(obj.name).toBe("loop");
+    expect(obj.self).toBe("[redacted:cycle]"); // the cycle is cut, not followed
+    // The redacted observation is now acyclic, so persisting it can never throw.
+    expect(() => JSON.stringify(observation)).not.toThrow();
+  });
+
+  test("excessive nesting is truncated at the depth bound", () => {
+    let deep: unknown = "leaf";
+    for (let i = 0; i < 40; i++) deep = { next: deep };
+    const { observation } = redactObservation({
+      schema: "s@1",
+      facts: [{ subject: "file:a", relation: "r", object: deep }],
+    });
+    expect(JSON.stringify(observation.facts[0]!.object)).toContain("[redacted:oversized]");
+    expect(() => JSON.stringify(observation)).not.toThrow();
+  });
+
+  test("a huge fact object is bounded by the node budget, ending in a marker", () => {
+    const big = Array.from({ length: 1000 }, (_, i) => i);
+    const { observation } = redactObservation({
+      schema: "s@1",
+      facts: [{ subject: "file:a", relation: "r", object: big }],
+    });
+    const arr = observation.facts[0]!.object as unknown[];
+    expect(arr.length).toBeLessThan(1000); // truncated well below the input size
+    expect(arr[arr.length - 1]).toBe("[redacted:oversized]");
+  });
+
+  test("a bigint fact value is stringified, so serialization never throws", () => {
+    const { observation } = redactObservation({
+      schema: "s@1",
+      facts: [{ subject: "file:a", relation: "count", object: { n: BigInt(42) } }],
+    });
+    expect((observation.facts[0]!.object as Record<string, unknown>).n).toBe("42");
+    expect(() => JSON.stringify(observation)).not.toThrow();
+  });
+
+  test("a secret-shaped object KEY is scrubbed too, while structural keys are kept", () => {
+    // A custom tool could key a map by data (a URL with credentials). The key persists in the
+    // @3 record (even references mode) and is rendered, so it must pass the boundary as well.
+    const { observation, summary } = redactObservation({
+      schema: "asterism.custom@1",
+      facts: [
+        {
+          subject: "repo:.",
+          relation: "auth_by_remote",
+          object: { "https://user:p4ssw0rd@host/repo.git": "ok", origin: "clean" },
+        },
+      ],
+    });
+    const obj = observation.facts[0]!.object as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    expect(keys.some((k) => k.includes("p4ssw0rd"))).toBe(false); // the secret-shaped key is gone
+    expect(keys.some((k) => k.includes("[redacted:value]"))).toBe(true);
+    expect(obj.origin).toBe("clean"); // a structural key survives unchanged
+    expect(summary.secretsRedacted).toBe(1);
+  });
+
+  test("facts beyond the cap are DROPPED (not just unrendered) and counted in the summary", () => {
+    const facts = Array.from({ length: 5 }, (_, i) => ({
+      subject: `file:f${i}.txt`,
+      relation: "exists",
+      object: true,
+    }));
+    const { observation, summary } = redactObservation({ schema: "asterism.fs.list@1", facts }, { maxFacts: 2 });
+    expect(observation.facts).toHaveLength(2); // only the first two survive on disk
+    expect(summary.factsDropped).toBe(3);
+  });
+
+  test("the default cap bounds the recorded facts (a tool cannot flood the trace)", () => {
+    const facts = Array.from({ length: DEFAULT_MAX_OBSERVATION_FACTS + 10 }, (_, i) => ({
+      subject: `file:f${i}`,
+      relation: "exists",
+      object: true,
+    }));
+    const { observation, summary } = redactObservation({ schema: "s@1", facts });
+    expect(observation.facts).toHaveLength(DEFAULT_MAX_OBSERVATION_FACTS);
+    expect(summary.factsDropped).toBe(10);
+  });
+
+  test("an under-cap observation drops nothing", () => {
+    const { summary } = redactObservation({
+      schema: "asterism.fs.write@1",
+      facts: [{ subject: "file:a", relation: "exists", object: true }],
+    });
+    expect(summary.factsDropped).toBe(0);
+  });
+
+  test("an observation with no facts yields no facts; a clean schema still passes the scrubber unchanged", () => {
+    const { observation, summary } = redactObservation({ schema: "asterism.empty@1", facts: [] });
+    expect(observation.facts).toEqual([]);
+    expect(observation.schema).toBe("asterism.empty@1"); // scrubbed, but matches no rule
+    expect(summary.secretsRedacted).toBe(0);
   });
 });
