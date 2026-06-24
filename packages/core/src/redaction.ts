@@ -312,9 +312,12 @@ export interface ObservationRedactionResult {
  *     nest a secret-shaped string as a value or as a map key, so the scrub recurses rather
  *     than checking only the top level. Numbers/booleans/null pass through (they cannot carry
  *     a secret token); a structural key matches no rule and is returned unchanged.
- *   - `relation` and `schema` — a tool-declared CLOSED vocabulary, not attacker
- *     content; left verbatim (scrubbing a controlled verb would corrupt it for no
- *     safety gain).
+ *   - `relation` and `schema` — meant to be a tool-declared CLOSED vocabulary, but for a
+ *     THIRD-PARTY tool that is only a contract expectation, not enforced (and a central
+ *     registry can't know an emitter's schemas). They are persisted + rendered even in
+ *     references mode, so they pass the same scrubber: a real verb/schema (`exists`,
+ *     `asterism.fs.write@1`) matches no rule and is returned unchanged; a secret-shaped one
+ *     (a tool that derived it from a URL/header) is redacted rather than trusted.
  *
  * Returns the redacted observation and a counts-only {@link RedactionSummary} aggregated
  * across every scrubbed field — never the removed spans. Pure, like {@link redactForTrace}:
@@ -364,12 +367,12 @@ export function redactObservation(
 
   const facts: ObservedFact[] = observation.facts.map((fact) => ({
     subject: scrub(fact.subject),
-    relation: fact.relation,
+    relation: scrub(fact.relation),
     object: redactValue(fact.object),
   }));
 
   return {
-    observation: { schema: observation.schema, facts },
+    observation: { schema: scrub(observation.schema), facts },
     summary: {
       truncated,
       originalBytes,

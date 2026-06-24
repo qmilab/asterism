@@ -421,29 +421,50 @@ function toolCallLines(sessionEvents: readonly EventEnvelope[]): { count: number
  * Render an already-REDACTED structured observation as indented audit lines: a schema
  * header plus one `subject relation = object` line per fact. Reads the payload defensively
  * (it is `unknown` off the log) — a malformed or empty observation yields no lines.
- * Everything here passed the redaction boundary, so nothing printed is a raw value.
+ * Everything here passed the redaction boundary, so nothing printed is a raw value; every
+ * field is additionally collapsed to a SINGLE line (see {@link singleLine}) so an embedded
+ * newline cannot forge extra audit lines.
  */
 function formatObservation(observation: unknown): string[] {
   if (observation === null || typeof observation !== "object") return [];
   const o = observation as { schema?: unknown; facts?: unknown };
   if (!Array.isArray(o.facts) || o.facts.length === 0) return [];
-  const schema = typeof o.schema === "string" ? o.schema : "(unknown)";
+  const schema = typeof o.schema === "string" ? singleLine(o.schema) : "(unknown)";
   const lines = [`       facts (${schema}):`];
   for (const fact of o.facts) {
     if (fact === null || typeof fact !== "object") continue;
     const f = fact as { subject?: unknown; relation?: unknown; object?: unknown };
-    const subject = typeof f.subject === "string" ? f.subject : "(unknown)";
-    const relation = typeof f.relation === "string" ? f.relation : "(unknown)";
+    const subject = typeof f.subject === "string" ? singleLine(f.subject) : "(unknown)";
+    const relation = typeof f.relation === "string" ? singleLine(f.relation) : "(unknown)";
     lines.push(`         ${subject} ${relation} = ${formatFactObject(f.object)}`);
   }
   return lines;
 }
 
-/** A fact's `object` as a compact display string. Strings are already redacted; others stringify. */
+/** A fact's `object` as a compact, single-line display string. Strings are already redacted; others stringify. */
 function formatFactObject(object: unknown): string {
-  if (typeof object === "string") return object;
+  if (typeof object === "string") return singleLine(object);
   if (typeof object === "number" || typeof object === "boolean") return String(object);
+  // JSON.stringify already escapes control chars inside any nested string.
   return JSON.stringify(object) ?? "null";
+}
+
+/**
+ * Collapse a stored fact field to a SINGLE display line. `redactForTrace` deliberately keeps
+ * newlines (a tool's content can be legitimately multi-line, and the content renderer prefixes
+ * each line with `│ `). Facts, by contrast, render INLINE — one `subject relation = object`
+ * per line with no prefix — so a redacted field that legitimately contains a newline (a POSIX
+ * path may) could otherwise forge extra "Recorded tool calls"-shaped lines into the audit, even
+ * with content capture off. Render any line break / control char as a visible backslash escape
+ * so the value stays on its own line and the injection is plain to a reviewer.
+ */
+function singleLine(value: string): string {
+  return value.replace(new RegExp("[\\u0000-\\u001f\\u007f-\\u009f]", "g"), (ch) => {
+    if (ch === "\n") return "\\n";
+    if (ch === "\r") return "\\r";
+    if (ch === "\t") return "\\t";
+    return `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`;
+  });
 }
 
 /**

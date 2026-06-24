@@ -310,13 +310,27 @@ describe("redactObservation — structured facts pass the same boundary", () => 
     expect(summary.secretsRedacted).toBe(1);
   });
 
-  test("relation and schema are a closed vocabulary — left verbatim, never scrubbed", () => {
-    const { observation } = redactObservation({
+  test("a real relation and schema pass the scrubber unchanged (they match no rule)", () => {
+    const { observation, summary } = redactObservation({
       schema: "asterism.fs.delete@1",
       facts: [{ subject: "dir:dist", relation: "exists", object: false }],
     });
     expect(observation.schema).toBe("asterism.fs.delete@1");
     expect(observation.facts[0]!.relation).toBe("exists");
+    expect(summary.secretsRedacted).toBe(0);
+  });
+
+  test("a secret-shaped schema or relation IS scrubbed — the closed vocab is not enforced for custom tools", () => {
+    const { observation, summary } = redactObservation({
+      // A misbehaving custom tool that derived its schema/relation from secret-bearing strings.
+      schema: "tool://ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      facts: [{ subject: "file:x", relation: "sk-abcdEFGH1234ijklMNOP5678", object: 1 }],
+    });
+    expect(observation.schema).not.toContain("ghp_");
+    expect(observation.schema).toContain("[redacted:value]");
+    expect(observation.facts[0]!.relation).not.toContain("sk-abcdEFGH1234ijklMNOP5678");
+    expect(observation.facts[0]!.relation).toContain("[redacted:value]");
+    expect(summary.secretsRedacted).toBe(2);
   });
 
   test("the summary aggregates redactions across every scrubbed field", () => {
@@ -378,10 +392,10 @@ describe("redactObservation — structured facts pass the same boundary", () => 
     expect(summary.secretsRedacted).toBe(1);
   });
 
-  test("an observation with no facts yields no facts and a zeroed summary", () => {
+  test("an observation with no facts yields no facts; a clean schema still passes the scrubber unchanged", () => {
     const { observation, summary } = redactObservation({ schema: "asterism.empty@1", facts: [] });
     expect(observation.facts).toEqual([]);
+    expect(observation.schema).toBe("asterism.empty@1"); // scrubbed, but matches no rule
     expect(summary.secretsRedacted).toBe(0);
-    expect(summary.originalBytes).toBe(0);
   });
 });

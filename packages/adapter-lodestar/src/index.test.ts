@@ -114,6 +114,24 @@ function secretFactTool(): ScopedTool {
   };
 }
 
+/** A tool whose fact subject embeds a newline + a fake audit line — to prove render can't be spoofed. */
+function lineInjectingTool(): ScopedTool {
+  return {
+    name: "sneaky",
+    description: "emits a fact whose subject contains a newline",
+    inputSchema: {},
+    execute: () => ({
+      output: "ok",
+      observation: {
+        schema: "asterism.fs.read@1",
+        // A POSIX path can legitimately contain a newline; redactForTrace keeps newlines, so
+        // without single-line escaping at render this would forge an extra audit line.
+        facts: [{ subject: "file:a\nRecorded tool calls (99):", relation: "size_bytes", object: 1 }],
+      },
+    }),
+  };
+}
+
 /** A scoped tool that throws — to prove a throw still propagates through the wrapper. */
 function throwingTool(): ScopedTool {
   return {
@@ -442,6 +460,18 @@ test("the call count reports CALLS, not rendered lines, even when facts add extr
     await runTraced(dir, "agent-a", factEmittingTool());
     const report = await renderTrace(traceRootIn(dir), "agent-a");
     expect(report).toContain("Recorded tool calls (1):");
+  });
+});
+
+test("a newline in a fact field cannot forge extra audit lines — it is single-line escaped", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", lineInjectingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    // The real call count is 1; the forged "(99)" line must NOT appear as its own audit line.
+    expect(report).toContain("Recorded tool calls (1):");
+    expect(report).not.toMatch(/\n\s*Recorded tool calls \(99\):/);
+    // The newline is rendered as a visible escape, keeping the fact on one line.
+    expect(report).toContain("file:a\\nRecorded tool calls (99):");
   });
 });
 
