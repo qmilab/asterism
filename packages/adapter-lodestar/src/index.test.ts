@@ -435,6 +435,16 @@ test("cross-agent isolation holds for facts: A's recorded facts never surface un
   });
 });
 
+test("the call count reports CALLS, not rendered lines, even when facts add extra lines", async () => {
+  await withWorkspace(async (dir) => {
+    // factEmittingTool emits TWO facts in ONE call. The header counts CALLS, so it must read
+    // "(1)" — not "(3)" for the call line plus its two fact lines.
+    await runTraced(dir, "agent-a", factEmittingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("Recorded tool calls (1):");
+  });
+});
+
 test("a no-facts call in references mode is unchanged — still @1, no observation field", async () => {
   await withWorkspace(async (dir) => {
     // The byte-for-byte property: a tool that emits no observation records the slice-1

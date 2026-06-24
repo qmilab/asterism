@@ -306,10 +306,12 @@ export interface ObservationRedactionResult {
  *
  *   - `subject` — always a string (a `file:`/`dir:`/`repo:` reference). Screened: a
  *     token-shaped path segment is exactly the kind of value the rules catch.
- *   - `object` — screened ONLY when it is a string (a branch name, a label). A
- *     number/boolean object (a byte size, an existence flag) cannot carry a secret
- *     token, so it passes through unchanged; any other shape is left as-is in this
- *     slice — the shipped tools emit only number / boolean / string objects.
+ *   - `object` — typed `unknown`, so STRING LEAVES are scrubbed wherever they appear: a
+ *     top-level string, an array element, or a nested object value. The boundary must hold
+ *     for ANY emitter, not just the shipped tools — a custom tool could nest a secret-shaped
+ *     string inside a structured value, so the scrub recurses rather than checking only the
+ *     top level. Numbers/booleans/null pass through (they cannot carry a secret token);
+ *     object KEYS are structural identifiers, left as-is.
  *   - `relation` and `schema` — a tool-declared CLOSED vocabulary, not attacker
  *     content; left verbatim (scrubbing a controlled verb would corrupt it for no
  *     safety gain).
@@ -342,10 +344,26 @@ export function redactObservation(
     return r.content;
   };
 
+  // Recursively scrub every string LEAF of a fact's `object`, wherever it sits — a top-level
+  // string, an array element, or a nested object value. The boundary cannot assume the
+  // shipped tools' shapes: a custom tool could nest a secret-shaped string, so the scrub must
+  // reach it. Numbers/booleans/null are returned as-is (they carry no secret token); object
+  // keys are structural and left untouched.
+  const redactValue = (value: unknown): unknown => {
+    if (typeof value === "string") return scrub(value);
+    if (Array.isArray(value)) return value.map(redactValue);
+    if (value !== null && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [key, nested] of Object.entries(value)) out[key] = redactValue(nested);
+      return out;
+    }
+    return value;
+  };
+
   const facts: ObservedFact[] = observation.facts.map((fact) => ({
     subject: scrub(fact.subject),
     relation: fact.relation,
-    object: typeof fact.object === "string" ? scrub(fact.object) : fact.object,
+    object: redactValue(fact.object),
   }));
 
   return {

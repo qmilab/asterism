@@ -331,6 +331,32 @@ describe("redactObservation — structured facts pass the same boundary", () => 
     expect(summary.secretsRedacted).toBe(2);
   });
 
+  test("string leaves nested in an array or object are scrubbed too — the boundary holds for any emitter", () => {
+    // `object` is typed `unknown`; a custom tool could nest a secret-shaped string inside a
+    // structured value. The scrub must reach every string leaf, not just a top-level string.
+    const { observation, summary } = redactObservation({
+      schema: "asterism.custom@1",
+      facts: [
+        {
+          subject: "repo:.",
+          relation: "remotes",
+          object: {
+            origin: "https://user:p4ssw0rd@host/repo.git",
+            tags: ["clean", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"],
+            count: 2,
+          },
+        },
+      ],
+    });
+    const obj = observation.facts[0]!.object as { origin: string; tags: string[]; count: number };
+    expect(obj.origin).not.toContain("p4ssw0rd"); // a secret in a nested object value...
+    expect(obj.origin).toContain("[redacted:value]");
+    expect(obj.tags[1]).not.toContain("ghp_"); // ...and one in a nested array element...
+    expect(obj.tags[1]).toContain("[redacted:value]");
+    expect(obj.count).toBe(2); // ...while a number leaf is left untouched.
+    expect(summary.secretsRedacted).toBe(2); // both nested secrets counted
+  });
+
   test("an observation with no facts yields no facts and a zeroed summary", () => {
     const { observation, summary } = redactObservation({ schema: "asterism.empty@1", facts: [] });
     expect(observation.facts).toEqual([]);

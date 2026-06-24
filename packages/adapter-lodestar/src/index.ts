@@ -341,9 +341,13 @@ export async function renderTrace(
       // Lodestar's generic renderer prints each observation's source/schema/trust but NOT
       // our custom payload (the references we actually recorded). Append a compact per-call
       // summary so the audit shows what it captured — which tool ran, whether it succeeded,
-      // and how much it returned — instead of dropping it at the read layer.
+      // and how much it returned — instead of dropping it at the read layer. The header count
+      // is the number of CALLS, not rendered lines: a single call can span several lines
+      // (content, facts), so `lines.length` would overcount the calls.
       const calls = toolCallLines(sessionEvents);
-      return calls.length > 0 ? `${report}\n\nRecorded tool calls (${calls.length}):\n${calls.join("\n")}` : report;
+      return calls.count > 0
+        ? `${report}\n\nRecorded tool calls (${calls.count}):\n${calls.lines.join("\n")}`
+        : report;
     })
     .join("\n\n");
 }
@@ -384,9 +388,10 @@ interface ToolCallRef {
  *
  * The call number is an explicit per-call counter (not the running line count): a call can
  * span several lines (content, facts), so numbering must advance once per call, not once
- * per line.
+ * per line. Returns both the rendered `lines` and that `count`, so the caller's header can
+ * report the number of CALLS rather than the number of lines.
  */
-function toolCallLines(sessionEvents: readonly EventEnvelope[]): string[] {
+function toolCallLines(sessionEvents: readonly EventEnvelope[]): { count: number; lines: string[] } {
   const lines: string[] = [];
   let callNumber = 0;
   for (const event of sessionEvents) {
@@ -409,7 +414,7 @@ function toolCallLines(sessionEvents: readonly EventEnvelope[]): string[] {
     const factRedactionLine = formatRedaction(ref.fact_redaction);
     if (factRedactionLine) lines.push(`       fact redactions: ${factRedactionLine}`);
   }
-  return lines;
+  return { count: callNumber, lines };
 }
 
 /**
