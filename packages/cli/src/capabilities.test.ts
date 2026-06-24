@@ -391,4 +391,35 @@ describe("read-only tools emit structured observations", () => {
       rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  test("stat refuses a path through a symlinked directory that points outside the workspace", () => {
+    // lstat does not follow a FINAL-component symlink, but it DOES follow an intermediate one:
+    // `escape/secret.txt` (escape -> /outside) would otherwise leak the outside file's size.
+    const outside = mkdtempSync(join(tmpdir(), "asterism-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "twelve bytes");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = run("stat", { path: "escape/secret.txt" }) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("resolves outside this agent's workspace");
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("find honors the scan budget before descending into a directory", async () => {
+    await run("write_file", { path: "a.md", content: "x" });
+    await run("write_file", { path: "bigdir/inside.md", content: "x" });
+    // Budget = 2: the root's two entries (a.md, then bigdir) exactly spend it, so bigdir must
+    // not be descended — its contents must not surface, and the walk reports incomplete.
+    const cappedFind = workspaceCapabilities(workspace, { maxFindNodes: 2 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await cappedFind.execute({ args: { pattern: "*.md" } });
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    // inside.md lives under the un-descended bigdir, so it must not appear as a fact.
+    expect(result.observation!.facts.some((f) => f.subject === "file:bigdir/inside.md")).toBe(false);
+    expect(result.output).toContain("may be incomplete");
+  });
 });

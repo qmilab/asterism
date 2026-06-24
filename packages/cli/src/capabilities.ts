@@ -472,9 +472,16 @@ export function workspaceCapabilities(
         if (path === undefined) return failure("stat needs a 'path'.");
         const c = confineForRead(workspaceDir, path);
         if (!c.ok) return failure(c.message);
+        // `lstatSync` below does not follow a FINAL-component symlink, but it DOES follow a
+        // symlinked INTERMEDIATE directory (e.g. `escape/secret.txt` where `escape` → outside),
+        // which would leak the existence and size of a file outside the workspace. Refuse a path
+        // that resolves out — the same realpath guard list_dir / find apply before they enumerate.
+        if (resolvesOutsideWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
         try {
           // `lstatSync`, not `statSync`: report the node AS IT SITS in the workspace and never
-          // follow a symlink out of it to stat its target (the confinement choice delete_file
+          // follow a FINAL symlink out of it to stat its target (the confinement choice delete_file
           // makes too). A missing path is a failure with no observation — there is no effect to
           // record, matching read_file's discipline (an `exists:false` fact would also need an
           // ambiguous file:/dir: subject for a node whose kind is unknown).
@@ -559,11 +566,17 @@ export function workspaceCapabilities(
             if (matches(entry.name)) found.push({ rel, kind });
             // Recurse only into REAL directories — never follow a symlink (it could be a
             // cycle, or a link pointing out of the workspace; confinement is best-effort).
-            // A subtree we DON'T descend (depth limit, or unreadable) leaves matches below it
-            // unexamined, so mark the walk truncated — otherwise the count fact below would be
-            // recorded as an authoritative total / absence it cannot actually back.
+            // A subtree we DON'T descend leaves matches below it unexamined, so mark the walk
+            // truncated — otherwise the count fact below would be recorded as an authoritative
+            // total / absence it cannot actually back.
             if (entry.isDirectory()) {
-              if (depth < maxFindDepth) {
+              // Check the budget BEFORE descending: once `visited` has reached the cap, descending
+              // would `readdirSync` and sort an entire subtree we have no budget left to examine —
+              // unbounded work for nothing. The depth limit is the same kind of stop. Either way
+              // the walk is now incomplete.
+              if (depth >= maxFindDepth || visited >= maxFindNodes) {
+                truncated = true;
+              } else {
                 const childAbs = resolvePath(absDir, entry.name);
                 let sub: Dirent[];
                 try {
@@ -573,8 +586,6 @@ export function workspaceCapabilities(
                   continue;
                 }
                 walk(childAbs, sub, rel, depth + 1);
-              } else {
-                truncated = true; // a real subdirectory left unexplored at the depth limit
               }
             }
           }
