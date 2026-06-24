@@ -58,9 +58,10 @@ All five claims are demonstrable from a fresh install:
 
 **Claims 3 and 4 are about an agent's *actions* — the tools it uses.** The shipped
 CLI registers a default catalog of **workspace-scoped file tools** —
-`read_file`, `write_file`, and `delete_file` — behind the trust gate.
-`read_file`/`write_file` are ordinary read/write effects; `delete_file` is
-declared destructive. So a bare `asterism run` (with a model configured) gives the
+`read_file`, `list_dir`, `stat`, and `find` to explore, plus `write_file` and
+`delete_file` to change things — behind the trust gate. The read-only tools and
+`write_file` are ordinary read/write effects; `delete_file` is declared
+destructive. So a bare `asterism run` (with a model configured) gives the
 gate real actions to govern: an ordinary write executes under `autonomous`, and a
 deletion pauses for confirmation regardless of trust level.
 

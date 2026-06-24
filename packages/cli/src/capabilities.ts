@@ -15,6 +15,9 @@
 // escalates a *command-string* argument to `destructive`, but it cannot introspect
 // a structured-arg tool, so a mis-declared one would slip the gate. Hence:
 //   - fs.read   → `read`        information only; always runs.
+//   - fs.list   → `read`        list a folder's entries (one level); info only.
+//   - fs.stat   → `read`        a node's metadata (exists / kind / size); info only.
+//   - fs.find   → `read`        recursive name search under a folder; info only.
 //   - fs.write  → `write`       an ordinary side effect inside the agent's own
 //                               workspace; runs at notify/autonomous, is withheld
 //                               under propose. (The acceptance demo declares its
@@ -34,16 +37,19 @@
 // execution under merely logical confinement.
 
 import {
+  type Dirent,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 
+import { DEFAULT_MAX_OBSERVATION_FACTS } from "@qmilab/asterism-core";
 import type { Capability } from "@qmilab/asterism-core";
-import type { ToolInvocation, ToolResult } from "@qmilab/asterism-core";
+import type { ObservedFact, ToolInvocation, ToolResult } from "@qmilab/asterism-core";
 
 // Structured-observation schemas and their CLOSED relation vocabulary. Each tool declares
 // the facts it KNOWS it established — at the source, never reverse-engineered from output —
@@ -54,8 +60,22 @@ import type { ToolInvocation, ToolResult } from "@qmilab/asterism-core";
 const FS_WRITE_SCHEMA = "asterism.fs.write@1";
 const FS_DELETE_SCHEMA = "asterism.fs.delete@1";
 const FS_READ_SCHEMA = "asterism.fs.read@1";
+const FS_LIST_SCHEMA = "asterism.fs.list@1";
+const FS_STAT_SCHEMA = "asterism.fs.stat@1";
+const FS_FIND_SCHEMA = "asterism.fs.find@1";
 const REL_SIZE_BYTES = "size_bytes";
 const REL_EXISTS = "exists";
+const REL_ENTRY_COUNT = "entry_count";
+const REL_MATCH_COUNT = "match_count";
+
+// Bounds for the read-only directory tools (list_dir / find). The fact arrays they emit are
+// capped at the recorder's own limit so a huge tree can't flood the trace — the authoritative
+// COUNT fact (entry_count / match_count) is always emitted first and carries the true total, so
+// bounding the per-entry facts never hides the real size. `find` additionally caps the WALK
+// itself (nodes visited, depth) so a deep or hostile tree cannot make a read run unbounded.
+const MAX_LISTED_ENTRIES = 200; // entries rendered into the human-readable output
+const MAX_FIND_NODES = 20_000; // entries scanned before `find` stops and says so
+const MAX_FIND_DEPTH = 32; // directory depth `find` descends before stopping
 
 /**
  * A controlled `file:`/`dir:` subject reference for a confined, workspace-relative path,
@@ -122,6 +142,55 @@ function confine(
   // `rel` is the canonical workspace-relative path (`.`/`./x`/`a/../b` collapsed) — the
   // stable identity a structured fact's subject reference is built from.
   return { ok: true, path: target, rel };
+}
+
+/**
+ * Confinement for a READ-only tool. Identical to {@link confine} except the workspace
+ * ROOT is permitted — listing or searching `.` is the natural default for `list_dir` /
+ * `find`, and reading the root directory is harmless (the reason `confine` refuses the
+ * root is write/delete-specific: a `delete_file` of "." would `rmSync` the whole
+ * workspace; a read cannot do comparable damage). Only a climb-OUT (`..`, an absolute
+ * path) is refused. The root normalizes to a stable `.` so its subject is `dir:.`.
+ */
+function confineForRead(
+  workspaceDir: string,
+  requested: string,
+): { ok: true; path: string; rel: string } | { ok: false; message: string } {
+  const root = resolvePath(workspaceDir);
+  const target = resolvePath(root, requested);
+  const rel = relative(root, target);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return {
+      ok: false,
+      message: `Refused: '${requested}' must be a path inside this agent's workspace.`,
+    };
+  }
+  return { ok: true, path: target, rel: rel === "" ? "." : rel };
+}
+
+/** Classify a directory entry as a `dir:` or `file:` node. A symlink is NOT followed
+ *  (`withFileTypes` / `lstat` semantics): it reports `isDirectory() === false`, so it is
+ *  labelled `file:` — a leaf the tools never descend into, keeping the walk confined. */
+function direntKind(entry: Pick<Dirent, "isDirectory">): "file" | "dir" {
+  return entry.isDirectory() ? "dir" : "file";
+}
+
+/** The workspace-relative path of an entry inside `parentRel` (root `"."` has no prefix). */
+function childRel(parentRel: string, name: string): string {
+  return parentRel === "." ? name : `${parentRel}${sep}${name}`;
+}
+
+/**
+ * Compile a simple filename glob into a matcher over an entry's NAME. Only `*` is a
+ * wildcard (matching any run of non-separator characters); every other character is
+ * matched literally. Building the regex from a fully-escaped pattern means there is no
+ * nested-quantifier ReDoS surface, and it only ever runs against short entry names.
+ * Case-insensitive, for friendliness (`*.MD` finds `notes.md`).
+ */
+function nameMatcher(pattern: string): (name: string) => boolean {
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, "[^/]*");
+  const re = new RegExp(`^${escaped}$`, "i");
+  return (name) => re.test(name);
 }
 
 /**
@@ -269,5 +338,201 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
     },
   };
 
-  return [readFile, writeFile, deleteFile];
+  const listDir: Capability = {
+    key: "fs.list",
+    effect: "read",
+    tool: {
+      name: "list_dir",
+      description:
+        "List the entries of a folder in your workspace (one level, not recursive). " +
+        "Argument: { path } relative to your workspace; omit it or pass '.' for the workspace root.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Workspace-relative folder to list. Defaults to the workspace root.",
+          },
+        },
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const path = stringArg(invocation.args, "path") ?? ".";
+        const c = confineForRead(workspaceDir, path);
+        if (!c.ok) return failure(c.message);
+        let entries: Dirent[];
+        try {
+          entries = readdirSync(c.path, { withFileTypes: true });
+        } catch (err) {
+          return failure(`Could not list '${path}': ${failureReason(err)}`);
+        }
+        // Sort by name so the listing AND the facts are deterministic across platforms
+        // (readdir order is filesystem-dependent; a replay-stable observation must not be).
+        entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+        // The count fact is FIRST and authoritative (the true total, regardless of how many
+        // per-entry facts the recorder keeps); per-entry existence facts are bounded so a huge
+        // folder cannot flood the observation. The human output is bounded separately, wider.
+        const facts: ObservedFact[] = [
+          { subject: nodeSubject("dir", c.rel), relation: REL_ENTRY_COUNT, object: entries.length },
+        ];
+        const factBudget = DEFAULT_MAX_OBSERVATION_FACTS - facts.length;
+        const lines: string[] = [];
+        entries.forEach((entry, i) => {
+          const kind = direntKind(entry);
+          if (i < factBudget) {
+            facts.push({
+              subject: nodeSubject(kind, childRel(c.rel, entry.name)),
+              relation: REL_EXISTS,
+              object: true,
+            });
+          }
+          if (i < MAX_LISTED_ENTRIES) lines.push(kind === "dir" ? `${entry.name}/` : entry.name);
+        });
+
+        let output: string;
+        if (entries.length === 0) {
+          output = `'${path}' is empty.`;
+        } else {
+          const noun = entries.length === 1 ? "entry" : "entries";
+          output = `'${path}' contains ${entries.length} ${noun}:\n${lines.join("\n")}`;
+          if (entries.length > lines.length) {
+            output += `\n… and ${entries.length - lines.length} more.`;
+          }
+        }
+        return { output, observation: { schema: FS_LIST_SCHEMA, facts } };
+      },
+    },
+  };
+
+  const statNode: Capability = {
+    key: "fs.stat",
+    effect: "read",
+    tool: {
+      name: "stat",
+      description:
+        "Report metadata about a file or folder in your workspace: whether it is a file or " +
+        "a folder, and a file's size in bytes. Argument: { path } relative to your workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative path to inspect." },
+        },
+        required: ["path"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const path = stringArg(invocation.args, "path");
+        if (path === undefined) return failure("stat needs a 'path'.");
+        const c = confineForRead(workspaceDir, path);
+        if (!c.ok) return failure(c.message);
+        try {
+          // `lstatSync`, not `statSync`: report the node AS IT SITS in the workspace and never
+          // follow a symlink out of it to stat its target (the confinement choice delete_file
+          // makes too). A missing path is a failure with no observation — there is no effect to
+          // record, matching read_file's discipline (an `exists:false` fact would also need an
+          // ambiguous file:/dir: subject for a node whose kind is unknown).
+          const info = lstatSync(c.path);
+          const kind = info.isDirectory() ? "dir" : "file";
+          const subject = nodeSubject(kind, c.rel);
+          const facts: ObservedFact[] = [{ subject, relation: REL_EXISTS, object: true }];
+          let output: string;
+          if (kind === "dir") {
+            output = `'${path}' is a folder.`;
+          } else {
+            facts.push({ subject, relation: REL_SIZE_BYTES, object: info.size });
+            output = `'${path}' is a file of ${info.size} ${info.size === 1 ? "byte" : "bytes"}.`;
+          }
+          return { output, observation: { schema: FS_STAT_SCHEMA, facts } };
+        } catch (err) {
+          return failure(`Could not stat '${path}': ${failureReason(err)}`);
+        }
+      },
+    },
+  };
+
+  const findNodes: Capability = {
+    key: "fs.find",
+    effect: "read",
+    tool: {
+      name: "find",
+      description:
+        "Find files and folders by name anywhere under a folder in your workspace (recursive). " +
+        "The pattern matches an entry's name; '*' is a wildcard (e.g. '*.md'). Arguments: " +
+        "{ pattern, path } with path relative to your workspace (defaults to the workspace root).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description: "Name to match; '*' is a wildcard (e.g. '*.md').",
+          },
+          path: {
+            type: "string",
+            description: "Workspace-relative folder to search under. Defaults to the workspace root.",
+          },
+        },
+        required: ["pattern"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const pattern = stringArg(invocation.args, "pattern");
+        if (pattern === undefined) return failure("find needs a 'pattern'.");
+        const base = stringArg(invocation.args, "path") ?? ".";
+        const c = confineForRead(workspaceDir, base);
+        if (!c.ok) return failure(c.message);
+        const matches = nameMatcher(pattern);
+
+        const found: { rel: string; kind: "file" | "dir" }[] = [];
+        let visited = 0;
+        let truncated = false;
+        const walk = (absDir: string, relDir: string, depth: number): void => {
+          if (truncated || depth > MAX_FIND_DEPTH) return;
+          let entries: Dirent[];
+          try {
+            entries = readdirSync(absDir, { withFileTypes: true });
+          } catch {
+            return; // an unreadable subtree is skipped, not fatal to the whole search
+          }
+          entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+          for (const entry of entries) {
+            if (visited >= MAX_FIND_NODES) {
+              truncated = true;
+              return;
+            }
+            visited++;
+            const rel = childRel(relDir, entry.name);
+            const kind = direntKind(entry);
+            if (matches(entry.name)) found.push({ rel, kind });
+            // Recurse only into REAL directories — never follow a symlink (it could be a
+            // cycle, or a link pointing out of the workspace; confinement is best-effort).
+            if (entry.isDirectory()) walk(resolvePath(absDir, entry.name), rel, depth + 1);
+          }
+        };
+        walk(c.path, c.rel, 0);
+
+        const facts: ObservedFact[] = [
+          { subject: nodeSubject("dir", c.rel), relation: REL_MATCH_COUNT, object: found.length },
+        ];
+        const factBudget = DEFAULT_MAX_OBSERVATION_FACTS - facts.length;
+        found.slice(0, factBudget).forEach((m) => {
+          facts.push({ subject: nodeSubject(m.kind, m.rel), relation: REL_EXISTS, object: true });
+        });
+
+        let output: string;
+        if (found.length === 0) {
+          output = `No entries under '${base}' match '${pattern}'.`;
+        } else {
+          const noun = found.length === 1 ? "match" : "matches";
+          const shown = found.slice(0, MAX_LISTED_ENTRIES);
+          const lines = shown.map((m) => (m.kind === "dir" ? `${m.rel}/` : m.rel));
+          output = `Found ${found.length} ${noun} for '${pattern}' under '${base}':\n${lines.join("\n")}`;
+          if (found.length > shown.length) output += `\n… and ${found.length - shown.length} more.`;
+        }
+        if (truncated) {
+          output += `\n(Stopped after scanning ${MAX_FIND_NODES} entries; results may be incomplete.)`;
+        }
+        return { output, observation: { schema: FS_FIND_SCHEMA, facts } };
+      },
+    },
+  };
+
+  return [readFile, writeFile, deleteFile, listDir, statNode, findNodes];
 }
