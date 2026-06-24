@@ -62,6 +62,7 @@ import type {
   RunRequest,
   RuntimeAdapter,
   ScopedTool,
+  ToolObservation,
   ToolResult,
 } from "@qmilab/asterism-core";
 
@@ -182,10 +183,12 @@ class TraceRecorder {
 
     // Facts are references about effects (paths/sizes/state), but they pass the SAME
     // redaction boundary as content before persistence — a path or value that trips a
-    // secret rule is scrubbed in the fact too. An empty/absent observation leaves the
-    // record at `@1`/`@2`, unchanged.
+    // secret rule is scrubbed in the fact too. The shape is validated FIRST (the tool's
+    // result is untyped at runtime — a third-party/JS tool may hand back a malformed
+    // observation): a bad shape falls back to the `@1`/`@2` record rather than throwing,
+    // which `wrapTool`'s `.catch` would otherwise turn into a DROPPED trace entry.
     const observation = result.observation;
-    if (observation && observation.facts.length > 0) {
+    if (hasRecordableFacts(observation)) {
       const redactedFacts = redactObservation(observation);
       payload.observation = redactedFacts.observation;
       payload.fact_redaction = redactedFacts.summary;
@@ -238,6 +241,33 @@ class TraceRecorder {
       versions: {},
     });
   }
+}
+
+/**
+ * Runtime guard for the `observation` a tool handed back. The `ToolResult` type says `facts`
+ * is an array of `{subject, relation}` strings, but a third-party or JS tool is not bound by
+ * that type at runtime — it may return no `facts`, a non-array, or facts with non-string
+ * fields. Only a well-formed, NON-EMPTY observation is recorded as `@3` facts; anything else is
+ * left to the `@1`/`@2` path, so a malformed observation degrades the record rather than
+ * throwing (a throw, swallowed by `wrapTool`'s `.catch`, would drop the call from the trace
+ * entirely). `object` is intentionally unvalidated — `redactObservation` handles any value shape.
+ */
+function hasRecordableFacts(
+  observation: ToolObservation | undefined,
+): observation is ToolObservation {
+  return (
+    observation !== undefined &&
+    typeof observation.schema === "string" &&
+    Array.isArray(observation.facts) &&
+    observation.facts.length > 0 &&
+    observation.facts.every(
+      (fact) =>
+        fact !== null &&
+        typeof fact === "object" &&
+        typeof fact.subject === "string" &&
+        typeof fact.relation === "string",
+    )
+  );
 }
 
 /**
@@ -480,6 +510,7 @@ function formatRedaction(redaction: unknown): string | undefined {
   if (typeof s.injectionRedacted === "number" && s.injectionRedacted > 0) parts.push(`injection=${s.injectionRedacted}`);
   if (typeof s.exfiltrationRedacted === "number" && s.exfiltrationRedacted > 0) parts.push(`exfiltration=${s.exfiltrationRedacted}`);
   if (typeof s.controlsStripped === "number" && s.controlsStripped > 0) parts.push(`controls=${s.controlsStripped}`);
+  if (typeof s.factsDropped === "number" && s.factsDropped > 0) parts.push(`facts dropped=${s.factsDropped}`);
   if (s.truncated === true) {
     parts.push(typeof s.originalBytes === "number" ? `truncated from ${s.originalBytes} bytes` : "truncated");
   }

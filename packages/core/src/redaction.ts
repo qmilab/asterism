@@ -34,6 +34,15 @@ import { MEMORY_FIREWALL_RULES } from "./firewall.js";
 export const DEFAULT_TRACE_CONTENT_MAX_BYTES = 4096;
 
 /**
+ * Default cap on the number of structured facts recorded from a single observation. Each fact
+ * field is already bounded by {@link DEFAULT_TRACE_CONTENT_MAX_BYTES}, but without a count cap a
+ * tool could flood the trace by SPLITTING data across many facts (the per-field cap alone leaves
+ * the `@3` payload unbounded). The two caps together bound the whole observation. Generous for
+ * the shipped tools (which emit 1–2 facts); raise it per-call via `redactObservation`'s `maxFacts`.
+ */
+export const DEFAULT_MAX_OBSERVATION_FACTS = 64;
+
+/**
  * A single named secret-value pattern. Mirrors `FirewallRule`, minus the category. An
  * optional `replace` keeps part of the match (e.g. a key name or a URL scheme) and redacts
  * only the secret portion; when absent the whole match becomes {@link SECRET_MARK}. The
@@ -67,6 +76,12 @@ export interface RedactionSummary {
   readonly injectionRedacted: number;
   /** How many exfiltration-phrasing spans were scrubbed (firewall exfiltration rules). */
   readonly exfiltrationRedacted: number;
+  /**
+   * How many structured facts were DROPPED because the observation exceeded the per-call fact
+   * cap ({@link redactObservation}). Present only on an observation's summary — content
+   * redaction never drops facts, so {@link redactForTrace} omits it.
+   */
+  readonly factsDropped?: number;
 }
 
 /** The redacted content plus the counts-only account of what was removed. */
@@ -319,14 +334,19 @@ export interface ObservationRedactionResult {
  *     `asterism.fs.write@1`) matches no rule and is returned unchanged; a secret-shaped one
  *     (a tool that derived it from a URL/header) is redacted rather than trusted.
  *
+ * Facts beyond `maxFacts` ({@link DEFAULT_MAX_OBSERVATION_FACTS}) are DROPPED and counted in
+ * `summary.factsDropped`: with each field already byte-capped, the count cap is what keeps the
+ * whole `@3` payload bounded against a tool that splits data across many facts.
+ *
  * Returns the redacted observation and a counts-only {@link RedactionSummary} aggregated
  * across every scrubbed field — never the removed spans. Pure, like {@link redactForTrace}:
  * no I/O, no secret reader, deterministic.
  */
 export function redactObservation(
   observation: ToolObservation,
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; maxFacts?: number } = {},
 ): ObservationRedactionResult {
+  const maxFacts = opts.maxFacts ?? DEFAULT_MAX_OBSERVATION_FACTS;
   let truncated = false;
   let originalBytes = 0;
   let controlsStripped = 0;
@@ -365,7 +385,11 @@ export function redactObservation(
     return value;
   };
 
-  const facts: ObservedFact[] = observation.facts.map((fact) => ({
+  // Cap the fact COUNT before scrubbing — excess facts are dropped, not just unrendered, so a
+  // flood never lands on disk. Each surviving field is still byte-capped by `scrub`.
+  const kept = observation.facts.slice(0, Math.max(0, maxFacts));
+  const factsDropped = observation.facts.length - kept.length;
+  const facts: ObservedFact[] = kept.map((fact) => ({
     subject: scrub(fact.subject),
     relation: scrub(fact.relation),
     object: redactValue(fact.object),
@@ -380,6 +404,7 @@ export function redactObservation(
       secretsRedacted,
       injectionRedacted,
       exfiltrationRedacted,
+      factsDropped,
     },
   };
 }

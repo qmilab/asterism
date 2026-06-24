@@ -73,6 +73,7 @@ export type {
 // point. Pure; no I/O, no secret reader.
 export {
   DEFAULT_TRACE_CONTENT_MAX_BYTES,
+  DEFAULT_MAX_OBSERVATION_FACTS,
   SECRET_VALUE_RULES,
   redactForTrace,
   redactObservation,

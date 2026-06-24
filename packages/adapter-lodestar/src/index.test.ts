@@ -22,6 +22,7 @@ import type {
   RunRequest,
   RuntimeAdapter,
   ScopedTool,
+  ToolObservation,
 } from "@qmilab/asterism-core";
 import { renderTrace, wrapWithLodestar } from "./index.js";
 
@@ -127,6 +128,40 @@ function lineInjectingTool(): ScopedTool {
         // A POSIX path can legitimately contain a newline; redactForTrace keeps newlines, so
         // without single-line escaping at render this would forge an extra audit line.
         facts: [{ subject: "file:a\nRecorded tool calls (99):", relation: "size_bytes", object: 1 }],
+      },
+    }),
+  };
+}
+
+/** A tool that returns a MALFORMED observation (no facts array) — as an untyped JS tool might. */
+function malformedObservationTool(): ScopedTool {
+  return {
+    name: "malformed",
+    description: "returns an observation with no facts array",
+    inputSchema: {},
+    execute: () => ({
+      output: "still useful",
+      // Despite the TS contract, a third-party/JS tool can hand back this shape at runtime.
+      observation: { schema: "asterism.bad@1" } as unknown as ToolObservation,
+    }),
+  };
+}
+
+/** A tool that emits `n` facts in one call — to prove the per-observation fact cap holds. */
+function manyFactsTool(n: number): ScopedTool {
+  return {
+    name: "lister",
+    description: "emits many facts",
+    inputSchema: {},
+    execute: () => ({
+      output: "listed",
+      observation: {
+        schema: "asterism.fs.list@1",
+        facts: Array.from({ length: n }, (_, i) => ({
+          subject: `file:f${i}.txt`,
+          relation: "exists",
+          object: true,
+        })),
       },
     }),
   };
@@ -472,6 +507,31 @@ test("a newline in a fact field cannot forge extra audit lines — it is single-
     expect(report).not.toMatch(/\n\s*Recorded tool calls \(99\):/);
     // The newline is rendered as a visible escape, keeping the fact on one line.
     expect(report).toContain("file:a\\nRecorded tool calls (99):");
+  });
+});
+
+test("a malformed observation degrades to references — the call is recorded, never dropped", async () => {
+  await withWorkspace(async (dir) => {
+    // The observation has no valid `facts` array. Reading `.facts.length` would throw, and the
+    // wrapper's `.catch` would swallow it — dropping the WHOLE call from the trace. The guard
+    // must instead fall back to the @1 references record so the call still appears in the audit.
+    await runTraced(dir, "agent-a", malformedObservationTool());
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk).toContain("asterism.tool_result@1"); // references recorded...
+    expect(onDisk).not.toContain("asterism.tool_result@3"); // ...not the @3 facts record
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("malformed  [ok]"); // the call is present in the audit
+  });
+});
+
+test("a flood of facts is capped on disk and the drop is surfaced in the audit", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", manyFactsTool(70)); // 70 > the default cap of 64
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("fact redactions: facts dropped=6"); // 70 - 64
+    // Only the capped facts were stored, so only that many render.
+    const factLines = (report ?? "").split("\n").filter((l) => l.includes("exists = true"));
+    expect(factLines).toHaveLength(64);
   });
 });
 

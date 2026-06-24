@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_MAX_OBSERVATION_FACTS,
   DEFAULT_TRACE_CONTENT_MAX_BYTES,
   SECRET_VALUE_RULES,
   redactForTrace,
@@ -390,6 +391,36 @@ describe("redactObservation — structured facts pass the same boundary", () => 
     expect(keys.some((k) => k.includes("[redacted:value]"))).toBe(true);
     expect(obj.origin).toBe("clean"); // a structural key survives unchanged
     expect(summary.secretsRedacted).toBe(1);
+  });
+
+  test("facts beyond the cap are DROPPED (not just unrendered) and counted in the summary", () => {
+    const facts = Array.from({ length: 5 }, (_, i) => ({
+      subject: `file:f${i}.txt`,
+      relation: "exists",
+      object: true,
+    }));
+    const { observation, summary } = redactObservation({ schema: "asterism.fs.list@1", facts }, { maxFacts: 2 });
+    expect(observation.facts).toHaveLength(2); // only the first two survive on disk
+    expect(summary.factsDropped).toBe(3);
+  });
+
+  test("the default cap bounds the recorded facts (a tool cannot flood the trace)", () => {
+    const facts = Array.from({ length: DEFAULT_MAX_OBSERVATION_FACTS + 10 }, (_, i) => ({
+      subject: `file:f${i}`,
+      relation: "exists",
+      object: true,
+    }));
+    const { observation, summary } = redactObservation({ schema: "s@1", facts });
+    expect(observation.facts).toHaveLength(DEFAULT_MAX_OBSERVATION_FACTS);
+    expect(summary.factsDropped).toBe(10);
+  });
+
+  test("an under-cap observation drops nothing", () => {
+    const { summary } = redactObservation({
+      schema: "asterism.fs.write@1",
+      facts: [{ subject: "file:a", relation: "exists", object: true }],
+    });
+    expect(summary.factsDropped).toBe(0);
   });
 
   test("an observation with no facts yields no facts; a clean schema still passes the scrubber unchanged", () => {
