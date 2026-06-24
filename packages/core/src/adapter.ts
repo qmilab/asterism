@@ -20,12 +20,58 @@ export interface ToolInvocation {
   args: unknown;
 }
 
+/**
+ * A single thing a tool established for certain about the world by running —
+ * a reference about its OWN effect, never the raw content it touched. The shape
+ * is a `subject / relation / object` triple so the kernel can record and reason
+ * over it without parsing prose:
+ *
+ *   - `subject` — a controlled entity reference, NOT free text: `file:<workspace
+ *     -relative-path>`, `dir:<path>`, `repo:<path>`. The closed prefix set keeps
+ *     a fact pinned to an identifiable thing inside the agent's workspace.
+ *   - `relation` — a controlled verb from a per-schema closed set (`size_bytes`,
+ *     `exists`, …). The emitting tool owns the set; no free-text drift.
+ *   - `object` — the value the relation asserts (`412`, `true`, `false`,
+ *     `"main"`). A reference about an effect (a size, an existence flag), never a
+ *     secret value and never the file's contents.
+ *
+ * Facts are screened by the redaction boundary (`redactObservation`) before they
+ * are persisted, exactly like captured content: a path or value that trips a
+ * secret rule is scrubbed in the fact too.
+ */
+export interface ObservedFact {
+  subject: string;
+  relation: string;
+  object: unknown;
+}
+
+/**
+ * A typed, structured observation of one tool call's effect — the facts the tool
+ * KNOWS it established, declared at the source. Structure comes from the tool (the
+ * one component that knows its effect with certainty), never reverse-engineered
+ * from the human-readable `output`. `schema` names the fact shape (e.g.
+ * `asterism.fs.write@1`) so a reader can tell which closed relation set applies.
+ */
+export interface ToolObservation {
+  schema: string;
+  facts: readonly ObservedFact[];
+}
+
 /** What a scoped tool hands back after executing. */
 export interface ToolResult {
   /** Text returned to the model. */
   output: string;
   /** True when the tool failed; the model sees this as an error result. */
   isError?: boolean;
+  /**
+   * An OPTIONAL structured record of what this call established about the world,
+   * alongside the human-readable `output`. A tool with no structured effect (or a
+   * failed call) omits it — fully back-compatible: a result without an
+   * `observation` behaves byte-for-byte as before. The kernel screens it through
+   * the redaction boundary before it reaches any persisted trace; it is an extra
+   * OUTPUT channel and grants the substrate nothing.
+   */
+  observation?: ToolObservation;
 }
 
 /**

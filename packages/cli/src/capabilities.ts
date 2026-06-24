@@ -34,6 +34,7 @@
 // execution under merely logical confinement.
 
 import {
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -43,6 +44,27 @@ import { dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node
 
 import type { Capability } from "@qmilab/asterism-core";
 import type { ToolInvocation, ToolResult } from "@qmilab/asterism-core";
+
+// Structured-observation schemas and their CLOSED relation vocabulary. Each tool declares
+// the facts it KNOWS it established — at the source, never reverse-engineered from output —
+// so the trace can record what a call changed, not just its byte count. The relation set is
+// per-schema and fixed here (no free-text drift). Facts are references about the call's own
+// effect (a size, an existence flag), never the file's contents and never a secret value;
+// the kernel screens them through `redactObservation` before any of it is persisted.
+const FS_WRITE_SCHEMA = "asterism.fs.write@1";
+const FS_DELETE_SCHEMA = "asterism.fs.delete@1";
+const FS_READ_SCHEMA = "asterism.fs.read@1";
+const REL_SIZE_BYTES = "size_bytes";
+const REL_EXISTS = "exists";
+
+/**
+ * A controlled `file:`/`dir:` subject reference for a confined, workspace-relative path,
+ * separators normalized to `/` so the reference is stable across platforms. The closed
+ * prefix set (`file:`, `dir:`) pins each fact to an identifiable node inside the workspace.
+ */
+function nodeSubject(kind: "file" | "dir", rel: string): string {
+  return `${kind}:${rel.split(sep).join("/")}`;
+}
 
 /** A tool failure the model can see and react to (never throws across the seam). */
 function failure(message: string): ToolResult {
@@ -82,7 +104,7 @@ function stringArg(args: unknown, name: string): string | undefined {
 function confine(
   workspaceDir: string,
   requested: string,
-): { ok: true; path: string } | { ok: false; message: string } {
+): { ok: true; path: string; rel: string } | { ok: false; message: string } {
   const root = resolvePath(workspaceDir);
   const target = resolvePath(root, requested);
   const rel = relative(root, target);
@@ -97,7 +119,9 @@ function confine(
       message: `Refused: '${requested}' must be a path inside this agent's workspace.`,
     };
   }
-  return { ok: true, path: target };
+  // `rel` is the canonical workspace-relative path (`.`/`./x`/`a/../b` collapsed) — the
+  // stable identity a structured fact's subject reference is built from.
+  return { ok: true, path: target, rel };
 }
 
 /**
@@ -128,7 +152,23 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
         try {
-          return { output: readFileSync(c.path, "utf8") };
+          const content = readFileSync(c.path, "utf8");
+          // The structured fact is the file's SIZE only — never its contents as a fact
+          // (the contents are the model-facing `output`; a fact is a reference about the
+          // effect, not the data the tool read).
+          return {
+            output: content,
+            observation: {
+              schema: FS_READ_SCHEMA,
+              facts: [
+                {
+                  subject: nodeSubject("file", c.rel),
+                  relation: REL_SIZE_BYTES,
+                  object: Buffer.byteLength(content, "utf8"),
+                },
+              ],
+            },
+          };
         } catch (err) {
           return failure(`Could not read '${path}': ${failureReason(err)}`);
         }
@@ -166,7 +206,17 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
         try {
           mkdirSync(dirname(c.path), { recursive: true });
           writeFileSync(c.path, content);
-          return { output: `Wrote ${Buffer.byteLength(content, "utf8")} bytes to '${path}'.` };
+          const bytes = Buffer.byteLength(content, "utf8");
+          return {
+            output: `Wrote ${bytes} bytes to '${path}'.`,
+            observation: {
+              schema: FS_WRITE_SCHEMA,
+              facts: [
+                { subject: nodeSubject("file", c.rel), relation: REL_SIZE_BYTES, object: bytes },
+                { subject: nodeSubject("file", c.rel), relation: REL_EXISTS, object: true },
+              ],
+            },
+          };
         } catch (err) {
           return failure(`Could not write '${path}': ${failureReason(err)}`);
         }
@@ -195,10 +245,23 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
         try {
+          // Classify the node BEFORE removal so the subject reference is honest (it is gone
+          // after `rmSync`). `lstatSync`, not `statSync`: classify the node `rmSync` actually
+          // removes — a symlink is removed as a link (labelled `file:`), never followed out of
+          // the workspace to classify its target. A stat failure means the target is missing;
+          // the `force:false` rm below then throws too, so the fact is only ever emitted for a
+          // delete that actually happened.
+          const kind = lstatSync(c.path).isDirectory() ? "dir" : "file";
           // force:false ⇒ a missing target is an error the model sees, not a
           // silent success; recursive:true allows removing a populated folder.
           rmSync(c.path, { recursive: true, force: false });
-          return { output: `Deleted '${path}'.` };
+          return {
+            output: `Deleted '${path}'.`,
+            observation: {
+              schema: FS_DELETE_SCHEMA,
+              facts: [{ subject: nodeSubject(kind, c.rel), relation: REL_EXISTS, object: false }],
+            },
+          };
         } catch (err) {
           return failure(`Could not delete '${path}': ${failureReason(err)}`);
         }

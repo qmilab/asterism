@@ -33,6 +33,15 @@
 // references-only default is the safe baseline. The redaction policy lives in `core` (the
 // kernel owns what is safe to persist); this package only applies it at the capture point.
 //
+// STRUCTURED FACTS. Independently of the capture mode, a tool may return a structured
+// `observation` — typed `subject/relation/object` facts it KNOWS it established (it wrote
+// `notes/todo.md` at 412 bytes; it deleted `dist/`). When present, the trace records them
+// under `asterism.tool_result@3` (a superset of the content schema). Facts are references
+// about effects, not raw content, but they ride the SAME redaction boundary first
+// (`redactObservation`) — a path or value that trips a secret rule is scrubbed in the fact
+// too. A call with no facts is recorded exactly as before; facts enrich the audit, they
+// never bypass the kernel's gate (golden rule 2: an extra output channel, no new capability).
+//
 // ISOLATION + INTEGRITY. The trace is written to a HOST-CONTROLLED root the host passes
 // in (`traceRoot`), NEVER under the agent's own `workspaceDir`: the workspace is
 // agent-writable (its file tools can create or overwrite files there), so a trace stored
@@ -46,7 +55,7 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { EventLogReader, EventLogWriter } from "@qmilab/lodestar-event-log";
 import type { EventEnvelope, Observation } from "@qmilab/lodestar-core";
 import { projectChain, renderReport } from "@qmilab/lodestar-trace";
-import { createToolRegistry, redactForTrace } from "@qmilab/asterism-core";
+import { createToolRegistry, redactForTrace, redactObservation } from "@qmilab/asterism-core";
 import type {
   RedactionSummary,
   RunHandle,
@@ -64,6 +73,14 @@ const TOOL_RESULT_SCHEMA = "asterism.tool_result@1";
  * version so a reader (and a future claim extractor in slice 2b) can tell the two apart.
  */
 const TOOL_RESULT_CONTENT_SCHEMA = "asterism.tool_result@2";
+/**
+ * The schema key for an observation that ALSO carries the tool's structured facts — a
+ * SUPERSET of `@2` (references, the redacted content when in content mode, AND the
+ * redacted `subject/relation/object` facts the tool declared). Emitted only when the tool
+ * returned a non-empty `observation`; a call with no facts stays `@1`/`@2`, byte-for-byte
+ * the slice-1/2a record. Facts ride the SAME redaction boundary as content before landing.
+ */
+const TOOL_RESULT_OBSERVATION_SCHEMA = "asterism.tool_result@3";
 /** Semver of the `observation.recorded` event shape this writer emits. */
 const EVENT_SCHEMA_VERSION = "1.0.0";
 
@@ -123,10 +140,20 @@ class TraceRecorder {
   }
 
   /**
-   * Record a completed tool call. Always references (name, output size, keyed fingerprint,
-   * error flag); when `captureContent`, ALSO the redacted output content + its redaction
-   * summary, under the content-bearing schema. Raw output is passed through the kernel's
-   * `redactForTrace` boundary first — it never reaches the log unredacted.
+   * Record a completed tool call. The payload is LAYERED, and the schema version is the
+   * highest layer present so an unchanged call stays byte-for-byte the earlier record:
+   *
+   *   - References ALWAYS — name, output size, keyed fingerprint, error flag (`@1`).
+   *   - Redacted content WHEN `captureContent` — the output through `redactForTrace`,
+   *     plus its counts-only summary (`@2`, a superset of `@1`).
+   *   - Redacted structured FACTS when the tool returned a non-empty `observation` — the
+   *     `subject/relation/object` facts through `redactObservation`, plus a fact-redaction
+   *     summary (`@3`, a superset of `@2`).
+   *
+   * Both `redactForTrace` and `redactObservation` are the kernel's policy — the adapter only
+   * applies them at the capture point, holding no secret reader. Raw output and raw facts
+   * never reach the log: a call with no facts in references mode is the slice-1 record
+   * verbatim; with no facts in content mode, the slice-2a record verbatim.
    */
   async recordResult(tool: string, result: ToolResult): Promise<void> {
     const output = result.output ?? "";
@@ -142,19 +169,30 @@ class TraceRecorder {
         .slice(0, 32),
       is_error: result.isError === true,
     };
-    if (!this.captureContent) {
-      await this.append(tool, TOOL_RESULT_SCHEMA, references);
-      return;
+
+    const payload: Record<string, unknown> = { ...references };
+    let schema = TOOL_RESULT_SCHEMA;
+
+    if (this.captureContent) {
+      const redacted = redactForTrace(output);
+      payload.content = redacted.content;
+      payload.redaction = redacted.summary;
+      schema = TOOL_RESULT_CONTENT_SCHEMA;
     }
-    // Content mode: redact at the boundary, then store the redacted content + counts-only
-    // summary alongside the references. `redactForTrace` is the kernel's policy — the
-    // adapter only applies it, holding no secret reader.
-    const redacted = redactForTrace(output);
-    await this.append(tool, TOOL_RESULT_CONTENT_SCHEMA, {
-      ...references,
-      content: redacted.content,
-      redaction: redacted.summary,
-    });
+
+    // Facts are references about effects (paths/sizes/state), but they pass the SAME
+    // redaction boundary as content before persistence — a path or value that trips a
+    // secret rule is scrubbed in the fact too. An empty/absent observation leaves the
+    // record at `@1`/`@2`, unchanged.
+    const observation = result.observation;
+    if (observation && observation.facts.length > 0) {
+      const redactedFacts = redactObservation(observation);
+      payload.observation = redactedFacts.observation;
+      payload.fact_redaction = redactedFacts.summary;
+      schema = TOOL_RESULT_OBSERVATION_SCHEMA;
+    }
+
+    await this.append(tool, schema, payload);
   }
 
   /**
@@ -167,9 +205,10 @@ class TraceRecorder {
   }
 
   /**
-   * Append one `observation.recorded` event under `schema`. `summary` is either a
-   * references-only summary (`@1`) or references PLUS already-REDACTED content (`@2`) —
-   * NEVER raw arguments or raw output text. The observation is stamped `internal` and `raw`.
+   * Append one `observation.recorded` event under `schema`. `summary` is a references-only
+   * summary (`@1`), references PLUS already-REDACTED content (`@2`), or references plus
+   * already-REDACTED structured facts (`@3`) — NEVER raw arguments, raw output text, or raw
+   * facts. The observation is stamped `internal` and `raw`.
    */
   private async append(
     tool: string,
@@ -316,7 +355,7 @@ function earliestSeq(events: readonly EventEnvelope[]): number {
   return min;
 }
 
-/** The summary this layer stores in each observation's payload (references; content in `@2`). */
+/** The summary this layer stores in each observation's payload (references; content in `@2`; facts in `@3`). */
 interface ToolCallRef {
   tool?: unknown;
   output_bytes?: unknown;
@@ -326,6 +365,10 @@ interface ToolCallRef {
   content?: unknown;
   /** Present only in content mode (`@2`): the counts-only redaction summary. */
   redaction?: unknown;
+  /** Present only when facts were recorded (`@3`): the ALREADY-REDACTED structured observation. */
+  observation?: unknown;
+  /** Present only in `@3`: the counts-only summary of what the facts' redaction removed. */
+  fact_redaction?: unknown;
 }
 
 /**
@@ -335,11 +378,17 @@ interface ToolCallRef {
  * the output's byte length (a reference, never its contents). The fingerprint is kept in
  * the log for recurrence checks but not printed (it carries no human-readable signal). In
  * content mode, the already-REDACTED content and a redaction summary are shown indented
- * beneath the call — the content has already passed the redaction boundary, so nothing
- * printed here is raw output.
+ * beneath the call. When the call recorded structured facts (`@3`), the already-REDACTED
+ * `subject relation = object` facts are shown too — everything here has passed the
+ * redaction boundary, so nothing printed is raw output or a raw fact.
+ *
+ * The call number is an explicit per-call counter (not the running line count): a call can
+ * span several lines (content, facts), so numbering must advance once per call, not once
+ * per line.
  */
 function toolCallLines(sessionEvents: readonly EventEnvelope[]): string[] {
   const lines: string[] = [];
+  let callNumber = 0;
   for (const event of sessionEvents) {
     if (event.type !== "observation.recorded") continue;
     const observation = event.payload as { payload?: ToolCallRef } | undefined;
@@ -348,15 +397,48 @@ function toolCallLines(sessionEvents: readonly EventEnvelope[]): string[] {
     const tool = typeof ref.tool === "string" ? ref.tool : "(unknown)";
     const status = ref.threw === true ? "threw" : ref.is_error === true ? "error" : "ok";
     const bytes = typeof ref.output_bytes === "number" ? `${ref.output_bytes} bytes` : "—";
-    lines.push(`  ${lines.length + 1}. ${tool}  [${status}]  ${bytes}`);
+    lines.push(`  ${++callNumber}. ${tool}  [${status}]  ${bytes}`);
     const redactionLine = formatRedaction(ref.redaction);
     if (redactionLine) lines.push(`       redactions: ${redactionLine}`);
     if (typeof ref.content === "string") {
       // The content is already redacted + bounded; indent each line under the call.
       for (const contentLine of ref.content.split("\n")) lines.push(`       │ ${contentLine}`);
     }
+    // Structured facts (`@3`), already redacted — the audit detail this slice adds.
+    for (const factLine of formatObservation(ref.observation)) lines.push(factLine);
+    const factRedactionLine = formatRedaction(ref.fact_redaction);
+    if (factRedactionLine) lines.push(`       fact redactions: ${factRedactionLine}`);
   }
   return lines;
+}
+
+/**
+ * Render an already-REDACTED structured observation as indented audit lines: a schema
+ * header plus one `subject relation = object` line per fact. Reads the payload defensively
+ * (it is `unknown` off the log) — a malformed or empty observation yields no lines.
+ * Everything here passed the redaction boundary, so nothing printed is a raw value.
+ */
+function formatObservation(observation: unknown): string[] {
+  if (observation === null || typeof observation !== "object") return [];
+  const o = observation as { schema?: unknown; facts?: unknown };
+  if (!Array.isArray(o.facts) || o.facts.length === 0) return [];
+  const schema = typeof o.schema === "string" ? o.schema : "(unknown)";
+  const lines = [`       facts (${schema}):`];
+  for (const fact of o.facts) {
+    if (fact === null || typeof fact !== "object") continue;
+    const f = fact as { subject?: unknown; relation?: unknown; object?: unknown };
+    const subject = typeof f.subject === "string" ? f.subject : "(unknown)";
+    const relation = typeof f.relation === "string" ? f.relation : "(unknown)";
+    lines.push(`         ${subject} ${relation} = ${formatFactObject(f.object)}`);
+  }
+  return lines;
+}
+
+/** A fact's `object` as a compact display string. Strings are already redacted; others stringify. */
+function formatFactObject(object: unknown): string {
+  if (typeof object === "string") return object;
+  if (typeof object === "number" || typeof object === "boolean") return String(object);
+  return JSON.stringify(object) ?? "null";
 }
 
 /**

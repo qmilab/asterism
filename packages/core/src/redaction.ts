@@ -27,6 +27,7 @@
 // is also host-owned and agent-unreachable (see adapter-lodestar); this layer is the
 // content half of that defense in depth.
 
+import type { ObservedFact, ToolObservation } from "./adapter.js";
 import { MEMORY_FIREWALL_RULES } from "./firewall.js";
 
 /** Default cap on the bytes of tool content captured into the trace (per call). */
@@ -283,6 +284,75 @@ export function redactForTrace(
     summary: {
       truncated: bounded.truncated,
       originalBytes: bounded.originalBytes,
+      controlsStripped,
+      secretsRedacted,
+      injectionRedacted,
+      exfiltrationRedacted,
+    },
+  };
+}
+
+/** A redacted {@link ToolObservation} plus the counts-only account of what its facts triggered. */
+export interface ObservationRedactionResult {
+  readonly observation: ToolObservation;
+  /** The per-field {@link RedactionSummary}s aggregated across every scrubbed fact field. */
+  readonly summary: RedactionSummary;
+}
+
+/**
+ * Redact a structured tool observation for the trace — the SAME boundary applied to
+ * captured content, mapped over a fact's secret-bearing fields so a path or value that
+ * trips a secret rule is scrubbed in the fact too. Which fields are screened, and why:
+ *
+ *   - `subject` — always a string (a `file:`/`dir:`/`repo:` reference). Screened: a
+ *     token-shaped path segment is exactly the kind of value the rules catch.
+ *   - `object` — screened ONLY when it is a string (a branch name, a label). A
+ *     number/boolean object (a byte size, an existence flag) cannot carry a secret
+ *     token, so it passes through unchanged; any other shape is left as-is in this
+ *     slice — the shipped tools emit only number / boolean / string objects.
+ *   - `relation` and `schema` — a tool-declared CLOSED vocabulary, not attacker
+ *     content; left verbatim (scrubbing a controlled verb would corrupt it for no
+ *     safety gain).
+ *
+ * Returns the redacted observation and a counts-only {@link RedactionSummary} aggregated
+ * across every scrubbed field — never the removed spans. Pure, like {@link redactForTrace}:
+ * no I/O, no secret reader, deterministic.
+ */
+export function redactObservation(
+  observation: ToolObservation,
+  opts: { maxBytes?: number } = {},
+): ObservationRedactionResult {
+  let truncated = false;
+  let originalBytes = 0;
+  let controlsStripped = 0;
+  let secretsRedacted = 0;
+  let injectionRedacted = 0;
+  let exfiltrationRedacted = 0;
+
+  // Scrub one string field through the content boundary, folding its counts into the
+  // running aggregate so the summary covers the whole observation.
+  const scrub = (value: string): string => {
+    const r = redactForTrace(value, opts);
+    truncated = truncated || r.summary.truncated;
+    originalBytes += r.summary.originalBytes;
+    controlsStripped += r.summary.controlsStripped;
+    secretsRedacted += r.summary.secretsRedacted;
+    injectionRedacted += r.summary.injectionRedacted;
+    exfiltrationRedacted += r.summary.exfiltrationRedacted;
+    return r.content;
+  };
+
+  const facts: ObservedFact[] = observation.facts.map((fact) => ({
+    subject: scrub(fact.subject),
+    relation: fact.relation,
+    object: typeof fact.object === "string" ? scrub(fact.object) : fact.object,
+  }));
+
+  return {
+    observation: { schema: observation.schema, facts },
+    summary: {
+      truncated,
+      originalBytes,
       controlsStripped,
       secretsRedacted,
       injectionRedacted,

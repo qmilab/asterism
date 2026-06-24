@@ -79,6 +79,41 @@ function mixedOutputTool(): ScopedTool {
   };
 }
 
+/** A scoped tool that emits a clean structured observation (benign facts) alongside its output. */
+function factEmittingTool(): ScopedTool {
+  return {
+    name: "writer",
+    description: "writes and reports structured facts",
+    inputSchema: {},
+    execute: () => ({
+      output: "Wrote 42 bytes to 'notes/todo.md'.",
+      observation: {
+        schema: "asterism.fs.write@1",
+        facts: [
+          { subject: "file:notes/todo.md", relation: "size_bytes", object: 42 },
+          { subject: "file:notes/todo.md", relation: "exists", object: true },
+        ],
+      },
+    }),
+  };
+}
+
+/** A tool whose observation SUBJECT carries a secret-shaped path — to prove facts are redacted. */
+function secretFactTool(): ScopedTool {
+  return {
+    name: "leaky",
+    description: "emits a fact whose subject looks like a secret",
+    inputSchema: {},
+    execute: () => ({
+      output: "ok",
+      observation: {
+        schema: "asterism.fs.read@1",
+        facts: [{ subject: `file:config/${SECRET}`, relation: "size_bytes", object: 7 }],
+      },
+    }),
+  };
+}
+
 /** A scoped tool that throws — to prove a throw still propagates through the wrapper. */
 function throwingTool(): ScopedTool {
   return {
@@ -334,5 +369,80 @@ test("renderTrace surfaces a corrupt log as an error, not as 'no trace'", async 
     await mkdir(projectDir, { recursive: true });
     await writeFile(join(projectDir, "2026-06-23.ndjson"), "{not valid json\n");
     await expect(renderTrace(traceRootIn(dir), "agent-a")).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Structured facts (slice T1) — a tool's `observation` is recorded under @3,
+// redacted at the same boundary as content, partitioned per agent like the rest.
+// ---------------------------------------------------------------------------
+
+test("a tool's structured facts are recorded under @3 and rendered in the report", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", factEmittingTool());
+
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk).toContain("asterism.tool_result@3"); // the trace-record superset schema
+    expect(onDisk).toContain("asterism.fs.write@1"); // the observation's own fact schema
+
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("facts (asterism.fs.write@1):");
+    expect(report).toContain("file:notes/todo.md size_bytes = 42");
+    expect(report).toContain("file:notes/todo.md exists = true");
+  });
+});
+
+test("facts ride the redaction boundary — a secret-shaped fact subject never reaches the log", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", secretFactTool());
+
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(onDisk).not.toContain(SECRET); // the secret-shaped path is scrubbed IN the fact
+    expect(onDisk).toContain("[redacted:value]");
+
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).not.toContain(SECRET);
+    expect(report).toContain("fact redactions: secrets="); // the fact-redaction summary shows
+  });
+});
+
+test("facts are recorded in REFERENCES mode too (no content), proving they are reference-grade", async () => {
+  await withWorkspace(async (dir) => {
+    // A references-only run (the default) with a fact-emitting tool: the facts ARE recorded,
+    // but the human-readable output content is NOT — facts are references, not content.
+    await runTraced(dir, "agent-a", factEmittingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("file:notes/todo.md size_bytes = 42"); // facts present...
+    expect(report).not.toContain("Wrote 42 bytes"); // ...but the output content is absent
+  });
+});
+
+test("content mode with facts records BOTH the redacted content and the facts (@3 superset)", async () => {
+  await withWorkspace(async (dir) => {
+    await runTracedContent(dir, "agent-a", factEmittingTool());
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("Wrote 42 bytes"); // the benign content is captured...
+    expect(report).toContain("file:notes/todo.md size_bytes = 42"); // ...alongside the facts
+  });
+});
+
+test("cross-agent isolation holds for facts: A's recorded facts never surface under B", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", factEmittingTool());
+    // The facts ride the same agent-id partition as the rest of the trace.
+    expect(await renderTrace(traceRootIn(dir), "agent-b")).toBeUndefined();
+  });
+});
+
+test("a no-facts call in references mode is unchanged — still @1, no observation field", async () => {
+  await withWorkspace(async (dir) => {
+    // The byte-for-byte property: a tool that emits no observation records the slice-1
+    // record exactly — @1, and nothing fact-shaped on disk.
+    await runTraced(dir, "agent-a", secretEchoTool());
+    const onDisk = await readTreeText(traceRootIn(dir));
+    expect(onDisk).toContain("asterism.tool_result@1");
+    expect(onDisk).not.toContain("asterism.tool_result@3");
+    expect(onDisk).not.toContain("fact_redaction");
   });
 });

@@ -591,3 +591,45 @@ describe("the destructive gate drives Run status to awaiting_confirmation", () =
     }
   });
 });
+
+describe("the gate passes a tool's structured observation through untouched", () => {
+  /** A tool that returns a structured observation — to prove the gate does not strip it. */
+  function observingTool(name: string): ScopedTool {
+    return {
+      name,
+      description: name,
+      inputSchema: {},
+      execute: () => ({
+        output: `${name} ran`,
+        observation: {
+          schema: "asterism.fs.write@1",
+          facts: [{ subject: "file:notes.md", relation: "size_bytes", object: 5 }],
+        },
+      }),
+    };
+  }
+
+  test("an executed write surfaces its observation on the result (an extra output channel, not a capability)", async () => {
+    const registry = resolveToolRegistry(
+      trustProfile({ level: "autonomous", capabilities: ["fs.write"] }),
+      [capability("fs.write", "write", observingTool("write_file"))],
+    );
+    const tool = registry.list().find((t) => t.name === "write_file")!;
+    const result = await tool.execute({ args: { path: "notes.md", content: "hello" } });
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.write@1",
+      facts: [{ subject: "file:notes.md", relation: "size_bytes", object: 5 }],
+    });
+  });
+
+  test("a withheld action under propose carries NO observation — the tool never ran", async () => {
+    const registry = resolveToolRegistry(
+      trustProfile({ level: "propose", capabilities: ["fs.write"] }),
+      [capability("fs.write", "write", observingTool("write_file"))],
+    );
+    const tool = registry.list().find((t) => t.name === "write_file")!;
+    const result = await tool.execute({ args: { path: "notes.md", content: "hello" } });
+    expect(result.output).toContain("[proposed]");
+    expect(result.observation).toBeUndefined();
+  });
+});

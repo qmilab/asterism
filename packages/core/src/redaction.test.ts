@@ -3,6 +3,7 @@ import {
   DEFAULT_TRACE_CONTENT_MAX_BYTES,
   SECRET_VALUE_RULES,
   redactForTrace,
+  redactObservation,
 } from "./redaction";
 
 // One representative (fake) secret per named rule. The coverage test below asserts
@@ -255,5 +256,85 @@ describe("redactForTrace — control characters", () => {
     expect(content).not.toContain("EFGH1234ijklMNOP5678"); // secret rejoined, then redacted
     expect(content).toContain("[redacted:value]");
     expect(summary.controlsStripped).toBe(3); // U+200B, U+202E, U+202C
+  });
+});
+
+describe("redactObservation — structured facts pass the same boundary", () => {
+  test("ordinary facts (paths, sizes, flags) pass through untouched with a zeroed summary", () => {
+    const { observation, summary } = redactObservation({
+      schema: "asterism.fs.write@1",
+      facts: [
+        { subject: "file:notes/todo.md", relation: "size_bytes", object: 412 },
+        { subject: "file:notes/todo.md", relation: "exists", object: true },
+      ],
+    });
+    expect(observation.schema).toBe("asterism.fs.write@1");
+    expect(observation.facts).toEqual([
+      { subject: "file:notes/todo.md", relation: "size_bytes", object: 412 },
+      { subject: "file:notes/todo.md", relation: "exists", object: true },
+    ]);
+    expect(summary.secretsRedacted).toBe(0);
+    expect(summary.injectionRedacted).toBe(0);
+    expect(summary.exfiltrationRedacted).toBe(0);
+    expect(summary.truncated).toBe(false);
+  });
+
+  test("a secret-shaped path SUBJECT is scrubbed in the fact and counted", () => {
+    const { observation, summary } = redactObservation({
+      schema: "asterism.fs.read@1",
+      facts: [
+        // A path segment shaped like an sk- key trips the value rules.
+        { subject: "file:config/sk-abcdEFGH1234ijklMNOP5678", relation: "size_bytes", object: 12 },
+      ],
+    });
+    const fact = observation.facts[0]!;
+    expect(fact.subject).not.toContain("sk-abcdEFGH1234ijklMNOP5678");
+    expect(fact.subject).toContain("[redacted:value]");
+    expect(fact.object).toBe(12); // the numeric object is untouched
+    expect(summary.secretsRedacted).toBe(1);
+  });
+
+  test("a string OBJECT that trips a rule is scrubbed; numeric/boolean objects are left as-is", () => {
+    const { observation, summary } = redactObservation({
+      schema: "asterism.example@1",
+      facts: [
+        { subject: "repo:.", relation: "remote_url", object: "https://user:p4ssw0rd@host/repo.git" },
+        { subject: "repo:.", relation: "ahead", object: 2 },
+        { subject: "repo:.", relation: "detached", object: false },
+      ],
+    });
+    expect(observation.facts[0]!.object).not.toContain("p4ssw0rd");
+    expect(observation.facts[0]!.object).toContain("[redacted:value]");
+    expect(observation.facts[1]!.object).toBe(2);
+    expect(observation.facts[2]!.object).toBe(false);
+    expect(summary.secretsRedacted).toBe(1);
+  });
+
+  test("relation and schema are a closed vocabulary — left verbatim, never scrubbed", () => {
+    const { observation } = redactObservation({
+      schema: "asterism.fs.delete@1",
+      facts: [{ subject: "dir:dist", relation: "exists", object: false }],
+    });
+    expect(observation.schema).toBe("asterism.fs.delete@1");
+    expect(observation.facts[0]!.relation).toBe("exists");
+  });
+
+  test("the summary aggregates redactions across every scrubbed field", () => {
+    const { summary } = redactObservation({
+      schema: "asterism.example@1",
+      facts: [
+        { subject: "file:sk-abcdEFGH1234ijklMNOP5678", relation: "size_bytes", object: 1 },
+        { subject: "file:ok", relation: "token", object: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" },
+      ],
+    });
+    // Two separate fields (one subject, one object) each carried a secret-shaped token.
+    expect(summary.secretsRedacted).toBe(2);
+  });
+
+  test("an observation with no facts yields no facts and a zeroed summary", () => {
+    const { observation, summary } = redactObservation({ schema: "asterism.empty@1", facts: [] });
+    expect(observation.facts).toEqual([]);
+    expect(summary.secretsRedacted).toBe(0);
+    expect(summary.originalBytes).toBe(0);
   });
 });

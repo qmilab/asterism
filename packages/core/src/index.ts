@@ -17,6 +17,8 @@ export type {
   ScopedTool,
   ToolInvocation,
   ToolResult,
+  ToolObservation,
+  ObservedFact,
   ToolInputSchema,
 } from "./adapter.js";
 export { createToolRegistry } from "./adapter.js";
@@ -73,11 +75,13 @@ export {
   DEFAULT_TRACE_CONTENT_MAX_BYTES,
   SECRET_VALUE_RULES,
   redactForTrace,
+  redactObservation,
 } from "./redaction.js";
 export type {
   RedactionRule,
   RedactionSummary,
   RedactionResult,
+  ObservationRedactionResult,
 } from "./redaction.js";
 
 // The local secret store — holds credential plaintext behind a scoped `read`;
