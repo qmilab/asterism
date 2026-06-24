@@ -14,7 +14,7 @@
 //   - subject references are controlled + normalized (file:<workspace-relative-path>).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -338,5 +338,57 @@ describe("read-only tools emit structured observations", () => {
     expect(result.observation!.facts.length).toBeGreaterThan(0);
     expect(result.observation!.facts.every((f) => f.relation === "exists")).toBe(true);
     expect(result.output).toContain("may be incomplete");
+  });
+
+  test("find omits the count fact when the depth limit leaves a subtree unexplored", async () => {
+    await run("write_file", { path: "top.md", content: "x" });
+    await run("write_file", { path: "deep/inner.md", content: "x" }); // a match below the root
+    // maxFindDepth 0 ⇒ the root's `deep/` subtree is never descended, so a real match below it
+    // is unexamined: the walk must report incomplete and NOT assert an authoritative count.
+    const shallowFind = workspaceCapabilities(workspace, { maxFindDepth: 0 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await shallowFind.execute({ args: { pattern: "*.md" } });
+    expect(result.isError).toBeUndefined();
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    // top.md, seen at the root, is still a true exists fact.
+    expect(
+      result.observation!.facts.some(
+        (f) => f.subject === "file:top.md" && f.relation === "exists",
+      ),
+    ).toBe(true);
+    expect(result.output).toContain("incomplete");
+  });
+
+  // ---- symlinked-root escape (read tools must not follow a symlink out of the workspace) ----
+
+  test("list_dir refuses a symlinked root that resolves outside the workspace", () => {
+    // A symlink INSIDE the workspace pointing at an external directory. The lexical confinement
+    // check accepts it (the path text stays inside), but readdirSync would follow it and leak an
+    // outside tree — so the realpath guard must refuse it.
+    const outside = mkdtempSync(join(tmpdir(), "asterism-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "x");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = run("list_dir", { path: "escape" }) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("resolves outside this agent's workspace");
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("find refuses a symlinked root that resolves outside the workspace", () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "x");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = run("find", { pattern: "*", path: "escape" }) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

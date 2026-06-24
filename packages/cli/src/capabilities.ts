@@ -42,6 +42,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -166,6 +167,32 @@ function confineForRead(
     };
   }
   return { ok: true, path: target, rel: rel === "" ? "." : rel };
+}
+
+/**
+ * True when an in-workspace path RESOLVES (through symlinks) to a location outside the
+ * workspace. `confineForRead` is lexical — it accepts a path that stays inside textually,
+ * but a symlinked component (the root itself, or an intermediate directory) can still point
+ * out, and a tool that enumerates a directory with `readdirSync` FOLLOWS that symlink and
+ * would leak an external tree. The directory-listing reads (`list_dir`, `find`) call this to
+ * refuse such a root, making good on their "does not follow symlinks" contract (it goes one
+ * step beyond `confine`'s lexical-only baseline precisely because enumerating leaks a whole
+ * tree, not one file). Both sides are realpath'd, so a workspace that itself sits under a
+ * symlink (e.g. macOS `/tmp` → `/private/tmp`) is fine. A path that cannot be resolved
+ * (missing) is NOT an escape — the caller's `readdirSync` reports it — so this returns false
+ * and lets that failure surface normally.
+ */
+function resolvesOutsideWorkspace(workspaceDir: string, absPath: string): boolean {
+  let realRoot: string;
+  let realTarget: string;
+  try {
+    realRoot = realpathSync(resolvePath(workspaceDir));
+    realTarget = realpathSync(absPath);
+  } catch {
+    return false;
+  }
+  const rel = relative(realRoot, realTarget);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
 
 /** Classify a directory entry as a `dir:` or `file:` node. A symlink is NOT followed
@@ -375,6 +402,11 @@ export function workspaceCapabilities(
         const path = stringArg(invocation.args, "path") ?? ".";
         const c = confineForRead(workspaceDir, path);
         if (!c.ok) return failure(c.message);
+        // `readdirSync` follows a symlinked root out of the workspace — refuse one that
+        // resolves outside (the lexical check above cannot see through a symlink).
+        if (resolvesOutsideWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
         let entries: Dirent[];
         try {
           entries = readdirSync(c.path, { withFileTypes: true });
@@ -494,6 +526,11 @@ export function workspaceCapabilities(
         const base = stringArg(invocation.args, "path") ?? ".";
         const c = confineForRead(workspaceDir, base);
         if (!c.ok) return failure(c.message);
+        // `readdirSync` follows a symlinked root out of the workspace — refuse one that
+        // resolves outside (the lexical check above cannot see through a symlink).
+        if (resolvesOutsideWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${base}' resolves outside this agent's workspace.`);
+        }
         // Validate the search ROOT loudly: a missing, non-directory, or unreadable root is a
         // failure with no observation — exactly like list_dir / stat. A typoed root must NOT
         // look like a valid empty search. Only DEEPER subtrees are skipped-on-error in `walk`
@@ -522,25 +559,34 @@ export function workspaceCapabilities(
             if (matches(entry.name)) found.push({ rel, kind });
             // Recurse only into REAL directories — never follow a symlink (it could be a
             // cycle, or a link pointing out of the workspace; confinement is best-effort).
-            if (entry.isDirectory() && depth < maxFindDepth) {
-              const childAbs = resolvePath(absDir, entry.name);
-              let sub: Dirent[];
-              try {
-                sub = readdirSync(childAbs, { withFileTypes: true });
-              } catch {
-                continue; // an unreadable subtree is skipped, not fatal to the whole search
+            // A subtree we DON'T descend (depth limit, or unreadable) leaves matches below it
+            // unexamined, so mark the walk truncated — otherwise the count fact below would be
+            // recorded as an authoritative total / absence it cannot actually back.
+            if (entry.isDirectory()) {
+              if (depth < maxFindDepth) {
+                const childAbs = resolvePath(absDir, entry.name);
+                let sub: Dirent[];
+                try {
+                  sub = readdirSync(childAbs, { withFileTypes: true });
+                } catch {
+                  truncated = true; // unreadable subtree → results incomplete
+                  continue;
+                }
+                walk(childAbs, sub, rel, depth + 1);
+              } else {
+                truncated = true; // a real subdirectory left unexplored at the depth limit
               }
-              walk(childAbs, sub, rel, depth + 1);
             }
           }
         };
         walk(c.path, rootEntries, c.rel, 0);
 
         // A TRUNCATED walk has only a partial view, so it must not assert a count: `found.length`
-        // is "matches seen before the cap", not the true total. A consumer of the structured
-        // observation sees only an exact-looking number and would persist a FALSE count / false
-        // absence — so OMIT the count fact when truncated. The per-match `exists` facts stay valid
-        // (each found node really does exist; existence is a fact, not a completeness claim).
+        // is "matches seen before the walk stopped short" (a scan cap, the depth limit, or an
+        // unreadable subtree), not the true total. A consumer of the structured observation sees
+        // only an exact-looking number and would persist a FALSE count / false absence — so OMIT
+        // the count fact when truncated. The per-match `exists` facts stay valid (each found node
+        // really does exist; existence is a fact, not a completeness claim).
         const facts: ObservedFact[] = [];
         if (!truncated) {
           facts.push({
@@ -565,7 +611,7 @@ export function workspaceCapabilities(
           if (found.length > shown.length) output += `\n… and ${found.length - shown.length} more.`;
         }
         if (truncated) {
-          output += `\n(Stopped after scanning ${maxFindNodes} entries; results may be incomplete.)`;
+          output += `\n(Results may be incomplete: some folders were not fully searched.)`;
         }
         return { output, observation: { schema: FS_FIND_SCHEMA, facts } };
       },
