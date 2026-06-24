@@ -194,13 +194,29 @@ function nameMatcher(pattern: string): (name: string) => boolean {
 }
 
 /**
+ * Override for the read-only `find` walk bounds — the number of entries scanned and
+ * the directory depth descended before it stops and reports results incomplete.
+ * Defaults to the production limits; the CLI seam calls `workspaceCapabilities`
+ * with no overrides, so this is for tests (and a future operator-tunable budget).
+ */
+interface FindWalkLimits {
+  maxFindNodes?: number;
+  maxFindDepth?: number;
+}
+
+/**
  * Build the default capability catalog bound to one agent's workspace. The set of
  * tools (and their effects) is install-wide — every agent's runs receive the same
  * catalog; only the workspace each tool is confined to differs, and only the
  * agent's trust level and the gate decide what may actually run. The kernel does
  * the rest: exposure filtering, gating, and (for fs.delete) the confirmation pause.
  */
-export function workspaceCapabilities(workspaceDir: string): Capability[] {
+export function workspaceCapabilities(
+  workspaceDir: string,
+  limits: FindWalkLimits = {},
+): Capability[] {
+  const maxFindNodes = limits.maxFindNodes ?? MAX_FIND_NODES;
+  const maxFindDepth = limits.maxFindDepth ?? MAX_FIND_DEPTH;
   const readFile: Capability = {
     key: "fs.read",
     effect: "read",
@@ -478,22 +494,25 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
         const base = stringArg(invocation.args, "path") ?? ".";
         const c = confineForRead(workspaceDir, base);
         if (!c.ok) return failure(c.message);
+        // Validate the search ROOT loudly: a missing, non-directory, or unreadable root is a
+        // failure with no observation — exactly like list_dir / stat. A typoed root must NOT
+        // look like a valid empty search. Only DEEPER subtrees are skipped-on-error in `walk`
+        // below (a single unreadable subdirectory should not abort the whole search).
+        let rootEntries: Dirent[];
+        try {
+          rootEntries = readdirSync(c.path, { withFileTypes: true });
+        } catch (err) {
+          return failure(`Could not search '${base}': ${failureReason(err)}`);
+        }
         const matches = nameMatcher(pattern);
 
         const found: { rel: string; kind: "file" | "dir" }[] = [];
         let visited = 0;
         let truncated = false;
-        const walk = (absDir: string, relDir: string, depth: number): void => {
-          if (truncated || depth > MAX_FIND_DEPTH) return;
-          let entries: Dirent[];
-          try {
-            entries = readdirSync(absDir, { withFileTypes: true });
-          } catch {
-            return; // an unreadable subtree is skipped, not fatal to the whole search
-          }
+        const walk = (absDir: string, entries: Dirent[], relDir: string, depth: number): void => {
           entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
           for (const entry of entries) {
-            if (visited >= MAX_FIND_NODES) {
+            if (visited >= maxFindNodes) {
               truncated = true;
               return;
             }
@@ -503,14 +522,33 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
             if (matches(entry.name)) found.push({ rel, kind });
             // Recurse only into REAL directories — never follow a symlink (it could be a
             // cycle, or a link pointing out of the workspace; confinement is best-effort).
-            if (entry.isDirectory()) walk(resolvePath(absDir, entry.name), rel, depth + 1);
+            if (entry.isDirectory() && depth < maxFindDepth) {
+              const childAbs = resolvePath(absDir, entry.name);
+              let sub: Dirent[];
+              try {
+                sub = readdirSync(childAbs, { withFileTypes: true });
+              } catch {
+                continue; // an unreadable subtree is skipped, not fatal to the whole search
+              }
+              walk(childAbs, sub, rel, depth + 1);
+            }
           }
         };
-        walk(c.path, c.rel, 0);
+        walk(c.path, rootEntries, c.rel, 0);
 
-        const facts: ObservedFact[] = [
-          { subject: nodeSubject("dir", c.rel), relation: REL_MATCH_COUNT, object: found.length },
-        ];
+        // A TRUNCATED walk has only a partial view, so it must not assert a count: `found.length`
+        // is "matches seen before the cap", not the true total. A consumer of the structured
+        // observation sees only an exact-looking number and would persist a FALSE count / false
+        // absence — so OMIT the count fact when truncated. The per-match `exists` facts stay valid
+        // (each found node really does exist; existence is a fact, not a completeness claim).
+        const facts: ObservedFact[] = [];
+        if (!truncated) {
+          facts.push({
+            subject: nodeSubject("dir", c.rel),
+            relation: REL_MATCH_COUNT,
+            object: found.length,
+          });
+        }
         const factBudget = DEFAULT_MAX_OBSERVATION_FACTS - facts.length;
         found.slice(0, factBudget).forEach((m) => {
           facts.push({ subject: nodeSubject(m.kind, m.rel), relation: REL_EXISTS, object: true });
@@ -527,7 +565,7 @@ export function workspaceCapabilities(workspaceDir: string): Capability[] {
           if (found.length > shown.length) output += `\n… and ${found.length - shown.length} more.`;
         }
         if (truncated) {
-          output += `\n(Stopped after scanning ${MAX_FIND_NODES} entries; results may be incomplete.)`;
+          output += `\n(Stopped after scanning ${maxFindNodes} entries; results may be incomplete.)`;
         }
         return { output, observation: { schema: FS_FIND_SCHEMA, facts } };
       },

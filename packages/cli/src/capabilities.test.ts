@@ -304,4 +304,39 @@ describe("read-only tools emit structured observations", () => {
     expect(result.isError).toBe(true);
     expect(result.observation).toBeUndefined();
   });
+
+  test("find fails loudly when the search root is missing — not a silent empty result", async () => {
+    await run("write_file", { path: "real.txt", content: "x" });
+    const result = await run("find", { pattern: "*", path: "no-such-dir" });
+    // A typoed root must fail (like list_dir/stat), never look like a valid empty search.
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Could not search");
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("find fails when the search root is a file, not a folder", async () => {
+    await run("write_file", { path: "a.txt", content: "x" });
+    const result = await run("find", { pattern: "*", path: "a.txt" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("find omits the count fact when the walk is truncated — no authoritative partial count", async () => {
+    for (const name of ["m1.md", "m2.md", "m3.md", "m4.md", "m5.md"]) {
+      await run("write_file", { path: name, content: "x" });
+    }
+    // A node cap below the entry count forces truncation mid-walk. `found.length` is then only
+    // a partial total, so the structured observation must NOT record it as match_count.
+    const cappedFind = workspaceCapabilities(workspace, { maxFindNodes: 3 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await cappedFind.execute({ args: { pattern: "*.md" } });
+    expect(result.isError).toBeUndefined();
+    // No match_count at all — a partial count would persist a false total / false absence…
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    // …but the matches actually seen are still recorded, as true `exists` facts.
+    expect(result.observation!.facts.length).toBeGreaterThan(0);
+    expect(result.observation!.facts.every((f) => f.relation === "exists")).toBe(true);
+    expect(result.output).toContain("may be incomplete");
+  });
 });
