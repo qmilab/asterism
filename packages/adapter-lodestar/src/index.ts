@@ -189,10 +189,20 @@ class TraceRecorder {
     // which `wrapTool`'s `.catch` would otherwise turn into a DROPPED trace entry.
     const observation = result.observation;
     if (hasRecordableFacts(observation)) {
-      const redactedFacts = redactObservation(observation);
-      payload.observation = redactedFacts.observation;
-      payload.fact_redaction = redactedFacts.summary;
-      schema = TOOL_RESULT_OBSERVATION_SCHEMA;
+      try {
+        const redactedFacts = redactObservation(observation);
+        payload.observation = redactedFacts.observation;
+        payload.fact_redaction = redactedFacts.summary;
+        schema = TOOL_RESULT_OBSERVATION_SCHEMA;
+      } catch {
+        // `redactObservation` is bounded + total, so this is a last-resort net: any unforeseen
+        // failure building the facts layer degrades the record to references-only (@1/@2) — the
+        // call still lands in the trace. A throw here, unguarded, would be swallowed by
+        // `wrapTool`'s `.catch` and drop the whole call. Leave `payload`/`schema` as references.
+        delete payload.observation;
+        delete payload.fact_redaction;
+        schema = this.captureContent ? TOOL_RESULT_CONTENT_SCHEMA : TOOL_RESULT_SCHEMA;
+      }
     }
 
     await this.append(tool, schema, payload);

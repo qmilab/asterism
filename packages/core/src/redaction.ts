@@ -43,6 +43,17 @@ export const DEFAULT_TRACE_CONTENT_MAX_BYTES = 4096;
 export const DEFAULT_MAX_OBSERVATION_FACTS = 64;
 
 /**
+ * Bounds for the recursive walk of a fact's `object`. A custom tool's `object` is untrusted and
+ * could be cyclic, deeply nested, or huge — without bounds the walk could overflow the stack or
+ * run unbounded, and a throw there (swallowed by the trace recorder) would DROP the whole call.
+ * `DEPTH` caps nesting (stack safety); `NODES` is a budget on values visited ACROSS the whole
+ * observation (so total time + persisted size stay bounded even across many facts). Past a bound
+ * the offending substructure becomes a marker; legitimate small fact objects are untouched.
+ */
+const MAX_FACT_OBJECT_DEPTH = 16;
+const MAX_FACT_OBJECT_NODES = 256;
+
+/**
  * A single named secret-value pattern. Mirrors `FirewallRule`, minus the category. An
  * optional `replace` keeps part of the match (e.g. a key name or a URL scheme) and redacts
  * only the secret portion; when absent the whole match becomes {@link SECRET_MARK}. The
@@ -99,6 +110,10 @@ export interface RedactionResult {
 const SECRET_MARK = "[redacted:value]";
 const INJECTION_MARK = "[redacted:injection]";
 const EXFILTRATION_MARK = "[redacted:exfiltration]";
+// Structural markers for the bounded fact-object walk (redactObservation) — a part of an
+// untrusted `object` that exceeds the depth/node bounds, or a back-edge to an ancestor.
+const OVERSIZED_MARK = "[redacted:oversized]";
+const CYCLE_MARK = "[redacted:cycle]";
 
 // ---------------------------------------------------------------------------
 // Secret-VALUE rules — aimed at the raw tokens tool output commonly carries.
@@ -374,15 +389,48 @@ export function redactObservation(
   // persisted + rendered even in references mode, so an unscrubbed key would leak. Keys are
   // scrubbed too — a structural key (`origin`, `ahead`) matches no rule and is returned
   // unchanged; only a secret-shaped one is replaced. Numbers/booleans/null pass through.
-  const redactValue = (value: unknown): unknown => {
+  //
+  // The walk is BOUNDED and total (never throws): depth, a shared node budget, and cycle
+  // detection cap an untrusted, possibly cyclic/huge/deep object, and the result is always
+  // JSON-safe (a bigint is stringified) so persisting it can never throw and drop the call.
+  const seen = new WeakSet<object>();
+  let nodeBudget = MAX_FACT_OBJECT_NODES;
+  const redactValue = (value: unknown, depth: number): unknown => {
     if (typeof value === "string") return scrub(value);
-    if (Array.isArray(value)) return value.map(redactValue);
-    if (value !== null && typeof value === "object") {
+    // A bigint would throw on JSON serialization — stringify (and scrub) it so the trace write
+    // is always safe. Other primitives (number/boolean) and null/undefined serialize fine.
+    if (typeof value === "bigint") return scrub(value.toString());
+    if (value === null || typeof value !== "object") return value;
+    if (depth >= MAX_FACT_OBJECT_DEPTH) return OVERSIZED_MARK;
+    if (seen.has(value)) return CYCLE_MARK; // a back-edge to an ancestor (also unserializable)
+    seen.add(value);
+    let result: unknown;
+    if (Array.isArray(value)) {
+      const out: unknown[] = [];
+      for (const item of value) {
+        if (nodeBudget <= 0) {
+          out.push(OVERSIZED_MARK);
+          break;
+        }
+        nodeBudget--;
+        out.push(redactValue(item, depth + 1));
+      }
+      result = out;
+    } else {
       const out: Record<string, unknown> = {};
-      for (const [key, nested] of Object.entries(value)) out[scrub(key)] = redactValue(nested);
-      return out;
+      for (const key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (nodeBudget <= 0) {
+          out["[truncated]"] = OVERSIZED_MARK;
+          break;
+        }
+        nodeBudget--;
+        out[scrub(key)] = redactValue((value as Record<string, unknown>)[key], depth + 1);
+      }
+      result = out;
     }
-    return value;
+    seen.delete(value); // only the current ancestry path is "seen" — a DAG is not a cycle
+    return result;
   };
 
   // Cap the fact COUNT before scrubbing — excess facts are dropped, not just unrendered, so a
@@ -392,7 +440,7 @@ export function redactObservation(
   const facts: ObservedFact[] = kept.map((fact) => ({
     subject: scrub(fact.subject),
     relation: scrub(fact.relation),
-    object: redactValue(fact.object),
+    object: redactValue(fact.object, 0),
   }));
 
   return {

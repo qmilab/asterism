@@ -372,6 +372,51 @@ describe("redactObservation — structured facts pass the same boundary", () => 
     expect(summary.secretsRedacted).toBe(2); // both nested secrets counted
   });
 
+  test("a cyclic fact object is bounded — the back-edge becomes a marker, never throws", () => {
+    const cyclic: Record<string, unknown> = { name: "loop" };
+    cyclic.self = cyclic;
+    const { observation } = redactObservation({
+      schema: "asterism.x@1",
+      facts: [{ subject: "file:a", relation: "shape", object: cyclic }],
+    });
+    const obj = observation.facts[0]!.object as Record<string, unknown>;
+    expect(obj.name).toBe("loop");
+    expect(obj.self).toBe("[redacted:cycle]"); // the cycle is cut, not followed
+    // The redacted observation is now acyclic, so persisting it can never throw.
+    expect(() => JSON.stringify(observation)).not.toThrow();
+  });
+
+  test("excessive nesting is truncated at the depth bound", () => {
+    let deep: unknown = "leaf";
+    for (let i = 0; i < 40; i++) deep = { next: deep };
+    const { observation } = redactObservation({
+      schema: "s@1",
+      facts: [{ subject: "file:a", relation: "r", object: deep }],
+    });
+    expect(JSON.stringify(observation.facts[0]!.object)).toContain("[redacted:oversized]");
+    expect(() => JSON.stringify(observation)).not.toThrow();
+  });
+
+  test("a huge fact object is bounded by the node budget, ending in a marker", () => {
+    const big = Array.from({ length: 1000 }, (_, i) => i);
+    const { observation } = redactObservation({
+      schema: "s@1",
+      facts: [{ subject: "file:a", relation: "r", object: big }],
+    });
+    const arr = observation.facts[0]!.object as unknown[];
+    expect(arr.length).toBeLessThan(1000); // truncated well below the input size
+    expect(arr[arr.length - 1]).toBe("[redacted:oversized]");
+  });
+
+  test("a bigint fact value is stringified, so serialization never throws", () => {
+    const { observation } = redactObservation({
+      schema: "s@1",
+      facts: [{ subject: "file:a", relation: "count", object: { n: BigInt(42) } }],
+    });
+    expect((observation.facts[0]!.object as Record<string, unknown>).n).toBe("42");
+    expect(() => JSON.stringify(observation)).not.toThrow();
+  });
+
   test("a secret-shaped object KEY is scrubbed too, while structural keys are kept", () => {
     // A custom tool could key a map by data (a URL with credentials). The key persists in the
     // @3 record (even references mode) and is rendered, so it must pass the boundary as well.

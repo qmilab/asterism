@@ -167,6 +167,24 @@ function manyFactsTool(n: number): ScopedTool {
   };
 }
 
+/** A tool whose fact object is CYCLIC — to prove the recorder bounds it instead of crashing/dropping. */
+function cyclicFactTool(): ScopedTool {
+  const cyclic: Record<string, unknown> = { name: "loop" };
+  cyclic.self = cyclic;
+  return {
+    name: "cyclic",
+    description: "emits a fact with a cyclic object",
+    inputSchema: {},
+    execute: () => ({
+      output: "ok",
+      observation: {
+        schema: "asterism.x@1",
+        facts: [{ subject: "file:a", relation: "shape", object: cyclic }],
+      },
+    }),
+  };
+}
+
 /** A scoped tool that throws — to prove a throw still propagates through the wrapper. */
 function throwingTool(): ScopedTool {
   return {
@@ -532,6 +550,19 @@ test("a flood of facts is capped on disk and the drop is surfaced in the audit",
     // Only the capped facts were stored, so only that many render.
     const factLines = (report ?? "").split("\n").filter((l) => l.includes("exists = true"));
     expect(factLines).toHaveLength(64);
+  });
+});
+
+test("a cyclic fact object never crashes the recorder or drops the call — it is bounded and recorded", async () => {
+  await withWorkspace(async (dir) => {
+    await runTraced(dir, "agent-a", cyclicFactTool());
+    const onDisk = await readTreeText(traceRootIn(dir));
+    // The call IS recorded with its facts (not lost to a swallowed stack overflow), cycle marked.
+    expect(onDisk).toContain("asterism.tool_result@3");
+    expect(onDisk).toContain("[redacted:cycle]");
+    // And the trace reads back without throwing.
+    const report = await renderTrace(traceRootIn(dir), "agent-a");
+    expect(report).toContain("cyclic  [ok]");
   });
 });
 
