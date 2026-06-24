@@ -306,12 +306,12 @@ export interface ObservationRedactionResult {
  *
  *   - `subject` — always a string (a `file:`/`dir:`/`repo:` reference). Screened: a
  *     token-shaped path segment is exactly the kind of value the rules catch.
- *   - `object` — typed `unknown`, so STRING LEAVES are scrubbed wherever they appear: a
- *     top-level string, an array element, or a nested object value. The boundary must hold
- *     for ANY emitter, not just the shipped tools — a custom tool could nest a secret-shaped
- *     string inside a structured value, so the scrub recurses rather than checking only the
- *     top level. Numbers/booleans/null pass through (they cannot carry a secret token);
- *     object KEYS are structural identifiers, left as-is.
+ *   - `object` — typed `unknown`, so EVERY STRING is scrubbed wherever it appears: a
+ *     top-level string, an array element, a nested object value, AND a nested object key. The
+ *     boundary must hold for ANY emitter, not just the shipped tools — a custom tool could
+ *     nest a secret-shaped string as a value or as a map key, so the scrub recurses rather
+ *     than checking only the top level. Numbers/booleans/null pass through (they cannot carry
+ *     a secret token); a structural key matches no rule and is returned unchanged.
  *   - `relation` and `schema` — a tool-declared CLOSED vocabulary, not attacker
  *     content; left verbatim (scrubbing a controlled verb would corrupt it for no
  *     safety gain).
@@ -344,17 +344,19 @@ export function redactObservation(
     return r.content;
   };
 
-  // Recursively scrub every string LEAF of a fact's `object`, wherever it sits — a top-level
-  // string, an array element, or a nested object value. The boundary cannot assume the
-  // shipped tools' shapes: a custom tool could nest a secret-shaped string, so the scrub must
-  // reach it. Numbers/booleans/null are returned as-is (they carry no secret token); object
-  // keys are structural and left untouched.
+  // Recursively scrub every string in a fact's `object`, wherever it sits — a top-level
+  // string, an array element, a nested object VALUE, or a nested object KEY. The boundary
+  // cannot assume the shipped tools' shapes: a custom tool could nest a secret-shaped string
+  // as a value OR as a key (a map keyed by a URL with credentials), and an @3 fact is
+  // persisted + rendered even in references mode, so an unscrubbed key would leak. Keys are
+  // scrubbed too — a structural key (`origin`, `ahead`) matches no rule and is returned
+  // unchanged; only a secret-shaped one is replaced. Numbers/booleans/null pass through.
   const redactValue = (value: unknown): unknown => {
     if (typeof value === "string") return scrub(value);
     if (Array.isArray(value)) return value.map(redactValue);
     if (value !== null && typeof value === "object") {
       const out: Record<string, unknown> = {};
-      for (const [key, nested] of Object.entries(value)) out[key] = redactValue(nested);
+      for (const [key, nested] of Object.entries(value)) out[scrub(key)] = redactValue(nested);
       return out;
     }
     return value;

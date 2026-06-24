@@ -357,6 +357,27 @@ describe("redactObservation — structured facts pass the same boundary", () => 
     expect(summary.secretsRedacted).toBe(2); // both nested secrets counted
   });
 
+  test("a secret-shaped object KEY is scrubbed too, while structural keys are kept", () => {
+    // A custom tool could key a map by data (a URL with credentials). The key persists in the
+    // @3 record (even references mode) and is rendered, so it must pass the boundary as well.
+    const { observation, summary } = redactObservation({
+      schema: "asterism.custom@1",
+      facts: [
+        {
+          subject: "repo:.",
+          relation: "auth_by_remote",
+          object: { "https://user:p4ssw0rd@host/repo.git": "ok", origin: "clean" },
+        },
+      ],
+    });
+    const obj = observation.facts[0]!.object as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    expect(keys.some((k) => k.includes("p4ssw0rd"))).toBe(false); // the secret-shaped key is gone
+    expect(keys.some((k) => k.includes("[redacted:value]"))).toBe(true);
+    expect(obj.origin).toBe("clean"); // a structural key survives unchanged
+    expect(summary.secretsRedacted).toBe(1);
+  });
+
   test("an observation with no facts yields no facts and a zeroed summary", () => {
     const { observation, summary } = redactObservation({ schema: "asterism.empty@1", facts: [] });
     expect(observation.facts).toEqual([]);
