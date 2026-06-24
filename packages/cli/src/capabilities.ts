@@ -40,6 +40,7 @@ import {
   type Dirent,
   lstatSync,
   mkdirSync,
+  opendirSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -218,6 +219,38 @@ function nameMatcher(pattern: string): (name: string) => boolean {
   const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, "[^/]*");
   const re = new RegExp(`^${escaped}$`, "i");
   return (name) => re.test(name);
+}
+
+/**
+ * Read a directory's entries with a hard upper bound. `readdirSync` materializes (and then we
+ * sort) the WHOLE directory before any per-entry budget check could apply — so a single folder
+ * with far more entries than the scan budget would blow `find`'s advertised bound on memory and
+ * time. This streams with `opendirSync`/`readSync` instead, keeping at most `limit` entries and
+ * stopping the moment one more exists, so memory is O(limit), not O(directory size). Returns the
+ * kept entries sorted by name (deterministic, replay-stable) and `more = true` when the directory
+ * held more than `limit` — the caller marks the walk truncated, exactly as for the depth/scan
+ * caps. When the directory fits within `limit`, every entry is read and sorted, so a COMPLETE
+ * result stays fully ordered; only an already-incomplete (truncated) one sees an FS-order subset.
+ */
+function readDirBounded(absDir: string, limit: number): { entries: Dirent[]; more: boolean } {
+  const dir = opendirSync(absDir);
+  try {
+    const entries: Dirent[] = [];
+    let more = false;
+    for (;;) {
+      const entry = dir.readSync();
+      if (entry === null) break;
+      if (entries.length >= limit) {
+        more = true;
+        break;
+      }
+      entries.push(entry);
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return { entries, more };
+  } finally {
+    dir.closeSync();
+  }
 }
 
 /**
@@ -541,10 +574,11 @@ export function workspaceCapabilities(
         // Validate the search ROOT loudly: a missing, non-directory, or unreadable root is a
         // failure with no observation — exactly like list_dir / stat. A typoed root must NOT
         // look like a valid empty search. Only DEEPER subtrees are skipped-on-error in `walk`
-        // below (a single unreadable subdirectory should not abort the whole search).
-        let rootEntries: Dirent[];
+        // below (a single unreadable subdirectory should not abort the whole search). The bounded
+        // read also caps how much of a huge root we materialize (see `readDirBounded`).
+        let root: { entries: Dirent[]; more: boolean };
         try {
-          rootEntries = readdirSync(c.path, { withFileTypes: true });
+          root = readDirBounded(c.path, maxFindNodes);
         } catch (err) {
           return failure(`Could not search '${base}': ${failureReason(err)}`);
         }
@@ -552,9 +586,8 @@ export function workspaceCapabilities(
 
         const found: { rel: string; kind: "file" | "dir" }[] = [];
         let visited = 0;
-        let truncated = false;
+        let truncated = root.more; // the root held more entries than the scan budget could read
         const walk = (absDir: string, entries: Dirent[], relDir: string, depth: number): void => {
-          entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
           for (const entry of entries) {
             if (visited >= maxFindNodes) {
               truncated = true;
@@ -570,27 +603,30 @@ export function workspaceCapabilities(
             // truncated — otherwise the count fact below would be recorded as an authoritative
             // total / absence it cannot actually back.
             if (entry.isDirectory()) {
-              // Check the budget BEFORE descending: once `visited` has reached the cap, descending
-              // would `readdirSync` and sort an entire subtree we have no budget left to examine —
-              // unbounded work for nothing. The depth limit is the same kind of stop. Either way
-              // the walk is now incomplete.
+              // Check the budget BEFORE descending: once `visited` has reached the cap, even the
+              // bounded read+sort of a subtree we have no budget left to examine is wasted. The
+              // depth limit is the same kind of stop. Either way the walk is now incomplete.
               if (depth >= maxFindDepth || visited >= maxFindNodes) {
                 truncated = true;
               } else {
                 const childAbs = resolvePath(absDir, entry.name);
-                let sub: Dirent[];
+                // Read at most the remaining budget — a child folder bigger than that can't be
+                // fully scanned anyway, and `readDirBounded` keeps memory O(remaining), never
+                // O(child size). `more` means it held more than we could scan ⇒ incomplete.
+                let child: { entries: Dirent[]; more: boolean };
                 try {
-                  sub = readdirSync(childAbs, { withFileTypes: true });
+                  child = readDirBounded(childAbs, maxFindNodes - visited);
                 } catch {
                   truncated = true; // unreadable subtree → results incomplete
                   continue;
                 }
-                walk(childAbs, sub, rel, depth + 1);
+                if (child.more) truncated = true;
+                walk(childAbs, child.entries, rel, depth + 1);
               }
             }
           }
         };
-        walk(c.path, rootEntries, c.rel, 0);
+        walk(c.path, root.entries, c.rel, 0);
 
         // A TRUNCATED walk has only a partial view, so it must not assert a count: `found.length`
         // is "matches seen before the walk stopped short" (a scan cap, the depth limit, or an

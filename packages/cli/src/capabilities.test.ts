@@ -422,4 +422,19 @@ describe("read-only tools emit structured observations", () => {
     expect(result.observation!.facts.some((f) => f.subject === "file:bigdir/inside.md")).toBe(false);
     expect(result.output).toContain("may be incomplete");
   });
+
+  test("find scans at most the budget from a single large directory (bounded read)", async () => {
+    // Eight sibling files, budget 3: the bounded read stops after 3, so only 3 are ever scanned
+    // — the directory is never fully materialized before the cap applies. The walk is truncated.
+    for (let i = 0; i < 8; i++) {
+      await run("write_file", { path: `f${i}.txt`, content: "x" });
+    }
+    const cappedFind = workspaceCapabilities(workspace, { maxFindNodes: 3 }).find(
+      (c) => c.tool.name === "find",
+    )!.tool;
+    const result = await cappedFind.execute({ args: { pattern: "*.txt" } });
+    expect(result.observation!.facts.filter((f) => f.relation === "exists")).toHaveLength(3);
+    expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
+    expect(result.output).toContain("may be incomplete");
+  });
 });
