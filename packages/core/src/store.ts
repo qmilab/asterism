@@ -13,7 +13,12 @@ import { SkillRepository } from "./repositories/skills.js";
 import type { CreateSkillInput } from "./repositories/skills.js";
 import { ObjectiveRepository } from "./repositories/objectives.js";
 import type { ObjectiveQuery } from "./repositories/objectives.js";
-import { WorldFactRepository, DEFAULT_WORLD_FACT_CAP, WorldFactCapError } from "./repositories/world-facts.js";
+import {
+  WorldFactRepository,
+  DEFAULT_WORLD_FACT_CAP,
+  WorldFactCapError,
+  WorldFactConflictError,
+} from "./repositories/world-facts.js";
 import { CredentialRepository } from "./repositories/credentials.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
@@ -145,6 +150,16 @@ export class AsterismStore {
     // must be definitively framable (`accepted`) or not, never ambiguous.
     if (!this.columnExists("objectives", "review_state")) {
       this.driver.exec(`ALTER TABLE objectives ADD COLUMN review_state TEXT NOT NULL DEFAULT 'accepted'`);
+    }
+    // The world-fact review state joined `world_facts` after slice 3 first shipped the
+    // table (#86: a future derived writer PROPOSES facts, gated by a review state). Add it
+    // idempotently with DEFAULT 'accepted' — every pre-#86 world-fact was SELF-written,
+    // hence implicitly ratified, so it stays framable. A constant default (not NULL) is
+    // required because this column gates framing: every world-fact must be definitively
+    // framable (`accepted`) or not, never ambiguous. The first `world_facts` ALTER (slice 3
+    // noted "new table → no migrate ALTER needed; only later columns need that").
+    if (!this.columnExists("world_facts", "review_state")) {
+      this.driver.exec(`ALTER TABLE world_facts ADD COLUMN review_state TEXT NOT NULL DEFAULT 'accepted'`);
     }
   }
 
@@ -1036,7 +1051,7 @@ export class AsterismStore {
       this.emit(
         agentId,
         "world_fact.recorded",
-        { worldFactId: fact.id, superseded: existing !== undefined },
+        { worldFactId: fact.id, superseded: existing !== undefined, reviewState: fact.reviewState },
         runId,
       );
       return fact;
@@ -1067,9 +1082,139 @@ export class AsterismStore {
     });
   }
 
-  /** An agent's world-facts for a surface to render (and for run framing), oldest-first. */
+  /** An agent's world-facts for a surface to render (and for inspect/history), oldest-first. */
   listWorldFacts(agentId: string): WorldFact[] {
     return this.worldFacts.list(agentId);
+  }
+
+  /**
+   * PROPOSE a world-fact for human review — the safe entry point a future derived-fact
+   * producer (#84 T3) and this slice's tests use to add a `proposed` note. NOT wired to any
+   * shipped surface in #86: the agent's `record_note` and the operator's `notes set` write
+   * `accepted` self-notes through {@link recordWorldFact}; this is the parallel path for a
+   * writer whose output must be ratified before it frames.
+   *
+   * The governance discipline of {@link recordWorldFact}, with one addition. Firewall FIRST
+   * (screen subject + value + the rendered line, OUTSIDE the transaction so a blocked write's
+   * `world_fact.blocked` audit survives the rollback). Then, under one transaction:
+   *   1. **Refuse to clobber an `accepted` subject.** One row per subject carries one review
+   *      state, so a `proposed` write to a subject that already holds an `accepted` row would
+   *      upsert-destroy that ratified note and drop it from framing — a governance regression.
+   *      So it throws {@link WorldFactConflictError} instead (no clobber). A still-`proposed`
+   *      row for the subject is fine to supersede (re-proposing). The clean coexistence /
+   *      supersede-on-accept policy is deferred to T3 (world-model.md §11.1).
+   *   2. **Cap** a NEW subject (superseding a proposed one is free), rejecting loudly with
+   *      {@link WorldFactCapError} at cap — a resource bound, not audited.
+   *   3. Upsert with `review_state = 'proposed'` and emit `world_fact.recorded`
+   *      (`reviewState: "proposed"` in the payload, so the audit shows it was QUEUED, not
+   *      declared — the `objective.added` analogue). References only — never subject/value.
+   */
+  proposeWorldFact(agentId: string, subject: string, value: string, runId?: string): WorldFact {
+    const trimmedSubject = subject.trim();
+    const trimmedValue = value.trim();
+    try {
+      assertMemorySafe(trimmedSubject);
+      assertMemorySafe(trimmedValue);
+      assertMemorySafe(worldFactFramingText(trimmedSubject, trimmedValue));
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        this.emit(agentId, "world_fact.blocked", { findings: err.findings }, runId);
+      }
+      throw err;
+    }
+    return this.driver.transaction(() => {
+      const existing = this.worldFacts.get(agentId, trimmedSubject);
+      // A proposed write may supersede a still-PROPOSED note for the same subject (re-propose),
+      // but must never clobber an ACCEPTED one — that would drop a ratified note from framing
+      // on an unreviewed write. Refuse loudly; T3 owns the supersession policy.
+      if (existing !== undefined && existing.reviewState === "accepted") {
+        throw new WorldFactConflictError(trimmedSubject);
+      }
+      if (existing === undefined && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
+        throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
+      }
+      const fact = this.worldFacts.upsert(agentId, trimmedSubject, trimmedValue, "proposed");
+      this.emit(
+        agentId,
+        "world_fact.recorded",
+        { worldFactId: fact.id, superseded: existing !== undefined, reviewState: fact.reviewState },
+        runId,
+      );
+      return fact;
+    });
+  }
+
+  /**
+   * Accept a PROPOSED world-fact — the human's ratification of a queued note — with a
+   * firewall RE-SCREEN on the way in (the issue's explicit requirement). Reads the proposed
+   * row, re-screens its actual stored `subject` + `value` + rendered line; a hit emits
+   * `world_fact.blocked` and rethrows, so a note that passed the write screen but trips a
+   * tightened rule is never accepted into framing. Otherwise CAS-settles `proposed → accepted`
+   * ({@link WorldFactRepository.settleProposed}) and records `world_fact.reviewed`
+   * (`{ worldFactId, from: "proposed", to: "accepted" }`, references only — never the
+   * content). The re-screen lives kernel-side, so every accept path inherits it (stronger
+   * than memory's CLI-side re-screen). The CAS is the race guard — two surfaces accepting one
+   * proposal cannot both win. Returns the accepted row to the winner, or undefined to a caller
+   * that lost the race or named an unknown / already-settled / cross-agent id.
+   *
+   * Not wrapped in a transaction: like {@link recordWorldFact}, a firewall block must commit
+   * its `world_fact.blocked` audit independently of the rollback that the rethrow would cause.
+   * The settle + its `world_fact.reviewed` event run in their own transaction below.
+   */
+  acceptProposedWorldFact(agentId: string, id: string): WorldFact | undefined {
+    const proposed = this.worldFacts.getById(agentId, id);
+    if (!proposed || proposed.reviewState !== "proposed") return undefined;
+    try {
+      assertMemorySafe(proposed.subject);
+      assertMemorySafe(proposed.value);
+      assertMemorySafe(worldFactFramingText(proposed.subject, proposed.value));
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        this.emit(agentId, "world_fact.blocked", { findings: err.findings });
+      }
+      throw err;
+    }
+    return this.driver.transaction(() => {
+      // Pin the settle to the exact value just re-screened. A world-fact is an upsert, so a
+      // concurrent re-propose of the same still-`proposed` subject can rewrite this row in
+      // place (same id, still `proposed`, new value) between the read+re-screen above and
+      // this CAS — a review_state-only CAS would ratify content the operator never saw. The
+      // `expectedValue` predicate makes the accept win only while the content is unchanged;
+      // a churn drops to undefined and the operator re-reviews the new value.
+      const fact = this.worldFacts.settleProposed(agentId, id, "accepted", proposed.value);
+      if (fact) {
+        this.emit(agentId, "world_fact.reviewed", {
+          worldFactId: fact.id,
+          from: "proposed",
+          to: fact.reviewState,
+        });
+      }
+      return fact;
+    });
+  }
+
+  /**
+   * Reject a PROPOSED world-fact — the human declined a queued note — via a single
+   * compare-and-set ({@link WorldFactRepository.settleProposed}) and record the transition as
+   * `world_fact.reviewed` (`{ worldFactId, from: "proposed", to: "rejected" }`, references
+   * only). No firewall screen — a rejected note frames nothing. The CAS is the race guard.
+   * The mirror of {@link rejectProposedMemory} / {@link settleProposedObjective}'s reject leg:
+   * the note stays for history but never frames. Returns the rejected row to the winner, or
+   * undefined to a caller that lost the race or named an unknown / already-settled /
+   * cross-agent id, in which case nothing changes and nothing is logged.
+   */
+  rejectProposedWorldFact(agentId: string, id: string): WorldFact | undefined {
+    return this.driver.transaction(() => {
+      const fact = this.worldFacts.settleProposed(agentId, id, "rejected");
+      if (fact) {
+        this.emit(agentId, "world_fact.reviewed", {
+          worldFactId: fact.id,
+          from: "proposed",
+          to: fact.reviewState,
+        });
+      }
+      return fact;
+    });
   }
 
   /** Attach a markdown skill and record `skill.attached` (name + workspace path). */

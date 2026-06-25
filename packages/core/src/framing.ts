@@ -135,12 +135,15 @@ export function buildSystemPrompt(ctx: FramingContext): string {
 
   // Working notes — the agent's OWN running record of the current situation, placed
   // LAST and clearly labelled as unverified. This is the one framing block the agent
-  // wrote itself, without human review (unlike memory, which is ratified), so the label
-  // is load-bearing: a reader (human or model) must never mistake a self-asserted note
-  // for a verified fact (the §4 honesty constraint; CLAUDE.md golden rule 7). Input
-  // order is preserved (the caller passes them oldest-first); the section is omitted
-  // when there are none.
-  const worldFacts = ctx.worldFacts ?? [];
+  // wrote itself, without per-write human review (unlike memory, which is ratified), so the
+  // label is load-bearing: a reader (human or model) must never mistake a self-asserted note
+  // for a verified fact (the §4 honesty constraint; CLAUDE.md golden rule 7). Only `accepted`
+  // notes frame — a derived PROPOSED note (#84 T3) is inert until ratified, a rejected one
+  // never frames — re-filtered here defensively (the same belt-and-suspenders the objective
+  // filter uses: the framing layer never trusts the caller to have filtered, even though
+  // `run.ts` already reads `listAccepted`). Input order is preserved (the caller passes them
+  // oldest-first); the section is omitted when none are accepted.
+  const worldFacts = (ctx.worldFacts ?? []).filter((f) => f.reviewState === "accepted");
   if (worldFacts.length > 0) {
     const lines = worldFacts.map((f) => `- ${worldFactFramingText(f.subject, f.value)}`);
     sections.push(

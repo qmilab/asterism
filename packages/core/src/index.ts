@@ -214,7 +214,13 @@ export { SkillRepository } from "./repositories/skills.js";
 export type { CreateSkillInput } from "./repositories/skills.js";
 export { ObjectiveRepository } from "./repositories/objectives.js";
 export type { CreateObjectiveInput, ObjectiveQuery } from "./repositories/objectives.js";
-export { WorldFactRepository, DEFAULT_WORLD_FACT_CAP, WorldFactCapError } from "./repositories/world-facts.js";
+export {
+  WorldFactRepository,
+  DEFAULT_WORLD_FACT_CAP,
+  WorldFactCapError,
+  WorldFactConflictError,
+} from "./repositories/world-facts.js";
+export type { WorldFactQuery } from "./repositories/world-facts.js";
 export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
 export { CapabilityStandingRepository } from "./repositories/capability-standing.js";

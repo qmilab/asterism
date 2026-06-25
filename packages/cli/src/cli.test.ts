@@ -3032,6 +3032,69 @@ test("notes commands fail clearly for an unknown agent", async () => {
   expect(await runCli(["notes", "inspect", "ghost"], h.io)).toBe(1);
   expect(await runCli(["notes", "set", "ghost", "s", "v"], h.io)).toBe(1);
   expect(await runCli(["notes", "clear", "ghost", "s"], h.io)).toBe(1);
+  expect(await runCli(["notes", "accept", "ghost", "s"], h.io)).toBe(1);
+  expect(await runCli(["notes", "reject", "ghost", "s"], h.io)).toBe(1);
+});
+
+/** Plant a `proposed` working note for an agent (the producer is #84 T3; tests seed it). */
+function proposeNote(h: Harness, agentName: string, subject: string, value: string): void {
+  const store = openHomeStore(h);
+  try {
+    store.proposeWorldFact(agentNamed(store, agentName).id, subject, value);
+  } finally {
+    store.close();
+  }
+}
+
+test("notes inspect flags a note awaiting review; accept makes it frame", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  proposeNote(h, "personal", "deploy version", "v0.2.1");
+
+  // Inspect surfaces the note as awaiting review — and it does NOT yet frame.
+  let listing = await capture(["notes", "inspect", "personal"], h.io);
+  expect(listing).toContain("deploy version: v0.2.1");
+  expect(listing.toLowerCase()).toContain("awaiting your review");
+
+  // Accept it — reported, and now it is plain accepted (no tag).
+  expect(await runCli(["notes", "accept", "personal", "deploy version"], h.io)).toBe(0);
+  listing = await capture(["notes", "inspect", "personal"], h.io);
+  expect(listing).toContain("deploy version: v0.2.1");
+  expect(listing.toLowerCase()).not.toContain("awaiting your review");
+});
+
+test("notes reject leaves a note that never frames", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  proposeNote(h, "personal", "build", "green");
+
+  expect(await runCli(["notes", "reject", "personal", "build"], h.io)).toBe(0);
+  const listing = await capture(["notes", "inspect", "personal"], h.io);
+  // Kept for history (still listed), but flagged rejected — never framing.
+  expect(listing).toContain("build: green");
+  expect(listing.toLowerCase()).toContain("rejected");
+});
+
+test("notes accept/reject on a self-written (accepted) note is reported, not applied", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["notes", "set", "personal", "deploy", "v0.2.1"], h.io); // accepted
+
+  // It is not awaiting review — accept and reject both decline plainly.
+  expect(await runCli(["notes", "accept", "personal", "deploy"], h.io)).toBe(1);
+  expect(h.err.join("\n").toLowerCase()).toContain("not awaiting review");
+  expect(await runCli(["notes", "reject", "personal", "deploy"], h.io)).toBe(1);
+});
+
+test("notes accept on an unknown subject is reported", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  expect(await runCli(["notes", "accept", "personal", "nope"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("No working note");
 });
 
 test("objective done on an unknown id is reported, not silently ignored", async () => {

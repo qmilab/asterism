@@ -416,9 +416,11 @@ async function runAndPersist(
   const objectives = store.objectives.listActiveAccepted(agent.id);
   // The agent's working notes — its own running record of the current situation, framed
   // as standing context on every run (a scoped read in the same place objectives/skills
-  // are resolved, no new seam). Framed LAST and clearly labelled as unverified, so a
-  // self-written note is never mistaken for a ratified memory.
-  const worldFacts = store.worldFacts.list(agent.id);
+  // are resolved, no new seam). Only the `accepted` ones (the framing set); a derived,
+  // reflection-style PROPOSED note (#84 T3) is inert until a human accepts it, exactly as a
+  // proposed objective is. Framed LAST and clearly labelled as unverified, so a self-written
+  // note is never mistaken for a ratified memory.
+  const worldFacts = store.worldFacts.listAccepted(agent.id);
   // Everything that can fail while turning the agent's identity + task into an
   // executed outcome — recall, framing, and the substrate run — sits INSIDE one
   // guard, so a throw anywhere drives the run to a terminal state instead of
