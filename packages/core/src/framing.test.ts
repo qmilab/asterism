@@ -52,6 +52,7 @@ function worldFact(partial: Partial<WorldFact>): WorldFact {
     agentId: agentFixture.id,
     subject: "subject",
     value: "value",
+    reviewState: "accepted",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...partial,
@@ -230,6 +231,30 @@ describe("buildSystemPrompt — working notes (world-facts)", () => {
       ],
     });
     expect(prompt.indexOf("first-subject")).toBeLessThan(prompt.indexOf("second-subject"));
+  });
+
+  test("only ACCEPTED notes frame — a proposed or rejected note is inert (defensive filter)", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      worldFacts: [
+        worldFact({ id: "1", subject: "ACCEPTED-NOTE", value: "v", reviewState: "accepted" }),
+        worldFact({ id: "2", subject: "PROPOSED-NOTE", value: "v", reviewState: "proposed" }),
+        worldFact({ id: "3", subject: "REJECTED-NOTE", value: "v", reviewState: "rejected" }),
+      ],
+    });
+    // The framing layer re-filters to `accepted` even though `run.ts` reads `listAccepted` —
+    // a proposed note never shapes a run until ratified, a rejected one never frames.
+    expect(prompt).toContain("ACCEPTED-NOTE");
+    expect(prompt).not.toContain("PROPOSED-NOTE");
+    expect(prompt).not.toContain("REJECTED-NOTE");
+  });
+
+  test("the section is omitted when every note is unaccepted (nothing framable)", () => {
+    const prompt = buildSystemPrompt({
+      agent: agentFixture,
+      worldFacts: [worldFact({ id: "1", subject: "PROPOSED-NOTE", value: "v", reviewState: "proposed" })],
+    });
+    expect(prompt).not.toContain("Your working notes");
   });
 });
 

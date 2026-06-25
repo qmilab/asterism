@@ -1080,7 +1080,7 @@ function cmdObjectiveStatus(
 // operator content).
 
 const NOTES_USAGE =
-  'Usage: asterism notes <inspect|set|clear>  ·  inspect <agent>  ·  set <agent> "<subject>" "<value>"  ·  clear <agent> "<subject>"';
+  'Usage: asterism notes <inspect|set|clear|accept|reject>  ·  inspect <agent>  ·  set <agent> "<subject>" "<value>"  ·  clear <agent> "<subject>"  ·  accept|reject <agent> "<subject>"';
 
 function cmdNotes(args: string[], io: CliIO): Promise<number> {
   const sub = args[0];
@@ -1100,6 +1100,8 @@ function cmdNotes(args: string[], io: CliIO): Promise<number> {
   if (sub === "inspect") return cmdNotesInspect(rest, io);
   if (sub === "set") return cmdNotesSet(rest, io);
   if (sub === "clear") return cmdNotesClear(rest, io);
+  if (sub === "accept") return cmdNotesReview(rest, io, "accepted");
+  if (sub === "reject") return cmdNotesReview(rest, io, "rejected");
   io.err(`Unknown subcommand: notes ${sub}`);
   io.out(COMMAND_HELP.notes!);
   return Promise.resolve(1);
@@ -1168,6 +1170,84 @@ function cmdNotesSet(args: string[], io: CliIO): Promise<number> {
         io.err(
           `${name}'s working notes are full (${err.cap} max). Clear one with ` +
             `\`asterism notes clear ${name} "<subject>"\` before adding a new subject.`,
+        );
+        return 1;
+      }
+      throw err;
+    }
+  });
+}
+
+/**
+ * `asterism notes accept|reject <agent> "<subject>"` — the operator's review of a working
+ * note awaiting ratification. A self-written note (the agent's `record_note`, the operator's
+ * `notes set`) is already `accepted` and frames runs immediately; a note that arrived
+ * `proposed` (a future derived writer) is INERT until the operator accepts it here. Keyed by
+ * the trimmed subject — the same handle `notes set`/`clear` use, unambiguous because one
+ * subject maps to one note. Accept re-screens the note through the firewall on the way in
+ * (kernel-side), so a now-poisoned note is refused, never ratified; reject leaves it for
+ * history but never framing. Reviewing a note is the agent's own scoped state — never
+ * destructive, never cross-agent.
+ */
+function cmdNotesReview(
+  args: string[],
+  io: CliIO,
+  verdict: "accepted" | "rejected",
+): Promise<number> {
+  if (notesHelp(args, io)) return Promise.resolve(0);
+  const name = args[0];
+  const subject = args.slice(1).join(" ").trim();
+  const action = verdict === "accepted" ? "accept" : "reject";
+  if (!name || !subject) {
+    io.err(`Usage: asterism notes ${action} <agent> "<subject>"`);
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    // Resolve the subject to a note, scoped to this agent. Only a `proposed` note is
+    // reviewable: a self-written `accepted` one already frames (nothing to ratify), a
+    // `rejected` one was already declined. Tell those apart plainly.
+    const fact = store.worldFacts.get(agent.id, subject);
+    if (!fact) {
+      io.err(`No working note named "${subject}" for ${name}.`);
+      return 1;
+    }
+    if (fact.reviewState !== "proposed") {
+      io.err(
+        `Working note "${subject}" for ${name} is not awaiting review (it is ${fact.reviewState}).`,
+      );
+      return 1;
+    }
+    try {
+      // Pass the row the operator JUST resolved — the store screens and pins the settle to
+      // THIS value, so a concurrent re-propose that churned the note since the read above
+      // cannot ratify/reject content the operator never saw (it drops to undefined instead).
+      const settled =
+        verdict === "accepted"
+          ? store.acceptProposedWorldFact(agent.id, fact)
+          : store.rejectProposedWorldFact(agent.id, fact);
+      if (!settled) {
+        // The CAS lost — the note was settled by another reviewer, or its value changed
+        // since the read above. Either way, report it rather than claim a change that did
+        // not happen; the operator can re-inspect and try again.
+        io.err(`Working note "${subject}" for ${name} changed or was already reviewed — run \`asterism notes inspect ${name}\` and try again.`);
+        return 1;
+      }
+      io.out(
+        verdict === "accepted"
+          ? `Accepted working note "${subject}" for ${name}; it now frames runs.`
+          : `Rejected working note "${subject}" for ${name}; it will not frame runs.`,
+      );
+      return 0;
+    } catch (err) {
+      // Accept re-screens through the firewall; a note that trips a tightened rule is
+      // refused (and the block already audited), never ratified into framing.
+      if (err instanceof MemoryFirewallError) {
+        io.err(
+          `That note can't be accepted — it trips the safety screen (${err.findings
+            .map((f) => `${f.category}:${f.rule}`)
+            .join(", ")}).`,
         );
         return 1;
       }

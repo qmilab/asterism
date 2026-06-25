@@ -163,6 +163,8 @@ another agent.`,
   notes: `asterism notes inspect <agent>
 asterism notes set     <agent> "<subject>" "<value>"
 asterism notes clear   <agent> "<subject>"
+asterism notes accept  <agent> "<subject>"
+asterism notes reject  <agent> "<subject>"
 
 See and manage an agent's working notes — its own running record of the current
 situation, like "deploy version: v0.2.1" or "migration: 60% done". The agent writes
@@ -174,11 +176,15 @@ and framed as such — never as facts you reviewed (unlike its memory).
   notes set <agent> "<subject>" "<value>"
                                        Set or correct a note yourself.
   notes clear <agent> "<subject>"      Remove a note.
+  notes accept <agent> "<subject>"     Approve a note awaiting your review, so it frames runs.
+  notes reject <agent> "<subject>"     Decline a note awaiting your review (it never frames).
 
-A note is the agent's own scoped state — writing or clearing one is never destructive,
-and never crosses to another agent. The agent keeps a bounded number of notes; when
-full, it must clear one before recording a new subject. Notes you set are screened for
-safety exactly like the agent's own.`,
+A note is the agent's own scoped state — writing, clearing, or reviewing one is never
+destructive, and never crosses to another agent. Notes you set yourself take effect
+immediately. Some notes can arrive marked awaiting your review; until you accept one it
+does not frame the agent's runs. The agent keeps a bounded number of notes; when full,
+it must clear one before recording a new subject. Notes you set are screened for safety
+exactly like the agent's own.`,
 
   run: `asterism run <agent> "<task>"
 

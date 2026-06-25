@@ -113,6 +113,7 @@ export const EVENT_TYPES = [
   "world_fact.recorded",
   "world_fact.blocked",
   "world_fact.cleared",
+  "world_fact.reviewed",
   "skill.attached",
   "credential.added",
   "credential.rotated",
@@ -264,6 +265,18 @@ export interface WorldFact {
   subject: string;
   /** The current value; a re-write of the same subject REPLACES it. */
   value: string;
+  /**
+   * Ratification state, reusing memory's {@link ReviewState}. A SELF-written note (the
+   * agent's `record_note`, the operator's `notes set`) is `accepted` — framed immediately,
+   * byte-for-byte today's behaviour. A future DERIVED writer (#84 T3) PROPOSES a `proposed`
+   * one that is INERT — framing requires `accepted`, so a proposal never shapes a run until
+   * a human accepts it (accept → `accepted`, reject → `rejected`). One row per subject
+   * carries one review state (the `UNIQUE(agentId, subject)` constraint is unchanged), so
+   * `proposed` and `accepted` never coexist for a subject. The same property that makes
+   * memory's accept/reject meaningful and keeps an unreviewed proposal from acting as a
+   * backdoor injection.
+   */
+  reviewState: ReviewState;
   createdAt: string;
   updatedAt: string;
 }

@@ -167,7 +167,17 @@ export function formatWorldFactList(
     "",
   ];
   for (const f of facts) {
-    lines.push(`• ${f.subject}: ${f.value}`);
+    // Annotate anything not already accepted so an operator sees the review queue. An
+    // `accepted` note (the self-written default) frames runs and reads as today — no tag.
+    // A `proposed` note arrived for review and does NOT frame until accepted; a `rejected`
+    // one was declined. The tag keeps the honesty the working-notes label is there for.
+    const tag =
+      f.reviewState === "proposed"
+        ? "  ⟳ awaiting your review — not yet framing runs"
+        : f.reviewState === "rejected"
+          ? "  ✗ rejected — not framing runs"
+          : "";
+    lines.push(`• ${f.subject}: ${f.value}${tag}`);
     lines.push(`  updated ${f.updatedAt}`);
   }
   return lines.join("\n").trimEnd();

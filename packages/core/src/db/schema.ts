@@ -94,16 +94,28 @@ CREATE INDEX IF NOT EXISTS idx_objectives_agent ON objectives(agent_id);
 -- own content, scoped by agent_id like memory.content -- and, because they frame runs,
 -- firewall-screened on the write path exactly like memory. This is the one framing
 -- input the agent writes without per-write human review, so the kernel caps the row
--- count per agent and frames these as the agent's OWN UNVERIFIED notes. A new table
--- (added after slice 1/2 shipped objectives), so a fresh open picks it up via this
--- CREATE and no store.migrate() ALTER is needed (only later COLUMNS need that).
+-- count per agent and frames these as the agent's OWN UNVERIFIED notes.
+--
+-- review_state ('proposed' | 'accepted' | 'rejected', the canonical ReviewState memory
+-- uses) governs ratification, exactly as on objectives: a SELF-written note (the agent's
+-- record_note, the operator's notes set) is 'accepted' (the upsert default); a future
+-- DERIVED writer (#84 T3, harvesting current-state facts from a run's observations)
+-- PROPOSES a 'proposed' one that is INERT until a human accepts it. ONLY 'accepted'
+-- frames a run -- a proposed note never shapes behaviour until ratified, a rejected one
+-- never frames. One row per subject carries one review_state (the UNIQUE constraint is
+-- unchanged), so proposed and accepted can never coexist for one subject; the proposed
+-- producer refuses to clobber an accepted subject (see store.proposeWorldFact). A fresh
+-- open picks the column up via this CREATE; an older database that already has the
+-- (slice-3) table gets it via the additive ALTER in store.migrate() with DEFAULT
+-- 'accepted' (every pre-#86 world-fact was self-written, hence implicitly ratified).
 CREATE TABLE IF NOT EXISTS world_facts (
-  id          TEXT PRIMARY KEY,
-  agent_id    TEXT NOT NULL REFERENCES agents(id),
-  subject     TEXT NOT NULL,
-  value       TEXT NOT NULL,
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL,
+  id           TEXT PRIMARY KEY,
+  agent_id     TEXT NOT NULL REFERENCES agents(id),
+  subject      TEXT NOT NULL,
+  value        TEXT NOT NULL,
+  review_state TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
   UNIQUE(agent_id, subject)
 );
 CREATE INDEX IF NOT EXISTS idx_world_facts_agent ON world_facts(agent_id);
