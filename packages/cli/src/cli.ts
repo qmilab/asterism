@@ -1220,14 +1220,18 @@ function cmdNotesReview(
       return 1;
     }
     try {
+      // Pass the row the operator JUST resolved — the store screens and pins the settle to
+      // THIS value, so a concurrent re-propose that churned the note since the read above
+      // cannot ratify/reject content the operator never saw (it drops to undefined instead).
       const settled =
         verdict === "accepted"
-          ? store.acceptProposedWorldFact(agent.id, fact.id)
-          : store.rejectProposedWorldFact(agent.id, fact.id);
+          ? store.acceptProposedWorldFact(agent.id, fact)
+          : store.rejectProposedWorldFact(agent.id, fact);
       if (!settled) {
-        // The CAS lost — another reviewer settled this note between the read and the
-        // settle. Report it rather than claim a change that did not happen.
-        io.err(`Working note "${subject}" for ${name} was already reviewed.`);
+        // The CAS lost — the note was settled by another reviewer, or its value changed
+        // since the read above. Either way, report it rather than claim a change that did
+        // not happen; the operator can re-inspect and try again.
+        io.err(`Working note "${subject}" for ${name} changed or was already reviewed — run \`asterism notes inspect ${name}\` and try again.`);
         return 1;
       }
       io.out(

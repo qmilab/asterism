@@ -1146,28 +1146,34 @@ export class AsterismStore {
 
   /**
    * Accept a PROPOSED world-fact — the human's ratification of a queued note — with a
-   * firewall RE-SCREEN on the way in (the issue's explicit requirement). Reads the proposed
-   * row, re-screens its actual stored `subject` + `value` + rendered line; a hit emits
-   * `world_fact.blocked` and rethrows, so a note that passed the write screen but trips a
-   * tightened rule is never accepted into framing. Otherwise CAS-settles `proposed → accepted`
-   * ({@link WorldFactRepository.settleProposed}) and records `world_fact.reviewed`
-   * (`{ worldFactId, from: "proposed", to: "accepted" }`, references only — never the
-   * content). The re-screen lives kernel-side, so every accept path inherits it (stronger
-   * than memory's CLI-side re-screen). The CAS is the race guard — two surfaces accepting one
-   * proposal cannot both win. Returns the accepted row to the winner, or undefined to a caller
-   * that lost the race or named an unknown / already-settled / cross-agent id.
+   * firewall RE-SCREEN on the way in (the issue's explicit requirement). Takes the
+   * `reviewed` row the OPERATOR resolved (e.g. the row the CLI read and the operator saw in
+   * `notes inspect`), NOT a fresh store read — so the value ratified is exactly the value the
+   * human reviewed. This matters because a world-fact is an UPSERT: a concurrent re-propose of
+   * the same still-`proposed` subject rewrites that row IN PLACE (same id, still `proposed`,
+   * new value), so re-reading here would re-screen and ratify content the operator never saw.
+   * Instead this re-screens `reviewed.subject` + `reviewed.value` + the rendered line (a hit
+   * emits `world_fact.blocked` and rethrows — a note that passed the write screen but trips a
+   * tightened rule is never accepted), then CAS-settles `proposed → accepted` PINNED to
+   * `reviewed.value` ({@link WorldFactRepository.settleProposed}): the accept wins only while
+   * the row still holds the reviewed content, so a churn drops to undefined and the operator
+   * re-reviews. (`subject` is immutable for a given id — the upsert conflicts on subject — so
+   * pinning the value pins the whole screened rendered line.) Records `world_fact.reviewed`
+   * (`{ worldFactId, from: "proposed", to: "accepted" }`, references only). The re-screen lives
+   * kernel-side, so every accept path inherits it. The CAS is also the multi-drain race guard —
+   * two surfaces accepting one proposal cannot both win. Returns the accepted row to the winner,
+   * or undefined to a caller that lost the race, whose reviewed value no longer matches, or
+   * named an unknown / already-settled / cross-agent row.
    *
    * Not wrapped in a transaction: like {@link recordWorldFact}, a firewall block must commit
    * its `world_fact.blocked` audit independently of the rollback that the rethrow would cause.
    * The settle + its `world_fact.reviewed` event run in their own transaction below.
    */
-  acceptProposedWorldFact(agentId: string, id: string): WorldFact | undefined {
-    const proposed = this.worldFacts.getById(agentId, id);
-    if (!proposed || proposed.reviewState !== "proposed") return undefined;
+  acceptProposedWorldFact(agentId: string, reviewed: WorldFact): WorldFact | undefined {
     try {
-      assertMemorySafe(proposed.subject);
-      assertMemorySafe(proposed.value);
-      assertMemorySafe(worldFactFramingText(proposed.subject, proposed.value));
+      assertMemorySafe(reviewed.subject);
+      assertMemorySafe(reviewed.value);
+      assertMemorySafe(worldFactFramingText(reviewed.subject, reviewed.value));
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
         this.emit(agentId, "world_fact.blocked", { findings: err.findings });
@@ -1175,13 +1181,7 @@ export class AsterismStore {
       throw err;
     }
     return this.driver.transaction(() => {
-      // Pin the settle to the exact value just re-screened. A world-fact is an upsert, so a
-      // concurrent re-propose of the same still-`proposed` subject can rewrite this row in
-      // place (same id, still `proposed`, new value) between the read+re-screen above and
-      // this CAS — a review_state-only CAS would ratify content the operator never saw. The
-      // `expectedValue` predicate makes the accept win only while the content is unchanged;
-      // a churn drops to undefined and the operator re-reviews the new value.
-      const fact = this.worldFacts.settleProposed(agentId, id, "accepted", proposed.value);
+      const fact = this.worldFacts.settleProposed(agentId, reviewed.id, "accepted", reviewed.value);
       if (fact) {
         this.emit(agentId, "world_fact.reviewed", {
           worldFactId: fact.id,
@@ -1197,15 +1197,18 @@ export class AsterismStore {
    * Reject a PROPOSED world-fact — the human declined a queued note — via a single
    * compare-and-set ({@link WorldFactRepository.settleProposed}) and record the transition as
    * `world_fact.reviewed` (`{ worldFactId, from: "proposed", to: "rejected" }`, references
-   * only). No firewall screen — a rejected note frames nothing. The CAS is the race guard.
-   * The mirror of {@link rejectProposedMemory} / {@link settleProposedObjective}'s reject leg:
-   * the note stays for history but never frames. Returns the rejected row to the winner, or
-   * undefined to a caller that lost the race or named an unknown / already-settled /
-   * cross-agent id, in which case nothing changes and nothing is logged.
+   * only). No firewall screen — a rejected note frames nothing. Takes the OPERATOR-resolved
+   * `reviewed` row and PINS the CAS to `reviewed.value`, the same upsert-race guard accept uses:
+   * if a concurrent re-propose churned the value (`green → red`) since the operator resolved it,
+   * the reject matches nothing and the operator re-reviews, rather than silently rejecting a
+   * `red` proposal they never saw. The mirror of {@link rejectProposedMemory} /
+   * {@link settleProposedObjective}'s reject leg: the note stays for history but never frames.
+   * Returns the rejected row to the winner, or undefined to a caller that lost the race, whose
+   * reviewed value no longer matches, or named an unknown / already-settled / cross-agent row.
    */
-  rejectProposedWorldFact(agentId: string, id: string): WorldFact | undefined {
+  rejectProposedWorldFact(agentId: string, reviewed: WorldFact): WorldFact | undefined {
     return this.driver.transaction(() => {
-      const fact = this.worldFacts.settleProposed(agentId, id, "rejected");
+      const fact = this.worldFacts.settleProposed(agentId, reviewed.id, "rejected", reviewed.value);
       if (fact) {
         this.emit(agentId, "world_fact.reviewed", {
           worldFactId: fact.id,

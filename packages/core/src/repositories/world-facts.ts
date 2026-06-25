@@ -152,8 +152,9 @@ export class WorldFactRepository {
 
   /**
    * One world-fact by its row `id` for an agent, or undefined when unknown or another
-   * agent's. The id-keyed sibling of {@link get} (which keys by subject), used by the accept
-   * path to re-read a proposed row and re-screen its actual stored content before ratifying.
+   * agent's. The id-keyed sibling of {@link get} (which keys by subject) — the lookup a
+   * surface uses when it holds a row id rather than a subject, and the id-scoped isolation
+   * guarantee (an id known to one agent cannot read another's row) is proven against it.
    */
   getById(agentId: string, id: string): WorldFact | undefined {
     requireAgentId(agentId);
