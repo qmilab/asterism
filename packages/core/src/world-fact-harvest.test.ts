@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsterismStore } from "./store";
-import { executeRun } from "./run.js";
+import { executeRun, resumeRun } from "./run.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
 import { auditTrustHooks } from "./audit.js";
@@ -104,6 +104,24 @@ describe("harvestWorldFactCandidates — the pure reducer", () => {
     ]);
     // size_bytes isn't a number and there's no exists:true → unrenderable → skipped.
     expect(out).toEqual([]);
+  });
+
+  test("a malformed observation never throws (a host/JS tool may break the TS contract)", () => {
+    // The harvest runs at the run's terminal exit, so a throw here would reject the run —
+    // an untrusted tool's bad observation must be IGNORED, not fatal (the T1 recorder rule).
+    const bad = [
+      { effect: "write" as const, observation: { schema: "x" } as unknown as ToolObservation }, // no facts
+      { effect: "write" as const, observation: { schema: "x", facts: "nope" } as unknown as ToolObservation },
+      { effect: "write" as const, observation: { schema: "x", facts: [null, 42, "s"] } as unknown as ToolObservation },
+      { effect: "write" as const, observation: { schema: "x", facts: [{ relation: "exists", object: true }] } as unknown as ToolObservation }, // no subject
+      { effect: "write" as const, observation: { schema: "x", facts: [{ subject: "file:ok", relation: "exists", object: true }] } },
+    ];
+    let out: ReturnType<typeof harvestWorldFactCandidates> = [];
+    expect(() => {
+      out = harvestWorldFactCandidates(bad);
+    }).not.toThrow();
+    // Only the one well-formed fact survives; the malformed shapes are skipped.
+    expect(out).toEqual([{ subject: "file:ok", value: "present" }]);
   });
 });
 
@@ -380,21 +398,50 @@ describe("harvest end-to-end — a run's changes become proposed working notes",
   });
 });
 
-describe("harvest timing — terminal exits only", () => {
-  test("a run paused awaiting confirmation harvests NOTHING (the resumed run harvests)", async () => {
+describe("harvest timing — every exit, terminal and pause", () => {
+  test("a run paused on a destructive action harvests what RAN BEFORE the pause", async () => {
     // A destructive delete with no confirm hook → the gate pauses the run. The write that
-    // ran before it produced an observation, but the paused exit SKIPS the harvest.
+    // ran before it produced an observation that exists ONLY in this invocation — so the
+    // pause exit harvests it (a later resume that skips the already-performed action would
+    // never re-observe it). The pausing delete itself never ran, so it is NOT harvested.
     const result = await executeRun(store, alice, "write then delete", {
       adapter: sequenceAdapter([
         { tool: "write_file", args: { path: "a.ts", bytes: 1 } },
-        { tool: "delete_file", args: { path: "old.ts" } }, // destructive → pauses
+        { tool: "delete_file", args: { path: "old.ts" } }, // destructive → pauses (never runs)
       ]),
       capabilities: [writeCap(), deleteCap()],
     });
     expect(result.status).toBe("awaiting_confirmation");
-    expect(result.harvest).toBeUndefined();
-    // Nothing proposed yet — not even the write that succeeded before the pause.
-    expect(store.worldFacts.list(alice.id)).toEqual([]);
+    expect(result.harvest).toEqual({ proposed: 1, dropped: 0, skipped: 0 });
+    // The pre-pause write is proposed; the un-run delete is not.
+    expect(proposedNotes(alice.id)).toEqual({ "file:a.ts": "1 bytes" });
+  });
+
+  test("an intermediate confirmed destructive action is harvested, not lost across re-pauses", async () => {
+    // Codex R1 P2: two sequential destructive deletes confirmed one-per-resume. `dist` runs
+    // on resume 1 (which then PAUSES on `cache`), so its observation exists only in resume
+    // 1's invocation; resume 2 SKIPS the already-performed `dist` (no re-observation). If the
+    // pause exit didn't harvest, `file:dist` would never be proposed. It must be.
+    const seq = sequenceAdapter([
+      { tool: "delete_file", args: { path: "dist" } },
+      { tool: "delete_file", args: { path: "cache" } },
+    ]);
+    const caps = [deleteCap()];
+
+    const parked = await executeRun(store, alice, "delete dist and cache", { adapter: seq, capabilities: caps });
+    expect(parked.status).toBe("awaiting_confirmation");
+    expect(store.worldFacts.list(alice.id)).toEqual([]); // nothing ran yet
+
+    // Confirm 1: `dist` runs, `cache` re-pauses → the pause exit harvests `file:dist`.
+    const first = await resumeRun(store, alice, parked.run.id, { adapter: seq, capabilities: caps });
+    expect(first.kind === "resumed" && first.result.status).toBe("awaiting_confirmation");
+    expect(proposedNotes(alice.id)).toEqual({ "file:dist": "absent" });
+
+    // Confirm 2: `dist` is skipped (already performed, no re-observation), `cache` runs →
+    // terminal harvest adds `file:cache`. `file:dist` survives from confirm 1 (idempotent).
+    const second = await resumeRun(store, alice, parked.run.id, { adapter: seq, capabilities: caps });
+    expect(second.kind === "resumed" && second.result.status).toBe("done");
+    expect(proposedNotes(alice.id)).toEqual({ "file:dist": "absent", "file:cache": "absent" });
   });
 
   test("a failed run still harvests what it changed before failing", async () => {

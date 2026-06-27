@@ -388,7 +388,19 @@ async function runAndPersist(
   // selection (state-changing only) and rendering live in the pure `harvestWorldFactCandidates`.
   const collected: ObservedEffect[] = [];
 
-  // Harvest the collected observations into PROPOSED working notes, at a TERMINAL exit only.
+  // Harvest the collected observations into PROPOSED working notes, called at EVERY exit of
+  // this invocation (terminal AND a pause). Why every exit, not only terminal: an
+  // observation lives in `collected` ONLY during the invocation whose tool produced it. A
+  // run that executes a confirmed destructive action and then PAUSES on a later one would,
+  // if harvest skipped the pause, discard that first action's observation — and the next
+  // resume SKIPS the already-performed destructive call (`alreadyPerformedResult`, the tool
+  // never re-runs), so it never re-observes it. Harvesting at the pause too captures each
+  // change at the first exit after it ran. Re-harvesting on a resume is safe because
+  // `proposeWorldFact` is idempotent per subject (a still-`proposed` subject supersedes in
+  // place; an `accepted` one is skipped), so the re-run of reversible actions across resumes
+  // does not duplicate notes — at most a redundant `world_fact.recorded` for an unchanged row.
+  // [Codex review R1 P2: terminal-only dropped an intermediate destructive action's change.]
+  //
   // Each candidate is screened + capped + audited by `store.proposeWorldFact` (the kernel
   // re-enforcing on derived, not-self-authored content); the proposals are inert until the
   // operator accepts them (`notes accept`). Returns a references-only summary, or undefined
@@ -583,13 +595,22 @@ async function runAndPersist(
     // than masking it as a failure; otherwise the substrate genuinely failed.
     const paused = store.runs.get(agent.id, run.id);
     if (paused?.status === "awaiting_confirmation") {
-      return { run: paused, status: "awaiting_confirmation", output: "", actions: collectActions() };
+      // Pause exit — harvest what ran BEFORE the pause (its observations exist only in this
+      // invocation's `collected`; a later resume that skips the already-performed action
+      // would never re-observe it). Idempotent per subject on the eventual resume.
+      const harvest = harvestWorkingNotes();
+      return {
+        run: paused,
+        status: "awaiting_confirmation",
+        output: "",
+        actions: collectActions(),
+        ...(harvest ? { harvest } : {}),
+      };
     }
     const failed = store.finishRun(agent.id, run.id, "", "failed");
     revokeFailedGrants();
-    // Terminal exit — harvest the state-changing observations the run produced before it
-    // failed (a write that landed is a true current-state fact worth proposing, even on a
-    // failed run). Skipped at the awaiting_confirmation exits (the resumed run harvests).
+    // Harvest the state-changing observations the run produced before it failed (a write
+    // that landed is a true current-state fact worth proposing, even on a failed run).
     const harvest = harvestWorkingNotes();
     return {
       run: failed ?? run,
@@ -611,11 +632,14 @@ async function runAndPersist(
       output.text.length > 0
         ? store.recordRunOutput(agent.id, run.id, output.text)
         : current;
+    // Pause exit — harvest what ran before the pause (see the catch-pause exit above).
+    const harvest = harvestWorkingNotes();
     return {
       run: persisted ?? current,
       status: "awaiting_confirmation",
       output: output.text,
       actions: collectActions(),
+      ...(harvest ? { harvest } : {}),
     };
   }
 
@@ -633,8 +657,8 @@ async function runAndPersist(
   if (status === "failed") revokeFailedGrants();
   // Terminal exit — harvest the run's state-changing observations into proposed working
   // notes (#84 T3) for the operator to review. Both `done` and `failed` harvest (a write
-  // that landed is a true current-state fact either way); only the awaiting_confirmation
-  // exits skip it, since the run resumes and re-harvests.
+  // that landed is a true current-state fact either way); the pause exits above harvest too,
+  // so an intermediate confirmed action's change is never lost (idempotent per subject).
   const harvest = harvestWorkingNotes();
   return {
     run: finished ?? current ?? run,

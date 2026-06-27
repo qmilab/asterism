@@ -90,13 +90,29 @@ export function harvestWorldFactCandidates(
   const bySubject = new Map<string, Map<string, unknown>>();
   for (const { observation, effect } of effects) {
     if (effect === "read") continue;
-    for (const fact of observation.facts) {
-      let relations = bySubject.get(fact.subject);
+    // The `observation` arrives from a tool's result — an UNTRUSTED extra channel. The TS
+    // type guarantees `facts: ObservedFact[]`, but a host/JS tool implemented outside strict
+    // TS can return a truthy-but-malformed observation (no `facts`, a non-array `facts`, a
+    // fact missing `subject`/`relation`). The harvest runs at the run's terminal exit, so a
+    // throw here would reject `executeRun` rather than ignore the bad observation — exactly
+    // the T1 recorder's defensiveness, applied to the consumer. So validate the shape and
+    // skip what does not match, never throw.
+    const facts: unknown = observation?.facts;
+    if (!Array.isArray(facts)) continue;
+    for (const fact of facts) {
+      if (fact === null || typeof fact !== "object") continue;
+      const { subject, relation, object } = fact as {
+        subject?: unknown;
+        relation?: unknown;
+        object?: unknown;
+      };
+      if (typeof subject !== "string" || typeof relation !== "string") continue;
+      let relations = bySubject.get(subject);
       if (relations === undefined) {
         relations = new Map<string, unknown>();
-        bySubject.set(fact.subject, relations);
+        bySubject.set(subject, relations);
       }
-      relations.set(fact.relation, fact.object);
+      relations.set(relation, object);
     }
   }
 
