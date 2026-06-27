@@ -148,9 +148,14 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
   function settle(chatId: string, result: ExecuteRunResult): OutboundMessage[] {
     if (result.status === "awaiting_confirmation") {
       // The gate stopped the run on a destructive action. Remember it so a reply
-      // can clear the pause, and ask for the OK naming what is waiting.
+      // can clear the pause, and ask for the OK naming what is waiting. A run can harvest
+      // working notes for the state-changing tools that ran BEFORE the pause (the kernel
+      // harvests at every exit, not just terminal), so surface that alongside the prompt —
+      // else a paused chat run never reports notes it already wrote for review (Codex R5 P2).
       pending.set(chatId, result.run.id);
-      return reply(chatId, formatConfirmPrompt(result));
+      const harvestLine = formatHarvest(result.harvest);
+      const prompt = formatConfirmPrompt(result);
+      return reply(chatId, harvestLine ? `${prompt}\n\n${harvestLine}` : prompt);
     }
     pending.delete(chatId);
     return reply(chatId, formatResult(deps.agent, result));
@@ -352,7 +357,28 @@ function formatResult(agent: Agent, result: ExecuteRunResult): string {
   if (agent.trustLevel !== "propose" && result.actions.length > 0) {
     parts.push(formatActions(result.actions));
   }
+  // The working-note harvest (#84 T3) — tell the chat operator a run proposed notes to
+  // review, or dropped some at the cap, so the no-silent-loss behaviour holds here too, not
+  // only on the CLI. References-only counts.
+  const harvestLine = formatHarvest(result.harvest);
+  if (harvestLine) parts.push(harvestLine);
   return parts.join("\n\n");
+}
+
+/**
+ * A references-only line for the working-note harvest (#84 T3), or `undefined` when nothing
+ * was harvested or dropped. Mirrors the CLI's `reportHarvest`: surface a `dropped` count even
+ * when nothing was proposed (a full notes store), so the cap loss is never silent.
+ */
+function formatHarvest(harvest: ExecuteRunResult["harvest"]): string | undefined {
+  if (!harvest || (harvest.proposed === 0 && harvest.dropped === 0)) return undefined;
+  const { proposed, dropped } = harvest;
+  const drop = dropped > 0 ? `${dropped} dropped (working notes full)` : "";
+  if (proposed > 0) {
+    const noun = proposed === 1 ? "working-note proposal" : "working-note proposals";
+    return `📝 Harvested ${proposed} ${noun} to review${drop ? `; ${drop}` : ""}.`;
+  }
+  return `📝 No working notes harvested: ${drop}.`;
 }
 
 /** A compact, references-only tally of the gate decisions a run took. */

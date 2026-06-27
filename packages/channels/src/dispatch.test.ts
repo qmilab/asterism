@@ -125,6 +125,31 @@ test("an authorized chat runs the bound agent — and only that agent", async ()
   expect(store.runs.list(work.id)).toHaveLength(0);
 });
 
+test("a chat reply surfaces the working-note harvest (#84 T3 — no per-surface silent loss)", async () => {
+  const writeWithObservation: Capability = {
+    key: "fs.write",
+    effect: "write",
+    tool: {
+      name: "fs.write",
+      description: "write a file",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({
+        output: "written",
+        observation: {
+          schema: "asterism.fs.write@1",
+          facts: [{ subject: "file:n.md", relation: "size_bytes", object: 4 }],
+        },
+      }),
+    },
+  };
+  const d = createDispatcher(
+    deps({ adapter: toolCallingAdapter("fs.write", { path: "n.md" }), capabilities: [writeWithObservation] }),
+  );
+  const out = await d.handle({ chatId: "100", text: "write a note" });
+  // The chat operator is told a note was proposed, with the review hint.
+  expect(out[0]!.text).toContain("Harvested 1 working-note proposal");
+});
+
 test("a chat task frames memory through the agent's opt-in recall provider", async () => {
   const framedFor: string[] = [];
   const recall: RecallProvider = {
@@ -145,6 +170,48 @@ test("a misconfigured recall provider declines the task with the reason — no r
   const out = await d.handle({ chatId: "100", text: "write the draft" });
   expect(out[0]!.text).toContain("ASTERISM_RECALL_EMBED_URL");
   expect(store.runs.list(personal.id)).toHaveLength(0);
+});
+
+test("a paused chat run surfaces the harvest it made before pausing (#84 T3, Codex R5)", async () => {
+  const writeWithObservation: Capability = {
+    key: "fs.write",
+    effect: "write",
+    tool: {
+      name: "fs.write",
+      description: "write a file",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({
+        output: "written",
+        observation: {
+          schema: "asterism.fs.write@1",
+          facts: [{ subject: "file:n.md", relation: "size_bytes", object: 4 }],
+        },
+      }),
+    },
+  };
+  // The run writes a file (→ a harvestable note), then hits a destructive delete that pauses.
+  const seqAdapter: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const w = request.tools.list().find((t) => t.name === "fs.write");
+        if (w) await w.execute({ args: { path: "n.md" } }, request.signal);
+        const del = request.tools.list().find((t) => t.name === "delete_files");
+        if (del) await del.execute({ args: { command: "rm -rf dist" } }, request.signal);
+        return { status: "done", text: "done" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const d = createDispatcher(
+    deps({ adapter: seqAdapter, capabilities: [writeWithObservation, deleteFilesCapability()] }),
+  );
+
+  const paused = await d.handle({ chatId: "100", text: "write then delete" });
+  expect(store.runs.list(personal.id)[0]!.status).toBe("awaiting_confirmation");
+  // The reply asks for confirmation AND tells the operator a note was harvested before the pause.
+  expect(paused[0]!.text).toContain("/confirm");
+  expect(paused[0]!.text).toContain("Harvested 1 working-note proposal");
 });
 
 test("a destructive action pauses and asks; /confirm resumes it through the gate", async () => {

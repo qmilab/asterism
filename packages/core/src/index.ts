@@ -191,9 +191,12 @@ export type {
   ExecuteRunOptions,
   ExecuteRunResult,
   ActionRecord,
+  HarvestSummary,
   ResumeOutcome,
   DeclineOutcome,
 } from "./run.js";
+export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
+export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The
 // kernel's run-orchestration surfaces compose this around their own hooks.

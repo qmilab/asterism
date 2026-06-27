@@ -30,6 +30,10 @@ import {
   WORLD_FACT_RECORD_TOOL,
   WORLD_FACT_FORGET_TOOL,
 } from "./world-facts.js";
+import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
+import type { ObservedEffect } from "./world-fact-harvest.js";
+import { WorldFactCapError, WorldFactConflictError } from "./repositories/world-facts.js";
+import { MemoryFirewallError } from "./firewall.js";
 import type { AsterismStore } from "./store.js";
 import type { Agent, Run, RunStatus } from "./types.js";
 
@@ -107,6 +111,24 @@ export interface ActionRecord {
   decision: "executed" | "withheld" | "paused";
 }
 
+/**
+ * The outcome of harvesting a run's state-changing observations into proposed working
+ * notes (#84 T3). All references-only counts — never the harvested subjects/values.
+ * `proposed` notes are INERT until the operator accepts them (`notes accept`).
+ */
+export interface HarvestSummary {
+  /** New/superseded working notes proposed for review. */
+  proposed: number;
+  /** Candidates dropped because the agent's working notes were full (the cap — no silent loss). */
+  dropped: number;
+  /**
+   * Candidates skipped without proposing — a subject the operator already ACCEPTED (the
+   * harvest never clobbers a ratified note, §13.3) or a value the firewall blocked (already
+   * audited `world_fact.blocked`).
+   */
+  skipped: number;
+}
+
 /** The outcome of {@link executeRun}: the final run row, its status, and output. */
 export interface ExecuteRunResult {
   /** The run row in its final persisted state. */
@@ -128,6 +150,13 @@ export interface ExecuteRunResult {
    * these as the post-run summary; the empty array means the run took no actions.
    */
   actions: readonly ActionRecord[];
+  /**
+   * The working-note harvest outcome (#84 T3), present when a terminal run derived any
+   * proposed notes from its state-changing observations. Absent for a run that produced
+   * none, and for a run paused `awaiting_confirmation` (harvest runs only at a terminal
+   * exit — the resumed run harvests). References-only counts.
+   */
+  harvest?: HarvestSummary;
 }
 
 /**
@@ -352,6 +381,68 @@ async function runAndPersist(
   });
   const collectActions = (): readonly ActionRecord[] => actions;
 
+  // Collect the structured observations of the run's SUCCESSFUL tool calls, in execution
+  // order, for the end-of-run working-note harvest (#84 T3). The gate fires `onObservation`
+  // only after a tool ran without error and returned one, so a withheld (`propose`) or
+  // paused action contributes nothing — a `propose` agent harvests nothing. Pure data here;
+  // selection (state-changing only) and rendering live in the pure `harvestWorldFactCandidates`.
+  const collected: ObservedEffect[] = [];
+
+  // Harvest the collected observations into PROPOSED working notes, called at EVERY exit of
+  // this invocation (terminal AND a pause). Why every exit, not only terminal: an
+  // observation lives in `collected` ONLY during the invocation whose tool produced it. A
+  // run that executes a confirmed destructive action and then PAUSES on a later one would,
+  // if harvest skipped the pause, discard that first action's observation — and the next
+  // resume SKIPS the already-performed destructive call (`alreadyPerformedResult`, the tool
+  // never re-runs), so it never re-observes it. Harvesting at the pause too captures each
+  // change at the first exit after it ran. Re-harvesting on a resume is safe because
+  // `proposeWorldFact` is idempotent per subject (a still-`proposed` subject supersedes in
+  // place; an `accepted` one is skipped), so the re-run of reversible actions across resumes
+  // does not duplicate notes — at most a redundant `world_fact.recorded` for an unchanged row.
+  // [Codex review R1 P2: terminal-only dropped an intermediate destructive action's change.]
+  //
+  // Each candidate is screened + capped + audited by `store.proposeWorldFact` (the kernel
+  // re-enforcing on derived, not-self-authored content); the proposals are inert until the
+  // operator accepts them (`notes accept`). Returns a references-only summary, or undefined
+  // when there was nothing to harvest (so the result field is absent for an empty harvest).
+  // Resilient by design: one candidate failing never aborts the rest.
+  //   - WorldFactConflictError — the subject is already ACCEPTED; the harvest never clobbers
+  //     a ratified note (§13.3 known limitation), so skip it.
+  //   - WorldFactCapError — the agent's notes are full for a NEW subject; count this one as
+  //     dropped and CONTINUE (no silent loss — the cap rejects, never evicts). Not a `break`:
+  //     a later candidate for an already-`proposed` subject is a supersede that takes no slot,
+  //     so it must still update even after the cap was hit on an earlier new subject.
+  //   - MemoryFirewallError — a poisoned subject/value (e.g. an injection-shaped filename);
+  //     already audited `world_fact.blocked` by the store, so skip and continue.
+  const harvestWorkingNotes = (): HarvestSummary | undefined => {
+    const candidates = harvestWorldFactCandidates(collected);
+    if (candidates.length === 0) return undefined;
+    let proposed = 0;
+    let dropped = 0;
+    let skipped = 0;
+    for (const { subject, value } of candidates) {
+      try {
+        store.proposeWorldFact(agent.id, subject, value, run.id);
+        proposed += 1;
+      } catch (err) {
+        if (err instanceof WorldFactCapError) {
+          // Notes are full — drop THIS candidate and keep going, do NOT break. The cap only
+          // bites a NEW subject; a later candidate for an already-`proposed` subject is a
+          // supersede that consumes no slot, so it must still update (breaking here would
+          // leave it stale). [Codex R3 P2.]
+          dropped += 1;
+          continue;
+        }
+        if (err instanceof WorldFactConflictError || err instanceof MemoryFirewallError) {
+          skipped += 1;
+          continue;
+        }
+        throw err;
+      }
+    }
+    return { proposed, dropped, skipped };
+  };
+
   // Fail-safe asymmetry — autonomy is lost faster than it is earned. A run that
   // EXECUTED an earned (granted) destructive capability and then FAILED loses that
   // grant: the capability is downgraded to `gated`, so its next invocation pauses for
@@ -387,6 +478,9 @@ async function runAndPersist(
     },
     onExecute: (action) => {
       actions.push(record(action, "executed"));
+    },
+    onObservation: (observation, effect) => {
+      collected.push({ observation, effect });
     },
     onWithhold: (action) => {
       actions.push(record(action, "withheld"));
@@ -505,16 +599,30 @@ async function runAndPersist(
     // than masking it as a failure; otherwise the substrate genuinely failed.
     const paused = store.runs.get(agent.id, run.id);
     if (paused?.status === "awaiting_confirmation") {
-      return { run: paused, status: "awaiting_confirmation", output: "", actions: collectActions() };
+      // Pause exit — harvest what ran BEFORE the pause (its observations exist only in this
+      // invocation's `collected`; a later resume that skips the already-performed action
+      // would never re-observe it). Idempotent per subject on the eventual resume.
+      const harvest = harvestWorkingNotes();
+      return {
+        run: paused,
+        status: "awaiting_confirmation",
+        output: "",
+        actions: collectActions(),
+        ...(harvest ? { harvest } : {}),
+      };
     }
     const failed = store.finishRun(agent.id, run.id, "", "failed");
     revokeFailedGrants();
+    // Harvest the state-changing observations the run produced before it failed (a write
+    // that landed is a true current-state fact worth proposing, even on a failed run).
+    const harvest = harvestWorkingNotes();
     return {
       run: failed ?? run,
       status: "failed",
       output: "",
       error: err instanceof Error ? err.message : String(err),
       actions: collectActions(),
+      ...(harvest ? { harvest } : {}),
     };
   }
   await flushEvents(streamed);
@@ -528,11 +636,14 @@ async function runAndPersist(
       output.text.length > 0
         ? store.recordRunOutput(agent.id, run.id, output.text)
         : current;
+    // Pause exit — harvest what ran before the pause (see the catch-pause exit above).
+    const harvest = harvestWorkingNotes();
     return {
       run: persisted ?? current,
       status: "awaiting_confirmation",
       output: output.text,
       actions: collectActions(),
+      ...(harvest ? { harvest } : {}),
     };
   }
 
@@ -548,12 +659,18 @@ async function runAndPersist(
   const status: RunStatus = output.status === "done" ? "done" : "failed";
   const finished = store.finishRun(agent.id, run.id, output.text, status);
   if (status === "failed") revokeFailedGrants();
+  // Terminal exit — harvest the run's state-changing observations into proposed working
+  // notes (#84 T3) for the operator to review. Both `done` and `failed` harvest (a write
+  // that landed is a true current-state fact either way); the pause exits above harvest too,
+  // so an intermediate confirmed action's change is never lost (idempotent per subject).
+  const harvest = harvestWorkingNotes();
   return {
     run: finished ?? current ?? run,
     status,
     output: output.text,
     ...(output.error !== undefined ? { error: output.error } : {}),
     actions: collectActions(),
+    ...(harvest ? { harvest } : {}),
   };
 }
 

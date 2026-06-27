@@ -49,7 +49,10 @@ export interface AuditContext {
  * composed over an optional `base` set of hooks whose behaviour is preserved:
  * the audit write fires first, then the base handler. `base.confirm` and
  * `base.abortController` pass through untouched (the audit layer never decides a
- * confirmation — it only records that one was required).
+ * confirmation — it only records that one was required). Observe-only hooks the audit
+ * layer adds nothing to — `base.onObservation` (the #84 T3 world-fact harvest collector) —
+ * also pass through verbatim via the `...base` spread: an observation is harvested into a
+ * proposed working note, not recorded as a gate decision, so the event log is unchanged.
  *
  * Each event's payload is `{ capability, effect }` — references only. The effect
  * is the *classified* effect (escalated to `destructive` when the action's
