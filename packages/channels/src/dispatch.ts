@@ -148,9 +148,14 @@ export function createDispatcher(deps: ChannelDeps): ChannelDispatcher {
   function settle(chatId: string, result: ExecuteRunResult): OutboundMessage[] {
     if (result.status === "awaiting_confirmation") {
       // The gate stopped the run on a destructive action. Remember it so a reply
-      // can clear the pause, and ask for the OK naming what is waiting.
+      // can clear the pause, and ask for the OK naming what is waiting. A run can harvest
+      // working notes for the state-changing tools that ran BEFORE the pause (the kernel
+      // harvests at every exit, not just terminal), so surface that alongside the prompt —
+      // else a paused chat run never reports notes it already wrote for review (Codex R5 P2).
       pending.set(chatId, result.run.id);
-      return reply(chatId, formatConfirmPrompt(result));
+      const harvestLine = formatHarvest(result.harvest);
+      const prompt = formatConfirmPrompt(result);
+      return reply(chatId, harvestLine ? `${prompt}\n\n${harvestLine}` : prompt);
     }
     pending.delete(chatId);
     return reply(chatId, formatResult(deps.agent, result));

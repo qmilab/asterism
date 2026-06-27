@@ -20,7 +20,7 @@
 
 import type { ToolObservation } from "./adapter.js";
 import type { EffectClass } from "./trust.js";
-import { redactForTrace } from "./redaction.js";
+import { DEFAULT_MAX_OBSERVATION_FACTS, redactForTrace } from "./redaction.js";
 
 /**
  * One run-time observation paired with the EFFECTIVE effect the gate classified it under
@@ -111,7 +111,15 @@ export function harvestWorldFactCandidates(
     // skip what does not match, never throw.
     const facts: unknown = observation?.facts;
     if (!Array.isArray(facts)) continue;
-    for (const fact of facts) {
+    // Bound the facts PROCESSED per observation. A buggy or JS-hosted tool could return a huge
+    // `facts` array; the harvest runs at the run's terminal/pause exit, so iterating + storing
+    // every fact would consume unbounded CPU/memory there. Cap at the SAME per-call bound the
+    // trace recorder uses (`DEFAULT_MAX_OBSERVATION_FACTS`); the world-fact cap bounds
+    // PERSISTENCE, this bounds the in-memory harvest WORK. `slice` is O(cap), not O(len).
+    // [Codex R5 P2.]
+    const bounded =
+      facts.length > DEFAULT_MAX_OBSERVATION_FACTS ? facts.slice(0, DEFAULT_MAX_OBSERVATION_FACTS) : facts;
+    for (const fact of bounded) {
       if (fact === null || typeof fact !== "object") continue;
       const { subject, relation, object } = fact as {
         subject?: unknown;
