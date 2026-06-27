@@ -2047,6 +2047,35 @@ test("confirm resumes a paused run and performs the destructive action", async (
   expect(runs.join("\n")).toContain("done");
 });
 
+test("a run's real file writes are harvested as proposed working notes (#84 T3)", async () => {
+  const h = harness();
+  // The real workspace-scoped catalog: write_file emits asterism.fs.write@1 facts, which
+  // the kernel harvests into proposed working notes at the run's terminal exit.
+  h.io.capabilities = workspaceCapabilities;
+  h.io.makeAdapter = () => ({ adapter: toolCallingAdapter("write_file", { path: "out.txt", content: "hello world" }) });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  h.out.length = 0;
+  h.err.length = 0;
+
+  expect(await runCli(["run", "personal", "write a file"], h.io)).toBe(0);
+
+  // The harvest summary points the operator at the review surface (on stderr).
+  const err = h.err.join("\n");
+  expect(err).toContain("Harvested 1 working-note proposal");
+  expect(err).toContain("asterism notes inspect personal");
+
+  // notes inspect shows the harvested note, flagged as awaiting review (it does not frame yet).
+  const listing = await capture(["notes", "inspect", "personal"], h.io);
+  expect(listing).toContain("file:out.txt");
+  expect(listing.toLowerCase()).toContain("awaiting your review");
+
+  // The operator accepts it — now it is a ratified working note.
+  expect(await runCli(["notes", "accept", "personal", "file:out.txt"], h.io)).toBe(0);
+  const after = await capture(["notes", "inspect", "personal"], h.io);
+  expect(after.toLowerCase()).not.toContain("awaiting your review");
+});
+
 test("the bare confirm form resolves a run across the operator's agents", async () => {
   const h = harness();
   h.io.makeAdapter = () => ({ adapter: toolCallingAdapter("delete_file", { path: "dist" }) });

@@ -1351,6 +1351,19 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       for (const line of formatActionSummary(result.actions)) io.err(line);
     }
 
+    // The working-note harvest (#84 T3): the run derived proposed notes from what it
+    // changed. They are INERT until reviewed, so point the operator at the review surface.
+    // To stderr (like the action summary) so stdout stays the agent's own output.
+    if (result.harvest && result.harvest.proposed > 0) {
+      const { proposed, dropped } = result.harvest;
+      const noun = proposed === 1 ? "working-note proposal" : "working-note proposals";
+      const full =
+        dropped > 0 ? ` (${dropped} more dropped — ${name}'s working notes are full)` : "";
+      io.err(
+        `Harvested ${proposed} ${noun}${full} — review with \`asterism notes inspect ${name}\`.`,
+      );
+    }
+
     if (result.status === "awaiting_confirmation") {
       io.out("Run paused: a destructive action needs your confirmation before it can proceed.");
       io.out(`Confirm it to continue:  asterism confirm ${name} ${shortId(result.run.id)}`);

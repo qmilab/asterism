@@ -28,6 +28,7 @@ import { createHmac } from "node:crypto";
 import type {
   ScopedTool,
   ToolInvocation,
+  ToolObservation,
   ToolRegistry,
   ToolResult,
 } from "./adapter.js";
@@ -374,6 +375,20 @@ export interface TrustHooks {
    * when the tool errors or throws.
    */
   onSucceeded?: (action: Action) => void;
+  /**
+   * A tool returned a structured {@link ToolObservation} from a SUCCESSFUL (`!isError`)
+   * execute. The kernel's seam for harvesting what a run established about the world — the
+   * world-fact harvest (#84 T3) collects these and derives proposed working notes at the
+   * run's terminal exit. Fired with the action's EFFECTIVE effect class (a destructive
+   * invocation passes `destructive`, including an arg-escalated write→destructive; an
+   * ordinary read/write passes its declared effect), so a consumer can select state-changing
+   * facts (`!== "read"`) without reclassifying. Fires only after the gate let the tool run and
+   * it succeeded WITH an observation — never on a withheld (`propose`), paused
+   * (awaiting-confirmation), errored, or observation-less call. So a `propose` agent (whose
+   * side effects are withheld) produces no observations to harvest. Observe-only: like the
+   * other hooks it is a side channel; it never changes the gate decision.
+   */
+  onObservation?: (observation: ToolObservation, effect: EffectClass) => void;
   /** A side-effecting action was withheld under `propose` (recorded as a plan step). */
   onWithhold?: (action: Action) => void;
   /**
@@ -567,7 +582,16 @@ function gateTool(
         // action whose tool returned non-error counts toward an earned track record,
         // so a failed/ambiguous attempt (still recorded as executed for at-most-once)
         // never earns autonomy. A throw skips this, as it should.
-        if (!destructiveResult.isError) hooks.onSucceeded?.(action);
+        if (!destructiveResult.isError) {
+          hooks.onSucceeded?.(action);
+          // A structured observation from a SUCCESSFUL destructive call — pass the
+          // EFFECTIVE effect (`destructive`, incl. an arg-escalated write→destructive), so
+          // the harvest sees this as state-changing. Fired after onSucceeded, only on a
+          // non-error result that carries one.
+          if (destructiveResult.observation) {
+            hooks.onObservation?.(destructiveResult.observation, classifyEffect(action));
+          }
+        }
         return destructiveResult;
       }
 
@@ -575,7 +599,13 @@ function gateTool(
       // signal like any cancellable work, and record it ONLY on success, so a
       // transient failure simply re-runs (resume never skips a reversible action).
       const result = await tool.execute(invocation, signal);
-      if (!result.isError) hooks.onExecute?.(action);
+      if (!result.isError) {
+        hooks.onExecute?.(action);
+        // A structured observation from a SUCCESSFUL read/write call — pass the declared
+        // `action.effect` (this branch never reaches a destructive action). The harvest
+        // keeps `write` and drops `read`; either way the gate is unchanged.
+        if (result.observation) hooks.onObservation?.(result.observation, action.effect);
+      }
       return result;
     },
   };
