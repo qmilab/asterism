@@ -134,7 +134,16 @@ export function harvestWorldFactCandidates(
   for (const [subject, relations] of bySubject) {
     const value = renderValue(relations);
     if (value === undefined) continue;
-    byRedacted.set(redactForTrace(subject).content, redactForTrace(value).content);
+    const safeSubject = redactForTrace(subject).content;
+    const safeValue = redactForTrace(value).content;
+    // Skip a candidate whose redacted subject or value is empty/whitespace. A malformed or
+    // custom observation can carry a whitespace subject, or one stripped entirely to nothing
+    // by control-char/redaction removal; `proposeWorldFact` TRIMS, so it would otherwise
+    // persist a note with an empty subject (the harvest is the one write path without the CLI
+    // `record_note`/`notes set` non-empty check). Observations are untrusted tool output, so
+    // guard it here. [Codex R4 P3.]
+    if (safeSubject.trim() === "" || safeValue.trim() === "") continue;
+    byRedacted.set(safeSubject, safeValue);
   }
 
   const candidates: WorldFactCandidate[] = [...byRedacted].map(([subject, value]) => ({

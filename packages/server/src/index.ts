@@ -162,6 +162,11 @@ function runResultBody(result: ExecuteRunResult): Record<string, unknown> {
     status: result.status,
     output: result.output,
     actions: result.actions,
+    // The working-note harvest (#84 T3) — references-only counts (proposed/dropped/skipped),
+    // so an HTTP client learns a run proposed notes to review, or dropped some at the cap,
+    // exactly as the CLI surfaces it (no per-surface silent loss). Absent when nothing was
+    // harvested, like the optional `error`.
+    ...(result.harvest !== undefined ? { harvest: result.harvest } : {}),
     ...(result.error !== undefined ? { error: result.error } : {}),
   };
 }

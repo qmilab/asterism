@@ -125,6 +125,31 @@ test("an authorized chat runs the bound agent — and only that agent", async ()
   expect(store.runs.list(work.id)).toHaveLength(0);
 });
 
+test("a chat reply surfaces the working-note harvest (#84 T3 — no per-surface silent loss)", async () => {
+  const writeWithObservation: Capability = {
+    key: "fs.write",
+    effect: "write",
+    tool: {
+      name: "fs.write",
+      description: "write a file",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({
+        output: "written",
+        observation: {
+          schema: "asterism.fs.write@1",
+          facts: [{ subject: "file:n.md", relation: "size_bytes", object: 4 }],
+        },
+      }),
+    },
+  };
+  const d = createDispatcher(
+    deps({ adapter: toolCallingAdapter("fs.write", { path: "n.md" }), capabilities: [writeWithObservation] }),
+  );
+  const out = await d.handle({ chatId: "100", text: "write a note" });
+  // The chat operator is told a note was proposed, with the review hint.
+  expect(out[0]!.text).toContain("Harvested 1 working-note proposal");
+});
+
 test("a chat task frames memory through the agent's opt-in recall provider", async () => {
   const framedFor: string[] = [];
   const recall: RecallProvider = {

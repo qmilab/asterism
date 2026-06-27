@@ -579,6 +579,45 @@ test("the buffered POST surfaces the action summary", async () => {
   ]);
 });
 
+test("the buffered POST surfaces the working-note harvest (#84 T3 — no per-surface silent loss)", async () => {
+  const writeCap: Capability = {
+    key: "fs.write",
+    effect: "write",
+    tool: {
+      name: "fs.write",
+      description: "write a file",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({
+        output: "written",
+        observation: {
+          schema: "asterism.fs.write@1",
+          facts: [{ subject: "file:n.md", relation: "size_bytes", object: 4 }],
+        },
+      }),
+    },
+  };
+  const adapter: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "fs.write");
+        if (tool) await tool.execute({ args: { path: "n.md" } }, request.signal);
+        return { status: "done", text: "ok" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const res = await handleRequest(
+    deps({ adapter, capabilities: [writeCap] }),
+    post("/agents/personal/runs", { input: "write a note" }),
+  );
+  expect(res.status).toBe(201);
+  const json = (await res.json()) as { harvest?: { proposed: number; dropped: number; skipped: number } };
+  // The HTTP body carries the references-only harvest counts, so an API client learns to review.
+  expect(json.harvest).toEqual({ proposed: 1, dropped: 0, skipped: 0 });
+});
+
 // --- confirm endpoint: resume a gate-paused run out of band (#17) ---------
 
 /** A destructive capability whose spy records when it truly runs. */

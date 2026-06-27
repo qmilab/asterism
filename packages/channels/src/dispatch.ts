@@ -352,7 +352,28 @@ function formatResult(agent: Agent, result: ExecuteRunResult): string {
   if (agent.trustLevel !== "propose" && result.actions.length > 0) {
     parts.push(formatActions(result.actions));
   }
+  // The working-note harvest (#84 T3) — tell the chat operator a run proposed notes to
+  // review, or dropped some at the cap, so the no-silent-loss behaviour holds here too, not
+  // only on the CLI. References-only counts.
+  const harvestLine = formatHarvest(result.harvest);
+  if (harvestLine) parts.push(harvestLine);
   return parts.join("\n\n");
+}
+
+/**
+ * A references-only line for the working-note harvest (#84 T3), or `undefined` when nothing
+ * was harvested or dropped. Mirrors the CLI's `reportHarvest`: surface a `dropped` count even
+ * when nothing was proposed (a full notes store), so the cap loss is never silent.
+ */
+function formatHarvest(harvest: ExecuteRunResult["harvest"]): string | undefined {
+  if (!harvest || (harvest.proposed === 0 && harvest.dropped === 0)) return undefined;
+  const { proposed, dropped } = harvest;
+  const drop = dropped > 0 ? `${dropped} dropped (working notes full)` : "";
+  if (proposed > 0) {
+    const noun = proposed === 1 ? "working-note proposal" : "working-note proposals";
+    return `📝 Harvested ${proposed} ${noun} to review${drop ? `; ${drop}` : ""}.`;
+  }
+  return `📝 No working notes harvested: ${drop}.`;
 }
 
 /** A compact, references-only tally of the gate decisions a run took. */
