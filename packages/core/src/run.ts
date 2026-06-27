@@ -408,8 +408,10 @@ async function runAndPersist(
   // Resilient by design: one candidate failing never aborts the rest.
   //   - WorldFactConflictError — the subject is already ACCEPTED; the harvest never clobbers
   //     a ratified note (§13.3 known limitation), so skip it.
-  //   - WorldFactCapError — the agent's notes are full; STOP and count the remaining as
-  //     dropped (no silent loss — the cap rejects, never evicts).
+  //   - WorldFactCapError — the agent's notes are full for a NEW subject; count this one as
+  //     dropped and CONTINUE (no silent loss — the cap rejects, never evicts). Not a `break`:
+  //     a later candidate for an already-`proposed` subject is a supersede that takes no slot,
+  //     so it must still update even after the cap was hit on an earlier new subject.
   //   - MemoryFirewallError — a poisoned subject/value (e.g. an injection-shaped filename);
   //     already audited `world_fact.blocked` by the store, so skip and continue.
   const harvestWorkingNotes = (): HarvestSummary | undefined => {
@@ -418,16 +420,18 @@ async function runAndPersist(
     let proposed = 0;
     let dropped = 0;
     let skipped = 0;
-    for (let i = 0; i < candidates.length; i++) {
-      const { subject, value } = candidates[i]!;
+    for (const { subject, value } of candidates) {
       try {
         store.proposeWorldFact(agent.id, subject, value, run.id);
         proposed += 1;
       } catch (err) {
         if (err instanceof WorldFactCapError) {
-          // Notes are full — every remaining candidate (this one included) is dropped.
-          dropped += candidates.length - i;
-          break;
+          // Notes are full — drop THIS candidate and keep going, do NOT break. The cap only
+          // bites a NEW subject; a later candidate for an already-`proposed` subject is a
+          // supersede that consumes no slot, so it must still update (breaking here would
+          // leave it stale). [Codex R3 P2.]
+          dropped += 1;
+          continue;
         }
         if (err instanceof WorldFactConflictError || err instanceof MemoryFirewallError) {
           skipped += 1;

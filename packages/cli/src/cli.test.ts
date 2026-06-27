@@ -2076,6 +2076,32 @@ test("a run's real file writes are harvested as proposed working notes (#84 T3)"
   expect(after.toLowerCase()).not.toContain("awaiting your review");
 });
 
+test("confirm surfaces the harvest from a resumed run (#84 T3, Codex R3)", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: toolCallingAdapter("delete_file", { path: "dist" }) });
+  h.io.capabilities = workspaceCapabilities;
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  const workspace = join(h.dir, HOME_DIR_NAME, "agents", "personal");
+  mkdirSync(join(workspace, "dist"), { recursive: true });
+  writeFileSync(join(workspace, "dist", "a.js"), "x");
+
+  // The destructive delete pauses the run; harvesting happens on the resume, not here.
+  h.out.length = 0;
+  expect(await runCli(["run", "personal", "delete dist"], h.io)).toBe(0);
+  const id = confirmIdFromHint(h.out);
+
+  // Confirm runs the delete → harvests `dir:dist: absent`. `confirm` must report it (not
+  // just `run`), since the resume is where the harvest happened.
+  h.err.length = 0;
+  expect(await runCli(["confirm", "personal", id], h.io)).toBe(0);
+  expect(h.err.join("\n")).toContain("Harvested 1 working-note proposal");
+  // And the proposed note is really there for review.
+  const listing = await capture(["notes", "inspect", "personal"], h.io);
+  expect(listing).toContain("dir:dist");
+  expect(listing.toLowerCase()).toContain("awaiting your review");
+});
+
 test("when working notes are full, a dropped harvest is reported, not silently lost (#84 T3)", async () => {
   const h = harness();
   h.io.capabilities = workspaceCapabilities;

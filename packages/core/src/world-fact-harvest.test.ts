@@ -378,6 +378,30 @@ describe("harvest end-to-end — a run's changes become proposed working notes",
     expect(store.worldFacts.list(alice.id, { reviewState: "proposed" }).length).toBe(1);
   });
 
+  test("at the cap, a NEW subject drops but an existing-proposed subject still updates (no break)", async () => {
+    // Codex R3 P2: the harvest must not `break` on the first cap error — a later candidate
+    // for an already-`proposed` subject is a supersede that consumes no slot and must update.
+    store.proposeWorldFact(alice.id, "file:z.ts", "old"); // an existing proposed note
+    // Fill the rest to the cap with accepted notes (distinct subjects), so a NEW subject is full.
+    for (let i = 0; i < DEFAULT_WORLD_FACT_CAP - 1; i++) {
+      store.recordWorldFact(alice.id, `pre:${i}`, "present");
+    }
+    const result = await executeRun(store, alice, "write new + rewrite existing", {
+      adapter: sequenceAdapter([
+        { tool: "write_file", args: { path: "a.ts", bytes: 5 } }, // file:a.ts — NEW → cap-dropped
+        { tool: "write_file", args: { path: "z.ts", bytes: 10 } }, // file:z.ts — existing proposed → supersede
+      ]),
+      capabilities: [writeCap()],
+    });
+    // `file:a.ts` (sorted first) is dropped at the cap; `file:z.ts` still updates.
+    expect(result.harvest).toEqual({ proposed: 1, dropped: 1, skipped: 0 });
+    expect(store.worldFacts.get(alice.id, "file:z.ts")).toMatchObject({
+      value: "10 bytes", // updated, not the stale "old"
+      reviewState: "proposed",
+    });
+    expect(store.worldFacts.get(alice.id, "file:a.ts")).toBeUndefined();
+  });
+
   test("accepted-subject conflict: the harvest never clobbers a ratified note (skips it)", async () => {
     // The operator already accepted a note for this subject (a self-written/accepted row).
     store.recordWorldFact(alice.id, "file:app.ts", "100 bytes");

@@ -56,6 +56,7 @@ import type {
   CognitionCaptureMode,
   CognitionProviderId,
   FirewallFinding,
+  HarvestSummary,
   Memory,
   MemoryQuery,
   Objective,
@@ -1280,6 +1281,31 @@ function cmdNotesClear(args: string[], io: CliIO): Promise<number> {
 
 // --- run -------------------------------------------------------------------
 
+/**
+ * Surface the working-note harvest (#84 T3) for a finished/paused run, to stderr (like the
+ * action summary) so stdout stays the agent's own output. Shared by `run` AND `confirm`: a
+ * RESUMED run harvests too (a confirmed destructive action runs, or a resume harvests before
+ * re-pausing), so `confirm` must report it as well, not just `run` (Codex R3 P2). Reports a
+ * `dropped` count even when NOTHING was proposed — a full notes store trips the cap on the
+ * first candidate (proposed: 0, dropped > 0), and that must not be hidden (no silent loss).
+ */
+function reportHarvest(io: CliIO, harvest: HarvestSummary | undefined, name: string): void {
+  if (!harvest || (harvest.proposed === 0 && harvest.dropped === 0)) return;
+  const { proposed, dropped } = harvest;
+  const dropMsg =
+    dropped > 0
+      ? `${dropped} ${dropped === 1 ? "change was" : "changes were"} dropped — ${name}'s working notes are full (clear one with \`asterism notes clear ${name} "<subject>"\`)`
+      : "";
+  if (proposed > 0) {
+    const noun = proposed === 1 ? "working-note proposal" : "working-note proposals";
+    const tail = dropped > 0 ? `; ${dropMsg}` : "";
+    io.err(`Harvested ${proposed} ${noun} — review with \`asterism notes inspect ${name}\`${tail}.`);
+  } else {
+    // Nothing proposed, but changes were dropped — report the loss, don't swallow it.
+    io.err(`No working notes harvested: ${dropMsg}.`);
+  }
+}
+
 async function cmdRun(args: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(args, ["help", "h"]);
   if (helpRequested(parsed)) {
@@ -1352,26 +1378,8 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
     }
 
     // The working-note harvest (#84 T3): the run derived proposed notes from what it
-    // changed. They are INERT until reviewed, so point the operator at the review surface.
-    // To stderr (like the action summary) so stdout stays the agent's own output. Surface
-    // a `dropped` count even when NOTHING was proposed — if the notes are already full, the
-    // first candidate trips the cap (proposed: 0, dropped > 0), and that must not be hidden
-    // (no silent loss — Codex R2 P2).
-    if (result.harvest && (result.harvest.proposed > 0 || result.harvest.dropped > 0)) {
-      const { proposed, dropped } = result.harvest;
-      const dropMsg =
-        dropped > 0 ? `${dropped} ${dropped === 1 ? "change was" : "changes were"} dropped — ${name}'s working notes are full (clear one with \`asterism notes clear ${name} "<subject>"\`)` : "";
-      if (proposed > 0) {
-        const noun = proposed === 1 ? "working-note proposal" : "working-note proposals";
-        const tail = dropped > 0 ? `; ${dropMsg}` : "";
-        io.err(
-          `Harvested ${proposed} ${noun} — review with \`asterism notes inspect ${name}\`${tail}.`,
-        );
-      } else {
-        // Nothing proposed, but changes were dropped — report the loss, don't swallow it.
-        io.err(`No working notes harvested: ${dropMsg}.`);
-      }
-    }
+    // changed. Surfaced from the SHARED reporter so a resumed run (`confirm`) reports it too.
+    reportHarvest(io, result.harvest, name);
 
     if (result.status === "awaiting_confirmation") {
       io.out("Run paused: a destructive action needs your confirmation before it can proceed.");
@@ -1542,6 +1550,11 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
     if (agent.trustLevel !== "propose" && result.actions.length > 0) {
       for (const line of formatActionSummary(result.actions)) io.err(line);
     }
+
+    // A resumed run harvests too — a confirmed destructive action runs (and may delete a
+    // file → an `absent` note), or the resume harvests pre-pause work before re-pausing. So
+    // `confirm` reports the harvest/drop like `run` does, via the shared reporter (R3 P2).
+    reportHarvest(io, result.harvest, agent.name);
 
     if (result.status === "awaiting_confirmation") {
       io.out("Run paused again: another destructive action needs your confirmation.");
