@@ -20,6 +20,7 @@
 
 import type { ToolObservation } from "./adapter.js";
 import type { EffectClass } from "./trust.js";
+import { redactForTrace } from "./redaction.js";
 
 /**
  * One run-time observation paired with the EFFECTIVE effect the gate classified it under
@@ -76,11 +77,22 @@ function renderValue(relations: ReadonlyMap<string, unknown>): string | undefine
  * 2. ACCUMULATE per subject a `relation → object` map, applying facts in execution order so
  *    the LAST value of each relation wins — a `write` then `delete` of one path resolves to
  *    its final `exists = false` state, a re-write to its latest size.
- * 3. RENDER each subject (skipping any with no renderable state), and
- * 4. SORT by subject so a downstream "propose up to the cap" is deterministic.
+ * 3. RENDER each subject (skipping any with no renderable state),
+ * 4. REDACT the subject and value through the kernel's secret-redaction boundary
+ *    (`redactForTrace`) before they become a candidate, and
+ * 5. SORT by subject so a downstream "propose up to the cap" is deterministic.
  *
- * Dedup is automatic (one entry per subject). Pure and total: an empty or all-read input
- * yields `[]`.
+ * Step 4 is the security boundary (Codex R2 P1): a harvested subject is `file:<path>` where
+ * the agent CHOSE the path, so a secret-shaped path (`file:keys/AKIA…`) would otherwise be
+ * persisted into a proposed note and, once accepted, replay the secret in framing. The
+ * downstream `proposeWorldFact` only firewall-screens (prompt-injection), NOT secret VALUES;
+ * the trace path already redacts the same observation facts, so the harvest must too — same
+ * boundary, applied here so the candidate is safe by construction (defense in depth: any
+ * consumer of this fn gets redacted output). A clean subject/value passes through unchanged.
+ *
+ * Dedup is by the REDACTED subject (one entry per output subject — two raw paths that redact
+ * identically collapse, last-wins, which is the safe outcome since they cannot be told apart
+ * without the secret). Pure and total: an empty or all-read input yields `[]`.
  */
 export function harvestWorldFactCandidates(
   effects: readonly ObservedEffect[],
@@ -116,11 +128,19 @@ export function harvestWorldFactCandidates(
     }
   }
 
-  const candidates: WorldFactCandidate[] = [];
+  // Render, then REDACT subject + value at the persist boundary. Keyed by the REDACTED
+  // subject so the output has one entry per safe subject (a clean subject is its own key).
+  const byRedacted = new Map<string, string>();
   for (const [subject, relations] of bySubject) {
     const value = renderValue(relations);
-    if (value !== undefined) candidates.push({ subject, value });
+    if (value === undefined) continue;
+    byRedacted.set(redactForTrace(subject).content, redactForTrace(value).content);
   }
+
+  const candidates: WorldFactCandidate[] = [...byRedacted].map(([subject, value]) => ({
+    subject,
+    value,
+  }));
   candidates.sort((a, b) => (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0));
   return candidates;
 }

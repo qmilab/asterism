@@ -1353,15 +1353,24 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
 
     // The working-note harvest (#84 T3): the run derived proposed notes from what it
     // changed. They are INERT until reviewed, so point the operator at the review surface.
-    // To stderr (like the action summary) so stdout stays the agent's own output.
-    if (result.harvest && result.harvest.proposed > 0) {
+    // To stderr (like the action summary) so stdout stays the agent's own output. Surface
+    // a `dropped` count even when NOTHING was proposed — if the notes are already full, the
+    // first candidate trips the cap (proposed: 0, dropped > 0), and that must not be hidden
+    // (no silent loss — Codex R2 P2).
+    if (result.harvest && (result.harvest.proposed > 0 || result.harvest.dropped > 0)) {
       const { proposed, dropped } = result.harvest;
-      const noun = proposed === 1 ? "working-note proposal" : "working-note proposals";
-      const full =
-        dropped > 0 ? ` (${dropped} more dropped — ${name}'s working notes are full)` : "";
-      io.err(
-        `Harvested ${proposed} ${noun}${full} — review with \`asterism notes inspect ${name}\`.`,
-      );
+      const dropMsg =
+        dropped > 0 ? `${dropped} ${dropped === 1 ? "change was" : "changes were"} dropped — ${name}'s working notes are full (clear one with \`asterism notes clear ${name} "<subject>"\`)` : "";
+      if (proposed > 0) {
+        const noun = proposed === 1 ? "working-note proposal" : "working-note proposals";
+        const tail = dropped > 0 ? `; ${dropMsg}` : "";
+        io.err(
+          `Harvested ${proposed} ${noun} — review with \`asterism notes inspect ${name}\`${tail}.`,
+        );
+      } else {
+        // Nothing proposed, but changes were dropped — report the loss, don't swallow it.
+        io.err(`No working notes harvested: ${dropMsg}.`);
+      }
     }
 
     if (result.status === "awaiting_confirmation") {

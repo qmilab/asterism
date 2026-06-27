@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AsterismStore } from "@qmilab/asterism-core";
+import { AsterismStore, DEFAULT_WORLD_FACT_CAP } from "@qmilab/asterism-core";
 import type {
   Capability,
   ProposedMemory,
@@ -2074,6 +2074,32 @@ test("a run's real file writes are harvested as proposed working notes (#84 T3)"
   expect(await runCli(["notes", "accept", "personal", "file:out.txt"], h.io)).toBe(0);
   const after = await capture(["notes", "inspect", "personal"], h.io);
   expect(after.toLowerCase()).not.toContain("awaiting your review");
+});
+
+test("when working notes are full, a dropped harvest is reported, not silently lost (#84 T3)", async () => {
+  const h = harness();
+  h.io.capabilities = workspaceCapabilities;
+  h.io.makeAdapter = () => ({ adapter: toolCallingAdapter("write_file", { path: "out.txt", content: "hi" }) });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // Fill the agent's working notes to the cap so the harvest has no room.
+  const seed = openHomeStore(h);
+  try {
+    const agent = agentNamed(seed, "personal");
+    for (let i = 0; i < DEFAULT_WORLD_FACT_CAP; i++) seed.recordWorldFact(agent.id, `pre:${i}`, "present");
+  } finally {
+    seed.close();
+  }
+
+  h.out.length = 0;
+  h.err.length = 0;
+  expect(await runCli(["run", "personal", "write a file"], h.io)).toBe(0);
+
+  // Nothing proposed (cap full) — but the drop is surfaced, not swallowed.
+  const err = h.err.join("\n");
+  expect(err).toContain("No working notes harvested");
+  expect(err).toContain("working notes are full");
 });
 
 test("the bare confirm form resolves a run across the operator's agents", async () => {
