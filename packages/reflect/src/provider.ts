@@ -11,11 +11,14 @@
 
 import {
   isReflectionMemoryType,
+  isTransitionStatus,
   REFLECTION_MEMORY_TYPES,
 } from "@qmilab/asterism-core";
 import type {
+  ObjectiveTransitionInput,
   ProposedMemory,
   ProposedObjective,
+  ProposedTransition,
   ReflectionInput,
   ReflectionProvider,
 } from "@qmilab/asterism-core";
@@ -252,6 +255,64 @@ export function parseObjectiveProposals(
 }
 
 /**
+ * The objective-TRANSITION instruction (Type B). A separate, narrower task again: given a run and
+ * the agent's CURRENT active objectives, notice when the run shows one is FINISHED — completed
+ * (`done`) or made moot / abandoned (`dropped`) — and propose winding it down. It judges existing
+ * objectives, so it must refer to each by the id it is shown. Pinned to a strict JSON envelope.
+ * Exported so it is reviewable and testable.
+ */
+export const OBJECTIVE_TRANSITION_SYSTEM_PROMPT = `You are the reflection step of an AI agent runtime. You are given the transcript of one task an agent just finished — the task it was asked to do and the output it produced — and the agent's CURRENT standing objectives, each with an id. Your job is to notice when the run shows one of those objectives is FINISHED, and propose changing its status for a human to approve.
+
+An objective is finished in one of two ways:
+- "done"    — the run clearly COMPLETED it (the ongoing goal has been achieved).
+- "dropped" — the run shows it has been ABANDONED or made moot (it no longer makes sense to pursue).
+
+Be conservative: most runs do NOT finish a standing objective. Propose a transition ONLY when the transcript gives clear evidence, and ONLY for an objective in the list below (refer to it by its exact id). Never invent an objective that is not listed. If nothing is clearly finished, propose nothing.
+
+Respond with STRICT JSON and nothing else, in exactly this shape:
+{"transitions": [{"objectiveId": "the id from the list", "status": "done", "confidence": 0.0}]}
+
+"status" is "done" or "dropped". "confidence" is a number from 0 to 1. If nothing is finished, respond with {"transitions": []}.`;
+
+/** Compose the transition user message: the transcript plus the agent's active objectives, each with its id. */
+export function buildObjectiveTransitionUserPrompt(input: ObjectiveTransitionInput): string {
+  const { transcript, objectives } = input;
+  const list = objectives.map((o) => `- [${o.id}] ${o.content}`).join("\n");
+  return [
+    `Task the agent was given:\n${transcript.input}`,
+    `What the agent produced:\n${transcript.output}`,
+    `The agent's current standing objectives (propose a transition only on one of these, by its id):\n${list}`,
+    `Propose status transitions from this run as STRICT JSON: {"transitions": [{"objectiveId": ..., "status": "done"|"dropped", "confidence": ...}]}. If nothing is clearly finished, return {"transitions": []}.`,
+  ].join("\n\n");
+}
+
+/**
+ * Turn a model response into validated {@link ProposedTransition} objects. The transition analogue
+ * of {@link parseObjectiveProposals}, equally tolerant: an entry is dropped unless it has a non-blank
+ * string `objectiveId` AND a `status` of "done"/"dropped"; confidence is clamped; a response that is
+ * not usable JSON yields `[]`. The kernel re-validates each `objectiveId` against the agent's own
+ * objectives — this parser only enforces shape, never that the id is real.
+ */
+export function parseObjectiveTransitions(raw: string): ProposedTransition[] {
+  const entries = entriesOf(extractJson(raw), "transitions");
+  const proposals: ProposedTransition[] = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const objectiveId = typeof record.objectiveId === "string" ? record.objectiveId.trim() : "";
+    if (objectiveId.length === 0) continue;
+    const status = typeof record.status === "string" ? record.status.trim().toLowerCase() : "";
+    if (!isTransitionStatus(status)) continue;
+    proposals.push({
+      objectiveId,
+      proposedStatus: status,
+      confidence: normalizeConfidence(record.confidence),
+    });
+  }
+  return proposals;
+}
+
+/**
  * The hosted-model {@link ReflectionProvider}. Constructed with a
  * {@link ChatModelClient} (a real HTTP client in production, a fake in tests); it
  * builds the prompt, calls the model once per reflection task, and parses the result
@@ -275,5 +336,16 @@ export class DefaultReflectionProvider implements ReflectionProvider {
       user: buildObjectiveReflectionUserPrompt(input),
     });
     return parseObjectiveProposals(raw, input.transcript.runId);
+  }
+
+  /** Propose status transitions on EXISTING objectives the run finished — a third, separate model call + parser. */
+  async proposeObjectiveTransitions(
+    input: ObjectiveTransitionInput,
+  ): Promise<readonly ProposedTransition[]> {
+    const raw = await this.client.complete({
+      system: OBJECTIVE_TRANSITION_SYSTEM_PROMPT,
+      user: buildObjectiveTransitionUserPrompt(input),
+    });
+    return parseObjectiveTransitions(raw);
   }
 }

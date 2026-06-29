@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
 
-import type { ReflectionInput } from "@qmilab/asterism-core";
+import type { ObjectiveTransitionInput, ReflectionInput } from "@qmilab/asterism-core";
 
 import {
   buildObjectiveReflectionUserPrompt,
+  buildObjectiveTransitionUserPrompt,
   buildReflectionUserPrompt,
   DefaultReflectionProvider,
   parseObjectiveProposals,
+  parseObjectiveTransitions,
   parseProposals,
 } from "./provider.js";
 import type { ChatModelClient, ChatRequest } from "./model.js";
@@ -196,4 +198,79 @@ test("proposeObjectives calls the model with the objective system prompt and par
   expect(proposals[0]?.sourceRunId).toBe(RUN_ID);
   expect(client.seen[0]?.system).toContain("standing objective");
   expect(client.seen[0]?.user).toContain("write the blog");
+});
+
+// --- Type B: objective transition suggestions ------------------------------
+
+function transitionInput(
+  overrides: Partial<ObjectiveTransitionInput> = {},
+): ObjectiveTransitionInput {
+  return {
+    agentId: "agent-1",
+    transcript: {
+      runId: RUN_ID,
+      input: "run the final migration batch",
+      output: "migration complete, all rows verified",
+    },
+    objectives: [{ id: "obj-1", content: "finish the Q3 migration" }],
+    ...overrides,
+  };
+}
+
+test("parseObjectiveTransitions reads the {transitions:[…]} envelope and validates id + status", () => {
+  const raw = JSON.stringify({
+    transitions: [
+      { objectiveId: "obj-1", status: "done", confidence: 0.9 },
+      { objectiveId: "obj-2", status: "DROPPED", confidence: 9 }, // status case-folded, confidence clamped
+      { objectiveId: "   ", status: "done", confidence: 0.5 }, // blank id dropped
+      { objectiveId: "obj-3", status: "active", confidence: 0.5 }, // not a transition status — dropped
+      { objectiveId: "obj-4", status: "garbage", confidence: 0.5 }, // illegal — dropped
+      { objectiveId: "obj-5", confidence: 0.5 }, // missing status — dropped
+    ],
+  });
+  const transitions = parseObjectiveTransitions(raw);
+  expect(transitions.map((t) => [t.objectiveId, t.proposedStatus])).toEqual([
+    ["obj-1", "done"],
+    ["obj-2", "dropped"],
+  ]);
+  expect(transitions[1]?.confidence).toBe(1);
+});
+
+test("parseObjectiveTransitions tolerates fences/prose and a non-JSON response yields none", () => {
+  const fenced =
+    "Sure:\n```json\n" +
+    JSON.stringify({ transitions: [{ objectiveId: "obj-1", status: "done", confidence: 0.8 }] }) +
+    "\n```";
+  expect(parseObjectiveTransitions(fenced).map((t) => t.objectiveId)).toEqual(["obj-1"]);
+  expect(parseObjectiveTransitions("nothing is finished")).toEqual([]);
+  expect(parseObjectiveTransitions(JSON.stringify({ transitions: [] }))).toEqual([]);
+});
+
+test("the transition user prompt carries the task, output, and each objective with its id", () => {
+  const prompt = buildObjectiveTransitionUserPrompt(
+    transitionInput({
+      objectives: [
+        { id: "obj-1", content: "finish the Q3 migration" },
+        { id: "obj-2", content: "keep the notes tidy" },
+      ],
+    }),
+  );
+  expect(prompt).toContain("run the final migration batch");
+  expect(prompt).toContain("migration complete, all rows verified");
+  expect(prompt).toContain("[obj-1] finish the Q3 migration");
+  expect(prompt).toContain("[obj-2] keep the notes tidy");
+});
+
+test("proposeObjectiveTransitions calls the model with the transition system prompt and parses", async () => {
+  const client = cannedClient(
+    JSON.stringify({ transitions: [{ objectiveId: "obj-1", status: "done", confidence: 0.7 }] }),
+  );
+  const provider = new DefaultReflectionProvider(client);
+  const transitions = await provider.proposeObjectiveTransitions(transitionInput());
+  expect(transitions).toHaveLength(1);
+  expect(transitions[0]?.objectiveId).toBe("obj-1");
+  expect(transitions[0]?.proposedStatus).toBe("done");
+  // The transition prompt is distinct from the memory/objective ones (its JSON envelope key).
+  expect(client.seen[0]?.system).toContain("transitions");
+  expect(client.seen[0]?.user).toContain("[obj-1] finish the Q3 migration");
 });

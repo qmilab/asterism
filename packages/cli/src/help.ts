@@ -296,6 +296,9 @@ stay the one who decides what an agent remembers and what it works toward.
               reviews those — no model needed; otherwise it looks over the agent's
               latest work and drafts new ones. An accepted objective frames every later
               run; a proposed one does nothing until you accept it.
+              Finally, if the latest run looks to have FINISHED one of the agent's
+              standing objectives, it suggests marking that one done (or dropped) — apply
+              or skip each. Only your apply changes it; the agent never finishes its own.
   --propose   Look over the agent's new work and set aside what it might be worth
               remembering or working toward, for you to review later. Saves nothing as
               active and asks nothing — it just fills the review pile. This is the form

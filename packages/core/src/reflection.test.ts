@@ -5,6 +5,7 @@ import { openDatabase } from "./db/index.js";
 import {
   acceptProposedObjective,
   isReflectionMemoryType,
+  proposeObjectiveTransitions,
   proposeReviewableMemories,
   proposeReviewableObjectives,
   rejectProposedObjective,
@@ -13,6 +14,7 @@ import {
 import type {
   ProposedMemory,
   ProposedObjective,
+  ProposedTransition,
   ReflectionProvider,
 } from "./reflection.js";
 import { MEMORY_TYPES } from "./types.js";
@@ -25,6 +27,11 @@ function stubProvider(proposals: ProposedMemory[]): ReflectionProvider {
 /** A stub provider that also proposes objectives — `reflect` returns nothing. */
 function objectiveProvider(objectives: ProposedObjective[]): ReflectionProvider {
   return { reflect: async () => [], proposeObjectives: async () => objectives };
+}
+
+/** A stub provider that suggests objective transitions — `reflect` returns nothing. */
+function transitionProvider(transitions: ProposedTransition[]): ReflectionProvider {
+  return { reflect: async () => [], proposeObjectiveTransitions: async () => transitions };
 }
 
 function freshStore(): AsterismStore {
@@ -397,6 +404,186 @@ test("a proposed objective is agent-scoped — another agent cannot accept or re
     expect(acceptProposedObjective(store, bob, p.id).kind).toBe("not_found");
     expect(rejectProposedObjective(store, bob, p.id).kind).toBe("not_found");
     expect(store.objectives.get(alice.id, p.id)?.reviewState).toBe("proposed");
+  } finally {
+    store.close();
+  }
+});
+
+// --- Type B: reflection suggests objective status transitions (advisory) ----
+
+test("proposeObjectiveTransitions resolves a valid suggestion to the agent's own objective", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const obj = store.createObjective(agent.id, "finish the Q3 migration");
+    const run = store.startRun(agent.id, { input: "run the final migration batch" });
+    store.finishRun(agent.id, run.id, "migration complete, all rows verified", "done");
+
+    const result = await proposeObjectiveTransitions(
+      store,
+      agent,
+      transitionProvider([{ objectiveId: obj.id, proposedStatus: "done", confidence: 0.9 }]),
+    );
+    expect(result.kind).toBe("proposed");
+    if (result.kind !== "proposed") return;
+    expect(result.runId).toBe(run.id);
+    expect(result.advisories.length).toBe(1);
+    expect(result.advisories[0]!.objective.id).toBe(obj.id);
+    expect(result.advisories[0]!.objective.content).toBe("finish the Q3 migration");
+    expect(result.advisories[0]!.proposedStatus).toBe("done");
+    expect(result.advisories[0]!.confidence).toBe(0.9);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions DROPS a suggestion for an unknown id or an illegal status", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const real = store.createObjective(agent.id, "keep the notes tidy");
+    const run = store.startRun(agent.id, { input: "tidy" });
+    store.finishRun(agent.id, run.id, "tidied", "done");
+
+    const result = await proposeObjectiveTransitions(
+      store,
+      agent,
+      transitionProvider([
+        { objectiveId: real.id, proposedStatus: "done", confidence: 0.8 }, // kept
+        { objectiveId: "no-such-objective", proposedStatus: "done", confidence: 0.9 }, // unknown id — dropped
+        { objectiveId: real.id, proposedStatus: "active" as never, confidence: 0.7 }, // not a transition — dropped
+        { objectiveId: real.id, proposedStatus: "garbage" as never, confidence: 0.7 }, // illegal — dropped
+      ]),
+    );
+    if (result.kind !== "proposed") throw new Error("expected proposed");
+    expect(result.advisories.map((a) => a.objective.id)).toEqual([real.id]);
+    expect(result.advisories.map((a) => a.proposedStatus)).toEqual(["done"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions offers only ACTIVE+ACCEPTED objectives as candidates, dropping the rest", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const active = store.createObjective(agent.id, "an active goal");
+    const done = store.createObjective(agent.id, "already finished");
+    store.setObjectiveStatus(agent.id, done.id, "done");
+    const proposed = store.createObjective(agent.id, "a proposed goal", "proposed");
+    const run = store.startRun(agent.id, { input: "x" });
+    store.finishRun(agent.id, run.id, "did x", "done");
+
+    let seen: readonly { id: string }[] = [];
+    const provider: ReflectionProvider = {
+      reflect: async () => [],
+      proposeObjectiveTransitions: async (i) => {
+        seen = i.objectives;
+        // The model names every id, including the non-candidates; the kernel keeps only the active one.
+        return [
+          { objectiveId: active.id, proposedStatus: "done", confidence: 0.9 },
+          { objectiveId: done.id, proposedStatus: "dropped", confidence: 0.9 },
+          { objectiveId: proposed.id, proposedStatus: "done", confidence: 0.9 },
+        ];
+      },
+    };
+    const result = await proposeObjectiveTransitions(store, agent, provider);
+    if (result.kind !== "proposed") throw new Error("expected proposed");
+    // Only the active+accepted objective is a candidate handed to the provider...
+    expect(seen.map((o) => o.id)).toEqual([active.id]);
+    // ...and only it survives re-enforcement (the done + proposed ids are dropped).
+    expect(result.advisories.map((a) => a.objective.id)).toEqual([active.id]);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions is no_run with nothing to judge, and never calls the provider then", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    store.createObjective(agent.id, "a standing goal");
+    let called = false;
+    const provider: ReflectionProvider = {
+      reflect: async () => [],
+      proposeObjectiveTransitions: async () => {
+        called = true;
+        return [];
+      },
+    };
+    expect((await proposeObjectiveTransitions(store, agent, provider)).kind).toBe("no_run");
+    expect(called).toBe(false);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions yields none — no model call — when the agent has no active objectives", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const run = store.startRun(agent.id, { input: "x" });
+    store.finishRun(agent.id, run.id, "did x", "done");
+    let called = false;
+    const provider: ReflectionProvider = {
+      reflect: async () => [],
+      proposeObjectiveTransitions: async () => {
+        called = true;
+        return [];
+      },
+    };
+    const result = await proposeObjectiveTransitions(store, agent, provider);
+    expect(result.kind === "proposed" && result.advisories).toEqual([]);
+    expect(called).toBe(false); // no candidates ⇒ no model call
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions degrades to none when the provider can't propose transitions", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    store.createObjective(agent.id, "a standing goal");
+    const run = store.startRun(agent.id, { input: "x" });
+    store.finishRun(agent.id, run.id, "did x", "done");
+    const result = await proposeObjectiveTransitions(store, agent, stubProvider([]));
+    expect(result.kind === "proposed" && result.advisories).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions is agent-scoped — a suggestion for another agent's objective is dropped", async () => {
+  const store = freshStore();
+  try {
+    const alice = makeAgent(store, "alice");
+    const bob = makeAgent(store, "bob");
+    const aliceObj = store.createObjective(alice.id, "alice's standing goal");
+    const bobObj = store.createObjective(bob.id, "bob's standing goal");
+    const run = store.startRun(bob.id, { input: "x" });
+    store.finishRun(bob.id, run.id, "did x", "done");
+
+    let seen: readonly { id: string }[] = [];
+    const provider: ReflectionProvider = {
+      reflect: async () => [],
+      proposeObjectiveTransitions: async (i) => {
+        seen = i.objectives;
+        // The provider names ALICE's objective while reviewing BOB — it must be dropped.
+        return [
+          { objectiveId: aliceObj.id, proposedStatus: "done", confidence: 0.9 },
+          { objectiveId: bobObj.id, proposedStatus: "done", confidence: 0.9 },
+        ];
+      },
+    };
+    const result = await proposeObjectiveTransitions(store, bob, provider);
+    if (result.kind !== "proposed") throw new Error("expected proposed");
+    // Bob's candidate set never contains alice's objective...
+    expect(seen.map((o) => o.id)).toEqual([bobObj.id]);
+    // ...and a cross-agent suggestion is dropped — only bob's own survives.
+    expect(result.advisories.map((a) => a.objective.id)).toEqual([bobObj.id]);
+    // Alice's objective is untouched throughout.
+    expect(store.objectives.get(alice.id, aliceObj.id)?.status).toBe("active");
   } finally {
     store.close();
   }

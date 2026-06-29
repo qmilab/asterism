@@ -33,6 +33,7 @@ import {
   executeRun,
   MEMORY_TYPES,
   MemoryFirewallError,
+  proposeObjectiveTransitions,
   proposeReviewableMemories,
   proposeReviewableObjectives,
   proposeStandingGrants,
@@ -71,6 +72,7 @@ import type {
   StandingPolicy,
   StandingThresholds,
   TailOptions,
+  TransitionAdvisory,
   TrustLevel,
 } from "@qmilab/asterism-core";
 import type { RunningServer, ServeConsoleOptions, ServeOptions } from "@qmilab/asterism-server";
@@ -151,6 +153,24 @@ export type ReviewDecision =
   | { kind: "accept" }
   | { kind: "edit"; content: string }
   | { kind: "reject" };
+
+/** A suggested objective status transition presented during `reflect --review` (Type B, advisory). */
+export interface TransitionReviewItem {
+  /** 1-based position in the batch. */
+  index: number;
+  total: number;
+  /** The objective's content — already accepted; shown so the operator recognizes which goal. */
+  content: string;
+  /** Short objective id, for the operator's reference. */
+  objectiveId: string;
+  /** The suggested target status — "done" or "dropped". */
+  proposedStatus: string;
+  /** The provider's confidence in [0, 1]. */
+  confidence: number;
+}
+
+/** The operator's verdict on a suggested transition: apply it, skip it, or stop reviewing the rest. */
+export type TransitionDecision = "apply" | "skip" | "quit";
 
 /** A proposed standing grant presented for ratification during `trust <agent> --review`. */
 export interface StandingReviewItem {
@@ -257,6 +277,17 @@ export interface CliIO {
    * every proposal, so nothing persists — the same safe default as `confirm`.
    */
   review?: (item: ReviewItem) => ReviewDecision | Promise<ReviewDecision>;
+  /**
+   * Decide a suggested objective status transition during `reflect --review` — apply it
+   * (run the transition), skip it (leave the objective as is), or quit (stop reviewing the
+   * rest). Absent ⇒ every suggestion is SKIPPED and the model is never even called for
+   * transitions, so nothing is applied without a human at the keyboard — the same safe
+   * default as `confirm`/`review`. (A transition is advisory: the suggestion persists
+   * nothing; only an explicit apply changes a status, through the audited `setObjectiveStatus`.)
+   */
+  reviewTransition?: (
+    item: TransitionReviewItem,
+  ) => TransitionDecision | Promise<TransitionDecision>;
   /**
    * Ratify a proposed standing grant during `trust <agent> --review` — return true
    * to grant the capability an auto-approve standing, false to leave it gated. Absent
@@ -1878,17 +1909,24 @@ async function runReflectReview(
   const queuedObjectives = store.objectives.list(agent.id, { reviewState: "proposed" });
   // A persisted queue (from `--propose`) is drained, never re-computed: if EITHER queue has
   // rows we are in drain mode, and we drain whichever kinds have rows — no model needed.
+  let code = 0;
   if (queuedMemories.length > 0 || queuedObjectives.length > 0) {
-    let code = 0;
     if (queuedMemories.length > 0) {
       code = (await reviewQueueDrain(io, store, agent, name, queuedMemories)) || code;
     }
     if (queuedObjectives.length > 0) {
       code = (await reviewObjectiveQueueDrain(io, store, agent, name, queuedObjectives)) || code;
     }
-    return code;
+  } else {
+    code = (await reviewLive(io, store, home, agent, name)) || code;
   }
-  return reviewLive(io, store, home, agent, name);
+  // Type B (advisory): after reviewing what reflection PROPOSED TO ADD (memories + new objectives),
+  // surface any EXISTING active objective the latest run looks to have FINISHED, and let the operator
+  // apply or skip each. Runs whether we drained a queue or computed live — a drain skips the model, so
+  // this is the only place transitions surface in the common propose-then-review flow. It is internally
+  // guarded to a no-op (and no model call) when there is nothing to judge or no human at the keyboard.
+  code = (await reviewObjectiveTransitions(io, store, home, agent, name)) || code;
+  return code;
 }
 
 /** The running tally a review loop returns, formatted into the closing `Done — …` line. */
@@ -2314,6 +2352,104 @@ async function reviewObjectiveLive(
   );
 
   printReviewSummary(io, counts);
+  return 0;
+}
+
+/**
+ * Type B (advisory): after the memory + new-objective review, surface any of the agent's EXISTING
+ * active objectives the latest run looks to have FINISHED, and let the operator apply or skip each.
+ * The lightest shape — it PERSISTS NOTHING: a suggestion is computed live and discarded; only an
+ * explicit `apply` changes a status, through the EXISTING audited {@link AsterismStore.setObjectiveStatus}
+ * (which emits `objective.status_changed`). The agent never finishes its own goals — it only suggests.
+ *
+ * Guarded so it costs nothing when there is nothing to do: it makes NO model call (and returns 0) when
+ * there is no human at the keyboard (no `reviewTransition` hook — a piped/cron session applies nothing
+ * anyway), when the agent has no active objectives to finish, when there is no run to judge them against,
+ * or when the model cannot be built or omits the transition method. A MISSING model is not an error here
+ * (a drain that needed no model must not start failing); a model ERROR while computing is reported (→ 1).
+ */
+async function reviewObjectiveTransitions(
+  io: CliIO,
+  store: AsterismStore,
+  home: string,
+  agent: Agent,
+  name: string,
+): Promise<number> {
+  // No interactive reviewer ⇒ nothing could be applied, so skip entirely — and make NO model call
+  // (the queue-drain "refuse to run unattended" discipline, here also sparing the call).
+  const decide = io.reviewTransition;
+  if (!decide) return 0;
+  // Cheap pre-checks before building a model: no active objectives ⇒ nothing to finish; no run with
+  // output ⇒ nothing to judge them against.
+  if (store.objectives.listActiveAccepted(agent.id).length === 0) return 0;
+  const target = store.runs.latestWithOutput(agent.id);
+  if (!target || target.output === undefined) return 0;
+
+  // Build the provider the same way the live path does — but a MISSING model is NOT an error here:
+  // transition suggestions are advisory, so without a model there simply are none.
+  const context: ModelResolutionContext = { config: loadConfig(home), agentName: agent.name };
+  const made = io.makeReflectionProvider
+    ? io.makeReflectionProvider(io.env, context)
+    : (await import("./reflect-model.js")).buildReflectionProvider(io.env, context);
+  if (!made.provider || !made.provider.proposeObjectiveTransitions) return 0;
+
+  let advisories: readonly TransitionAdvisory[];
+  try {
+    const result = await proposeObjectiveTransitions(store, agent, made.provider, { runId: target.id });
+    if (result.kind === "no_run") return 0;
+    advisories = result.advisories;
+  } catch (err) {
+    io.err(`Objective-transition reflection failed: ${errorMessage(err)}`);
+    return 1;
+  }
+  if (advisories.length === 0) return 0;
+
+  io.out("");
+  io.out(
+    `${advisories.length} of ${name}'s objectives ${advisories.length === 1 ? "looks" : "look"} finished (from run ${shortId(target.id)}).`,
+  );
+  io.out("These are suggestions — an objective only changes if you apply it.");
+
+  let applied = 0;
+  let skipped = 0;
+  for (let i = 0; i < advisories.length; i++) {
+    const a = advisories[i]!;
+    io.out("");
+    io.out(
+      `(${i + 1}/${advisories.length}) "${a.objective.content}" (${shortId(a.objective.id)}) looks ${a.proposedStatus}` +
+        ` · confidence ${a.confidence}`,
+    );
+    const decision = await decide({
+      index: i + 1,
+      total: advisories.length,
+      content: a.objective.content,
+      objectiveId: shortId(a.objective.id),
+      proposedStatus: a.proposedStatus,
+      confidence: a.confidence,
+    });
+    if (decision === "quit") {
+      io.out("  · stopped");
+      break;
+    }
+    if (decision !== "apply") {
+      skipped++;
+      io.out("  · skipped");
+      continue;
+    }
+    // Apply through the EXISTING audited path. A returned row whose status is the proposed one is the
+    // applied transition; undefined (vanished / cross-agent) or any other status means it changed under
+    // us between the suggestion and the apply — reported, never crashed.
+    const result = store.setObjectiveStatus(agent.id, a.objective.id, a.proposedStatus);
+    if (result && result.status === a.proposedStatus) {
+      applied++;
+      io.out(`  ✓ marked ${a.proposedStatus}`);
+    } else {
+      skipped++;
+      io.out("  · the objective changed elsewhere — skipped");
+    }
+  }
+  io.out("");
+  io.out(`Done — ${applied} applied, ${skipped} skipped.`);
   return 0;
 }
 

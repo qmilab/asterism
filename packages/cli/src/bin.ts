@@ -21,7 +21,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { runCli } from "./cli.js";
-import type { CliIO, ReviewDecision } from "./cli.js";
+import type { CliIO, ReviewDecision, TransitionDecision } from "./cli.js";
 import { workspaceCapabilities } from "./capabilities.js";
 import { createNodeTerminal } from "./dashboard/terminal-node.js";
 import { ask, readPipedStdin } from "./runtime.js";
@@ -84,6 +84,20 @@ const io: CliIO = {
             return content.length > 0 ? { kind: "edit", content } : { kind: "reject" };
           }
           return { kind: "reject" };
+        },
+        // `reflect --review` Type B: the kernel suggests an existing objective looks finished and
+        // prints it; the human decides here. Apply runs the (audited) transition; skip leaves it; quit
+        // stops the rest. Wired only on a TTY for the same reason as `review` — a piped/redirected
+        // session has no human, and the field's ABSENCE makes the command apply nothing (and skip the
+        // model call). The default on an empty answer is SKIP — nothing changes without an explicit yes.
+        reviewTransition: async (): Promise<TransitionDecision> => {
+          const answer = await ask("  Apply this change? [a]pply / [s]kip / [q]uit (default: skip):");
+          const choice = (answer ?? "").toLowerCase();
+          if (choice === "a" || choice === "apply" || choice === "y" || choice === "yes") {
+            return "apply";
+          }
+          if (choice === "q" || choice === "quit") return "quit";
+          return "skip";
         },
       }
     : {}),
