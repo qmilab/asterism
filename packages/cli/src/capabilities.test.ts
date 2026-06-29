@@ -689,6 +689,32 @@ describe("workspace-bounded write tools emit structured observations", () => {
     }
   });
 
+  test("append_file refuses appending through a symlink LEAF whose target is outside (no escape)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-append-leaf-out-"));
+    try {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "orig");
+      symlinkSync(target, join(workspace, "link.txt")); // in-workspace symlink → outside FILE
+      const result = await run("append_file", { path: "link.txt", content: "MORE" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(readFileSync(target, "utf8")).toBe("orig"); // the outside file was not appended to
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("move refuses a destination that ALIASES back into the source (no parents created)", async () => {
+    await run("write_file", { path: "src/a.txt", content: "x" }); // creates src/
+    symlinkSync(join(workspace, "src"), join(workspace, "alias")); // alias -> src (in-workspace)
+    const result = await run("move", { from: "src", to: "alias/sub/dst" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+    // mkdir must NOT have followed the alias to create `src/sub` before renameSync failed.
+    expect(existsSync(join(workspace, "src/sub"))).toBe(false);
+    expect(readFileSync(join(workspace, "src/a.txt"), "utf8")).toBe("x");
+  });
+
   test("move refuses a DESTINATION through a symlinked directory (file not relocated outside)", async () => {
     const outside = mkdtempSync(join(tmpdir(), "asterism-move-dst-out-"));
     try {

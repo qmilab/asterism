@@ -217,28 +217,66 @@ function resolvesOutsideWorkspace(workspaceDir: string, absPath: string): boolea
 }
 
 /**
- * True when a CREATE / MOVE target would land OUTSIDE the workspace by following a symlinked
- * path COMPONENT. `confine` is lexical only, so a symlinked ancestor directory (e.g. an
- * in-workspace `escape -> /tmp/out`) lets `mkdirSync` / `appendFileSync` / `renameSync` write or
- * relocate outside the workspace even though the requested path stays textually inside. The
- * target itself may not exist yet (we are about to create it), so this realpaths the NEAREST
- * EXISTING ANCESTOR and checks it resolves inside — any symlink in the chain surfaces there. The
- * target's OWN final component is deliberately NOT followed: a symlink leaf is created or moved
- * AS A LINK, never escaped through (delete_file / move classify it with `lstat` the same way).
- * This hardens the new T4 write tools beyond the lexical baseline write_file / delete_file still
- * use (module header); it is still not an OS jail — a TOCTOU symlink swap between this check and
- * the write is out of scope for logical confinement.
+ * realpath the NEAREST EXISTING node at or above `start` and report whether it resolves OUTSIDE
+ * the workspace. The shared core of the write-tool symlink guards: a CREATE/MOVE target may not
+ * exist yet, so we climb to the first node that does and follow its symlink chain — any symlink
+ * pointing out surfaces there. `start` selects how much of the path is checked (see the two
+ * wrappers below). A path that resolves nowhere (every candidate missing) is not an escape.
  */
-function writeTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
-  let ancestor = dirname(absTarget);
+function nearestExistingResolvesOutside(workspaceDir: string, start: string): boolean {
+  let node = start;
   for (;;) {
     try {
-      lstatSync(ancestor);
-      return resolvesOutsideWorkspace(workspaceDir, ancestor);
+      lstatSync(node);
+      return resolvesOutsideWorkspace(workspaceDir, node);
     } catch {
-      const parent = dirname(ancestor);
-      if (parent === ancestor) return false; // reached the filesystem root; nothing existed
-      ancestor = parent;
+      const parent = dirname(node);
+      if (parent === node) return false; // reached the filesystem root; nothing existed
+      node = parent;
+    }
+  }
+}
+
+/**
+ * True when a `mkdir` / `move` target would land OUTSIDE the workspace through a symlinked
+ * ANCESTOR directory (e.g. an in-workspace `escape -> /tmp/out`, target `escape/sub`). `confine`
+ * is lexical only and cannot see through a symlink. Starts at the target's PARENT — the final
+ * component is deliberately NOT followed, because `mkdir`/`renameSync` create or move the leaf AS
+ * ITSELF (a symlink leaf is moved as a link, never written through), matching delete_file/move's
+ * `lstat` discipline.
+ */
+function writeTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
+  return nearestExistingResolvesOutside(workspaceDir, dirname(absTarget));
+}
+
+/**
+ * True when an `append_file` target would write OUTSIDE the workspace. Unlike mkdir/move,
+ * `appendFileSync` FOLLOWS a final symlink when it writes — so an in-workspace symlink LEAF whose
+ * target is external (`link.txt -> /tmp/out/secret`) is an escape too, not just a symlinked
+ * ancestor. Starts AT the target so the leaf is included when it already exists; when it does not,
+ * this walks up to the parent, same as the ancestor check (the file is about to be created).
+ */
+function appendTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
+  return nearestExistingResolvesOutside(workspaceDir, absTarget);
+}
+
+/** realpath the NEAREST EXISTING node at or above `start`, or null if none resolves. Used by the
+ *  move descendant guard to compare REAL paths (so a symlink alias `alias -> src` in the
+ *  destination chain cannot disguise an into-the-source move as a sibling). */
+function realpathNearestExisting(start: string): string | null {
+  let node = start;
+  for (;;) {
+    try {
+      lstatSync(node);
+      try {
+        return realpathSync(node);
+      } catch {
+        return null;
+      }
+    } catch {
+      const parent = dirname(node);
+      if (parent === node) return null;
+      node = parent;
     }
   }
 }
@@ -530,8 +568,9 @@ export function workspaceCapabilities(
         if (content === undefined) return failure("append_file needs string 'content'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
-        // Refuse writing THROUGH a symlinked directory that resolves outside (confine is lexical).
-        if (writeTargetEscapesWorkspace(workspaceDir, c.path)) {
+        // Refuse writing THROUGH a symlinked directory OR a final symlink that resolves outside
+        // (appendFileSync follows the leaf, so it is checked too — confine is lexical only).
+        if (appendTargetEscapesWorkspace(workspaceDir, c.path)) {
           return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
         }
         try {
@@ -630,10 +669,23 @@ export function workspaceCapabilities(
         // (component-aware via `relative`, so a mere name prefix like `src` → `srcfoo` is fine).
         // `within === ""` is the source itself — already refused by the no-clobber check above
         // (the source exists), kept here as defense.
-        const within = relative(src.path, dst.path);
+        const isInsideOrEqual = (rel: string): boolean =>
+          rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+        if (isInsideOrEqual(relative(src.path, dst.path))) {
+          return failure(`Refused: cannot move '${from}' into itself or its own subfolder ('${to}').`);
+        }
+        // The lexical check above is fooled by an in-workspace symlink ALIAS in the destination's
+        // ancestor chain that points back into the source (e.g. `alias -> src`, dst
+        // `alias/sub/dst` reads as a sibling). mkdir would then follow the alias and create inside
+        // the source before `renameSync` fails — a filesystem side effect on a REFUSED move. So
+        // also compare REAL paths: refuse when the destination's nearest existing ancestor
+        // resolves to the source itself or a path inside it.
+        const realSrc = realpathNearestExisting(src.path);
+        const realDstAnchor = realpathNearestExisting(dst.path);
         if (
-          within === "" ||
-          (within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within))
+          realSrc !== null &&
+          realDstAnchor !== null &&
+          isInsideOrEqual(relative(realSrc, realDstAnchor))
         ) {
           return failure(`Refused: cannot move '${from}' into itself or its own subfolder ('${to}').`);
         }
