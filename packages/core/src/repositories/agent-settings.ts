@@ -30,6 +30,7 @@ function mapSettings(row: SqlRow): AgentSettings {
   const recallBudget = intOrUnset(row.recall_budget);
   const minCleanExecutions = intOrUnset(row.min_clean_executions);
   const minDistinctTargets = intOrUnset(row.min_distinct_targets);
+  const worldFactCap = intOrUnset(row.world_fact_cap);
   const recallProvider = textOrUnset(row.recall_provider);
   const cognitionProvider = textOrUnset(row.cognition_provider);
   const cognitionCapture = textOrUnset(row.cognition_capture);
@@ -38,6 +39,7 @@ function mapSettings(row: SqlRow): AgentSettings {
     ...(recallBudget !== undefined ? { recallBudget } : {}),
     ...(minCleanExecutions !== undefined ? { minCleanExecutions } : {}),
     ...(minDistinctTargets !== undefined ? { minDistinctTargets } : {}),
+    ...(worldFactCap !== undefined ? { worldFactCap } : {}),
     // Validate on read too: a value reaches here only through the validated setter, so
     // any unknown string is a corrupt row, not a new provider — coerce it to unset
     // (the safe default) rather than surface an unrecognized selection to the host.
@@ -167,6 +169,62 @@ export class AgentSettingsRepository {
     const row = this.driver
       .prepare(
         `UPDATE agent_settings SET recall_budget = NULL, updated_at = ?
+           WHERE agent_id = ? RETURNING *`,
+      )
+      .get([now, agentId]);
+    return row ? mapSettings(row) : undefined;
+  }
+
+  /**
+   * An agent's world-fact cap override, or undefined when unset (no row, or the column
+   * is NULL) — the resolver reads this and falls back to the kernel
+   * {@link DEFAULT_WORLD_FACT_CAP}. Scoped to `agentId`, so it can only ever return one
+   * agent's own setting.
+   */
+  getWorldFactCap(agentId: string): number | undefined {
+    return this.get(agentId)?.worldFactCap;
+  }
+
+  /**
+   * Set an agent's world-fact cap override. Validates a positive whole number at the
+   * write boundary (the kernel never trusts a surface to have checked), then upserts
+   * ONLY the `world_fact_cap` column — a sibling setting's column is left untouched, so
+   * setting one knob never clears another. `created_at` is preserved across updates;
+   * `updated_at` advances on every change. Lowering the cap below the agent's current
+   * note count is allowed and only blocks NEW subjects — it never evicts existing notes
+   * (the no-silent-data-loss invariant the cap protects).
+   */
+  setWorldFactCap(agentId: string, cap: number): AgentSettings {
+    requireAgentId(agentId);
+    validatePositiveInt(cap, "world-fact cap");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `INSERT INTO agent_settings (agent_id, world_fact_cap, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           world_fact_cap = excluded.world_fact_cap,
+           updated_at = excluded.updated_at
+         RETURNING *`,
+      )
+      .get([agentId, cap, now, now]);
+    if (!row) throw new Error("agent settings upsert did not persist");
+    return mapSettings(row);
+  }
+
+  /**
+   * Clear an agent's world-fact cap override (back to the kernel default) by setting
+   * only that column to NULL. Returns the updated row, or undefined when the agent had
+   * no settings row to begin with (nothing was set, so nothing to clear) — symmetric
+   * with {@link clearRecallBudget}. The row itself is kept even when every override is
+   * now NULL, so a later setting on the same agent preserves `created_at`.
+   */
+  clearWorldFactCap(agentId: string): AgentSettings | undefined {
+    requireAgentId(agentId);
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE agent_settings SET world_fact_cap = NULL, updated_at = ?
            WHERE agent_id = ? RETURNING *`,
       )
       .get([now, agentId]);

@@ -221,6 +221,12 @@ CREATE TABLE IF NOT EXISTS agent_settings (
   -- PROPOSED for auto-approval. NULL on either ⇒ that half uses the default.
   min_clean_executions INTEGER,
   min_distinct_targets INTEGER,
+  -- The agent's world-fact cap override -- the maximum number of distinct subjects
+  -- ("working notes") it may hold, overriding the kernel DEFAULT_WORLD_FACT_CAP. The
+  -- cap bounds GROWTH of the agent's own unreviewed framing input: a new subject at
+  -- cap is rejected loudly (never silently evicted), superseding a tracked one is
+  -- free. NULL ⇒ the kernel default, like every other column here.
+  world_fact_cap       INTEGER,
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL
 );

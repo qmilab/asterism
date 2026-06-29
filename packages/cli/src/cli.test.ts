@@ -2349,7 +2349,7 @@ test("config recall-budget rejects values that are not a positive whole number",
   await runCli(["init"], h.io);
   await runCli(["new", "personal", "--trust", "autonomous"], h.io);
 
-  for (const bad of ["0", "-5", "abc", "2.5"]) {
+  for (const bad of ["0", "-5", "-2.5", "abc", "2.5"]) {
     h.err.length = 0;
     expect(await runCli(["config", "recall-budget", "personal", bad], h.io)).toBe(1);
     expect(h.err.join("\n")).toContain("positive whole number");
@@ -2454,7 +2454,7 @@ test("config recall-budget --default shows and clears the install-wide default",
 test("config recall-budget --default rejects a value that is not a positive whole number", async () => {
   const h = harness();
   await runCli(["init"], h.io);
-  for (const bad of ["0", "-5", "abc", "2.5"]) {
+  for (const bad of ["0", "-5", "-2.5", "abc", "2.5"]) {
     h.err.length = 0;
     expect(await runCli(["config", "recall-budget", "--default", bad], h.io)).toBe(1);
     expect(h.err.join("\n")).toContain("positive whole number");
@@ -2484,6 +2484,111 @@ test("the install-wide default applies to an un-set agent; a per-agent budget st
   expect(shown).toContain("Install-wide recall budget: 30");
   expect(shown).toContain("personal  →  40  [set]"); // per-agent wins
   expect(shown).toContain("work  →  30  [install-wide default]"); // falls back to install-wide
+});
+
+test("config world-fact-cap sets a per-agent cap, persisted in the kernel store", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["config", "world-fact-cap", "personal", "8"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set personal's world-fact cap to 8 notes");
+
+  // The cap is a kernel setting (agentId-scoped), not surface config.
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getWorldFactCap(agentNamed(store, "personal").id)).toBe(8);
+  } finally {
+    store.close();
+  }
+});
+
+test("config world-fact-cap with no value shows the current setting", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // Unset → the default is reported.
+  expect(await capture(["config", "world-fact-cap", "personal"], h.io)).toContain(
+    "uses the default world-fact cap",
+  );
+  await runCli(["config", "world-fact-cap", "personal", "5"], h.io);
+  expect(await capture(["config", "world-fact-cap", "personal"], h.io)).toContain("world-fact cap: 5 notes");
+});
+
+test("config world-fact-cap rejects values that are not a positive whole number", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  for (const bad of ["0", "-5", "-2.5", "abc", "2.5"]) {
+    h.err.length = 0;
+    expect(await runCli(["config", "world-fact-cap", "personal", bad], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("positive whole number");
+  }
+  // Nothing was persisted by any rejected attempt.
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getWorldFactCap(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("config world-fact-cap --unset clears the override, then is a no-op", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "world-fact-cap", "personal", "8"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["config", "world-fact-cap", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("uses the default");
+
+  // A second unset reports there was nothing set — it does not claim to clear again.
+  h.out.length = 0;
+  expect(await runCli(["config", "world-fact-cap", "personal", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("had no world-fact cap set");
+});
+
+test("config world-fact-cap reports an unknown agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "world-fact-cap", "ghost", "8"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("No agent named");
+});
+
+test("config world-fact-cap rejects an install-wide --default (not available yet)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "world-fact-cap", "--default", "10"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("not available yet");
+});
+
+test("config show lists each agent's world-fact cap, set or default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["config", "world-fact-cap", "personal", "8"], h.io);
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("Per-agent world-fact cap");
+  expect(shown).toContain("personal  →  8  [set]");
+  // The other agent is unaffected — a per-agent setting never crosses agents.
+  expect(shown).toContain("work  →  32  [default]");
+});
+
+test("notes inspect shows the per-agent cap once set", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["config", "world-fact-cap", "personal", "3"], h.io);
+  await runCli(["notes", "set", "personal", "deploy", "v1"], h.io);
+
+  // The listing's "(N of cap)" reflects the configured 3, not the built-in 32.
+  const shown = await capture(["notes", "inspect", "personal"], h.io);
+  expect(shown).toContain("(1 of 3)");
 });
 
 test("config recall-provider sets a per-agent provider, persisted in the kernel store", async () => {

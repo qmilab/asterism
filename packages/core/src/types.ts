@@ -427,6 +427,16 @@ export interface AgentSettings {
    * back to `DEFAULT_STANDING_POLICY.minDistinctTargets`.
    */
   minDistinctTargets?: number;
+  /**
+   * Per-agent override of the world-fact cap — the maximum number of distinct
+   * subjects ("working notes") the agent may hold. `undefined` ⇒ unset, so the
+   * kernel falls back to {@link DEFAULT_WORLD_FACT_CAP}. The cap bounds GROWTH of the
+   * one framing input the agent writes without per-write review: a new subject at cap
+   * is rejected loudly (never silently evicted), while superseding a tracked subject
+   * is always free. Lowering it below the current count blocks NEW subjects until the
+   * agent forgets some — it never deletes existing notes.
+   */
+  worldFactCap?: number;
   createdAt: string;
   updatedAt: string;
 }
