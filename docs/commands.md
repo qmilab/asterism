@@ -359,9 +359,11 @@ response>` lands on stdout.)
 
 > **Tools:** the shipped CLI registers a default catalog of workspace-scoped file
 > tools — `read_file`, `list_dir`, `stat`, and `find` to look around, plus
-> `write_file` and `delete_file` to change things — behind the trust gate. The
-> read-only tools and `write_file` are ordinary read/write effects; `delete_file`
-> is destructive and pauses for confirmation at every trust level. Each is confined
+> `write_file`, `append_file`, `mkdir`, and `move` to change things and
+> `delete_file` to remove them — behind the trust gate. The read-only tools and
+> the write tools are ordinary read/write effects; `delete_file` is destructive
+> and pauses for confirmation at every trust level, while `move` refuses to
+> overwrite an existing destination (so it never silently destroys anything). Each is confined
 > to the agent's workspace (logical scoping, not an OS-enforced jail — see
 > [what isolation means today](./concepts.md#what-isolation-means-today)). The
 > end-to-end behavior is shown in the [walkthrough](./walkthrough.md).

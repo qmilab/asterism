@@ -87,6 +87,22 @@ describe("harvestWorldFactCandidates — the pure reducer", () => {
     expect(out.map((c) => c.subject)).not.toContain("file:h");
   });
 
+  test("a move's single observation spanning two subjects → two notes (dest present, src absent)", () => {
+    // The `move` tool (T4) emits one write observation that touches BOTH paths: the
+    // destination now exists (with the relocated size) and the source no longer does.
+    const out = harvestWorldFactCandidates([
+      obs("write", [
+        { subject: "file:new.txt", relation: "size_bytes", object: 5 },
+        { subject: "file:new.txt", relation: "exists", object: true },
+        { subject: "file:old.txt", relation: "exists", object: false },
+      ]),
+    ]);
+    expect(out).toEqual([
+      { subject: "file:new.txt", value: "5 bytes" },
+      { subject: "file:old.txt", value: "absent" },
+    ]);
+  });
+
   test("output is sorted by subject (deterministic 'up to cap'); empty/all-read → []", () => {
     const out = harvestWorldFactCandidates([
       obs("write", [{ subject: "file:zebra", relation: "exists", object: true }]),

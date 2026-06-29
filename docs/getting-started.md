@@ -124,7 +124,8 @@ response goes to **standard out**, so you can pipe a run cleanly.
 !!! tip "The tools an agent has"
     Out of the box, `asterism run` gives every agent a catalog of
     workspace-scoped file tools: `read_file`, `list_dir`, `stat`, and `find` to
-    look around, plus `write_file` and `delete_file` to change things.
+    look around, plus `write_file`, `append_file`, `mkdir`, and `move` to change
+    things and `delete_file` to remove them.
     They're confined to the agent's own workspace — a path that climbs out
     (`..`, an absolute path) is refused. That's *logical* scoping, not an
     OS-enforced jail (see [what isolation means today](./concepts.md#what-isolation-means-today)).

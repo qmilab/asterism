@@ -58,12 +58,15 @@ All five claims are demonstrable from a fresh install:
 
 **Claims 3 and 4 are about an agent's *actions* — the tools it uses.** The shipped
 CLI registers a default catalog of **workspace-scoped file tools** —
-`read_file`, `list_dir`, `stat`, and `find` to explore, plus `write_file` and
-`delete_file` to change things — behind the trust gate. The read-only tools and
-`write_file` are ordinary read/write effects; `delete_file` is declared
-destructive. So a bare `asterism run` (with a model configured) gives the
-gate real actions to govern: an ordinary write executes under `autonomous`, and a
-deletion pauses for confirmation regardless of trust level.
+`read_file`, `list_dir`, `stat`, and `find` to explore, plus `write_file`,
+`append_file`, `mkdir`, and `move` to change things and `delete_file` to remove
+them — behind the trust gate. The read-only tools and the write tools
+(`write_file`, `append_file`, `mkdir`, `move`) are ordinary read/write effects;
+`delete_file` is declared destructive — and `move` refuses to overwrite an
+existing destination, so it never silently destroys anything. So a bare
+`asterism run` (with a model configured) gives the gate real actions to govern:
+an ordinary write executes under `autonomous`, and a deletion pauses for
+confirmation regardless of trust level.
 
 Each tool is confined to the agent's own workspace — a path that climbs out
 (`..`, an absolute path) is refused. That is *logical* scoping, not an

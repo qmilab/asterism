@@ -23,31 +23,49 @@
 //                               under propose. (The acceptance demo declares its
 //                               editor tool `write` the same way — editing a file
 //                               in the agent's scratch space is the agent's job.)
+//   - fs.mkdir  → `write`       create a folder; cannot lose data, so an ordinary
+//                               side effect like fs.write.
+//   - fs.append → `write`       add text to the end of a file (create-if-absent);
+//                               preserves existing content, so non-destructive.
+//   - fs.move   → `write`       move / rename within the workspace. NO-CLOBBER: it
+//                               refuses an existing destination, so it can never
+//                               overwrite (irreversible loss) and relocating bytes
+//                               is reversible — hence `write`, not `destructive`.
+//                               To replace a target, delete it first (that pauses).
 //   - fs.delete → `destructive` deleting is irreversible, so it pauses for
 //                               confirmation at EVERY trust level, autonomous
 //                               included, unless the capability is allow-listed.
 //
 // CONFINEMENT IS BEST-EFFORT, NOT A SANDBOX. Each tool resolves its `path`
 // argument against the agent's workspace and refuses one that climbs out (`..`,
-// an absolute path). That is Phase 0's *logical* scoping — exactly what the docs
-// claim and no more: it is not an OS-enforced filesystem jail and does not defend
-// against symlink tricks or a deliberately hostile tool. Stronger execution
-// isolation is a later phase; this catalog is intentionally limited to bounded
-// file operations and ships no arbitrary-shell tool, so it never grants code
-// execution under merely logical confinement.
+// an absolute path). The read explorers (list_dir/stat/find) and the T4 write
+// tools (mkdir/append_file/move) ADDITIONALLY realpath-check that no symlinked
+// path component resolves outside the workspace before they enumerate, write, or
+// relocate — closing the obvious symlinked-directory escape; write_file/delete_file
+// remain on the lexical baseline (uniformly hardening them is a noted follow-up).
+// This is still Phase 0's *logical* scoping — exactly what the docs claim and no
+// more: it is NOT an OS-enforced filesystem jail and does not defend against a
+// TOCTOU symlink swap between the check and the write, or a deliberately hostile
+// in-process tool. Stronger execution isolation is a later phase; this catalog is
+// intentionally limited to bounded file operations and ships no arbitrary-shell
+// tool, so it never grants code execution under merely logical confinement.
 
 import {
   type Dirent,
+  appendFileSync,
   lstatSync,
   mkdirSync,
   opendirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 
 import { DEFAULT_MAX_OBSERVATION_FACTS } from "@qmilab/asterism-core";
 import type { Capability } from "@qmilab/asterism-core";
@@ -61,6 +79,9 @@ import type { ObservedFact, ToolInvocation, ToolResult } from "@qmilab/asterism-
 // the kernel screens them through `redactObservation` before any of it is persisted.
 const FS_WRITE_SCHEMA = "asterism.fs.write@1";
 const FS_DELETE_SCHEMA = "asterism.fs.delete@1";
+const FS_MKDIR_SCHEMA = "asterism.fs.mkdir@1";
+const FS_APPEND_SCHEMA = "asterism.fs.append@1";
+const FS_MOVE_SCHEMA = "asterism.fs.move@1";
 const FS_READ_SCHEMA = "asterism.fs.read@1";
 const FS_LIST_SCHEMA = "asterism.fs.list@1";
 const FS_STAT_SCHEMA = "asterism.fs.stat@1";
@@ -194,6 +215,99 @@ function resolvesOutsideWorkspace(workspaceDir: string, absPath: string): boolea
   }
   const rel = relative(realRoot, realTarget);
   return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+/**
+ * Resolve `p` to the absolute location a CREATE / WRITE would land, FOLLOWING symlinks and
+ * tolerating not-yet-existing components. `realpathSync` is not enough on its own: it THROWS on a
+ * dangling symlink (one whose target does not exist yet), and a guard that treated that throw as
+ * "stays inside" would let an in-workspace `link -> /tmp/out/notyet` be written through, CREATING
+ * the outside file — the exact dangling-symlink escape. So: fast-path `realpathSync` when the whole
+ * chain exists; otherwise, if `p` itself is a symlink, follow its target (even if missing); else
+ * `p` is a missing name, so resolve its parent and re-append. Bounded against symlink loops.
+ */
+function resolveTargetLocation(p: string, depth = 0): string {
+  if (depth > 64) return p; // symlink-loop guard (realpathSync also throws ELOOP on the fast path)
+  try {
+    return realpathSync(p); // whole chain exists — one syscall, fully resolved
+  } catch {
+    // A component is missing or a symlink dangles; resolve manually.
+  }
+  let st: ReturnType<typeof lstatSync> | null = null;
+  try {
+    st = lstatSync(p);
+  } catch {
+    st = null;
+  }
+  if (st?.isSymbolicLink()) {
+    const link = readlinkSync(p);
+    const abs = isAbsolute(link) ? link : resolvePath(dirname(p), link);
+    return resolveTargetLocation(abs, depth + 1);
+  }
+  const parent = dirname(p);
+  if (parent === p) return p; // filesystem root
+  return resolvePath(resolveTargetLocation(parent, depth + 1), basename(p));
+}
+
+/**
+ * True when a write/create at `absLocation` would land OUTSIDE the workspace once symlinks (and
+ * dangling ones) are followed. The shared core of the write-tool symlink guards — `confine` is
+ * lexical and cannot see through a symlink; this resolves where the bytes would actually land.
+ */
+function locationEscapesWorkspace(workspaceDir: string, absLocation: string): boolean {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(resolvePath(workspaceDir));
+  } catch {
+    return false; // workspace itself unresolvable — leave to the operation's own error
+  }
+  const resolved = resolveTargetLocation(absLocation);
+  const rel = relative(realRoot, resolved);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+/**
+ * True when a target would land OUTSIDE the workspace once symlinks are followed THROUGH THE FINAL
+ * COMPONENT. For tools that follow a symlink leaf: `append_file` (`appendFileSync` writes through
+ * `link.txt -> /tmp/out/secret`) AND `mkdir` (`mkdirSync(..., {recursive:true})` treats an existing
+ * `escape -> /tmp/out` leaf as a satisfied directory and would emit a false `dir:escape exists`).
+ * So the leaf is included — an external leaf (existing OR dangling) is an escape, not just a
+ * symlinked ancestor.
+ */
+function targetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
+  return locationEscapesWorkspace(workspaceDir, absTarget);
+}
+
+/**
+ * True when a `move` target would land OUTSIDE the workspace through a symlinked ANCESTOR directory
+ * (e.g. `escape -> /tmp/out`, target `escape/a.txt`). Resolves the target's PARENT only — the final
+ * component is deliberately NOT followed, because `renameSync` moves a symlink leaf AS A LINK (it
+ * relocates the link itself, never writes through it), matching delete_file/move's `lstat`
+ * discipline. (`move` checks both its source and destination this way.)
+ */
+function parentEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
+  return locationEscapesWorkspace(workspaceDir, dirname(absTarget));
+}
+
+/** realpath the NEAREST EXISTING node at or above `start`, or null if none resolves. Used by the
+ *  move descendant guard to compare REAL paths (so a symlink alias `alias -> src` in the
+ *  destination chain cannot disguise an into-the-source move as a sibling). */
+function realpathNearestExisting(start: string): string | null {
+  let node = start;
+  for (;;) {
+    try {
+      lstatSync(node);
+      try {
+        return realpathSync(node);
+      } catch {
+        return null;
+      }
+    } catch {
+      const parent = dirname(node);
+      if (parent === node) return null;
+      node = parent;
+    }
+  }
 }
 
 /** Classify a directory entry as a `dir:` or `file:` node. A symlink is NOT followed
@@ -410,6 +524,224 @@ export function workspaceCapabilities(
         } catch (err) {
           return failure(`Could not delete '${path}': ${failureReason(err)}`);
         }
+      },
+    },
+  };
+
+  const mkdirNode: Capability = {
+    key: "fs.mkdir",
+    effect: "write",
+    tool: {
+      name: "mkdir",
+      description:
+        "Create a folder in your workspace, making parent folders as needed. " +
+        "Argument: { path } relative to your workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative folder path to create." },
+        },
+        required: ["path"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const path = stringArg(invocation.args, "path");
+        if (path === undefined) return failure("mkdir needs a 'path'.");
+        const c = confine(workspaceDir, path);
+        if (!c.ok) return failure(c.message);
+        // Refuse creating THROUGH a symlinked directory OR onto a symlink LEAF that resolves
+        // outside — mkdirSync follows an existing symlink-to-dir leaf and would otherwise report
+        // an out-of-workspace target as a satisfied `dir:` (confine is lexical only).
+        if (targetEscapesWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
+        try {
+          // recursive:true makes parents as needed and is idempotent on an existing
+          // FOLDER (no-op success → an honest `exists:true`); it still THROWS when the
+          // path is an existing file (EEXIST/ENOTDIR), so that fails with no observation.
+          mkdirSync(c.path, { recursive: true });
+          return {
+            output: `Created folder '${path}'.`,
+            observation: {
+              schema: FS_MKDIR_SCHEMA,
+              facts: [{ subject: nodeSubject("dir", c.rel), relation: REL_EXISTS, object: true }],
+            },
+          };
+        } catch (err) {
+          return failure(`Could not create '${path}': ${failureReason(err)}`);
+        }
+      },
+    },
+  };
+
+  const appendFile: Capability = {
+    key: "fs.append",
+    effect: "write",
+    tool: {
+      name: "append_file",
+      description:
+        "Append text to the end of a file in your workspace, creating it (and parent folders) " +
+        "if needed. Existing content is preserved. Arguments: { path, content } with path " +
+        "relative to your workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative file path to append to." },
+          content: { type: "string", description: "Text to add to the end of the file." },
+        },
+        required: ["path", "content"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const path = stringArg(invocation.args, "path");
+        if (path === undefined) return failure("append_file needs a 'path'.");
+        // Require `content` explicitly (write_file's discipline): a missing/non-string value
+        // must fail, not silently append nothing and report a misleading success.
+        const content = stringArg(invocation.args, "content");
+        if (content === undefined) return failure("append_file needs string 'content'.");
+        const c = confine(workspaceDir, path);
+        if (!c.ok) return failure(c.message);
+        // Refuse writing THROUGH a symlinked directory OR a final symlink that resolves outside
+        // (appendFileSync follows the leaf, so it is checked too — confine is lexical only).
+        if (targetEscapesWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
+        try {
+          mkdirSync(dirname(c.path), { recursive: true });
+          appendFileSync(c.path, content);
+          // The size fact is the file's RESULTING total size (its current world-state),
+          // read back after the append — not the appended byte count — so it matches the
+          // size_bytes fact read_file / stat emit about the same file.
+          const bytes = statSync(c.path).size;
+          const added = Buffer.byteLength(content, "utf8");
+          return {
+            output: `Appended ${added} ${added === 1 ? "byte" : "bytes"} to '${path}' (now ${bytes} bytes).`,
+            observation: {
+              schema: FS_APPEND_SCHEMA,
+              facts: [
+                { subject: nodeSubject("file", c.rel), relation: REL_SIZE_BYTES, object: bytes },
+                { subject: nodeSubject("file", c.rel), relation: REL_EXISTS, object: true },
+              ],
+            },
+          };
+        } catch (err) {
+          return failure(`Could not append to '${path}': ${failureReason(err)}`);
+        }
+      },
+    },
+  };
+
+  const moveNode: Capability = {
+    key: "fs.move",
+    effect: "write",
+    tool: {
+      name: "move",
+      description:
+        "Move or rename a file or folder within your workspace. Refuses if the destination " +
+        "already exists — delete it first if you mean to replace it. Arguments: { from, to } " +
+        "both relative to your workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "Workspace-relative path to move or rename." },
+          to: { type: "string", description: "Workspace-relative destination path." },
+        },
+        required: ["from", "to"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const from = stringArg(invocation.args, "from");
+        if (from === undefined) return failure("move needs a 'from'.");
+        const to = stringArg(invocation.args, "to");
+        if (to === undefined) return failure("move needs a 'to'.");
+        const src = confine(workspaceDir, from);
+        if (!src.ok) return failure(src.message);
+        const dst = confine(workspaceDir, to);
+        if (!dst.ok) return failure(dst.message);
+        // Refuse reaching the SOURCE through a symlinked directory, or writing the DESTINATION
+        // through one — either relocates a file across the workspace boundary even though both
+        // paths are lexically inside (confine is lexical). Checked BEFORE the source `lstat`
+        // below, so a symlinked-parent source is never even stat'd (which would leak the outside
+        // file's size into the observation). The source's OWN final component may be a symlink —
+        // it is moved AS A LINK; only a symlinked ANCESTOR escapes.
+        if (parentEscapesWorkspace(workspaceDir, src.path)) {
+          return failure(`Refused: '${from}' resolves outside this agent's workspace.`);
+        }
+        if (parentEscapesWorkspace(workspaceDir, dst.path)) {
+          return failure(`Refused: '${to}' resolves outside this agent's workspace.`);
+        }
+        // Classify the SOURCE before the move (it is gone afterward), with lstat so a symlink
+        // moves as a link (labelled file:) and is never followed out of the workspace —
+        // delete_file's discipline. A missing source throws here and fails with no observation.
+        let srcKind: "file" | "dir";
+        let srcSize: number;
+        try {
+          const info = lstatSync(src.path);
+          srcKind = info.isDirectory() ? "dir" : "file";
+          srcSize = info.size;
+        } catch (err) {
+          return failure(`Could not move '${from}': ${failureReason(err)}`);
+        }
+        // NO-CLOBBER (the whole reason this is `write`, not `destructive`): renameSync silently
+        // OVERWRITES an existing destination — irreversible data loss, the case only the
+        // destructive delete gate may reach. So refuse a taken destination outright; replacing
+        // means deleting it first (which pauses). lstat, not an exists-follow, so a dangling or
+        // symlinked destination still counts as taken (and a same-path self-move is refused).
+        try {
+          lstatSync(dst.path);
+          return failure(
+            `Refused: destination '${to}' already exists. Delete it first if you mean to replace it.`,
+          );
+        } catch {
+          // ENOENT → the destination is free; proceed.
+        }
+        // Refuse moving a path INTO ITSELF or its own descendant (e.g. `src` → `src/sub/dst`):
+        // renameSync would fail (the destination is inside the source), but only AFTER the
+        // mkdirSync below had already created the destination's parent folders — a filesystem
+        // side effect on a FAILED move. So detect it FIRST, before creating any parents. The
+        // destination is a descendant when its path resolves UNDER the source with no climb-out
+        // (component-aware via `relative`, so a mere name prefix like `src` → `srcfoo` is fine).
+        // `within === ""` is the source itself — already refused by the no-clobber check above
+        // (the source exists), kept here as defense.
+        const isInsideOrEqual = (rel: string): boolean =>
+          rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+        if (isInsideOrEqual(relative(src.path, dst.path))) {
+          return failure(`Refused: cannot move '${from}' into itself or its own subfolder ('${to}').`);
+        }
+        // The lexical check above is fooled by an in-workspace symlink ALIAS in the destination's
+        // ancestor chain that points back into the source (e.g. `alias -> src`, dst
+        // `alias/sub/dst` reads as a sibling). mkdir would then follow the alias and create inside
+        // the source before `renameSync` fails — a filesystem side effect on a REFUSED move. So
+        // also compare REAL paths: refuse when the destination's nearest existing ancestor
+        // resolves to the source itself or a path inside it.
+        const realSrc = realpathNearestExisting(src.path);
+        const realDstAnchor = realpathNearestExisting(dst.path);
+        if (
+          realSrc !== null &&
+          realDstAnchor !== null &&
+          isInsideOrEqual(relative(realSrc, realDstAnchor))
+        ) {
+          return failure(`Refused: cannot move '${from}' into itself or its own subfolder ('${to}').`);
+        }
+        try {
+          mkdirSync(dirname(dst.path), { recursive: true });
+          renameSync(src.path, dst.path);
+        } catch (err) {
+          return failure(`Could not move '${from}' to '${to}': ${failureReason(err)}`);
+        }
+        // Two subjects change: the destination now exists (same kind, and for a file the same
+        // size — a move relocates bytes, it does not change them) and the source no longer does.
+        const facts: ObservedFact[] = [];
+        if (srcKind === "file") {
+          facts.push({
+            subject: nodeSubject("file", dst.rel),
+            relation: REL_SIZE_BYTES,
+            object: srcSize,
+          });
+        }
+        facts.push({ subject: nodeSubject(srcKind, dst.rel), relation: REL_EXISTS, object: true });
+        facts.push({ subject: nodeSubject(srcKind, src.rel), relation: REL_EXISTS, object: false });
+        return {
+          output: `Moved '${from}' to '${to}'.`,
+          observation: { schema: FS_MOVE_SCHEMA, facts },
+        };
       },
     },
   };
@@ -665,5 +997,15 @@ export function workspaceCapabilities(
     },
   };
 
-  return [readFile, writeFile, deleteFile, listDir, statNode, findNodes];
+  return [
+    readFile,
+    writeFile,
+    appendFile,
+    mkdirNode,
+    moveNode,
+    deleteFile,
+    listDir,
+    statNode,
+    findNodes,
+  ];
 }
