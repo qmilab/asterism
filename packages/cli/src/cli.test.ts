@@ -2349,7 +2349,7 @@ test("config recall-budget rejects values that are not a positive whole number",
   await runCli(["init"], h.io);
   await runCli(["new", "personal", "--trust", "autonomous"], h.io);
 
-  for (const bad of ["0", "-5", "abc", "2.5"]) {
+  for (const bad of ["0", "-5", "-2.5", "abc", "2.5"]) {
     h.err.length = 0;
     expect(await runCli(["config", "recall-budget", "personal", bad], h.io)).toBe(1);
     expect(h.err.join("\n")).toContain("positive whole number");
@@ -2454,7 +2454,7 @@ test("config recall-budget --default shows and clears the install-wide default",
 test("config recall-budget --default rejects a value that is not a positive whole number", async () => {
   const h = harness();
   await runCli(["init"], h.io);
-  for (const bad of ["0", "-5", "abc", "2.5"]) {
+  for (const bad of ["0", "-5", "-2.5", "abc", "2.5"]) {
     h.err.length = 0;
     expect(await runCli(["config", "recall-budget", "--default", bad], h.io)).toBe(1);
     expect(h.err.join("\n")).toContain("positive whole number");
@@ -2521,7 +2521,7 @@ test("config world-fact-cap rejects values that are not a positive whole number"
   await runCli(["init"], h.io);
   await runCli(["new", "personal", "--trust", "autonomous"], h.io);
 
-  for (const bad of ["0", "-5", "abc", "2.5"]) {
+  for (const bad of ["0", "-5", "-2.5", "abc", "2.5"]) {
     h.err.length = 0;
     expect(await runCli(["config", "world-fact-cap", "personal", bad], h.io)).toBe(1);
     expect(h.err.join("\n")).toContain("positive whole number");

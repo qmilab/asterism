@@ -2604,6 +2604,20 @@ function cmdConfigShow(io: CliIO): Promise<number> {
 }
 
 /**
+ * Whether the parsed flags carry a dash-prefixed numeric value the caller meant as a
+ * setting value. The tiny arg parser turns a bare `-5` into a short boolean flag keyed
+ * `5`, and `-2.5` into one keyed `2.5` — never a positional. The real flags on these
+ * config verbs are word keys (`unset`, `default`, `help`, `h`), so ANY digit- or
+ * dot-leading flag key can only be such a number (`5`, `2.5`, `.5`, `2e3`). Detecting it
+ * lets a setter reject it with the "positive whole number" message instead of falling
+ * through to the read-only "show" path as a silent no-op (Codex P3 — the old `^\d+$`
+ * check matched only whole integers, so `-2.5` slipped through).
+ */
+function hasNumericValueFlag(parsed: ParsedArgs): boolean {
+  return Object.keys(parsed.flags).some((k) => /^[.\d]/.test(k));
+}
+
+/**
  * `asterism config recall-budget <agent> [<n>]` / `--unset` — read or set how many
  * memories an agent's runs may frame. With a value, sets the per-agent override;
  * with `--unset`, clears it back to the kernel default; with neither, shows the
@@ -2625,11 +2639,10 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
   }
   const unset = parsed.flags.unset === true;
   const valueRaw = parsed.positionals[2];
-  // The tiny arg parser turns a bare negative number (`-5`) into a short boolean flag
-  // (key `5`), not a positional, so a digit-only flag key is a negative budget the user
-  // tried to set. Catch it as an invalid value rather than letting it vanish and fall
-  // through to the read-only "show" path as a silent no-op.
-  const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
+  // A dash-prefixed number (`-5`, `-2.5`) becomes a digit/dot-leading flag key, not a
+  // positional — the user's intended (invalid) budget. Catch it so it is rejected rather
+  // than vanishing into the read-only "show" path as a silent no-op.
+  const negativeValue = hasNumericValueFlag(parsed);
   const CONSTANT = DEFAULT_RECALL_BUDGET.maxMemories;
 
   return withHomeStore(io, (store) => {
@@ -2695,11 +2708,11 @@ function cmdConfigInstallRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<nu
   const unset = parsed.flags.unset === true;
   // The budget can arrive two ways: `--default 30` (registered boolean ⇒ `30` is the next
   // positional after `recall-budget`) or `--default=30` (the parser's inline form ⇒ the value
-  // is the flag's own string). A bare negative (`--default -5`) still arrives as a digit-only
-  // flag key, caught by `negativeValue` below.
+  // is the flag's own string). A bare negative (`--default -5` / `-2.5`) still arrives as a
+  // digit/dot-leading flag key, caught by `negativeValue` below.
   const valueRaw =
     typeof parsed.flags.default === "string" ? parsed.flags.default : parsed.positionals[1];
-  const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
+  const negativeValue = hasNumericValueFlag(parsed);
   const CONSTANT = DEFAULT_RECALL_BUDGET.maxMemories;
 
   return withHomeStore(io, (store) => {
@@ -2763,10 +2776,10 @@ function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
   }
   const unset = parsed.flags.unset === true;
   const valueRaw = parsed.positionals[2];
-  // A bare negative number (`-5`) arrives as a digit-only short boolean flag key, not a
-  // positional — catch it as an invalid value rather than letting it fall through to the
+  // A dash-prefixed number (`-5`, `-2.5`) arrives as a digit/dot-leading short flag key, not
+  // a positional — catch it as an invalid value rather than letting it fall through to the
   // read-only "show" path as a silent no-op (same edge as `cmdConfigRecallBudget`).
-  const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
+  const negativeValue = hasNumericValueFlag(parsed);
   const CONSTANT = DEFAULT_WORLD_FACT_CAP;
 
   return withHomeStore(io, (store) => {
