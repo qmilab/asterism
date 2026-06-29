@@ -109,6 +109,129 @@ describe("file tools emit structured observations", () => {
     const result = await run("write_file", { path: "a/b/c.txt", content: "x" });
     expect(result.observation!.facts[0]!.subject).toBe("file:a/b/c.txt");
   });
+
+  // ---- symlinked-component escape (read_file/write_file/delete_file must not read, write, or
+  // delete THROUGH a symlink out of the workspace; uniform with the read explorers and T4 writes) ----
+
+  test("read_file refuses reading through a symlinked directory that points outside", async () => {
+    // `escape -> /outside`; `read_file('escape/secret.txt')` would otherwise readFileSync the
+    // EXTERNAL file's contents back to the model (an exfiltration the lexical confine can't see).
+    const outside = mkdtempSync(join(tmpdir(), "asterism-read-out-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "OUTSIDE-SECRET");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = await run("read_file", { path: "escape/secret.txt" });
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("resolves outside this agent's workspace");
+      expect(result.output).not.toContain("OUTSIDE-SECRET"); // contents never reached the model
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("read_file refuses reading through a symlink LEAF whose target is outside (no content leak)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-read-leaf-out-"));
+    try {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "OUTSIDE-SECRET");
+      symlinkSync(target, join(workspace, "link.txt")); // in-workspace symlink → outside FILE
+      const result = await run("read_file", { path: "link.txt" });
+      expect(result.isError).toBe(true);
+      expect(result.output).not.toContain("OUTSIDE-SECRET");
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("read_file STILL reads through a symlink that resolves INSIDE the workspace (no false refusal)", async () => {
+    // The guard refuses only a symlink resolving OUT; a legitimate in-workspace symlink reads fine.
+    await run("write_file", { path: "real.txt", content: "inside" });
+    symlinkSync(join(workspace, "real.txt"), join(workspace, "alias.txt"));
+    const result = await run("read_file", { path: "alias.txt" });
+    expect(result.isError).toBeUndefined();
+    expect(result.output).toBe("inside");
+  });
+
+  test("write_file refuses writing through a symlinked directory that points outside", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-write-out-"));
+    try {
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = await run("write_file", { path: "escape/leak.txt", content: "secret" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(join(outside, "leak.txt"))).toBe(false); // nothing written outside
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("write_file refuses writing through a symlink LEAF to outside (external file not overwritten)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-write-leaf-out-"));
+    try {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "orig");
+      symlinkSync(target, join(workspace, "link.txt")); // in-workspace symlink → outside FILE
+      const result = await run("write_file", { path: "link.txt", content: "CLOBBER" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(readFileSync(target, "utf8")).toBe("orig"); // the outside file was not overwritten
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("write_file refuses a DANGLING symlink leaf pointing outside (no outside file created)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-write-dangle-"));
+    try {
+      const target = join(outside, "notyet.txt"); // does NOT exist yet
+      symlinkSync(target, join(workspace, "dangling.txt")); // in-workspace symlink → missing outside path
+      const result = await run("write_file", { path: "dangling.txt", content: "X" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(target)).toBe(false); // the dangling target was NOT created outside
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("delete_file refuses deleting through a symlinked directory (outside file survives)", async () => {
+    // `escape -> /outside`; `delete_file('escape/secret.txt')` would otherwise rmSync the EXTERNAL
+    // file. The PARENT-only guard refuses it (the leaf-as-link discipline still removes a link leaf).
+    const outside = mkdtempSync(join(tmpdir(), "asterism-del-out-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "x");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = await run("delete_file", { path: "escape/secret.txt" });
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("resolves outside this agent's workspace");
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(join(outside, "secret.txt"))).toBe(true); // the outside file was not removed
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("delete_file removes an outward symlink LEAF as a link (its target is untouched)", async () => {
+    // A final symlink is deleted AS A LINK (rmSync unlinks it, never follows it), so deleting an
+    // in-workspace `link -> /outside` is allowed and leaves the outside directory intact.
+    const outside = mkdtempSync(join(tmpdir(), "asterism-del-leaf-"));
+    try {
+      writeFileSync(join(outside, "keep.txt"), "x");
+      symlinkSync(outside, join(workspace, "link")); // in-workspace symlink → outside dir
+      const result = await run("delete_file", { path: "link" });
+      expect(result.isError).toBeUndefined();
+      expect(result.observation).toEqual({
+        schema: "asterism.fs.delete@1",
+        facts: [{ subject: "file:link", relation: "exists", object: false }],
+      });
+      expect(existsSync(join(workspace, "link"))).toBe(false); // the link itself is gone
+      expect(existsSync(join(outside, "keep.txt"))).toBe(true); // the outside dir is untouched
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 // The read-only richer tools (slice T2): list_dir / stat / find. All are `effect: "read"`

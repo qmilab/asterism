@@ -38,17 +38,22 @@
 //
 // CONFINEMENT IS BEST-EFFORT, NOT A SANDBOX. Each tool resolves its `path`
 // argument against the agent's workspace and refuses one that climbs out (`..`,
-// an absolute path). The read explorers (list_dir/stat/find) and the T4 write
-// tools (mkdir/append_file/move) ADDITIONALLY realpath-check that no symlinked
-// path component resolves outside the workspace before they enumerate, write, or
-// relocate — closing the obvious symlinked-directory escape; write_file/delete_file
-// remain on the lexical baseline (uniformly hardening them is a noted follow-up).
-// This is still Phase 0's *logical* scoping — exactly what the docs claim and no
-// more: it is NOT an OS-enforced filesystem jail and does not defend against a
-// TOCTOU symlink swap between the check and the write, or a deliberately hostile
-// in-process tool. Stronger execution isolation is a later phase; this catalog is
-// intentionally limited to bounded file operations and ships no arbitrary-shell
-// tool, so it never grants code execution under merely logical confinement.
+// an absolute path). EVERY file tool ADDITIONALLY realpath-checks that no symlinked
+// path component resolves outside the workspace before it reads, enumerates, writes,
+// relocates, or deletes — closing the symlinked-directory (and symlinked-leaf) escape
+// uniformly across the read explorers (list_dir/stat/find), the writes
+// (write_file/append_file/mkdir/move), read_file, and delete_file alike. The split is
+// by how each tool treats a FINAL symlink: a tool that FOLLOWS the leaf (read_file
+// reads through it, write_file/append_file write through it, mkdir satisfies onto it)
+// checks the leaf too; a tool that operates on the leaf AS A LINK (delete_file removes
+// it, move relocates it) checks only the ANCESTORS, so deleting or moving an outward
+// symlink as a link still works. This is still Phase 0's *logical* scoping — exactly
+// what the docs claim and no more: it is NOT an OS-enforced filesystem jail and does
+// not defend against a TOCTOU symlink swap between the check and the operation, or a
+// deliberately hostile in-process tool. Stronger execution isolation is a later phase;
+// this catalog is intentionally limited to bounded file operations and ships no
+// arbitrary-shell tool, so it never grants code execution under merely logical
+// confinement.
 
 import {
   type Dirent,
@@ -268,22 +273,24 @@ function locationEscapesWorkspace(workspaceDir: string, absLocation: string): bo
 
 /**
  * True when a target would land OUTSIDE the workspace once symlinks are followed THROUGH THE FINAL
- * COMPONENT. For tools that follow a symlink leaf: `append_file` (`appendFileSync` writes through
- * `link.txt -> /tmp/out/secret`) AND `mkdir` (`mkdirSync(..., {recursive:true})` treats an existing
- * `escape -> /tmp/out` leaf as a satisfied directory and would emit a false `dir:escape exists`).
- * So the leaf is included — an external leaf (existing OR dangling) is an escape, not just a
- * symlinked ancestor.
+ * COMPONENT. For tools that follow a symlink leaf: `read_file` (`readFileSync` reads through
+ * `link.txt -> /etc/passwd`, returning external CONTENTS), `write_file`/`append_file`
+ * (`writeFileSync`/`appendFileSync` write through `link.txt -> /tmp/out/secret`), AND `mkdir`
+ * (`mkdirSync(..., {recursive:true})` treats an existing `escape -> /tmp/out` leaf as a satisfied
+ * directory and would emit a false `dir:escape exists`). So the leaf is included — an external leaf
+ * (existing OR dangling) is an escape, not just a symlinked ancestor.
  */
 function targetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
   return locationEscapesWorkspace(workspaceDir, absTarget);
 }
 
 /**
- * True when a `move` target would land OUTSIDE the workspace through a symlinked ANCESTOR directory
- * (e.g. `escape -> /tmp/out`, target `escape/a.txt`). Resolves the target's PARENT only — the final
- * component is deliberately NOT followed, because `renameSync` moves a symlink leaf AS A LINK (it
- * relocates the link itself, never writes through it), matching delete_file/move's `lstat`
- * discipline. (`move` checks both its source and destination this way.)
+ * True when a `move` or `delete_file` target would land OUTSIDE the workspace through a symlinked
+ * ANCESTOR directory (e.g. `escape -> /tmp/out`, target `escape/a.txt`). Resolves the target's
+ * PARENT only — the final component is deliberately NOT followed, because `renameSync` moves and
+ * `rmSync` removes a symlink leaf AS A LINK (relocating/unlinking the link itself, never reaching
+ * its target), matching the `lstat` discipline both use to classify the node. (`move` checks both
+ * its source and destination this way; `delete_file` checks the single target.)
  */
 function parentEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
   return locationEscapesWorkspace(workspaceDir, dirname(absTarget));
@@ -410,6 +417,15 @@ export function workspaceCapabilities(
         if (path === undefined) return failure("read_file needs a 'path'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
+        // Refuse READING through a symlink that resolves outside — `readFileSync` follows both a
+        // symlinked intermediate directory and a final symlink LEAF, so an in-workspace
+        // `link -> /etc/passwd` (or `escape/secret`, escape -> outside) would return an EXTERNAL
+        // file's CONTENTS to the model — an exfiltration, not the "one in-workspace file" the
+        // lexical `confine` assumes. The leaf is followed, so it is checked too (a symlink that
+        // resolves INSIDE the workspace still reads fine); same guard write_file/append_file/mkdir use.
+        if (targetEscapesWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
         try {
           const content = readFileSync(c.path, "utf8");
           // The structured fact is the file's SIZE only — never its contents as a fact
@@ -462,6 +478,14 @@ export function workspaceCapabilities(
         if (content === undefined) return failure("write_file needs string 'content'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
+        // Refuse WRITING through a symlinked directory OR a final symlink leaf that resolves
+        // outside — `writeFileSync` follows a symlink leaf (`link.txt -> /tmp/out` would write
+        // there, overwriting an external file) and `mkdirSync(dirname)` below follows symlinked
+        // intermediates. The leaf is followed, so it is checked too; same guard
+        // append_file/mkdir use (confine is lexical only).
+        if (targetEscapesWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
         try {
           mkdirSync(dirname(c.path), { recursive: true });
           writeFileSync(c.path, content);
@@ -503,6 +527,15 @@ export function workspaceCapabilities(
         if (path === undefined) return failure("delete_file needs a 'path'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
+        // Refuse DELETING through a symlinked directory — `rmSync('escape/file', {recursive})`
+        // with `escape -> /tmp/out` would remove an EXTERNAL file. Use the PARENT-only guard
+        // (not the leaf-following one): `rmSync` removes a final symlink AS A LINK — it unlinks the
+        // link, never follows it to delete the target — exactly `move`'s source discipline, so only
+        // a symlinked ANCESTOR escapes. Checked BEFORE the `lstatSync` below, so a symlinked-parent
+        // target is never stat'd into the observation (the same ordering `move` uses for its source).
+        if (parentEscapesWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
         try {
           // Classify the node BEFORE removal so the subject reference is honest (it is gone
           // after `rmSync`). `lstatSync`, not `statSync`: classify the node `rmSync` actually
