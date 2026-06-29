@@ -14,7 +14,16 @@
 //   - subject references are controlled + normalized (file:<workspace-relative-path>).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -436,5 +445,217 @@ describe("read-only tools emit structured observations", () => {
     expect(result.observation!.facts.filter((f) => f.relation === "exists")).toHaveLength(3);
     expect(result.observation!.facts.some((f) => f.relation === "match_count")).toBe(false);
     expect(result.output).toContain("may be incomplete");
+  });
+});
+
+// The workspace-bounded write tools (slice T4): mkdir / append_file / move. All are `effect:
+// "write"` — they run at notify/autonomous, are withheld under propose, and NONE pauses (none is
+// destructive). Each emits structured current-state facts exactly like write_file/delete_file.
+// The discipline under test:
+//
+//   - mkdir       → dir: exists=true; recursive parents; idempotent on a folder; fails over a file.
+//   - append_file → preserves existing content; size_bytes is the RESULTING total + exists=true.
+//   - move        → NO-CLOBBER (refuses a taken destination, so it can never overwrite/lose data);
+//                   two facts — the destination now exists, the source no longer does.
+//   - all three confine to the workspace and refuse a climb-OUT and the workspace root.
+describe("workspace-bounded write tools emit structured observations", () => {
+  let workspace: string;
+
+  beforeEach(() => {
+    workspace = mkdtempSync(join(tmpdir(), "asterism-write-caps-"));
+  });
+  afterEach(() => {
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  function tool(name: string): ScopedTool {
+    const cap = workspaceCapabilities(workspace).find((c) => c.tool.name === name);
+    if (!cap) throw new Error(`no such tool in catalog: ${name}`);
+    return cap.tool;
+  }
+  function run(name: string, args: unknown): Promise<ToolResult> | ToolResult {
+    return tool(name).execute({ args });
+  }
+
+  test("the new write tools are all effect:write (gated like write_file, never pausing)", () => {
+    const caps = workspaceCapabilities(workspace);
+    for (const key of ["fs.mkdir", "fs.append", "fs.move"]) {
+      expect(caps.find((c) => c.key === key)?.effect).toBe("write");
+    }
+  });
+
+  // --- mkdir ---
+
+  test("mkdir creates a folder and reports it now exists", async () => {
+    const result = await run("mkdir", { path: "logs" });
+    expect(result.isError).toBeUndefined();
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.mkdir@1",
+      facts: [{ subject: "dir:logs", relation: "exists", object: true }],
+    });
+    expect(lstatSync(join(workspace, "logs")).isDirectory()).toBe(true);
+  });
+
+  test("mkdir makes parent folders as needed", async () => {
+    const result = await run("mkdir", { path: "a/b/c" });
+    expect(result.observation!.facts[0]!.subject).toBe("dir:a/b/c");
+    expect(lstatSync(join(workspace, "a/b/c")).isDirectory()).toBe(true);
+  });
+
+  test("mkdir on an existing folder is an idempotent success", async () => {
+    await run("mkdir", { path: "dir" });
+    const again = await run("mkdir", { path: "dir" });
+    expect(again.isError).toBeUndefined();
+    expect(again.observation!.facts).toEqual([{ subject: "dir:dir", relation: "exists", object: true }]);
+  });
+
+  test("mkdir over an existing FILE fails with no observation", async () => {
+    await run("write_file", { path: "taken", content: "x" });
+    const result = await run("mkdir", { path: "taken" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("mkdir refuses a climb-out and the workspace root", async () => {
+    const out = await run("mkdir", { path: "../escape" });
+    expect(out.isError).toBe(true);
+    expect(out.observation).toBeUndefined();
+    const root = await run("mkdir", { path: "." });
+    expect(root.isError).toBe(true);
+    expect(root.observation).toBeUndefined();
+  });
+
+  // --- append_file ---
+
+  test("append_file preserves existing content and reports the RESULTING total size", async () => {
+    await run("write_file", { path: "log.txt", content: "ab" }); // 2 bytes
+    const result = await run("append_file", { path: "log.txt", content: "cde" }); // +3 → 5
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.append@1",
+      facts: [
+        { subject: "file:log.txt", relation: "size_bytes", object: 5 },
+        { subject: "file:log.txt", relation: "exists", object: true },
+      ],
+    });
+    expect(readFileSync(join(workspace, "log.txt"), "utf8")).toBe("abcde");
+  });
+
+  test("append_file creates the file (and parents) when absent", async () => {
+    const result = await run("append_file", { path: "nested/new.txt", content: "hi" });
+    expect(result.isError).toBeUndefined();
+    expect(result.observation!.facts).toEqual([
+      { subject: "file:nested/new.txt", relation: "size_bytes", object: 2 },
+      { subject: "file:nested/new.txt", relation: "exists", object: true },
+    ]);
+    expect(readFileSync(join(workspace, "nested/new.txt"), "utf8")).toBe("hi");
+  });
+
+  test("append_file requires string content and a path", async () => {
+    expect((await run("append_file", { path: "x.txt" })).isError).toBe(true);
+    expect((await run("append_file", { content: "x" })).isError).toBe(true);
+    // A failed append never created the file.
+    expect(existsSync(join(workspace, "x.txt"))).toBe(false);
+  });
+
+  test("append_file to a directory fails with no observation", async () => {
+    await run("mkdir", { path: "folder" });
+    const result = await run("append_file", { path: "folder", content: "x" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("append_file refuses a climb-out", async () => {
+    const result = await run("append_file", { path: "../escape.txt", content: "x" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  // --- move ---
+
+  test("move relocates a file: destination exists (same size), source is gone", async () => {
+    await run("write_file", { path: "old.txt", content: "hello" }); // 5 bytes
+    const result = await run("move", { from: "old.txt", to: "new.txt" });
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.move@1",
+      facts: [
+        { subject: "file:new.txt", relation: "size_bytes", object: 5 },
+        { subject: "file:new.txt", relation: "exists", object: true },
+        { subject: "file:old.txt", relation: "exists", object: false },
+      ],
+    });
+    expect(existsSync(join(workspace, "old.txt"))).toBe(false);
+    expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("hello");
+  });
+
+  test("move renames a folder with a dir: subject and no size fact", async () => {
+    await run("write_file", { path: "src/a.txt", content: "x" }); // creates src/
+    const result = await run("move", { from: "src", to: "dst" });
+    expect(result.observation).toEqual({
+      schema: "asterism.fs.move@1",
+      facts: [
+        { subject: "dir:dst", relation: "exists", object: true },
+        { subject: "dir:src", relation: "exists", object: false },
+      ],
+    });
+    expect(existsSync(join(workspace, "src"))).toBe(false);
+    expect(readFileSync(join(workspace, "dst/a.txt"), "utf8")).toBe("x");
+  });
+
+  test("move is NO-CLOBBER: refuses a taken destination, leaving both paths untouched", async () => {
+    await run("write_file", { path: "from.txt", content: "from" });
+    await run("write_file", { path: "to.txt", content: "to" });
+    const result = await run("move", { from: "from.txt", to: "to.txt" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+    // Neither path changed — the destination was NOT overwritten.
+    expect(readFileSync(join(workspace, "from.txt"), "utf8")).toBe("from");
+    expect(readFileSync(join(workspace, "to.txt"), "utf8")).toBe("to");
+  });
+
+  test("move refuses a destination that exists as a directory", async () => {
+    await run("write_file", { path: "f.txt", content: "x" });
+    await run("mkdir", { path: "occupied" });
+    const result = await run("move", { from: "f.txt", to: "occupied" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+    expect(existsSync(join(workspace, "f.txt"))).toBe(true);
+  });
+
+  test("move of a missing source fails with no observation", async () => {
+    const result = await run("move", { from: "ghost.txt", to: "wherever.txt" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+  });
+
+  test("move refuses a climb-out on either side, and the workspace root", async () => {
+    await run("write_file", { path: "real.txt", content: "x" });
+    expect((await run("move", { from: "../escape.txt", to: "in.txt" })).observation).toBeUndefined();
+    expect((await run("move", { from: "real.txt", to: "../escape.txt" })).observation).toBeUndefined();
+    expect((await run("move", { from: ".", to: "in.txt" })).isError).toBe(true);
+    expect((await run("move", { from: "real.txt", to: "." })).isError).toBe(true);
+    // The real file is still where it started after every refusal.
+    expect(existsSync(join(workspace, "real.txt"))).toBe(true);
+  });
+
+  test("move relocates a symlink as a link (file: subject), never following it out", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-move-out-"));
+    try {
+      symlinkSync(outside, join(workspace, "link")); // in-workspace symlink → outside dir
+      const result = await run("move", { from: "link", to: "moved-link" });
+      // Classified by lstat: the link is a file: leaf, not the dir it points at.
+      expect(result.observation).toEqual({
+        schema: "asterism.fs.move@1",
+        facts: [
+          { subject: "file:moved-link", relation: "size_bytes", object: lstatSync(join(workspace, "moved-link")).size },
+          { subject: "file:moved-link", relation: "exists", object: true },
+          { subject: "file:link", relation: "exists", object: false },
+        ],
+      });
+      // The link moved; the OUTSIDE directory it pointed at was never touched.
+      expect(lstatSync(join(workspace, "moved-link")).isSymbolicLink()).toBe(true);
+      expect(existsSync(outside)).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

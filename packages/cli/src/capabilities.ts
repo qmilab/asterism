@@ -23,6 +23,15 @@
 //                               under propose. (The acceptance demo declares its
 //                               editor tool `write` the same way — editing a file
 //                               in the agent's scratch space is the agent's job.)
+//   - fs.mkdir  → `write`       create a folder; cannot lose data, so an ordinary
+//                               side effect like fs.write.
+//   - fs.append → `write`       add text to the end of a file (create-if-absent);
+//                               preserves existing content, so non-destructive.
+//   - fs.move   → `write`       move / rename within the workspace. NO-CLOBBER: it
+//                               refuses an existing destination, so it can never
+//                               overwrite (irreversible loss) and relocating bytes
+//                               is reversible — hence `write`, not `destructive`.
+//                               To replace a target, delete it first (that pauses).
 //   - fs.delete → `destructive` deleting is irreversible, so it pauses for
 //                               confirmation at EVERY trust level, autonomous
 //                               included, unless the capability is allow-listed.
@@ -38,13 +47,16 @@
 
 import {
   type Dirent,
+  appendFileSync,
   lstatSync,
   mkdirSync,
   opendirSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
@@ -61,6 +73,9 @@ import type { ObservedFact, ToolInvocation, ToolResult } from "@qmilab/asterism-
 // the kernel screens them through `redactObservation` before any of it is persisted.
 const FS_WRITE_SCHEMA = "asterism.fs.write@1";
 const FS_DELETE_SCHEMA = "asterism.fs.delete@1";
+const FS_MKDIR_SCHEMA = "asterism.fs.mkdir@1";
+const FS_APPEND_SCHEMA = "asterism.fs.append@1";
+const FS_MOVE_SCHEMA = "asterism.fs.move@1";
 const FS_READ_SCHEMA = "asterism.fs.read@1";
 const FS_LIST_SCHEMA = "asterism.fs.list@1";
 const FS_STAT_SCHEMA = "asterism.fs.stat@1";
@@ -414,6 +429,173 @@ export function workspaceCapabilities(
     },
   };
 
+  const mkdirNode: Capability = {
+    key: "fs.mkdir",
+    effect: "write",
+    tool: {
+      name: "mkdir",
+      description:
+        "Create a folder in your workspace, making parent folders as needed. " +
+        "Argument: { path } relative to your workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative folder path to create." },
+        },
+        required: ["path"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const path = stringArg(invocation.args, "path");
+        if (path === undefined) return failure("mkdir needs a 'path'.");
+        const c = confine(workspaceDir, path);
+        if (!c.ok) return failure(c.message);
+        try {
+          // recursive:true makes parents as needed and is idempotent on an existing
+          // FOLDER (no-op success → an honest `exists:true`); it still THROWS when the
+          // path is an existing file (EEXIST/ENOTDIR), so that fails with no observation.
+          mkdirSync(c.path, { recursive: true });
+          return {
+            output: `Created folder '${path}'.`,
+            observation: {
+              schema: FS_MKDIR_SCHEMA,
+              facts: [{ subject: nodeSubject("dir", c.rel), relation: REL_EXISTS, object: true }],
+            },
+          };
+        } catch (err) {
+          return failure(`Could not create '${path}': ${failureReason(err)}`);
+        }
+      },
+    },
+  };
+
+  const appendFile: Capability = {
+    key: "fs.append",
+    effect: "write",
+    tool: {
+      name: "append_file",
+      description:
+        "Append text to the end of a file in your workspace, creating it (and parent folders) " +
+        "if needed. Existing content is preserved. Arguments: { path, content } with path " +
+        "relative to your workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative file path to append to." },
+          content: { type: "string", description: "Text to add to the end of the file." },
+        },
+        required: ["path", "content"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const path = stringArg(invocation.args, "path");
+        if (path === undefined) return failure("append_file needs a 'path'.");
+        // Require `content` explicitly (write_file's discipline): a missing/non-string value
+        // must fail, not silently append nothing and report a misleading success.
+        const content = stringArg(invocation.args, "content");
+        if (content === undefined) return failure("append_file needs string 'content'.");
+        const c = confine(workspaceDir, path);
+        if (!c.ok) return failure(c.message);
+        try {
+          mkdirSync(dirname(c.path), { recursive: true });
+          appendFileSync(c.path, content);
+          // The size fact is the file's RESULTING total size (its current world-state),
+          // read back after the append — not the appended byte count — so it matches the
+          // size_bytes fact read_file / stat emit about the same file.
+          const bytes = statSync(c.path).size;
+          const added = Buffer.byteLength(content, "utf8");
+          return {
+            output: `Appended ${added} ${added === 1 ? "byte" : "bytes"} to '${path}' (now ${bytes} bytes).`,
+            observation: {
+              schema: FS_APPEND_SCHEMA,
+              facts: [
+                { subject: nodeSubject("file", c.rel), relation: REL_SIZE_BYTES, object: bytes },
+                { subject: nodeSubject("file", c.rel), relation: REL_EXISTS, object: true },
+              ],
+            },
+          };
+        } catch (err) {
+          return failure(`Could not append to '${path}': ${failureReason(err)}`);
+        }
+      },
+    },
+  };
+
+  const moveNode: Capability = {
+    key: "fs.move",
+    effect: "write",
+    tool: {
+      name: "move",
+      description:
+        "Move or rename a file or folder within your workspace. Refuses if the destination " +
+        "already exists — delete it first if you mean to replace it. Arguments: { from, to } " +
+        "both relative to your workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "Workspace-relative path to move or rename." },
+          to: { type: "string", description: "Workspace-relative destination path." },
+        },
+        required: ["from", "to"],
+      },
+      execute: (invocation: ToolInvocation): ToolResult => {
+        const from = stringArg(invocation.args, "from");
+        if (from === undefined) return failure("move needs a 'from'.");
+        const to = stringArg(invocation.args, "to");
+        if (to === undefined) return failure("move needs a 'to'.");
+        const src = confine(workspaceDir, from);
+        if (!src.ok) return failure(src.message);
+        const dst = confine(workspaceDir, to);
+        if (!dst.ok) return failure(dst.message);
+        // Classify the SOURCE before the move (it is gone afterward), with lstat so a symlink
+        // moves as a link (labelled file:) and is never followed out of the workspace —
+        // delete_file's discipline. A missing source throws here and fails with no observation.
+        let srcKind: "file" | "dir";
+        let srcSize: number;
+        try {
+          const info = lstatSync(src.path);
+          srcKind = info.isDirectory() ? "dir" : "file";
+          srcSize = info.size;
+        } catch (err) {
+          return failure(`Could not move '${from}': ${failureReason(err)}`);
+        }
+        // NO-CLOBBER (the whole reason this is `write`, not `destructive`): renameSync silently
+        // OVERWRITES an existing destination — irreversible data loss, the case only the
+        // destructive delete gate may reach. So refuse a taken destination outright; replacing
+        // means deleting it first (which pauses). lstat, not an exists-follow, so a dangling or
+        // symlinked destination still counts as taken (and a same-path self-move is refused).
+        try {
+          lstatSync(dst.path);
+          return failure(
+            `Refused: destination '${to}' already exists. Delete it first if you mean to replace it.`,
+          );
+        } catch {
+          // ENOENT → the destination is free; proceed.
+        }
+        try {
+          mkdirSync(dirname(dst.path), { recursive: true });
+          renameSync(src.path, dst.path);
+        } catch (err) {
+          return failure(`Could not move '${from}' to '${to}': ${failureReason(err)}`);
+        }
+        // Two subjects change: the destination now exists (same kind, and for a file the same
+        // size — a move relocates bytes, it does not change them) and the source no longer does.
+        const facts: ObservedFact[] = [];
+        if (srcKind === "file") {
+          facts.push({
+            subject: nodeSubject("file", dst.rel),
+            relation: REL_SIZE_BYTES,
+            object: srcSize,
+          });
+        }
+        facts.push({ subject: nodeSubject(srcKind, dst.rel), relation: REL_EXISTS, object: true });
+        facts.push({ subject: nodeSubject(srcKind, src.rel), relation: REL_EXISTS, object: false });
+        return {
+          output: `Moved '${from}' to '${to}'.`,
+          observation: { schema: FS_MOVE_SCHEMA, facts },
+        };
+      },
+    },
+  };
+
   const listDir: Capability = {
     key: "fs.list",
     effect: "read",
@@ -665,5 +847,15 @@ export function workspaceCapabilities(
     },
   };
 
-  return [readFile, writeFile, deleteFile, listDir, statNode, findNodes];
+  return [
+    readFile,
+    writeFile,
+    appendFile,
+    mkdirNode,
+    moveNode,
+    deleteFile,
+    listDir,
+    statNode,
+    findNodes,
+  ];
 }
