@@ -38,12 +38,17 @@
 //
 // CONFINEMENT IS BEST-EFFORT, NOT A SANDBOX. Each tool resolves its `path`
 // argument against the agent's workspace and refuses one that climbs out (`..`,
-// an absolute path). That is Phase 0's *logical* scoping — exactly what the docs
-// claim and no more: it is not an OS-enforced filesystem jail and does not defend
-// against symlink tricks or a deliberately hostile tool. Stronger execution
-// isolation is a later phase; this catalog is intentionally limited to bounded
-// file operations and ships no arbitrary-shell tool, so it never grants code
-// execution under merely logical confinement.
+// an absolute path). The read explorers (list_dir/stat/find) and the T4 write
+// tools (mkdir/append_file/move) ADDITIONALLY realpath-check that no symlinked
+// path component resolves outside the workspace before they enumerate, write, or
+// relocate — closing the obvious symlinked-directory escape; write_file/delete_file
+// remain on the lexical baseline (uniformly hardening them is a noted follow-up).
+// This is still Phase 0's *logical* scoping — exactly what the docs claim and no
+// more: it is NOT an OS-enforced filesystem jail and does not defend against a
+// TOCTOU symlink swap between the check and the write, or a deliberately hostile
+// in-process tool. Stronger execution isolation is a later phase; this catalog is
+// intentionally limited to bounded file operations and ships no arbitrary-shell
+// tool, so it never grants code execution under merely logical confinement.
 
 import {
   type Dirent,
@@ -209,6 +214,33 @@ function resolvesOutsideWorkspace(workspaceDir: string, absPath: string): boolea
   }
   const rel = relative(realRoot, realTarget);
   return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+/**
+ * True when a CREATE / MOVE target would land OUTSIDE the workspace by following a symlinked
+ * path COMPONENT. `confine` is lexical only, so a symlinked ancestor directory (e.g. an
+ * in-workspace `escape -> /tmp/out`) lets `mkdirSync` / `appendFileSync` / `renameSync` write or
+ * relocate outside the workspace even though the requested path stays textually inside. The
+ * target itself may not exist yet (we are about to create it), so this realpaths the NEAREST
+ * EXISTING ANCESTOR and checks it resolves inside — any symlink in the chain surfaces there. The
+ * target's OWN final component is deliberately NOT followed: a symlink leaf is created or moved
+ * AS A LINK, never escaped through (delete_file / move classify it with `lstat` the same way).
+ * This hardens the new T4 write tools beyond the lexical baseline write_file / delete_file still
+ * use (module header); it is still not an OS jail — a TOCTOU symlink swap between this check and
+ * the write is out of scope for logical confinement.
+ */
+function writeTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
+  let ancestor = dirname(absTarget);
+  for (;;) {
+    try {
+      lstatSync(ancestor);
+      return resolvesOutsideWorkspace(workspaceDir, ancestor);
+    } catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return false; // reached the filesystem root; nothing existed
+      ancestor = parent;
+    }
+  }
 }
 
 /** Classify a directory entry as a `dir:` or `file:` node. A symlink is NOT followed
@@ -449,6 +481,10 @@ export function workspaceCapabilities(
         if (path === undefined) return failure("mkdir needs a 'path'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
+        // Refuse creating THROUGH a symlinked directory that resolves outside (confine is lexical).
+        if (writeTargetEscapesWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
         try {
           // recursive:true makes parents as needed and is idempotent on an existing
           // FOLDER (no-op success → an honest `exists:true`); it still THROWS when the
@@ -494,6 +530,10 @@ export function workspaceCapabilities(
         if (content === undefined) return failure("append_file needs string 'content'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
+        // Refuse writing THROUGH a symlinked directory that resolves outside (confine is lexical).
+        if (writeTargetEscapesWorkspace(workspaceDir, c.path)) {
+          return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
+        }
         try {
           mkdirSync(dirname(c.path), { recursive: true });
           appendFileSync(c.path, content);
@@ -545,6 +585,18 @@ export function workspaceCapabilities(
         if (!src.ok) return failure(src.message);
         const dst = confine(workspaceDir, to);
         if (!dst.ok) return failure(dst.message);
+        // Refuse reaching the SOURCE through a symlinked directory, or writing the DESTINATION
+        // through one — either relocates a file across the workspace boundary even though both
+        // paths are lexically inside (confine is lexical). Checked BEFORE the source `lstat`
+        // below, so a symlinked-parent source is never even stat'd (which would leak the outside
+        // file's size into the observation). The source's OWN final component may be a symlink —
+        // it is moved AS A LINK; only a symlinked ANCESTOR escapes.
+        if (writeTargetEscapesWorkspace(workspaceDir, src.path)) {
+          return failure(`Refused: '${from}' resolves outside this agent's workspace.`);
+        }
+        if (writeTargetEscapesWorkspace(workspaceDir, dst.path)) {
+          return failure(`Refused: '${to}' resolves outside this agent's workspace.`);
+        }
         // Classify the SOURCE before the move (it is gone afterward), with lstat so a symlink
         // moves as a link (labelled file:) and is never followed out of the workspace —
         // delete_file's discipline. A missing source throws here and fails with no observation.

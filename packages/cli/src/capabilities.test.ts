@@ -661,6 +661,66 @@ describe("workspace-bounded write tools emit structured observations", () => {
     expect(existsSync(join(workspace, "real.txt"))).toBe(true);
   });
 
+  // ---- symlinked-component escape (T4 writes must not create / relocate THROUGH a symlink out) ----
+
+  test("mkdir refuses creating through a symlinked directory (nothing created outside)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-mkdir-out-"));
+    try {
+      symlinkSync(outside, join(workspace, "escape")); // escape -> outside dir
+      const result = await run("mkdir", { path: "escape/sub" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(join(outside, "sub"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("append_file refuses writing through a symlinked directory (nothing written outside)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-append-out-"));
+    try {
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = await run("append_file", { path: "escape/leak.txt", content: "secret" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(join(outside, "leak.txt"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("move refuses a DESTINATION through a symlinked directory (file not relocated outside)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-move-dst-out-"));
+    try {
+      symlinkSync(outside, join(workspace, "escape"));
+      await run("write_file", { path: "a.txt", content: "data" });
+      const result = await run("move", { from: "a.txt", to: "escape/a.txt" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      // The file stayed inside; nothing landed outside.
+      expect(readFileSync(join(workspace, "a.txt"), "utf8")).toBe("data");
+      expect(existsSync(join(outside, "a.txt"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("move refuses a SOURCE reached through a symlinked directory (no pull from outside)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-move-src-out-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "outside-secret");
+      symlinkSync(outside, join(workspace, "escape"));
+      const result = await run("move", { from: "escape/secret.txt", to: "pulled.txt" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(join(workspace, "pulled.txt"))).toBe(false);
+      // The outside file is untouched.
+      expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("outside-secret");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   test("move relocates a symlink as a link (file: subject), never following it out", async () => {
     const outside = mkdtempSync(join(tmpdir(), "asterism-move-out-"));
     try {
