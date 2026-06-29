@@ -621,6 +621,30 @@ describe("workspace-bounded write tools emit structured observations", () => {
     expect(existsSync(join(workspace, "f.txt"))).toBe(true);
   });
 
+  test("move into the source's own descendant is refused WITHOUT creating parents (no side effect)", async () => {
+    await run("write_file", { path: "src/a.txt", content: "x" }); // creates src/
+    const result = await run("move", { from: "src", to: "src/sub/dst" });
+    expect(result.isError).toBe(true);
+    expect(result.observation).toBeUndefined();
+    // The failed move must NOT have mutated the workspace — `src/sub` was never created...
+    expect(existsSync(join(workspace, "src/sub"))).toBe(false);
+    // ...and the source is untouched.
+    expect(readFileSync(join(workspace, "src/a.txt"), "utf8")).toBe("x");
+  });
+
+  test("a name-prefixed sibling is NOT mistaken for a descendant (src → srcfoo is allowed)", async () => {
+    await run("mkdir", { path: "src" });
+    const result = await run("move", { from: "src", to: "srcfoo" });
+    expect(result.isError).toBeUndefined();
+    expect(result.observation!.facts).toContainEqual({
+      subject: "dir:srcfoo",
+      relation: "exists",
+      object: true,
+    });
+    expect(existsSync(join(workspace, "src"))).toBe(false);
+    expect(lstatSync(join(workspace, "srcfoo")).isDirectory()).toBe(true);
+  });
+
   test("move of a missing source fails with no observation", async () => {
     const result = await run("move", { from: "ghost.txt", to: "wherever.txt" });
     expect(result.isError).toBe(true);

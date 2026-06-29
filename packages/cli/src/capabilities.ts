@@ -570,6 +570,21 @@ export function workspaceCapabilities(
         } catch {
           // ENOENT → the destination is free; proceed.
         }
+        // Refuse moving a path INTO ITSELF or its own descendant (e.g. `src` → `src/sub/dst`):
+        // renameSync would fail (the destination is inside the source), but only AFTER the
+        // mkdirSync below had already created the destination's parent folders — a filesystem
+        // side effect on a FAILED move. So detect it FIRST, before creating any parents. The
+        // destination is a descendant when its path resolves UNDER the source with no climb-out
+        // (component-aware via `relative`, so a mere name prefix like `src` → `srcfoo` is fine).
+        // `within === ""` is the source itself — already refused by the no-clobber check above
+        // (the source exists), kept here as defense.
+        const within = relative(src.path, dst.path);
+        if (
+          within === "" ||
+          (within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within))
+        ) {
+          return failure(`Refused: cannot move '${from}' into itself or its own subfolder ('${to}').`);
+        }
         try {
           mkdirSync(dirname(dst.path), { recursive: true });
           renameSync(src.path, dst.path);
