@@ -344,11 +344,12 @@ export type TransitionAdvisoryResult =
  * exactly as recall re-enforces its provider, a returned transition is kept only when its
  * `objectiveId` is one of THIS agent's own active objectives AND its status is a real
  * {@link TransitionStatus}; a hallucinated/cross-agent/no-longer-active id or an illegal status is
- * dropped before it ever reaches the operator, and AT MOST ONE suggestion survives per objective (a
- * duplicate or conflicting second suggestion for the same objective is dropped, so the outcome can
- * never depend on the model's duplicate ordering). No firewall screen: a transition adds no framable
- * content. A provider with no `proposeObjectiveTransitions`, or an agent with no active objectives,
- * yields an empty advisory list (not an error).
+ * dropped before it ever reaches the operator. At most one suggestion survives per objective: an
+ * identical duplicate collapses to one, and a CONFLICTING duplicate (the same objective with a
+ * different status) is dropped ENTIRELY — for untrusted output the outcome never depends on the
+ * model's response order. No firewall screen: a transition adds no framable content. A provider with
+ * no `proposeObjectiveTransitions`, or an agent with no active objectives, yields an empty advisory
+ * list (not an error).
  */
 export async function proposeObjectiveTransitions(
   store: AsterismStore,
@@ -385,16 +386,27 @@ export async function proposeObjectiveTransitions(
   });
 
   // Re-enforce untrusted provider output: keep a suggestion only for one of THIS agent's active
-  // objectives with a legal target status, and AT MOST ONE per objective (drop a duplicate or a
-  // conflicting second suggestion for the same id, so the result is order-independent).
+  // objectives with a legal target status, and AT MOST ONE per objective. Identical duplicates
+  // collapse to one; a CONFLICTING duplicate (the same objective with a DIFFERENT status) is
+  // dropped ENTIRELY — for untrusted output we refuse to guess `done` vs `dropped` by response
+  // order, rather than silently keeping whichever the model happened to emit first.
   const byId = new Map(active.map((o) => [o.id, o]));
-  const seen = new Set<string>();
-  const advisories: TransitionAdvisory[] = [];
+  const grouped = new Map<string, { objective: Objective; first: TransitionStatus; confidence: number; conflict: boolean }>();
   for (const t of raw) {
     const objective = byId.get(t.objectiveId);
-    if (!objective || !isTransitionStatus(t.proposedStatus) || seen.has(objective.id)) continue;
-    seen.add(objective.id);
-    advisories.push({ objective, proposedStatus: t.proposedStatus, confidence: t.confidence });
+    if (!objective || !isTransitionStatus(t.proposedStatus)) continue;
+    const existing = grouped.get(objective.id);
+    if (!existing) {
+      grouped.set(objective.id, { objective, first: t.proposedStatus, confidence: t.confidence, conflict: false });
+    } else if (existing.first !== t.proposedStatus) {
+      existing.conflict = true; // a second, DIFFERENT status — refuse to guess; drop the objective
+    }
+    // an identical-status repeat is harmless and ignored.
+  }
+  const advisories: TransitionAdvisory[] = [];
+  for (const g of grouped.values()) {
+    if (g.conflict) continue;
+    advisories.push({ objective: g.objective, proposedStatus: g.first, confidence: g.confidence });
   }
   return { kind: "proposed", advisories };
 }

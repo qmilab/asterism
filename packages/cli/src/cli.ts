@@ -1927,6 +1927,12 @@ async function runReflectReview(
   // the latest run PLUS the source runs of the proposals just drained, so a batched `--propose` that
   // finished an objective in an OLDER run is caught, not only the latest run. Internally guarded to a
   // no-op (and no model call) when there is nothing to judge or no human at the keyboard.
+  //
+  // Known advisory-only limitation: a reflected older run that queued NEITHER a memory NOR an
+  // objective proposal contributes no source run id, so if a newer run lands before review its
+  // completion is judged only against the latest run. Closing it fully would need either the persisted
+  // proposed-transition shape (the fork settled as advisory-only) or judging all recently-reflected
+  // runs (a different, re-judging selection model) — both deliberately out of scope (world-model.md §14).
   const queuedRunIds = [
     ...new Set(
       [

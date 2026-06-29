@@ -497,21 +497,44 @@ test("proposeObjectiveTransitions offers only ACTIVE+ACCEPTED objectives as cand
   }
 });
 
-test("proposeObjectiveTransitions keeps AT MOST ONE suggestion per objective (drops a duplicate/conflict)", async () => {
+test("proposeObjectiveTransitions DROPS a conflicting duplicate entirely (refuses to guess by order)", async () => {
   const store = freshStore();
   try {
     const agent = makeAgent(store, "personal");
     const obj = store.createObjective(agent.id, "finish the migration");
     const run = store.startRun(agent.id, { input: "x" });
     store.finishRun(agent.id, run.id, "did x", "done");
-    // Two CONFLICTING suggestions for the SAME objective — only the first survives, so the outcome
-    // never depends on the model's duplicate ordering.
+    // Two CONFLICTING suggestions for the SAME objective (done vs dropped) — neither survives, so
+    // the operator is never shown a status chosen only by the model's response order.
     const result = await proposeObjectiveTransitions(
       store,
       agent,
       transitionProvider([
         { objectiveId: obj.id, proposedStatus: "done", confidence: 0.9 },
         { objectiveId: obj.id, proposedStatus: "dropped", confidence: 0.8 },
+      ]),
+    );
+    if (result.kind !== "proposed") throw new Error("expected proposed");
+    expect(result.advisories).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions COLLAPSES an identical duplicate to one suggestion", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const obj = store.createObjective(agent.id, "finish the migration");
+    const run = store.startRun(agent.id, { input: "x" });
+    store.finishRun(agent.id, run.id, "did x", "done");
+    // The same status twice for one objective is harmless — it collapses to a single advisory.
+    const result = await proposeObjectiveTransitions(
+      store,
+      agent,
+      transitionProvider([
+        { objectiveId: obj.id, proposedStatus: "done", confidence: 0.9 },
+        { objectiveId: obj.id, proposedStatus: "done", confidence: 0.7 },
       ]),
     );
     if (result.kind !== "proposed") throw new Error("expected proposed");
