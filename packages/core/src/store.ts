@@ -171,6 +171,14 @@ export class AsterismStore {
     // column; no other table references `world_facts`, so dropping/renaming it cascades no
     // FK. A fresh database (built from SCHEMA, no table-level UNIQUE) skips the rebuild, and
     // after a rebuild there is no origin-'u' index, so re-opening is a no-op.
+    //
+    // The copy DROPS any pre-existing `rejected` rows: #86 shipped reject as a kept `rejected`
+    // row, so a v0.3.0→#86 database can hold some — but coexistence makes reject a DISCARD, and
+    // the new code assumes no `rejected` rows exist (formatting/`clear` ignore them while
+    // `count()` still counts them, which would make a rejected-only note invisible, unclearable,
+    // and a cap-slot leak). Filtering them here brings such a database to the coexistence
+    // invariant. (A pure pre-#86 DB has only `accepted` rows after the ALTER above, so the
+    // filter is a no-op there.) [Codex review: drop legacy rejected rows during migration.]
     if (this.hasAutoUniqueIndex("world_facts")) {
       this.driver.transaction(() => {
         this.driver.exec(
@@ -184,7 +192,8 @@ export class AsterismStore {
              updated_at   TEXT NOT NULL
            );
            INSERT INTO world_facts_new (id, agent_id, subject, value, review_state, created_at, updated_at)
-             SELECT id, agent_id, subject, value, review_state, created_at, updated_at FROM world_facts;
+             SELECT id, agent_id, subject, value, review_state, created_at, updated_at
+               FROM world_facts WHERE review_state != 'rejected';
            DROP TABLE world_facts;
            ALTER TABLE world_facts_new RENAME TO world_facts;
            CREATE INDEX IF NOT EXISTS idx_world_facts_agent ON world_facts(agent_id);`,
@@ -1196,9 +1205,21 @@ export class AsterismStore {
     return this.driver.transaction(() => {
       const accepted = this.worldFacts.getAccepted(agentId, trimmedSubject);
       const proposedExisting = this.worldFacts.getProposed(agentId, trimmedSubject);
-      // No-op: the value already holds for this subject (the accepted note has it, or a pending
-      // proposal already does), so there is nothing to review. Propose nothing.
-      if (accepted?.value === trimmedValue || proposedExisting?.value === trimmedValue) {
+      // The observation CONFIRMS the accepted value: there is nothing new to propose, AND any
+      // DIFFERENT pending proposal for this subject is now STALE — the world matches the
+      // accepted note, so a pending "update to something else" would, if later accepted, apply
+      // a value the world no longer shows. Discard the stale proposal (audited as a clear) so it
+      // can never be ratified to a dead value, then propose nothing.
+      // [Codex review: discard stale proposals when the observation matches the accepted value.]
+      if (accepted?.value === trimmedValue) {
+        if (proposedExisting !== undefined) {
+          const removed = this.worldFacts.deleteProposed(agentId, proposedExisting.id, proposedExisting.value);
+          if (removed) this.emit(agentId, "world_fact.cleared", { worldFactId: removed.id }, runId);
+        }
+        return undefined;
+      }
+      // A pending proposal already carries EXACTLY this value — nothing new to review.
+      if (proposedExisting?.value === trimmedValue) {
         return undefined;
       }
       // Only a brand-NEW subject grows the distinct-subject count; an update to a subject that

@@ -614,6 +614,21 @@ describe("world-fact coexistence — a proposed UPDATE sits beside the accepted 
     expect(store.proposeWorldFact(alice.id, "deploy", "v0.2.1")).toBeUndefined();
   });
 
+  test("re-observing the accepted value CLEARS a now-stale pending proposal (no dead-value ratification)", () => {
+    store.recordWorldFact(alice.id, "deploy", "v1"); // accepted
+    store.proposeWorldFact(alice.id, "deploy", "v2"); // a pending update
+    expect(store.worldFacts.getProposed(alice.id, "deploy")?.value).toBe("v2");
+    // The world reverts to the accepted value — the pending "→ v2" is now stale and could
+    // otherwise be accepted to a value the world no longer shows. Propose nothing AND discard it.
+    expect(store.proposeWorldFact(alice.id, "deploy", "v1")).toBeUndefined();
+    expect(store.worldFacts.getProposed(alice.id, "deploy")).toBeUndefined(); // stale proposal gone
+    expect(store.worldFacts.getAccepted(alice.id, "deploy")?.value).toBe("v1"); // untouched
+    // The discard is audited as a clear (references only — id, never the content).
+    const cleared = store.events.tail(alice.id).filter((e) => e.type === "world_fact.cleared");
+    expect(cleared.length).toBe(1);
+    expect(JSON.stringify(cleared)).not.toContain("v2");
+  });
+
   test("operator `notes set` over a coexisting proposal touches only the accepted row, leaving the proposal", () => {
     const proposed = store.proposeWorldFact(alice.id, "build", "green"); // pending update, no accepted yet
     // recordWorldFact (notes set) writes the ACCEPTED row; the pending proposal is left for
@@ -779,6 +794,41 @@ test("opening a pre-#86 world_facts table migrates review_state in and rebuilds 
     expect(migrated.proposeWorldFact("a1", "deploy", "v0.3.0")?.reviewState).toBe("proposed");
     expect(migrated.worldFacts.getAccepted("a1", "deploy")?.value).toBe("v0.2.1"); // still frames
     expect(migrated.worldFacts.getProposed("a1", "deploy")?.value).toBe("v0.3.0");
+  } finally {
+    migrated.close();
+  }
+});
+
+test("migration DROPS legacy `rejected` rows from a #86-era table (coexistence assumes none exist)", () => {
+  const driver = openDatabase(":memory:");
+  // A #86-era schema: world_facts WITH review_state AND the v0.3.0 table-level UNIQUE, holding an
+  // accepted note and a (legacy) `rejected` one. #86 kept rejected rows; coexistence discards them
+  // and the new code assumes none exist (it would otherwise count an invisible, unclearable note
+  // against the cap), so the rebuild must drop it.
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE world_facts (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, subject TEXT NOT NULL, value TEXT NOT NULL,
+      review_state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, subject)
+    );
+    INSERT INTO agents (id, name, role, soul_ref, workspace_dir, trust_level, created_at)
+      VALUES ('a1','alice','r','casual-helper','/tmp/a','autonomous','2026-01-01T00:00:00.000Z');
+    INSERT INTO world_facts (id, agent_id, subject, value, review_state, created_at, updated_at) VALUES
+      ('w1','a1','deploy','v0.2.1','accepted','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z'),
+      ('w2','a1','old-build','red','rejected','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');
+  `);
+  const migrated = new AsterismStore(driver);
+  try {
+    // The accepted note survives; the legacy rejected row is gone — not listed, not counted.
+    expect(migrated.worldFacts.getAccepted("a1", "deploy")?.value).toBe("v0.2.1");
+    expect(migrated.worldFacts.list("a1").map((f) => f.subject)).toEqual(["deploy"]);
+    expect(migrated.worldFacts.count("a1")).toBe(1);
+    expect(migrated.worldFacts.getProposed("a1", "old-build")).toBeUndefined();
   } finally {
     migrated.close();
   }

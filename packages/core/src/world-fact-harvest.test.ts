@@ -477,6 +477,20 @@ describe("harvest end-to-end — a run's changes become proposed working notes",
     expect(store.worldFacts.getAccepted(alice.id, "file:app.ts")?.value).toBe("200 bytes");
   });
 
+  test("re-observing the accepted value clears a coexisting STALE proposal", async () => {
+    store.recordWorldFact(alice.id, "file:app.ts", "100 bytes"); // accepted
+    store.proposeWorldFact(alice.id, "file:app.ts", "200 bytes"); // a now-stale pending update
+    const result = await executeRun(store, alice, "rewrite app back to 100", {
+      adapter: sequenceAdapter([{ tool: "write_file", args: { path: "app.ts", bytes: 100 } }]),
+      capabilities: [writeCap()],
+    });
+    // The observation matches the accepted value → nothing proposed, and the stale "200 bytes"
+    // proposal is discarded so it can't later be accepted to a value the world no longer shows.
+    expect(result.harvest).toEqual({ proposed: 0, dropped: 0, skipped: 1 });
+    expect(store.worldFacts.getProposed(alice.id, "file:app.ts")).toBeUndefined();
+    expect(store.worldFacts.getAccepted(alice.id, "file:app.ts")?.value).toBe("100 bytes");
+  });
+
   test("an injection-shaped filename is REDACTED (neutralized), not persisted raw", async () => {
     const result = await executeRun(store, alice, "write an injection-named + a clean file", {
       adapter: sequenceAdapter([
