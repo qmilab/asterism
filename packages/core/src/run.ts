@@ -32,7 +32,7 @@ import {
 } from "./world-facts.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
-import { WorldFactCapError, WorldFactConflictError } from "./repositories/world-facts.js";
+import { WorldFactCapError } from "./repositories/world-facts.js";
 import { MemoryFirewallError } from "./firewall.js";
 import type { AsterismStore } from "./store.js";
 import type { Agent, Run, RunStatus } from "./types.js";
@@ -122,9 +122,9 @@ export interface HarvestSummary {
   /** Candidates dropped because the agent's working notes were full (the cap — no silent loss). */
   dropped: number;
   /**
-   * Candidates skipped without proposing — a subject the operator already ACCEPTED (the
-   * harvest never clobbers a ratified note, §13.3) or a value the firewall blocked (already
-   * audited `world_fact.blocked`).
+   * Candidates skipped without proposing — a no-op (the accepted note or a pending proposal
+   * already holds this value, so there is nothing to review — world-model.md §12) or a value
+   * the firewall blocked (already audited `world_fact.blocked`).
    */
   skipped: number;
 }
@@ -397,21 +397,26 @@ async function runAndPersist(
   // never re-runs), so it never re-observes it. Harvesting at the pause too captures each
   // change at the first exit after it ran. Re-harvesting on a resume is safe because
   // `proposeWorldFact` is idempotent per subject (a still-`proposed` subject supersedes in
-  // place; an `accepted` one is skipped), so the re-run of reversible actions across resumes
-  // does not duplicate notes — at most a redundant `world_fact.recorded` for an unchanged row.
+  // place; a re-observation matching the accepted value is a no-op), so the re-run of
+  // reversible actions across resumes does not duplicate notes — at most a redundant
+  // `world_fact.recorded` for a changed proposed value.
   // [Codex review R1 P2: terminal-only dropped an intermediate destructive action's change.]
   //
-  // Each candidate is screened + capped + audited by `store.proposeWorldFact` (the kernel
-  // re-enforcing on derived, not-self-authored content); the proposals are inert until the
-  // operator accepts them (`notes accept`). Returns a references-only summary, or undefined
-  // when there was nothing to harvest (so the result field is absent for an empty harvest).
-  // Resilient by design: one candidate failing never aborts the rest.
-  //   - WorldFactConflictError — the subject is already ACCEPTED; the harvest never clobbers
-  //     a ratified note (§13.3 known limitation), so skip it.
-  //   - WorldFactCapError — the agent's notes are full for a NEW subject; count this one as
-  //     dropped and CONTINUE (no silent loss — the cap rejects, never evicts). Not a `break`:
-  //     a later candidate for an already-`proposed` subject is a supersede that takes no slot,
-  //     so it must still update even after the cap was hit on an earlier new subject.
+  // COEXISTENCE (world-model.md §12): a proposed UPDATE now COEXISTS with the accepted note it
+  // would supersede (the accepted one keeps framing until the operator accepts the update) —
+  // so the harvest keeps an already-accepted subject CURRENT instead of skipping it (the old
+  // conservative-skip). Each candidate is screened + capped + audited by
+  // `store.proposeWorldFact` (the kernel re-enforcing on derived, not-self-authored content);
+  // the proposals are inert until the operator accepts them (`notes accept`). Returns a
+  // references-only summary, or undefined when there was nothing to harvest (so the result
+  // field is absent for an empty harvest). Resilient by design: one candidate failing never
+  // aborts the rest.
+  //   - undefined return — a no-op: the accepted note (or a pending proposal) already holds
+  //     this value, so nothing was queued. Count it as skipped.
+  //   - WorldFactCapError — the agent's notes are full for a brand-NEW subject; count this one
+  //     as dropped and CONTINUE (no silent loss — the cap rejects, never evicts). Not a `break`:
+  //     a later candidate for an already-tracked subject is an update that takes no slot, so it
+  //     must still apply even after the cap was hit on an earlier new subject. [Codex R3 P2.]
   //   - MemoryFirewallError — a poisoned subject/value (e.g. an injection-shaped filename);
   //     already audited `world_fact.blocked` by the store, so skip and continue.
   const harvestWorkingNotes = (): HarvestSummary | undefined => {
@@ -422,18 +427,15 @@ async function runAndPersist(
     let skipped = 0;
     for (const { subject, value } of candidates) {
       try {
-        store.proposeWorldFact(agent.id, subject, value, run.id);
-        proposed += 1;
+        const fact = store.proposeWorldFact(agent.id, subject, value, run.id);
+        if (fact === undefined) skipped += 1;
+        else proposed += 1;
       } catch (err) {
         if (err instanceof WorldFactCapError) {
-          // Notes are full — drop THIS candidate and keep going, do NOT break. The cap only
-          // bites a NEW subject; a later candidate for an already-`proposed` subject is a
-          // supersede that consumes no slot, so it must still update (breaking here would
-          // leave it stale). [Codex R3 P2.]
           dropped += 1;
           continue;
         }
-        if (err instanceof WorldFactConflictError || err instanceof MemoryFirewallError) {
+        if (err instanceof MemoryFirewallError) {
           skipped += 1;
           continue;
         }

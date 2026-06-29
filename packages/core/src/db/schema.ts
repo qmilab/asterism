@@ -89,25 +89,35 @@ CREATE INDEX IF NOT EXISTS idx_objectives_agent ON objectives(agent_id);
 
 -- An agent's WORLD-FACTS -- its own running record of the current situation
 -- ("working notes"), scoped by agent_id like every other table. A (subject, value)
--- the agent maintains ITSELF mid-run; UNIQUE(agent_id, subject) makes a re-write of a
--- subject an UPSERT (superseded, not accumulated). subject and value are the agent's
--- own content, scoped by agent_id like memory.content -- and, because they frame runs,
+-- the agent maintains ITSELF mid-run; subject and value are the agent's own content,
+-- scoped by agent_id like memory.content -- and, because they frame runs,
 -- firewall-screened on the write path exactly like memory. This is the one framing
--- input the agent writes without per-write human review, so the kernel caps the row
--- count per agent and frames these as the agent's OWN UNVERIFIED notes.
+-- input the agent writes without per-write human review, so the kernel caps the
+-- distinct-subject count per agent and frames these as the agent's OWN UNVERIFIED notes.
 --
 -- review_state ('proposed' | 'accepted' | 'rejected', the canonical ReviewState memory
 -- uses) governs ratification, exactly as on objectives: a SELF-written note (the agent's
--- record_note, the operator's notes set) is 'accepted' (the upsert default); a future
--- DERIVED writer (#84 T3, harvesting current-state facts from a run's observations)
--- PROPOSES a 'proposed' one that is INERT until a human accepts it. ONLY 'accepted'
--- frames a run -- a proposed note never shapes behaviour until ratified, a rejected one
--- never frames. One row per subject carries one review_state (the UNIQUE constraint is
--- unchanged), so proposed and accepted can never coexist for one subject; the proposed
--- producer refuses to clobber an accepted subject (see store.proposeWorldFact). A fresh
--- open picks the column up via this CREATE; an older database that already has the
--- (slice-3) table gets it via the additive ALTER in store.migrate() with DEFAULT
--- 'accepted' (every pre-#86 world-fact was self-written, hence implicitly ratified).
+-- record_note, the operator's notes set) is 'accepted' (the upsert default); a DERIVED
+-- writer (#84 T3, harvesting current-state facts from a run's observations) PROPOSES a
+-- 'proposed' one that is INERT until a human accepts it. ONLY 'accepted' frames a run --
+-- a proposed note never shapes behaviour until ratified.
+--
+-- COEXISTENCE (world-model.md §12): a proposed UPDATE to a subject the operator already
+-- accepted must keep the accepted note framing while it waits for review -- so TWO partial
+-- unique indexes (one WHERE review_state='accepted', one WHERE review_state='proposed')
+-- allow ONE accepted + ONE proposed row per subject to coexist, in place of a single
+-- table-level UNIQUE(agent_id, subject) (which forbade coexistence and forced the
+-- conservative-skip of #86 §11.1). Accept SUPERSEDES the accepted note in place and removes
+-- the proposal; reject DISCARDS the proposal, leaving the accepted note intact -- so a
+-- rejected row never persists (no rejected-history rows). A re-write of a subject in the
+-- SAME state is still an upsert (superseded, not accumulated).
+--
+-- The two partial indexes are created in store.migrate(), NOT here: their WHERE clause
+-- references review_state, a column a v0.3.0 database does not have until migrate() adds it
+-- (SCHEMA runs before that ALTER, so a partial index here would throw "no such column" when
+-- opening an older DB). migrate() creates them (IF NOT EXISTS) for BOTH a fresh DB and an
+-- older one, after guaranteeing the column and -- for an older DB -- a one-time table
+-- rebuild that drops the v0.3.0 table-level UNIQUE (SQLite cannot DROP a constraint).
 CREATE TABLE IF NOT EXISTS world_facts (
   id           TEXT PRIMARY KEY,
   agent_id     TEXT NOT NULL REFERENCES agents(id),
@@ -115,8 +125,7 @@ CREATE TABLE IF NOT EXISTS world_facts (
   value        TEXT NOT NULL,
   review_state TEXT NOT NULL,
   created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL,
-  UNIQUE(agent_id, subject)
+  updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_world_facts_agent ON world_facts(agent_id);
 

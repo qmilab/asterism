@@ -221,7 +221,6 @@ export {
   WorldFactRepository,
   DEFAULT_WORLD_FACT_CAP,
   WorldFactCapError,
-  WorldFactConflictError,
 } from "./repositories/world-facts.js";
 export type { WorldFactQuery } from "./repositories/world-facts.js";
 export { CredentialRepository } from "./repositories/credentials.js";

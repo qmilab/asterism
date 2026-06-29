@@ -149,9 +149,16 @@ export function formatObjectiveList(
 /**
  * Render an agent's WORLD-FACTS — its working notes — for `notes inspect`. These are
  * the agent's OWN unverified record (it wrote them mid-run, no human review), so the
- * header says so plainly; never present them as verified state. Oldest-first, as the
- * kernel returns and frames them. The `cap` (when given) is shown so an operator can
- * see how full the agent's notes are.
+ * header says so plainly; never present them as verified state.
+ *
+ * Grouped by SUBJECT (world-model.md §12 coexistence): a subject can hold an `accepted`
+ * note AND a coexisting `proposed` UPDATE awaiting review. An accepted note shows its
+ * framed value; a coexisting proposal is shown as a pending update beneath it (the accepted
+ * value keeps framing until the operator accepts). A brand-new `proposed` note (no accepted
+ * row yet) is flagged as awaiting review — it does NOT frame until accepted. The header
+ * count is DISTINCT subjects (the cap basis), and the `cap` (when given) is shown so an
+ * operator can see how full the agent's notes are. Subjects appear oldest-first (the order
+ * the kernel returns rows in).
  */
 export function formatWorldFactList(
   facts: readonly WorldFact[],
@@ -161,24 +168,40 @@ export function formatWorldFactList(
   if (facts.length === 0) {
     return `${agentName} has no working notes yet. The agent records its own as it runs; you can set one with: asterism notes set ${agentName} "<subject>" "<value>"`;
   }
+  // Pair each subject's accepted note with any coexisting proposed update. The input is
+  // oldest-first, so a Map keyed by subject preserves first-seen (oldest) subject order.
+  const bySubject = new Map<string, { accepted?: WorldFact; proposed?: WorldFact }>();
+  for (const f of facts) {
+    let entry = bySubject.get(f.subject);
+    if (entry === undefined) {
+      entry = {};
+      bySubject.set(f.subject, entry);
+    }
+    if (f.reviewState === "accepted") entry.accepted = f;
+    else if (f.reviewState === "proposed") entry.proposed = f;
+    // (No `rejected` rows exist — reject discards — so nothing else to bucket.)
+  }
   const fill = cap !== undefined ? ` of ${cap}` : "";
   const lines: string[] = [
-    `Working notes for ${agentName} (${facts.length}${fill}) — the agent's own unverified record, not facts:`,
+    `Working notes for ${agentName} (${bySubject.size}${fill}) — the agent's own unverified record, not facts:`,
     "",
   ];
-  for (const f of facts) {
-    // Annotate anything not already accepted so an operator sees the review queue. An
-    // `accepted` note (the self-written default) frames runs and reads as today — no tag.
-    // A `proposed` note arrived for review and does NOT frame until accepted; a `rejected`
-    // one was declined. The tag keeps the honesty the working-notes label is there for.
-    const tag =
-      f.reviewState === "proposed"
-        ? "  ⟳ awaiting your review — not yet framing runs"
-        : f.reviewState === "rejected"
-          ? "  ✗ rejected — not framing runs"
-          : "";
-    lines.push(`• ${f.subject}: ${f.value}${tag}`);
-    lines.push(`  updated ${f.updatedAt}`);
+  for (const [subject, { accepted, proposed }] of bySubject) {
+    if (accepted) {
+      // The framed value. A coexisting proposal is a pending UPDATE shown beneath it — the
+      // accepted value still frames until the operator accepts (accept applies, reject keeps).
+      lines.push(`• ${subject}: ${accepted.value}`);
+      if (proposed) {
+        lines.push(
+          `  ⟳ pending update → ${proposed.value} — awaiting your review (accept to apply, reject to keep the current value)`,
+        );
+      }
+      lines.push(`  updated ${accepted.updatedAt}`);
+    } else if (proposed) {
+      // A brand-new proposal with no accepted note yet — inert until accepted.
+      lines.push(`• ${subject}: ${proposed.value}  ⟳ awaiting your review — not yet framing runs`);
+      lines.push(`  updated ${proposed.updatedAt}`);
+    }
   }
   return lines.join("\n").trimEnd();
 }

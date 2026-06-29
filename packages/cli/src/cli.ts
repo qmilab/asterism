@@ -1184,11 +1184,13 @@ function cmdNotesSet(args: string[], io: CliIO): Promise<number> {
  * note awaiting ratification. A self-written note (the agent's `record_note`, the operator's
  * `notes set`) is already `accepted` and frames runs immediately; a note that arrived
  * `proposed` (a future derived writer) is INERT until the operator accepts it here. Keyed by
- * the trimmed subject — the same handle `notes set`/`clear` use, unambiguous because one
- * subject maps to one note. Accept re-screens the note through the firewall on the way in
- * (kernel-side), so a now-poisoned note is refused, never ratified; reject leaves it for
- * history but never framing. Reviewing a note is the agent's own scoped state — never
- * destructive, never cross-agent.
+ * the trimmed subject — the same handle `notes set`/`clear` use, unambiguous because at most
+ * one PROPOSED note exists per subject (the proposed partial unique index). Accept re-screens
+ * the note through the firewall on the way in (kernel-side) and SUPERSEDES any accepted note
+ * for the subject with the reviewed value; a now-poisoned note is refused, never ratified.
+ * Reject DISCARDS the proposed update, leaving any accepted note framing unchanged
+ * (world-model.md §12). Reviewing a note is the agent's own scoped state — never destructive,
+ * never cross-agent.
  */
 function cmdNotesReview(
   args: string[],
@@ -1206,18 +1208,17 @@ function cmdNotesReview(
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    // Resolve the subject to a note, scoped to this agent. Only a `proposed` note is
-    // reviewable: a self-written `accepted` one already frames (nothing to ratify), a
-    // `rejected` one was already declined. Tell those apart plainly.
-    const fact = store.worldFacts.get(agent.id, subject);
+    // Resolve the PROPOSED note for the subject (the only reviewable one), scoped to this
+    // agent. A subject can have an accepted note AND a coexisting proposed update; the review
+    // verbs act on the proposed one. Tell "no such proposal" apart from "exists but already
+    // accepted (nothing to review)" plainly.
+    const fact = store.worldFacts.getProposed(agent.id, subject);
     if (!fact) {
-      io.err(`No working note named "${subject}" for ${name}.`);
-      return 1;
-    }
-    if (fact.reviewState !== "proposed") {
-      io.err(
-        `Working note "${subject}" for ${name} is not awaiting review (it is ${fact.reviewState}).`,
-      );
+      if (store.worldFacts.getAccepted(agent.id, subject)) {
+        io.err(`Working note "${subject}" for ${name} is not awaiting review (it is already accepted).`);
+      } else {
+        io.err(`No working note awaiting review named "${subject}" for ${name}.`);
+      }
       return 1;
     }
     try {

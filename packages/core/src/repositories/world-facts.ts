@@ -33,26 +33,6 @@ export class WorldFactCapError extends Error {
 }
 
 /**
- * Thrown when PROPOSING a world-fact whose subject already holds an `accepted` row. The
- * single-row-per-subject model (the `UNIQUE(agent_id, subject)` constraint is unchanged)
- * forbids a `proposed` and an `accepted` row coexisting for one subject, so an unreviewed
- * proposed write must never upsert-clobber a ratified note — that would silently drop it
- * from framing and destroy its value. So {@link AsterismStore.proposeWorldFact} refuses
- * loudly instead. A governance refusal, NOT a resource bound: no content reached the
- * firewall, so — unlike a firewall block — it is not audited as an event. The clean
- * proposed-vs-accepted-same-subject *supersession* policy is deferred to the derived-fact
- * producer (#84 T3), which owns that decision (world-model.md §11.1).
- */
-export class WorldFactConflictError extends Error {
-  readonly subject: string;
-  constructor(subject: string) {
-    super(`world-fact subject already accepted: ${subject}`);
-    this.name = "WorldFactConflictError";
-    this.subject = subject;
-  }
-}
-
-/**
  * Filters for {@link WorldFactRepository.list}. Optional and scoped to one agent, the same
  * shape objectives/memory use: a filter narrows within the agent's own notes, never across
  * agents, and the enum is validated on the read path the same way the write path validates
@@ -106,10 +86,17 @@ export class WorldFactRepository {
    * single-table writer.
    *
    * `reviewState` defaults to `accepted` — the SELF-written path (the agent's `record_note`,
-   * the operator's `notes set`), framed immediately, byte-for-byte today. A future derived
-   * writer (#84 T3) passes `proposed`, which is INERT until accepted (framing requires
-   * `accepted`). On a subject collision the upsert REPLACES the review state too, so
-   * re-asserting a subject re-ratifies it to the passed state.
+   * the operator's `notes set`), framed immediately. A derived writer (#84 T3) passes
+   * `proposed`, which is INERT until accepted (framing requires `accepted`). Only those two
+   * states have a partial unique index, so only those are upsertable here (reject DISCARDS
+   * the row rather than persisting a `rejected` one — world-model.md §12).
+   *
+   * COEXISTENCE: the conflict target is the STATE-SPECIFIC partial unique index, so an
+   * `accepted` write conflicts only with the (single) accepted row for the subject and a
+   * `proposed` write only with the proposed row — letting an accepted note and a proposed
+   * UPDATE to it coexist. A within-state collision keeps the original id/created_at and
+   * replaces value + updated_at (superseded, not accumulated). The conflict target is
+   * `(agent_id, subject)`, so a collision can only ever be this agent's own row.
    */
   upsert(
     agentId: string,
@@ -122,18 +109,20 @@ export class WorldFactRepository {
     assertMemorySafe(value);
     assertMemorySafe(worldFactFramingText(subject, value));
     validateEnum(reviewState, REVIEW_STATES, "world-fact reviewState");
+    if (reviewState !== "accepted" && reviewState !== "proposed") {
+      // No partial index for 'rejected' (reject discards), so there is no coexistence
+      // target — a 'rejected' upsert is never a valid write path.
+      throw new Error(`world-fact upsert supports only 'accepted' | 'proposed', got '${reviewState}'`);
+    }
     const id = randomUUID();
     const now = new Date().toISOString();
-    // ON CONFLICT(agent_id, subject): keep the original id/created_at, replace value +
-    // review_state + updated_at. The conflict target is the table's UNIQUE(agent_id,
-    // subject), so the upsert is itself agent-scoped — a subject collision can only ever
-    // be this agent's own row.
+    const conflictWhere = reviewState === "accepted" ? "review_state = 'accepted'" : "review_state = 'proposed'";
     const row = this.driver
       .prepare(
         `INSERT INTO world_facts (id, agent_id, subject, value, review_state, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(agent_id, subject)
-         DO UPDATE SET value = excluded.value, review_state = excluded.review_state, updated_at = excluded.updated_at
+         ON CONFLICT(agent_id, subject) WHERE ${conflictWhere}
+         DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
          RETURNING *`,
       )
       .get([id, agentId, subject, value, reviewState, now, now]);
@@ -141,11 +130,28 @@ export class WorldFactRepository {
     return mapWorldFact(row);
   }
 
-  /** One world-fact by subject for an agent, or undefined when unknown or another agent's. */
-  get(agentId: string, subject: string): WorldFact | undefined {
+  /**
+   * The agent's `accepted` world-fact for a subject (the one that frames), or undefined.
+   * Single-valued by the accepted partial unique index. The subject-keyed read the
+   * self-write path uses to decide supersede-vs-insert and the cap's "new subject?" test.
+   */
+  getAccepted(agentId: string, subject: string): WorldFact | undefined {
     requireAgentId(agentId);
     const row = this.driver
-      .prepare(`SELECT * FROM world_facts WHERE agent_id = ? AND subject = ?`)
+      .prepare(`SELECT * FROM world_facts WHERE agent_id = ? AND subject = ? AND review_state = 'accepted'`)
+      .get([agentId, subject]);
+    return row ? mapWorldFact(row) : undefined;
+  }
+
+  /**
+   * The agent's pending `proposed` world-fact for a subject (the coexisting update awaiting
+   * review), or undefined. Single-valued by the proposed partial unique index — so the
+   * subject is an unambiguous review handle for `notes accept|reject`.
+   */
+  getProposed(agentId: string, subject: string): WorldFact | undefined {
+    requireAgentId(agentId);
+    const row = this.driver
+      .prepare(`SELECT * FROM world_facts WHERE agent_id = ? AND subject = ? AND review_state = 'proposed'`)
       .get([agentId, subject]);
     return row ? mapWorldFact(row) : undefined;
   }
@@ -206,27 +212,32 @@ export class WorldFactRepository {
       .map(mapWorldFact);
   }
 
-  /** How many world-facts the agent holds — the count the cap is checked against. */
+  /**
+   * How many DISTINCT subjects the agent holds — the cap basis. Counts distinct subjects,
+   * not rows: a subject that has both an accepted note AND a coexisting proposed update
+   * counts ONCE, so a pending update never inflates the cap (only a brand-new subject does).
+   * Reject discards, so no `rejected` rows exist to count.
+   */
   count(agentId: string): number {
     requireAgentId(agentId);
     const row = this.driver
-      .prepare(`SELECT COUNT(*) AS n FROM world_facts WHERE agent_id = ?`)
+      .prepare(`SELECT COUNT(DISTINCT subject) AS n FROM world_facts WHERE agent_id = ?`)
       .get([agentId]);
     return row ? Number(row.n) : 0;
   }
 
   /**
-   * Remove one world-fact by subject — returns the row that was removed (so the caller
-   * can audit it), or undefined when nothing matched (unknown subject, or another
-   * agent's). A scoped read-then-delete rather than `DELETE … RETURNING`: the row is
-   * needed for the audit, and a plain `DELETE` keeps to the idiom every other delete in
-   * the kernel uses (no reliance on RETURNING for a delete). The store wraps this in a
-   * transaction, so the read and the delete are atomic. Frames nothing and persists
-   * nothing, so — unlike the record path — it is not firewall-screened.
+   * Remove a subject entirely — BOTH its accepted note and any coexisting proposed update —
+   * so forgetting a note never leaves an orphan pending update. Returns a representative
+   * removed row for the audit (the accepted one if present, else the proposed), or undefined
+   * when nothing matched (unknown subject, or another agent's). A scoped read-then-delete
+   * rather than `DELETE … RETURNING` (the idiom every kernel delete uses, no RETURNING-on-
+   * delete driver risk); the store wraps it in a transaction, so the reads and the delete are
+   * atomic. Frames nothing and persists nothing, so it is not firewall-screened.
    */
   clear(agentId: string, subject: string): WorldFact | undefined {
     requireAgentId(agentId);
-    const existing = this.get(agentId, subject);
+    const existing = this.getAccepted(agentId, subject) ?? this.getProposed(agentId, subject);
     if (!existing) return undefined;
     this.driver
       .prepare(`DELETE FROM world_facts WHERE agent_id = ? AND subject = ?`)
@@ -235,54 +246,84 @@ export class WorldFactRepository {
   }
 
   /**
-   * Atomically settle a PROPOSED world-fact: flip `review_state` from `proposed` to
-   * `reviewState` in a SINGLE compare-and-set. The `review_state = 'proposed'` precondition
-   * lives in the UPDATE's WHERE clause, so two concurrent drains over one proposal cannot
-   * both win: the first transitions it and the second matches nothing. Advances `updated_at`
-   * (the review is a real transition). Because the single-row-per-subject model never lets a
-   * `proposed` and an `accepted` row share a subject, settling `proposed → accepted` can
-   * never collide with the `UNIQUE(agent_id, subject)` constraint.
-   *
-   * `expectedValue`, when given, is an ADDITIONAL `value = ?` precondition that pins the
-   * settle to the EXACT content the caller reviewed. This matters because a world-fact, unlike
-   * an append-only memory/objective proposal, is an UPSERT keyed by subject: a concurrent
-   * re-propose (`proposeWorldFact` of the same still-`proposed` subject) rewrites this very row
-   * IN PLACE, keeping its id and `proposed` state but changing the value. A plain
-   * review_state-only CAS would then ratify a value the operator never saw and the accept path
-   * never re-screened. The accept path passes the re-screened value here so the CAS only wins
-   * while the content is unchanged; if it churned, the settle matches nothing and the caller
-   * re-reviews the new value. (Content-exact rather than a version timestamp, so a churn back
-   * to the reviewed value — ABA — correctly still ratifies what was reviewed.) The subject is
-   * immutable for a given id — the upsert conflicts on subject, so one id is always one
-   * subject — so pinning the value pins the whole rendered line that was screened. Reject
-   * omits it (a rejected note frames nothing regardless of its value).
-   *
-   * Returns the settled row to the winner, or undefined to a caller that lost the race or
-   * whose `expectedValue` no longer matches (or named an unknown / already-settled /
-   * cross-agent id).
+   * Accept a PROPOSED world-fact — SUPERSEDE-ON-ACCEPT (world-model.md §12). Resolve the
+   * proposed row pinned to (`id`, still `proposed`, `value = expectedValue`); a gone/churned
+   * row yields undefined so the caller re-reviews (the same content-pin the old single-row CAS
+   * used — a concurrent re-propose that changed the value cannot ratify content the operator
+   * never saw). Then, in the caller's transaction:
+   *   - **An accepted row already exists for the subject** → apply the proposed value to it IN
+   *     PLACE (keeping the accepted note's id + created_at), then DELETE the consumed proposed
+   *     row. The accepted partial unique index stays single-valued for the subject.
+   *   - **No accepted row yet** → flip the proposed row `review_state → 'accepted'`; it becomes
+   *     the note (its id + created_at are the note's birth).
+   * Returns the surviving accepted row, or undefined when the pinned proposed row was gone.
+   * The two SELECT/UPDATE/DELETE statements are atomic under the store's wrapping transaction
+   * (the same basis {@link clear} relies on).
    */
-  settleProposed(
-    agentId: string,
-    id: string,
-    reviewState: ReviewState,
-    expectedValue?: string,
-  ): WorldFact | undefined {
+  acceptProposed(agentId: string, id: string, expectedValue?: string): WorldFact | undefined {
     requireAgentId(agentId);
-    validateEnum(reviewState, REVIEW_STATES, "world-fact reviewState");
     const now = new Date().toISOString();
     const clauses = ["id = ?", "agent_id = ?", "review_state = 'proposed'"];
-    const params: SqlValue[] = [reviewState, now, id, agentId];
+    const params: SqlValue[] = [id, agentId];
     if (expectedValue !== undefined) {
       clauses.push("value = ?");
       params.push(expectedValue);
     }
-    const row = this.driver
-      .prepare(
-        `UPDATE world_facts SET review_state = ?, updated_at = ?
-          WHERE ${clauses.join(" AND ")}
-          RETURNING *`,
-      )
+    const proposed = this.driver
+      .prepare(`SELECT * FROM world_facts WHERE ${clauses.join(" AND ")}`)
       .get(params);
-    return row ? mapWorldFact(row) : undefined;
+    if (!proposed) return undefined;
+    const subject = String(proposed.subject);
+    const value = String(proposed.value);
+    const proposedId = String(proposed.id);
+    const accepted = this.driver
+      .prepare(`SELECT * FROM world_facts WHERE agent_id = ? AND subject = ? AND review_state = 'accepted'`)
+      .get([agentId, subject]);
+    if (accepted) {
+      const updated = this.driver
+        .prepare(
+          `UPDATE world_facts SET value = ?, updated_at = ?
+             WHERE id = ? AND agent_id = ? AND review_state = 'accepted'
+             RETURNING *`,
+        )
+        .get([value, now, String(accepted.id), agentId]);
+      this.driver
+        .prepare(`DELETE FROM world_facts WHERE id = ? AND agent_id = ?`)
+        .run([proposedId, agentId]);
+      return updated ? mapWorldFact(updated) : undefined;
+    }
+    const flipped = this.driver
+      .prepare(
+        `UPDATE world_facts SET review_state = 'accepted', updated_at = ?
+           WHERE id = ? AND agent_id = ? AND review_state = 'proposed'
+           RETURNING *`,
+      )
+      .get([now, proposedId, agentId]);
+    return flipped ? mapWorldFact(flipped) : undefined;
+  }
+
+  /**
+   * Reject a PROPOSED world-fact — DISCARD it (world-model.md §12): delete the proposed row
+   * outright, leaving any accepted note for the subject untouched. A world-fact is volatile
+   * current-state, so a declined update has no lasting value (no `rejected`-history rows).
+   * Pinned to (`id`, still `proposed`, `value = expectedValue`) so a concurrent re-propose
+   * that churned the value forces a re-review rather than discarding a value the operator
+   * never saw. Read-then-delete (no RETURNING-on-delete), atomic under the store's wrapping
+   * transaction. Returns the deleted row to the winner (for the audit), or undefined when the
+   * pinned row was gone (lost race / churned / unknown / cross-agent).
+   */
+  deleteProposed(agentId: string, id: string, expectedValue?: string): WorldFact | undefined {
+    requireAgentId(agentId);
+    const clauses = ["id = ?", "agent_id = ?", "review_state = 'proposed'"];
+    const params: SqlValue[] = [id, agentId];
+    if (expectedValue !== undefined) {
+      clauses.push("value = ?");
+      params.push(expectedValue);
+    }
+    const where = clauses.join(" AND ");
+    const existing = this.driver.prepare(`SELECT * FROM world_facts WHERE ${where}`).get(params);
+    if (!existing) return undefined;
+    this.driver.prepare(`DELETE FROM world_facts WHERE ${where}`).run(params);
+    return mapWorldFact(existing);
   }
 }
