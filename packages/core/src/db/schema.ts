@@ -76,14 +76,21 @@ CREATE INDEX IF NOT EXISTS idx_skills_agent ON skills(agent_id);
 -- database that already has the (slice-1) table gets it via the additive ALTER in
 -- store.migrate() with DEFAULT 'accepted' (every pre-slice-2 objective was
 -- operator-declared, hence implicitly ratified).
+--
+-- source_run_id is the run a reflection-PROPOSED objective was noticed in (NULL for an
+-- operator-declared one — provenance only, never gates framing, so NULL is fine). It lets
+-- the Type-B transition advisory judge the source run of a queued objective proposal, not
+-- just the latest run. A fresh open picks it up via this CREATE; an older database gets it
+-- via the additive (nullable, no-default) ALTER in store.migrate().
 CREATE TABLE IF NOT EXISTS objectives (
-  id           TEXT PRIMARY KEY,
-  agent_id     TEXT NOT NULL REFERENCES agents(id),
-  content      TEXT NOT NULL,
-  status       TEXT NOT NULL,
-  review_state TEXT NOT NULL,
-  created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  id            TEXT PRIMARY KEY,
+  agent_id      TEXT NOT NULL REFERENCES agents(id),
+  content       TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  review_state  TEXT NOT NULL,
+  source_run_id TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_objectives_agent ON objectives(agent_id);
 

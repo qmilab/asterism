@@ -14,6 +14,12 @@ export interface CreateObjectiveInput {
    * accepts it. Mirrors {@link CreateMemoryInput.reviewState}.
    */
   reviewState?: ReviewState;
+  /**
+   * The run a reflection PROPOSAL was noticed in — set on the proposed path so the Type-B
+   * transition advisory can later judge that source run. Omitted for an operator-declared
+   * objective (provenance only; it never gates framing). Mirrors {@link CreateMemoryInput.sourceRunId}.
+   */
+  sourceRunId?: string;
 }
 
 /**
@@ -36,6 +42,7 @@ function mapObjective(row: SqlRow): Objective {
     content: String(row.content),
     status: String(row.status) as ObjectiveStatus,
     reviewState: String(row.review_state) as ReviewState,
+    ...(row.source_run_id != null ? { sourceRunId: String(row.source_run_id) } : {}),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -71,11 +78,12 @@ export class ObjectiveRepository {
     const now = new Date().toISOString();
     const row = this.driver
       .prepare(
-        `INSERT INTO objectives (id, agent_id, content, status, review_state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO objectives
+           (id, agent_id, content, status, review_state, source_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING *`,
       )
-      .get([id, agentId, input.content, "active", reviewState, now, now]);
+      .get([id, agentId, input.content, "active", reviewState, input.sourceRunId ?? null, now, now]);
     if (!row) throw new Error("objective insert did not persist");
     return mapObjective(row);
   }

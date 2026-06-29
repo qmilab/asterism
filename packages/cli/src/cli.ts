@@ -1928,7 +1928,12 @@ async function runReflectReview(
   // finished an objective in an OLDER run is caught, not only the latest run. Internally guarded to a
   // no-op (and no model call) when there is nothing to judge or no human at the keyboard.
   const queuedRunIds = [
-    ...new Set(queuedMemories.map((m) => m.sourceRunId).filter((id): id is string => id !== undefined)),
+    ...new Set(
+      [
+        ...queuedMemories.map((m) => m.sourceRunId),
+        ...queuedObjectives.map((o) => o.sourceRunId),
+      ].filter((id): id is string => id !== undefined),
+    ),
   ];
   code = (await reviewObjectiveTransitions(io, store, home, agent, name, queuedRunIds)) || code;
   return code;

@@ -1229,6 +1229,46 @@ test("reflect --review surfaces a transition from an OLDER queued run, not just 
   expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
 });
 
+test("reflect --review catches an older run that queued ONLY an objective proposal (no memory)", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["objective", "add", "personal", "finish the migration"], h.io); // the ACTIVE objective
+  await runCli(["run", "personal", "run the migration"], h.io); // R1 completes it
+
+  // --propose queues ONLY an objective proposal for R1 (no memory), capturing R1's id. The proposed
+  // objective carries sourceRunId = R1, the only handle to that run once a newer run arrives.
+  let r1Id = "";
+  const provider: ReflectionProvider = {
+    async reflect() {
+      return [];
+    },
+    async proposeObjectives(i) {
+      r1Id = i.transcript.runId;
+      return [{ content: "keep the notes tidy", confidence: 0.7, sourceRunId: i.transcript.runId }];
+    },
+    async proposeObjectiveTransitions(i) {
+      return i.transcripts.some((t) => t.runId === r1Id)
+        ? i.objectives.map((o) => ({ objectiveId: o.id, proposedStatus: "done" as const, confidence: 0.9 }))
+        : [];
+    },
+  };
+  h.io.makeReflectionProvider = () => ({ provider });
+  await runCli(["reflect", "personal", "--propose"], h.io); // queues a PROPOSED objective from R1
+
+  await runCli(["run", "personal", "write a blog"], h.io); // R2 — newer, now the latest run
+
+  // Review drains the queued objective proposal and surfaces transitions. R1 is recovered from the
+  // queued objective's sourceRunId (it left no memory), so the migration completion still surfaces.
+  h.io.review = (): ReviewDecision => ({ kind: "reject" });
+  h.io.reviewTransition = () => "apply";
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("looks finished");
+  expect(out).toContain("1 applied");
+  expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
+});
+
 test("reflect --review drains the queue by rejecting too (a refused proposal leaves it)", async () => {
   const h = harness();
   await withFinishedRun(h);

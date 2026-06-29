@@ -548,9 +548,11 @@ test("queueProposals queues objectives as inert `proposed` rows under one shared
     expect(result.objectives.queued).toBe(1); // objective
     expect(result.processedRuns).toEqual([run.id]);
 
-    // The objective persisted `proposed` — INERT (framing reads active+accepted only).
+    // The objective persisted `proposed` — INERT (framing reads active+accepted only) — and
+    // carries its source run, so the Type-B transition advisory can later judge that run.
     const proposed = store.objectives.list(agent.id, { reviewState: "proposed" });
     expect(proposed.map((o) => o.content)).toEqual(["objective from tidy the notes"]);
+    expect(proposed[0]?.sourceRunId).toBe(run.id);
     expect(store.objectives.listActiveAccepted(agent.id)).toEqual([]);
 
     // One reflected_at claim covered BOTH kinds: both per-run markers tag the same run, and

@@ -241,6 +241,12 @@ export interface Objective {
    * acting as a backdoor injection.
    */
   reviewState: ReviewState;
+  /**
+   * The run a reflection-PROPOSED objective was noticed in (so the Type-B transition advisory can
+   * judge that source run, not only the latest). Absent for an operator-declared objective —
+   * provenance only, it never gates framing. Mirrors {@link Memory.sourceRunId}.
+   */
+  sourceRunId?: string;
   createdAt: string;
   updatedAt: string;
 }

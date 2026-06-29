@@ -242,6 +242,22 @@ describe("objective review orchestration — audited references-only", () => {
     expect(JSON.stringify(payload)).not.toContain("standing goal");
   });
 
+  test("createObjective threads sourceRunId onto a proposed objective; operator-declared has none", () => {
+    const proposed = store.createObjective(alice.id, "a goal noticed in a run", "proposed", "run-xyz");
+    expect(proposed.sourceRunId).toBe("run-xyz");
+    expect(store.objectives.get(alice.id, proposed.id)?.sourceRunId).toBe("run-xyz");
+    // An operator-declared objective carries no source run (provenance only, never gates framing).
+    const declared = store.createObjective(alice.id, "an operator goal");
+    expect(declared.sourceRunId).toBeUndefined();
+    expect(store.objectives.get(alice.id, declared.id)?.sourceRunId).toBeUndefined();
+  });
+
+  test("an edited-accept carries the original proposal's sourceRunId onto the new accepted row", () => {
+    const p = store.createObjective(alice.id, "rough goal from a run", "proposed", "run-abc");
+    const accepted = store.acceptEditedObjectiveProposal(alice.id, p, "the refined goal");
+    expect(accepted?.sourceRunId).toBe("run-abc");
+  });
+
   test("settleProposedObjective records objective.reviewed with from/to references only", () => {
     const p = store.createObjective(alice.id, "review me", "proposed");
     const settled = store.settleProposedObjective(alice.id, p.id, "accepted");
@@ -298,7 +314,7 @@ describe("objective review orchestration — audited references-only", () => {
   });
 });
 
-test("opening a pre-slice-2 objectives table migrates review_state in as 'accepted'", () => {
+test("opening a pre-slice-2 objectives table migrates review_state in as 'accepted' (and source_run_id as NULL)", () => {
   const driver = openDatabase(":memory:");
   // An older schema: the slice-1 objectives table, before review_state existed, with a row.
   driver.exec(`
@@ -318,9 +334,11 @@ test("opening a pre-slice-2 objectives table migrates review_state in as 'accept
   `);
   const migrated = new AsterismStore(driver);
   try {
-    // The pre-existing operator-declared objective backfills as `accepted`, so it still frames.
+    // The pre-existing operator-declared objective backfills as `accepted`, so it still frames,
+    // and source_run_id was added as a NULLABLE column — the old row has no source run.
     const row = migrated.objectives.get("a1", "o1");
     expect(row?.reviewState).toBe("accepted");
+    expect(row?.sourceRunId).toBeUndefined();
     expect(migrated.objectives.listActiveAccepted("a1").map((o) => o.id)).toEqual(["o1"]);
   } finally {
     migrated.close();

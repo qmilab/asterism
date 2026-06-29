@@ -620,7 +620,7 @@ export async function queueProposals(
             const content = p.content.trim();
             return content.length === 0 ? null : content;
           },
-          (content) => store.createObjective(agent.id, content, "proposed"),
+          (content, p) => store.createObjective(agent.id, content, "proposed", p.sourceRunId),
         );
         store.recordObjectiveProposed(agent.id, run.id, objTally);
         result.objectives.queued += objTally.queued;
