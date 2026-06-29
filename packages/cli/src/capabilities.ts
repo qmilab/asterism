@@ -267,24 +267,26 @@ function locationEscapesWorkspace(workspaceDir: string, absLocation: string): bo
 }
 
 /**
- * True when a `mkdir` / `move` target would land OUTSIDE the workspace through a symlinked
- * ANCESTOR directory (e.g. an in-workspace `escape -> /tmp/out`, target `escape/sub`). Resolves
- * the target's PARENT — the final component is deliberately NOT followed, because `mkdir` /
- * `renameSync` create or move the leaf AS ITSELF (a symlink leaf is moved as a link, never written
- * through), matching delete_file/move's `lstat` discipline.
+ * True when a target would land OUTSIDE the workspace once symlinks are followed THROUGH THE FINAL
+ * COMPONENT. For tools that follow a symlink leaf: `append_file` (`appendFileSync` writes through
+ * `link.txt -> /tmp/out/secret`) AND `mkdir` (`mkdirSync(..., {recursive:true})` treats an existing
+ * `escape -> /tmp/out` leaf as a satisfied directory and would emit a false `dir:escape exists`).
+ * So the leaf is included — an external leaf (existing OR dangling) is an escape, not just a
+ * symlinked ancestor.
  */
-function writeTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
-  return locationEscapesWorkspace(workspaceDir, dirname(absTarget));
+function targetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
+  return locationEscapesWorkspace(workspaceDir, absTarget);
 }
 
 /**
- * True when an `append_file` target would write OUTSIDE the workspace. Unlike mkdir/move,
- * `appendFileSync` FOLLOWS a final symlink when it writes — so an in-workspace symlink LEAF whose
- * target is external (`link.txt -> /tmp/out/secret`, existing OR dangling) is an escape too, not
- * just a symlinked ancestor. Resolves the TARGET itself (leaf included).
+ * True when a `move` target would land OUTSIDE the workspace through a symlinked ANCESTOR directory
+ * (e.g. `escape -> /tmp/out`, target `escape/a.txt`). Resolves the target's PARENT only — the final
+ * component is deliberately NOT followed, because `renameSync` moves a symlink leaf AS A LINK (it
+ * relocates the link itself, never writes through it), matching delete_file/move's `lstat`
+ * discipline. (`move` checks both its source and destination this way.)
  */
-function appendTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
-  return locationEscapesWorkspace(workspaceDir, absTarget);
+function parentEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
+  return locationEscapesWorkspace(workspaceDir, dirname(absTarget));
 }
 
 /** realpath the NEAREST EXISTING node at or above `start`, or null if none resolves. Used by the
@@ -546,8 +548,10 @@ export function workspaceCapabilities(
         if (path === undefined) return failure("mkdir needs a 'path'.");
         const c = confine(workspaceDir, path);
         if (!c.ok) return failure(c.message);
-        // Refuse creating THROUGH a symlinked directory that resolves outside (confine is lexical).
-        if (writeTargetEscapesWorkspace(workspaceDir, c.path)) {
+        // Refuse creating THROUGH a symlinked directory OR onto a symlink LEAF that resolves
+        // outside — mkdirSync follows an existing symlink-to-dir leaf and would otherwise report
+        // an out-of-workspace target as a satisfied `dir:` (confine is lexical only).
+        if (targetEscapesWorkspace(workspaceDir, c.path)) {
           return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
         }
         try {
@@ -597,7 +601,7 @@ export function workspaceCapabilities(
         if (!c.ok) return failure(c.message);
         // Refuse writing THROUGH a symlinked directory OR a final symlink that resolves outside
         // (appendFileSync follows the leaf, so it is checked too — confine is lexical only).
-        if (appendTargetEscapesWorkspace(workspaceDir, c.path)) {
+        if (targetEscapesWorkspace(workspaceDir, c.path)) {
           return failure(`Refused: '${path}' resolves outside this agent's workspace.`);
         }
         try {
@@ -657,10 +661,10 @@ export function workspaceCapabilities(
         // below, so a symlinked-parent source is never even stat'd (which would leak the outside
         // file's size into the observation). The source's OWN final component may be a symlink —
         // it is moved AS A LINK; only a symlinked ANCESTOR escapes.
-        if (writeTargetEscapesWorkspace(workspaceDir, src.path)) {
+        if (parentEscapesWorkspace(workspaceDir, src.path)) {
           return failure(`Refused: '${from}' resolves outside this agent's workspace.`);
         }
-        if (writeTargetEscapesWorkspace(workspaceDir, dst.path)) {
+        if (parentEscapesWorkspace(workspaceDir, dst.path)) {
           return failure(`Refused: '${to}' resolves outside this agent's workspace.`);
         }
         // Classify the SOURCE before the move (it is gone afterward), with lstat so a symlink

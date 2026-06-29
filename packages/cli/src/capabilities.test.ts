@@ -718,6 +718,19 @@ describe("workspace-bounded write tools emit structured observations", () => {
     }
   });
 
+  test("mkdir refuses a symlink LEAF that points to an outside directory (no false dir: observation)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-mkdir-leaf-out-"));
+    try {
+      symlinkSync(outside, join(workspace, "escape")); // escape -> existing outside dir
+      const result = await run("mkdir", { path: "escape" });
+      expect(result.isError).toBe(true);
+      // Must NOT report the out-of-workspace target as a satisfied dir.
+      expect(result.observation).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   test("mkdir refuses creating through a DANGLING symlinked directory (no escape)", async () => {
     const outside = mkdtempSync(join(tmpdir(), "asterism-mkdir-dangle-"));
     try {
