@@ -704,6 +704,34 @@ describe("workspace-bounded write tools emit structured observations", () => {
     }
   });
 
+  test("append_file refuses a DANGLING symlink leaf pointing outside (no outside file created)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-append-dangle-"));
+    try {
+      const target = join(outside, "notyet.txt"); // does NOT exist yet
+      symlinkSync(target, join(workspace, "dangling.txt")); // in-workspace symlink → missing outside path
+      const result = await run("append_file", { path: "dangling.txt", content: "X" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(target)).toBe(false); // the dangling target was NOT created outside
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("mkdir refuses creating through a DANGLING symlinked directory (no escape)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-mkdir-dangle-"));
+    try {
+      const missing = join(outside, "nope"); // does NOT exist yet
+      symlinkSync(missing, join(workspace, "escape")); // escape → missing outside dir
+      const result = await run("mkdir", { path: "escape/sub" });
+      expect(result.isError).toBe(true);
+      expect(result.observation).toBeUndefined();
+      expect(existsSync(missing)).toBe(false); // nothing created outside
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   test("move refuses a destination that ALIASES back into the source (no parents created)", async () => {
     await run("write_file", { path: "src/a.txt", content: "x" }); // creates src/
     symlinkSync(join(workspace, "src"), join(workspace, "alias")); // alias -> src (in-workspace)

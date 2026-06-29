@@ -58,13 +58,14 @@ import {
   opendirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 
 import { DEFAULT_MAX_OBSERVATION_FACTS } from "@qmilab/asterism-core";
 import type { Capability } from "@qmilab/asterism-core";
@@ -217,47 +218,73 @@ function resolvesOutsideWorkspace(workspaceDir: string, absPath: string): boolea
 }
 
 /**
- * realpath the NEAREST EXISTING node at or above `start` and report whether it resolves OUTSIDE
- * the workspace. The shared core of the write-tool symlink guards: a CREATE/MOVE target may not
- * exist yet, so we climb to the first node that does and follow its symlink chain — any symlink
- * pointing out surfaces there. `start` selects how much of the path is checked (see the two
- * wrappers below). A path that resolves nowhere (every candidate missing) is not an escape.
+ * Resolve `p` to the absolute location a CREATE / WRITE would land, FOLLOWING symlinks and
+ * tolerating not-yet-existing components. `realpathSync` is not enough on its own: it THROWS on a
+ * dangling symlink (one whose target does not exist yet), and a guard that treated that throw as
+ * "stays inside" would let an in-workspace `link -> /tmp/out/notyet` be written through, CREATING
+ * the outside file — the exact dangling-symlink escape. So: fast-path `realpathSync` when the whole
+ * chain exists; otherwise, if `p` itself is a symlink, follow its target (even if missing); else
+ * `p` is a missing name, so resolve its parent and re-append. Bounded against symlink loops.
  */
-function nearestExistingResolvesOutside(workspaceDir: string, start: string): boolean {
-  let node = start;
-  for (;;) {
-    try {
-      lstatSync(node);
-      return resolvesOutsideWorkspace(workspaceDir, node);
-    } catch {
-      const parent = dirname(node);
-      if (parent === node) return false; // reached the filesystem root; nothing existed
-      node = parent;
-    }
+function resolveTargetLocation(p: string, depth = 0): string {
+  if (depth > 64) return p; // symlink-loop guard (realpathSync also throws ELOOP on the fast path)
+  try {
+    return realpathSync(p); // whole chain exists — one syscall, fully resolved
+  } catch {
+    // A component is missing or a symlink dangles; resolve manually.
   }
+  let st: ReturnType<typeof lstatSync> | null = null;
+  try {
+    st = lstatSync(p);
+  } catch {
+    st = null;
+  }
+  if (st?.isSymbolicLink()) {
+    const link = readlinkSync(p);
+    const abs = isAbsolute(link) ? link : resolvePath(dirname(p), link);
+    return resolveTargetLocation(abs, depth + 1);
+  }
+  const parent = dirname(p);
+  if (parent === p) return p; // filesystem root
+  return resolvePath(resolveTargetLocation(parent, depth + 1), basename(p));
+}
+
+/**
+ * True when a write/create at `absLocation` would land OUTSIDE the workspace once symlinks (and
+ * dangling ones) are followed. The shared core of the write-tool symlink guards — `confine` is
+ * lexical and cannot see through a symlink; this resolves where the bytes would actually land.
+ */
+function locationEscapesWorkspace(workspaceDir: string, absLocation: string): boolean {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(resolvePath(workspaceDir));
+  } catch {
+    return false; // workspace itself unresolvable — leave to the operation's own error
+  }
+  const resolved = resolveTargetLocation(absLocation);
+  const rel = relative(realRoot, resolved);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
 
 /**
  * True when a `mkdir` / `move` target would land OUTSIDE the workspace through a symlinked
- * ANCESTOR directory (e.g. an in-workspace `escape -> /tmp/out`, target `escape/sub`). `confine`
- * is lexical only and cannot see through a symlink. Starts at the target's PARENT — the final
- * component is deliberately NOT followed, because `mkdir`/`renameSync` create or move the leaf AS
- * ITSELF (a symlink leaf is moved as a link, never written through), matching delete_file/move's
- * `lstat` discipline.
+ * ANCESTOR directory (e.g. an in-workspace `escape -> /tmp/out`, target `escape/sub`). Resolves
+ * the target's PARENT — the final component is deliberately NOT followed, because `mkdir` /
+ * `renameSync` create or move the leaf AS ITSELF (a symlink leaf is moved as a link, never written
+ * through), matching delete_file/move's `lstat` discipline.
  */
 function writeTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
-  return nearestExistingResolvesOutside(workspaceDir, dirname(absTarget));
+  return locationEscapesWorkspace(workspaceDir, dirname(absTarget));
 }
 
 /**
  * True when an `append_file` target would write OUTSIDE the workspace. Unlike mkdir/move,
  * `appendFileSync` FOLLOWS a final symlink when it writes — so an in-workspace symlink LEAF whose
- * target is external (`link.txt -> /tmp/out/secret`) is an escape too, not just a symlinked
- * ancestor. Starts AT the target so the leaf is included when it already exists; when it does not,
- * this walks up to the parent, same as the ancestor check (the file is about to be created).
+ * target is external (`link.txt -> /tmp/out/secret`, existing OR dangling) is an escape too, not
+ * just a symlinked ancestor. Resolves the TARGET itself (leaf included).
  */
 function appendTargetEscapesWorkspace(workspaceDir: string, absTarget: string): boolean {
-  return nearestExistingResolvesOutside(workspaceDir, absTarget);
+  return locationEscapesWorkspace(workspaceDir, absTarget);
 }
 
 /** realpath the NEAREST EXISTING node at or above `start`, or null if none resolves. Used by the
