@@ -310,6 +310,7 @@ already waiting needs no model.`,
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
 asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>
+asterism config world-fact-cap <agent> <n>  ·  --unset
 asterism config recall-provider <agent> local  ·  --unset
 asterism config cognition-provider <agent> lodestar  ·  --unset
 asterism config cognition-capture <agent> content  ·  references
@@ -338,6 +339,15 @@ its runs when you want it to differ.
                                         agent without its own (·  --default --unset to
                                         clear, ·  --default to show). Precedence: a
                                         per-agent budget, then this, then the built-in.
+  asterism config world-fact-cap <agent> <n>
+                                        Set how many distinct working notes this agent
+                                        may keep (a positive whole number). At the cap, a
+                                        new note is refused until one is cleared — notes
+                                        are never silently dropped.
+  asterism config world-fact-cap <agent> --unset
+                                        Clear it, so the agent uses the default again.
+  asterism config world-fact-cap <agent>
+                                        Show this agent's current world-fact cap.
   asterism config recall-provider <agent> local
                                         Rank this agent's memory by meaning, using a
                                         local embeddings endpoint (opt-in, off by

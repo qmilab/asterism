@@ -1128,7 +1128,11 @@ function cmdNotesInspect(args: string[], io: CliIO): Promise<number> {
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    io.out(formatWorldFactList(store.listWorldFacts(agent.id), agent.name, DEFAULT_WORLD_FACT_CAP));
+    // The agent's EFFECTIVE cap (per-agent override or kernel default), so the listing's
+    // "(N of cap)" header reflects the configured bound, not always the built-in constant.
+    io.out(
+      formatWorldFactList(store.listWorldFacts(agent.id), agent.name, store.resolveWorldFactCap(agent.id)),
+    );
     return 0;
   });
 }
@@ -2457,6 +2461,7 @@ async function cmdConfig(args: string[], io: CliIO): Promise<number> {
   if (sub === "set") return cmdConfigSet(parsed, io);
   if (sub === "unset") return cmdConfigUnset(parsed, io);
   if (sub === "recall-budget") return cmdConfigRecallBudget(parsed, io);
+  if (sub === "world-fact-cap") return cmdConfigWorldFactCap(parsed, io);
   if (sub === "recall-provider") return cmdConfigRecallProvider(parsed, io);
   if (sub === "cognition-provider") return cmdConfigCognitionProvider(parsed, io);
   if (sub === "cognition-capture") return cmdConfigCognitionCapture(parsed, io);
@@ -2531,6 +2536,24 @@ function cmdConfigShow(io: CliIO): Promise<number> {
         } else {
           io.out(`  ${agent.name}  →  ${constant}  [default]`);
         }
+      }
+    }
+
+    io.out("");
+    io.out(`Per-agent world-fact cap  (built-in default ${DEFAULT_WORLD_FACT_CAP}):`);
+    if (agents.length === 0) {
+      io.out("  (no agents yet)");
+    } else {
+      // How many distinct working notes each agent may hold. An unset agent resolves to the
+      // kernel constant (no install-wide tier yet); the kernel owns that resolution
+      // (`resolveWorldFactCap`), so this only reads the stored value and labels the source.
+      for (const agent of agents) {
+        const cap = store.agentSettings.getWorldFactCap(agent.id);
+        io.out(
+          cap !== undefined
+            ? `  ${agent.name}  →  ${cap}  [set]`
+            : `  ${agent.name}  →  ${DEFAULT_WORLD_FACT_CAP}  [default]`,
+        );
       }
     }
 
@@ -2708,6 +2731,84 @@ function cmdConfigInstallRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<nu
     }
     store.installSettings.setRecallBudget(budget);
     io.out(`Set the install-wide recall budget to ${budget} ${budget === 1 ? "memory" : "memories"} — every agent without its own override now uses it.`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism config world-fact-cap <agent> [<n>]` / `--unset` — read or set how many
+ * distinct working notes (world-facts) an agent may hold. With a value, sets the
+ * per-agent override; with `--unset`, clears it back to the kernel default; with
+ * neither, shows the current setting. The kernel validates and stores it (agentId-scoped)
+ * and owns the effective-value resolution (`resolveWorldFactCap`) — this surface only
+ * parses, calls, and formats. Mirrors {@link cmdConfigRecallBudget} without the
+ * install-wide `--default` tier: that is a deferred additive follow-up, so the only
+ * fallback is the kernel constant.
+ */
+function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  // No install-wide tier yet (per-agent → kernel constant only). Reject `--default` with a
+  // clear, forward-looking message rather than silently ignoring it (it would otherwise fall
+  // through to a no-op).
+  if (parsed.flags.default !== undefined) {
+    io.err(
+      "An install-wide world-fact-cap default is not available yet — set it per agent: asterism config world-fact-cap <agent> <n>",
+    );
+    return Promise.resolve(1);
+  }
+
+  const agentName = parsed.positionals[1];
+  if (!agentName) {
+    io.err("Usage: asterism config world-fact-cap <agent> <n>  ·  --unset");
+    return Promise.resolve(1);
+  }
+  const unset = parsed.flags.unset === true;
+  const valueRaw = parsed.positionals[2];
+  // A bare negative number (`-5`) arrives as a digit-only short boolean flag key, not a
+  // positional — catch it as an invalid value rather than letting it fall through to the
+  // read-only "show" path as a silent no-op (same edge as `cmdConfigRecallBudget`).
+  const negativeValue = Object.keys(parsed.flags).some((k) => /^\d+$/.test(k));
+  const CONSTANT = DEFAULT_WORLD_FACT_CAP;
+
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, agentName);
+    if (!agent) return noAgent(io, agentName);
+
+    if (unset) {
+      // Decide the message from the PRIOR value, not row existence: a cleared row persists
+      // (with a NULL cap) to keep its created_at, so "is there a row" is not "was something
+      // set". Skip the write entirely when nothing was set.
+      const had = store.agentSettings.getWorldFactCap(agent.id);
+      if (had === undefined) {
+        io.out(`${agentName} had no world-fact cap set — it already uses the default (${CONSTANT}).`);
+        return 0;
+      }
+      store.clearWorldFactCap(agent.id);
+      io.out(`Cleared ${agentName}'s world-fact cap — it uses the default (${CONSTANT}) again.`);
+      return 0;
+    }
+
+    // No value and no `--unset`: read the current setting rather than change it.
+    if (valueRaw === undefined && !negativeValue) {
+      const current = store.agentSettings.getWorldFactCap(agent.id);
+      io.out(
+        current !== undefined
+          ? `${agentName}'s world-fact cap: ${current} ${current === 1 ? "note" : "notes"}.`
+          : `${agentName} uses the default world-fact cap (${CONSTANT} notes).`,
+      );
+      return 0;
+    }
+
+    // A cap must be a positive whole number. `intFlag` parses a non-negative integer;
+    // reject 0, a negative (the `negativeValue` case above), and anything non-numeric here
+    // with a clear message rather than letting the kernel's write-boundary validation
+    // surface as a raw error.
+    const cap = valueRaw !== undefined ? intFlag(valueRaw) : undefined;
+    if (cap === undefined || cap <= 0) {
+      io.err("The world-fact cap must be a positive whole number.");
+      return 1;
+    }
+    store.setWorldFactCap(agent.id, cap);
+    io.out(`Set ${agentName}'s world-fact cap to ${cap} ${cap === 1 ? "note" : "notes"}.`);
     return 0;
   });
 }

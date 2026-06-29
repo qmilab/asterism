@@ -539,3 +539,159 @@ test("opening a pre-existing database without agent_settings.cognition_capture m
     local.close();
   }
 });
+
+// --- world-fact cap (the per-agent bound on distinct working notes) -----------
+
+test("a world-fact cap is scoped: one agent's setting never appears for another", () => {
+  store.setWorldFactCap(alpha.id, 10);
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBe(10);
+  // Beta shares nothing — a per-agent cap is one agent's, never global.
+  expect(store.agentSettings.getWorldFactCap(beta.id)).toBeUndefined();
+  expect(store.agentSettings.get(beta.id)).toBeUndefined();
+});
+
+test("an unset agent has no world-fact cap override", () => {
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBeUndefined();
+});
+
+test("setWorldFactCap upserts: setting again rewrites the row, it does not add a second", () => {
+  store.setWorldFactCap(alpha.id, 10);
+  store.setWorldFactCap(alpha.id, 4);
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBe(4);
+  expect(store.agentSettings.get(alpha.id)?.worldFactCap).toBe(4);
+});
+
+test("createdAt is preserved across a world-fact-cap upsert; updatedAt advances", async () => {
+  const first = store.agentSettings.setWorldFactCap(alpha.id, 10);
+  await new Promise((r) => setTimeout(r, 2));
+  const second = store.agentSettings.setWorldFactCap(alpha.id, 4);
+  expect(second.createdAt).toBe(first.createdAt);
+  expect(second.updatedAt >= first.updatedAt).toBe(true);
+});
+
+test("clearWorldFactCap returns the agent to the default; the row persists with no cap", () => {
+  store.setWorldFactCap(alpha.id, 10);
+  store.clearWorldFactCap(alpha.id);
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBeUndefined();
+  // The row is kept (NULL cap) so a later set preserves created_at.
+  const row = store.agentSettings.get(alpha.id);
+  expect(row).toBeDefined();
+  expect(row?.worldFactCap).toBeUndefined();
+});
+
+test("clearWorldFactCap on an agent that never set one is a no-op (no row, no throw)", () => {
+  expect(store.clearWorldFactCap(alpha.id)).toBeUndefined();
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBeUndefined();
+});
+
+test("setWorldFactCap validates a positive whole number at the write boundary", () => {
+  expect(() => store.setWorldFactCap(alpha.id, 0)).toThrow();
+  expect(() => store.setWorldFactCap(alpha.id, -5)).toThrow();
+  expect(() => store.setWorldFactCap(alpha.id, 2.5)).toThrow();
+  expect(() => store.setWorldFactCap(alpha.id, Number.NaN)).toThrow();
+  expect(() => store.setWorldFactCap(alpha.id, Number.POSITIVE_INFINITY)).toThrow();
+  // A rejected write leaves nothing behind.
+  expect(store.agentSettings.get(alpha.id)).toBeUndefined();
+});
+
+test("the world-fact-cap repository methods require an agentId", () => {
+  expect(() => store.agentSettings.getWorldFactCap("")).toThrow();
+  expect(() => store.agentSettings.setWorldFactCap("", 10)).toThrow();
+  expect(() => store.agentSettings.clearWorldFactCap("")).toThrow();
+});
+
+test("setWorldFactCap records an agent.setting_changed event, references only", () => {
+  store.setWorldFactCap(alpha.id, 10);
+  const event = store.events.tail(alpha.id).find((e) => e.type === "agent.setting_changed");
+  expect(event).toBeDefined();
+  expect(event!.payload).toEqual({ setting: "worldFactCap", from: null, to: 10 });
+});
+
+test("setWorldFactCap to the unchanged value is a no-op: no phantom event, no row churn", () => {
+  const first = store.setWorldFactCap(alpha.id, 10);
+  store.setWorldFactCap(alpha.id, 10); // same value again — records nothing
+  expect(settingEvents(alpha.id, "worldFactCap")).toBe(1);
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBe(10);
+  expect(store.agentSettings.get(alpha.id)?.updatedAt).toBe(first.updatedAt);
+});
+
+test("setWorldFactCap again records the prior value as `from`", () => {
+  store.setWorldFactCap(alpha.id, 10);
+  store.setWorldFactCap(alpha.id, 4);
+  const last = store.events
+    .tail(alpha.id)
+    .filter((e) => e.type === "agent.setting_changed")
+    .at(-1);
+  expect((last!.payload as Record<string, unknown>).from).toBe(10);
+  expect((last!.payload as Record<string, unknown>).to).toBe(4);
+});
+
+test("clearWorldFactCap logs a transition to null only when something was set", () => {
+  store.setWorldFactCap(alpha.id, 10);
+  store.clearWorldFactCap(alpha.id);
+  const cleared = store.events
+    .tail(alpha.id)
+    .filter((e) => e.type === "agent.setting_changed")
+    .at(-1);
+  expect(cleared!.payload).toEqual({ setting: "worldFactCap", from: 10, to: null });
+
+  // A clear with nothing set emits nothing.
+  const before = settingEvents(beta.id, "worldFactCap");
+  store.clearWorldFactCap(beta.id);
+  expect(settingEvents(beta.id, "worldFactCap")).toBe(before);
+});
+
+test("the world-fact cap never clobbers the budget, thresholds, or providers", () => {
+  store.setRecallBudget(alpha.id, 40);
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  store.setRecallProvider(alpha.id, "local");
+  store.setWorldFactCap(alpha.id, 10);
+  // All four tunables coexist on the one row.
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBe("local");
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBe(10);
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+  // Clearing the cap leaves the others intact.
+  store.clearWorldFactCap(alpha.id);
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBe("local");
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBeUndefined();
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+});
+
+test("opening a pre-existing database without agent_settings.world_fact_cap migrates it in", () => {
+  const driver = openDatabase(":memory:");
+  // An older schema: agent_settings created before the world_fact_cap column existed.
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE agent_settings (
+      agent_id TEXT PRIMARY KEY, recall_budget INTEGER,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+  `);
+  const local = new AsterismStore(driver);
+  try {
+    const agent = local.createAgent({
+      name: "personal",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/personal",
+      trustLevel: "autonomous",
+    });
+    // The setter writes world_fact_cap; it would throw "no such column" un-migrated.
+    expect(local.setWorldFactCap(agent.id, 7).worldFactCap).toBe(7);
+    expect(local.agentSettings.getWorldFactCap(agent.id)).toBe(7);
+  } finally {
+    local.close();
+  }
+});

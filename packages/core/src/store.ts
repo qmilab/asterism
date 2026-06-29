@@ -141,6 +141,13 @@ export class AsterismStore {
     if (!this.columnExists("agent_settings", "cognition_capture")) {
       this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN cognition_capture TEXT`);
     }
+    // The per-agent world-fact cap override joined `agent_settings` after it shipped
+    // (#84 carry-forward: the cap was a kernel constant, now operator-configurable). Add
+    // it idempotently; a NULL default means every existing agent reads as "use the kernel
+    // DEFAULT_WORLD_FACT_CAP", the correct, unchanged starting state.
+    if (!this.columnExists("agent_settings", "world_fact_cap")) {
+      this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN world_fact_cap INTEGER`);
+    }
     // The objective review state joined `objectives` after slice 1 first shipped the
     // table (reflection now PROPOSES objectives, gated by a review state). Add it
     // idempotently with DEFAULT 'accepted': every pre-existing objective was
@@ -363,6 +370,70 @@ export class AsterismStore {
       });
       return settings;
     });
+  }
+
+  /**
+   * Set an agent's per-agent world-fact cap and record the change as
+   * `agent.setting_changed` — the audit trail for an operator tuning how many distinct
+   * working notes the agent may accumulate. References only (the `setting`, `from`, `to`
+   * counts — never a note's content). `from` is the prior override, or null when it was
+   * unset (running on {@link DEFAULT_WORLD_FACT_CAP}). The repository validates a positive
+   * whole number at the write boundary. The direct analogue of {@link setRecallBudget},
+   * including the unchanged-value no-op short-circuit.
+   */
+  setWorldFactCap(agentId: string, cap: number): AgentSettings {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getWorldFactCap(agentId) ?? null;
+      // An unchanged value is a true no-op — no write, no phantom event (the same
+      // discipline as `setRecallBudget`). A stored cap was already validated, so skipping
+      // the write is safe; any invalid `cap` cannot equal a stored value, so it still
+      // reaches the repository's write-boundary validation and throws.
+      if (from === cap) {
+        const existing = this.agentSettings.get(agentId);
+        if (existing) return existing;
+      }
+      const settings = this.agentSettings.setWorldFactCap(agentId, cap);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "worldFactCap",
+        from,
+        to: settings.worldFactCap ?? null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Clear an agent's world-fact cap override, returning it to the kernel default, and
+   * record the change as `agent.setting_changed` (`to: null`). A no-op when the agent had
+   * no override set: nothing changes, so nothing is logged — the returned row is
+   * undefined, telling the caller there was nothing to clear. Symmetric with
+   * {@link clearRecallBudget}.
+   */
+  clearWorldFactCap(agentId: string): AgentSettings | undefined {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getWorldFactCap(agentId) ?? null;
+      if (from === null) return this.agentSettings.get(agentId);
+      const settings = this.agentSettings.clearWorldFactCap(agentId);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "worldFactCap",
+        from,
+        to: null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * The agent's EFFECTIVE world-fact cap — the per-agent override if set, else the kernel
+   * {@link DEFAULT_WORLD_FACT_CAP}. The single source of truth for "how many distinct
+   * working notes may this agent hold", owned by the kernel so the two write-path
+   * enforcement sites ({@link recordWorldFact}, {@link proposeWorldFact}) and every surface
+   * that displays the cap read the same number. Two layers only by design — an install-wide
+   * default (the recall-budget #60 pattern) is a deferred additive follow-up, slotting in
+   * between these two when built, exactly as {@link resolveRecallBudget} layers its three.
+   */
+  resolveWorldFactCap(agentId: string): number {
+    return this.agentSettings.getWorldFactCap(agentId) ?? DEFAULT_WORLD_FACT_CAP;
   }
 
   /**
@@ -1117,8 +1188,12 @@ export class AsterismStore {
       const subjectIsNew =
         acceptedExisting === undefined &&
         this.worldFacts.getProposed(agentId, trimmedSubject) === undefined;
-      if (subjectIsNew && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
-        throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
+      // The effective cap is the per-agent override or the kernel default (resolved in one
+      // place); the error carries the actual number so the agent's tool result and the
+      // operator's CLI both report the cap that bit.
+      const cap = this.resolveWorldFactCap(agentId);
+      if (subjectIsNew && this.worldFacts.count(agentId) >= cap) {
+        throw new WorldFactCapError(cap);
       }
       const fact = this.worldFacts.upsert(agentId, trimmedSubject, trimmedValue);
       this.emit(
@@ -1225,8 +1300,11 @@ export class AsterismStore {
       // Only a brand-NEW subject grows the distinct-subject count; an update to a subject that
       // already has an accepted note or a pending proposal takes no slot.
       const subjectIsNew = accepted === undefined && proposedExisting === undefined;
-      if (subjectIsNew && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
-        throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
+      // The same effective per-agent cap the self-write path enforces (resolved in one
+      // place), so a derived proposal and a self-note share one bound.
+      const cap = this.resolveWorldFactCap(agentId);
+      if (subjectIsNew && this.worldFacts.count(agentId) >= cap) {
+        throw new WorldFactCapError(cap);
       }
       const fact = this.worldFacts.upsert(agentId, trimmedSubject, trimmedValue, "proposed");
       this.emit(

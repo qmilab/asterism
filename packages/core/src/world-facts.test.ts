@@ -260,6 +260,80 @@ describe("world-fact cap — reject loudly, supersede is free", () => {
   });
 });
 
+describe("world-fact cap — per-agent override (#84 carry-forward)", () => {
+  test("resolveWorldFactCap is the per-agent override when set, else the kernel default, scoped", () => {
+    // Unset ⇒ the kernel constant, for every agent.
+    expect(store.resolveWorldFactCap(alice.id)).toBe(DEFAULT_WORLD_FACT_CAP);
+    expect(store.resolveWorldFactCap(bob.id)).toBe(DEFAULT_WORLD_FACT_CAP);
+    // A per-agent override resolves for that agent only — bob still reads the default.
+    store.setWorldFactCap(alice.id, 3);
+    expect(store.resolveWorldFactCap(alice.id)).toBe(3);
+    expect(store.resolveWorldFactCap(bob.id)).toBe(DEFAULT_WORLD_FACT_CAP);
+  });
+
+  test("a lower per-agent cap bites earlier; the error carries the agent's actual cap", () => {
+    store.setWorldFactCap(alice.id, 2);
+    store.recordWorldFact(alice.id, "a", "1");
+    store.recordWorldFact(alice.id, "b", "2");
+    expect(store.worldFacts.count(alice.id)).toBe(2);
+    // The THIRD new subject is rejected at the per-agent cap of 2 — well below the default.
+    try {
+      store.recordWorldFact(alice.id, "c", "3");
+      throw new Error("expected a WorldFactCapError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorldFactCapError);
+      expect((err as WorldFactCapError).cap).toBe(2);
+    }
+    // Superseding an existing subject is still free at cap (no new slot).
+    expect(store.recordWorldFact(alice.id, "a", "updated").value).toBe("updated");
+    expect(store.worldFacts.count(alice.id)).toBe(2);
+  });
+
+  test("the cap is per-agent: alice's low cap never constrains bob", () => {
+    store.setWorldFactCap(alice.id, 1);
+    store.recordWorldFact(alice.id, "only", "1");
+    expect(() => store.recordWorldFact(alice.id, "second", "2")).toThrow(WorldFactCapError);
+    // Bob is on the kernel default — three new subjects are fine.
+    store.recordWorldFact(bob.id, "x", "1");
+    store.recordWorldFact(bob.id, "y", "2");
+    store.recordWorldFact(bob.id, "z", "3");
+    expect(store.worldFacts.count(bob.id)).toBe(3);
+  });
+
+  test("a raised cap admits more than the built-in default", () => {
+    store.setWorldFactCap(alice.id, DEFAULT_WORLD_FACT_CAP + 2);
+    for (let i = 0; i < DEFAULT_WORLD_FACT_CAP + 1; i++) {
+      store.recordWorldFact(alice.id, `s-${i}`, "v");
+    }
+    // One past the built-in constant — which would have thrown un-raised — is accepted.
+    expect(store.worldFacts.count(alice.id)).toBe(DEFAULT_WORLD_FACT_CAP + 1);
+  });
+
+  test("clearing the override restores the kernel default", () => {
+    store.setWorldFactCap(alice.id, 1);
+    store.recordWorldFact(alice.id, "only", "1");
+    expect(() => store.recordWorldFact(alice.id, "second", "2")).toThrow(WorldFactCapError);
+    // Back to the default (32) — the previously-blocked second subject now fits.
+    store.clearWorldFactCap(alice.id);
+    expect(store.recordWorldFact(alice.id, "second", "2").subject).toBe("second");
+    expect(store.worldFacts.count(alice.id)).toBe(2);
+  });
+
+  test("the DERIVED proposal path honors the same per-agent cap", () => {
+    store.setWorldFactCap(alice.id, 1);
+    // One new proposed subject fits (distinct count goes 0 → 1).
+    expect(store.proposeWorldFact(alice.id, "a", "1")?.reviewState).toBe("proposed");
+    // A second BRAND-NEW subject is over the cap of 1 and rejected with the agent's cap.
+    try {
+      store.proposeWorldFact(alice.id, "b", "2");
+      throw new Error("expected a WorldFactCapError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorldFactCapError);
+      expect((err as WorldFactCapError).cap).toBe(1);
+    }
+  });
+});
+
 describe("world-fact audit — references only, no-op safe", () => {
   test("world_fact.recorded carries the id + superseded flag, never the content", () => {
     const a = store.recordWorldFact(alice.id, "deploy", "v0.2.0");
