@@ -129,10 +129,14 @@ export interface ObjectiveRef {
 
 /** What the kernel hands a provider's optional {@link ReflectionProvider.proposeObjectiveTransitions}. */
 export interface ObjectiveTransitionInput {
-  /** The agent whose run this was — every suggestion is scoped to it. */
+  /** The agent whose runs these were — every suggestion is scoped to it. */
   agentId: string;
-  /** The run to judge the objectives against. */
-  transcript: RunTranscript;
+  /**
+   * The recent runs to judge the objectives against, newest-first. More than one so a batched
+   * `reflect --propose` that finished an objective in an OLDER run is still caught at review time,
+   * not just the single latest run.
+   */
+  transcripts: readonly RunTranscript[];
   /** The agent's ACTIVE + ACCEPTED objectives (the only transition candidates), WITH their ids. */
   objectives: readonly ObjectiveRef[];
 }
@@ -317,76 +321,82 @@ export interface TransitionAdvisory {
 }
 
 /**
- * The outcome of {@link proposeObjectiveTransitions} — the transition analogue of
- * {@link ProposeObjectivesResult}: `proposed` (a judgeable run was found; `advisories` may be empty
- * when nothing looks finished, the agent has no active objectives, or the provider omits the
- * method) or `no_run` (no completed run with output to judge the objectives against).
+ * The outcome of {@link proposeObjectiveTransitions}: `proposed` (at least one judgeable run was
+ * found; `advisories` may be empty when nothing looks finished, the agent has no active objectives,
+ * or the provider omits the method) or `no_run` (no completed run with output to judge against).
  */
 export type TransitionAdvisoryResult =
-  | { kind: "proposed"; runId: string; advisories: TransitionAdvisory[] }
+  | { kind: "proposed"; advisories: TransitionAdvisory[] }
   | { kind: "no_run" };
 
 /**
- * The Type-B advisory path: compute which of the agent's ACTIVE objectives a run looks to have
+ * The Type-B advisory path: compute which of the agent's ACTIVE objectives recent runs look to have
  * FINISHED, for an interactive reviewer to apply or skip. Deliberately the LIGHTEST shape — it
  * PERSISTS NOTHING and FRAMES NOTHING: it returns suggestions, and the only state change is the
  * human's explicit, audited {@link AsterismStore.setObjectiveStatus} at the surface.
  *
- * It selects the same run as the other live paths (a given `runId`, or the agent's latest run with
- * output), reads the agent's ACTIVE + ACCEPTED objectives (the only transition candidates), and
- * hands them — WITH ids — to the provider's optional `proposeObjectiveTransitions`. Provider output
- * is UNTRUSTED, so the kernel re-enforces it exactly as recall re-enforces its provider: a returned
- * transition is kept only when its `objectiveId` is one of THIS agent's own active objectives and
- * its status is a real {@link TransitionStatus} — a hallucinated id, a cross-agent id, a no-longer-
- * active id, or an illegal status is dropped before it ever reaches the operator. Survivors are
- * resolved to their objective row. No firewall screen: a transition adds no framable content. A
- * provider with no `proposeObjectiveTransitions`, or an agent with no active objectives, yields an
- * empty advisory list (not an error).
+ * It judges the agent's latest run with output PLUS any runs named in `options.runIds` (the drain
+ * surface passes the source runs of the proposals it is reviewing, so a batched `reflect --propose`
+ * that finished an objective in an OLDER run is caught too, not only the single latest run). The
+ * runs are deduped, blank-output ones dropped, sorted newest-first and bounded; their transcripts go
+ * to the provider in ONE call. The candidate objectives are the agent's ACTIVE + ACCEPTED ones — the
+ * same set framing uses, and the authority the provider's UNTRUSTED output is validated against:
+ * exactly as recall re-enforces its provider, a returned transition is kept only when its
+ * `objectiveId` is one of THIS agent's own active objectives AND its status is a real
+ * {@link TransitionStatus}; a hallucinated/cross-agent/no-longer-active id or an illegal status is
+ * dropped before it ever reaches the operator, and AT MOST ONE suggestion survives per objective (a
+ * duplicate or conflicting second suggestion for the same objective is dropped, so the outcome can
+ * never depend on the model's duplicate ordering). No firewall screen: a transition adds no framable
+ * content. A provider with no `proposeObjectiveTransitions`, or an agent with no active objectives,
+ * yields an empty advisory list (not an error).
  */
 export async function proposeObjectiveTransitions(
   store: AsterismStore,
   agent: Agent,
   provider: ReflectionProvider,
-  options: { runId?: string } = {},
+  options: { runIds?: readonly string[] } = {},
 ): Promise<TransitionAdvisoryResult> {
-  const target =
-    options.runId !== undefined
-      ? store.runs.get(agent.id, options.runId)
-      : store.runs.latestWithOutput(agent.id);
-  if (!target || target.output === undefined || target.output.trim().length === 0) {
-    return { kind: "no_run" };
-  }
+  // The runs this check judges: the latest run with output (the manual run→review case) plus any
+  // explicitly named runs (the drain path passes the queued proposals' source runs). Deduped.
+  const ids = new Set<string>(options.runIds ?? []);
+  const latest = store.runs.latestWithOutput(agent.id);
+  if (latest) ids.add(latest.id);
 
-  // The candidate set is the agent's OWN active + accepted objectives — the same set framing uses,
-  // and the authority the provider's output is validated against. A done/dropped/proposed objective
-  // is not a thing to "complete", so it is never a candidate.
+  const runs = [...ids]
+    .map((id) => store.runs.get(agent.id, id))
+    .filter((r): r is Run => !!r && r.output !== undefined && r.output.trim().length > 0)
+    // Newest-first, then bounded — an unbounded batch could otherwise grow the prompt without limit.
+    .sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0))
+    .slice(0, DEFAULT_REFLECT_RUN_LIMIT);
+  if (runs.length === 0) return { kind: "no_run" };
+
+  // The candidate set is the agent's OWN active + accepted objectives — a done/dropped/proposed
+  // objective is not a thing to "complete", so it is never a candidate.
   const active = store.objectives.listActiveAccepted(agent.id);
   if (active.length === 0 || !provider.proposeObjectiveTransitions) {
-    return { kind: "proposed", runId: target.id, advisories: [] };
+    return { kind: "proposed", advisories: [] };
   }
 
-  const transcript = { runId: target.id, input: target.input, output: target.output };
+  const transcripts = runs.map((r) => ({ runId: r.id, input: r.input, output: r.output ?? "" }));
   const raw = await provider.proposeObjectiveTransitions({
     agentId: agent.id,
-    transcript,
+    transcripts,
     objectives: active.map((o) => ({ id: o.id, content: o.content })),
   });
 
-  // Re-enforce untrusted provider output against the agent's own objectives: keep a suggestion only
-  // when it names one of THIS agent's active objectives and a legal target status. Everything else
-  // (a hallucinated/cross-agent id, an id that is not active, `active`/garbage status) is dropped.
+  // Re-enforce untrusted provider output: keep a suggestion only for one of THIS agent's active
+  // objectives with a legal target status, and AT MOST ONE per objective (drop a duplicate or a
+  // conflicting second suggestion for the same id, so the result is order-independent).
   const byId = new Map(active.map((o) => [o.id, o]));
+  const seen = new Set<string>();
   const advisories: TransitionAdvisory[] = [];
   for (const t of raw) {
     const objective = byId.get(t.objectiveId);
-    if (!objective || !isTransitionStatus(t.proposedStatus)) continue;
-    advisories.push({
-      objective,
-      proposedStatus: t.proposedStatus,
-      confidence: t.confidence,
-    });
+    if (!objective || !isTransitionStatus(t.proposedStatus) || seen.has(objective.id)) continue;
+    seen.add(objective.id);
+    advisories.push({ objective, proposedStatus: t.proposedStatus, confidence: t.confidence });
   }
-  return { kind: "proposed", runId: target.id, advisories };
+  return { kind: "proposed", advisories };
 }
 
 // ---------------------------------------------------------------------------

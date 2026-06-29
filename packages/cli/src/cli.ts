@@ -1921,11 +1921,16 @@ async function runReflectReview(
     code = (await reviewLive(io, store, home, agent, name)) || code;
   }
   // Type B (advisory): after reviewing what reflection PROPOSED TO ADD (memories + new objectives),
-  // surface any EXISTING active objective the latest run looks to have FINISHED, and let the operator
+  // surface any EXISTING active objective recent work looks to have FINISHED, and let the operator
   // apply or skip each. Runs whether we drained a queue or computed live — a drain skips the model, so
-  // this is the only place transitions surface in the common propose-then-review flow. It is internally
-  // guarded to a no-op (and no model call) when there is nothing to judge or no human at the keyboard.
-  code = (await reviewObjectiveTransitions(io, store, home, agent, name)) || code;
+  // this is the only place transitions surface in the propose-then-review flow. The runs it judges are
+  // the latest run PLUS the source runs of the proposals just drained, so a batched `--propose` that
+  // finished an objective in an OLDER run is caught, not only the latest run. Internally guarded to a
+  // no-op (and no model call) when there is nothing to judge or no human at the keyboard.
+  const queuedRunIds = [
+    ...new Set(queuedMemories.map((m) => m.sourceRunId).filter((id): id is string => id !== undefined)),
+  ];
+  code = (await reviewObjectiveTransitions(io, store, home, agent, name, queuedRunIds)) || code;
   return code;
 }
 
@@ -2374,16 +2379,16 @@ async function reviewObjectiveTransitions(
   home: string,
   agent: Agent,
   name: string,
+  runIds: readonly string[] = [],
 ): Promise<number> {
   // No interactive reviewer ⇒ nothing could be applied, so skip entirely — and make NO model call
   // (the queue-drain "refuse to run unattended" discipline, here also sparing the call).
   const decide = io.reviewTransition;
   if (!decide) return 0;
-  // Cheap pre-checks before building a model: no active objectives ⇒ nothing to finish; no run with
-  // output ⇒ nothing to judge them against.
+  // Cheap pre-checks before building a model: no active objectives ⇒ nothing to finish; no run to
+  // judge (no latest-with-output and no named source runs) ⇒ nothing to judge against.
   if (store.objectives.listActiveAccepted(agent.id).length === 0) return 0;
-  const target = store.runs.latestWithOutput(agent.id);
-  if (!target || target.output === undefined) return 0;
+  if (!store.runs.latestWithOutput(agent.id) && runIds.length === 0) return 0;
 
   // Build the provider the same way the live path does — but a MISSING model is NOT an error here:
   // transition suggestions are advisory, so without a model there simply are none.
@@ -2395,7 +2400,7 @@ async function reviewObjectiveTransitions(
 
   let advisories: readonly TransitionAdvisory[];
   try {
-    const result = await proposeObjectiveTransitions(store, agent, made.provider, { runId: target.id });
+    const result = await proposeObjectiveTransitions(store, agent, made.provider, { runIds });
     if (result.kind === "no_run") return 0;
     advisories = result.advisories;
   } catch (err) {
@@ -2406,7 +2411,7 @@ async function reviewObjectiveTransitions(
 
   io.out("");
   io.out(
-    `${advisories.length} of ${name}'s objectives ${advisories.length === 1 ? "looks" : "look"} finished (from run ${shortId(target.id)}).`,
+    `${advisories.length} of ${name}'s objectives ${advisories.length === 1 ? "looks" : "look"} finished, based on recent runs.`,
   );
   io.out("These are suggestions — an objective only changes if you apply it.");
 

@@ -261,28 +261,30 @@ export function parseObjectiveProposals(
  * objectives, so it must refer to each by the id it is shown. Pinned to a strict JSON envelope.
  * Exported so it is reviewable and testable.
  */
-export const OBJECTIVE_TRANSITION_SYSTEM_PROMPT = `You are the reflection step of an AI agent runtime. You are given the transcript of one task an agent just finished — the task it was asked to do and the output it produced — and the agent's CURRENT standing objectives, each with an id. Your job is to notice when the run shows one of those objectives is FINISHED, and propose changing its status for a human to approve.
+export const OBJECTIVE_TRANSITION_SYSTEM_PROMPT = `You are the reflection step of an AI agent runtime. You are given the transcripts of one or more tasks an agent recently finished — each task it was asked to do and the output it produced — and the agent's CURRENT standing objectives, each with an id. Your job is to notice when this recent work shows one of those objectives is FINISHED, and propose changing its status for a human to approve.
 
 An objective is finished in one of two ways:
-- "done"    — the run clearly COMPLETED it (the ongoing goal has been achieved).
-- "dropped" — the run shows it has been ABANDONED or made moot (it no longer makes sense to pursue).
+- "done"    — the work clearly COMPLETED it (the ongoing goal has been achieved).
+- "dropped" — the work shows it has been ABANDONED or made moot (it no longer makes sense to pursue).
 
-Be conservative: most runs do NOT finish a standing objective. Propose a transition ONLY when the transcript gives clear evidence, and ONLY for an objective in the list below (refer to it by its exact id). Never invent an objective that is not listed. If nothing is clearly finished, propose nothing.
+Be conservative: most runs do NOT finish a standing objective. Propose a transition ONLY when the transcripts give clear evidence, and ONLY for an objective in the list below (refer to it by its exact id). Never invent an objective that is not listed. Propose AT MOST ONE transition per objective. If nothing is clearly finished, propose nothing.
 
 Respond with STRICT JSON and nothing else, in exactly this shape:
 {"transitions": [{"objectiveId": "the id from the list", "status": "done", "confidence": 0.0}]}
 
 "status" is "done" or "dropped". "confidence" is a number from 0 to 1. If nothing is finished, respond with {"transitions": []}.`;
 
-/** Compose the transition user message: the transcript plus the agent's active objectives, each with its id. */
+/** Compose the transition user message: the recent run transcripts plus the agent's active objectives, each with its id. */
 export function buildObjectiveTransitionUserPrompt(input: ObjectiveTransitionInput): string {
-  const { transcript, objectives } = input;
+  const { transcripts, objectives } = input;
+  const runs = transcripts
+    .map((t, i) => `Run ${i + 1}:\nTask: ${t.input}\nOutput: ${t.output}`)
+    .join("\n\n");
   const list = objectives.map((o) => `- [${o.id}] ${o.content}`).join("\n");
   return [
-    `Task the agent was given:\n${transcript.input}`,
-    `What the agent produced:\n${transcript.output}`,
+    `The agent's recent work (most recent first):\n${runs}`,
     `The agent's current standing objectives (propose a transition only on one of these, by its id):\n${list}`,
-    `Propose status transitions from this run as STRICT JSON: {"transitions": [{"objectiveId": ..., "status": "done"|"dropped", "confidence": ...}]}. If nothing is clearly finished, return {"transitions": []}.`,
+    `Propose status transitions from this work as STRICT JSON: {"transitions": [{"objectiveId": ..., "status": "done"|"dropped", "confidence": ...}]}. If nothing is clearly finished, return {"transitions": []}.`,
   ].join("\n\n");
 }
 

@@ -426,7 +426,6 @@ test("proposeObjectiveTransitions resolves a valid suggestion to the agent's own
     );
     expect(result.kind).toBe("proposed");
     if (result.kind !== "proposed") return;
-    expect(result.runId).toBe(run.id);
     expect(result.advisories.length).toBe(1);
     expect(result.advisories[0]!.objective.id).toBe(obj.id);
     expect(result.advisories[0]!.objective.content).toBe("finish the Q3 migration");
@@ -493,6 +492,65 @@ test("proposeObjectiveTransitions offers only ACTIVE+ACCEPTED objectives as cand
     expect(seen.map((o) => o.id)).toEqual([active.id]);
     // ...and only it survives re-enforcement (the done + proposed ids are dropped).
     expect(result.advisories.map((a) => a.objective.id)).toEqual([active.id]);
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions keeps AT MOST ONE suggestion per objective (drops a duplicate/conflict)", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const obj = store.createObjective(agent.id, "finish the migration");
+    const run = store.startRun(agent.id, { input: "x" });
+    store.finishRun(agent.id, run.id, "did x", "done");
+    // Two CONFLICTING suggestions for the SAME objective — only the first survives, so the outcome
+    // never depends on the model's duplicate ordering.
+    const result = await proposeObjectiveTransitions(
+      store,
+      agent,
+      transitionProvider([
+        { objectiveId: obj.id, proposedStatus: "done", confidence: 0.9 },
+        { objectiveId: obj.id, proposedStatus: "dropped", confidence: 0.8 },
+      ]),
+    );
+    if (result.kind !== "proposed") throw new Error("expected proposed");
+    expect(result.advisories.length).toBe(1);
+    expect(result.advisories[0]!.proposedStatus).toBe("done");
+  } finally {
+    store.close();
+  }
+});
+
+test("proposeObjectiveTransitions judges runs named in runIds, not just the latest", async () => {
+  const store = freshStore();
+  try {
+    const agent = makeAgent(store, "personal");
+    const obj = store.createObjective(agent.id, "finish the migration");
+    // R1 (older) completed the migration; R2 (newer, the latest) is unrelated.
+    const r1 = store.startRun(agent.id, { input: "run the migration" });
+    store.finishRun(agent.id, r1.id, "migration done", "done");
+    const r2 = store.startRun(agent.id, { input: "write a blog" });
+    store.finishRun(agent.id, r2.id, "blog written", "done");
+
+    // Suggests "done" only when R1's transcript is among the runs it is shown.
+    const provider: ReflectionProvider = {
+      reflect: async () => [],
+      proposeObjectiveTransitions: async (i) =>
+        i.transcripts.some((t) => t.runId === r1.id)
+          ? i.objectives.map((o) => ({ objectiveId: o.id, proposedStatus: "done" as const, confidence: 0.9 }))
+          : [],
+    };
+
+    // Latest-only (no runIds) judges R2, never R1 — the old blind spot, nothing surfaces.
+    const latestOnly = await proposeObjectiveTransitions(store, agent, provider);
+    expect(latestOnly.kind === "proposed" && latestOnly.advisories).toEqual([]);
+
+    // Naming R1 (as the drain path does for a queued proposal's source run) judges it — the
+    // completion surfaces even though R2 is now the latest run.
+    const withR1 = await proposeObjectiveTransitions(store, agent, provider, { runIds: [r1.id] });
+    if (withR1.kind !== "proposed") throw new Error("expected proposed");
+    expect(withR1.advisories.map((a) => a.objective.id)).toEqual([obj.id]);
   } finally {
     store.close();
   }

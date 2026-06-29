@@ -207,11 +207,13 @@ function transitionInput(
 ): ObjectiveTransitionInput {
   return {
     agentId: "agent-1",
-    transcript: {
-      runId: RUN_ID,
-      input: "run the final migration batch",
-      output: "migration complete, all rows verified",
-    },
+    transcripts: [
+      {
+        runId: RUN_ID,
+        input: "run the final migration batch",
+        output: "migration complete, all rows verified",
+      },
+    ],
     objectives: [{ id: "obj-1", content: "finish the Q3 migration" }],
     ...overrides,
   };
@@ -259,6 +261,21 @@ test("the transition user prompt carries the task, output, and each objective wi
   expect(prompt).toContain("migration complete, all rows verified");
   expect(prompt).toContain("[obj-1] finish the Q3 migration");
   expect(prompt).toContain("[obj-2] keep the notes tidy");
+});
+
+test("the transition user prompt lists MULTIPLE recent runs when given more than one", () => {
+  const prompt = buildObjectiveTransitionUserPrompt(
+    transitionInput({
+      transcripts: [
+        { runId: "r2", input: "write a blog", output: "blog written" },
+        { runId: "r1", input: "run the migration", output: "migration done" },
+      ],
+    }),
+  );
+  expect(prompt).toContain("Run 1:");
+  expect(prompt).toContain("Run 2:");
+  expect(prompt).toContain("write a blog");
+  expect(prompt).toContain("run the migration");
 });
 
 test("proposeObjectiveTransitions calls the model with the transition system prompt and parses", async () => {
