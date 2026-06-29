@@ -3145,7 +3145,7 @@ test("notes inspect flags a note awaiting review; accept makes it frame", async 
   expect(listing.toLowerCase()).not.toContain("awaiting your review");
 });
 
-test("notes reject leaves a note that never frames", async () => {
+test("notes reject DISCARDS a brand-new proposal (no rejected-history row)", async () => {
   const h = harness();
   await runCli(["init"], h.io);
   await runCli(["new", "personal", "--trust", "autonomous"], h.io);
@@ -3153,9 +3153,43 @@ test("notes reject leaves a note that never frames", async () => {
 
   expect(await runCli(["notes", "reject", "personal", "build"], h.io)).toBe(0);
   const listing = await capture(["notes", "inspect", "personal"], h.io);
-  // Kept for history (still listed), but flagged rejected — never framing.
-  expect(listing).toContain("build: green");
-  expect(listing.toLowerCase()).toContain("rejected");
+  // Discarded outright (world-model.md §12) — the note is gone, not kept as rejected history.
+  expect(listing).not.toContain("build: green");
+  expect(listing).toContain("no working notes");
+});
+
+test("notes reject of a pending UPDATE keeps the accepted note framing", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["notes", "set", "personal", "deploy", "v0.2.0"], h.io); // accepted
+  proposeNote(h, "personal", "deploy", "v0.2.1"); // a coexisting pending update
+
+  // The pending update shows beneath the accepted value.
+  let listing = await capture(["notes", "inspect", "personal"], h.io);
+  expect(listing).toContain("deploy: v0.2.0");
+  expect(listing.toLowerCase()).toContain("pending update");
+
+  // Rejecting the update discards it; the accepted note keeps its value and still frames.
+  expect(await runCli(["notes", "reject", "personal", "deploy"], h.io)).toBe(0);
+  listing = await capture(["notes", "inspect", "personal"], h.io);
+  expect(listing).toContain("deploy: v0.2.0");
+  expect(listing.toLowerCase()).not.toContain("pending update");
+});
+
+test("notes accept of a pending UPDATE supersedes the accepted note in place", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["notes", "set", "personal", "deploy", "v0.2.0"], h.io); // accepted
+  proposeNote(h, "personal", "deploy", "v0.2.1"); // pending update
+
+  expect(await runCli(["notes", "accept", "personal", "deploy"], h.io)).toBe(0);
+  const listing = await capture(["notes", "inspect", "personal"], h.io);
+  // The accepted note now carries the accepted update, with no pending line left.
+  expect(listing).toContain("deploy: v0.2.1");
+  expect(listing.toLowerCase()).not.toContain("pending update");
+  expect(listing.toLowerCase()).not.toContain("awaiting your review");
 });
 
 test("notes accept/reject on a self-written (accepted) note is reported, not applied", async () => {

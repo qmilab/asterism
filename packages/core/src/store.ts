@@ -17,7 +17,6 @@ import {
   WorldFactRepository,
   DEFAULT_WORLD_FACT_CAP,
   WorldFactCapError,
-  WorldFactConflictError,
 } from "./repositories/world-facts.js";
 import { CredentialRepository } from "./repositories/credentials.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
@@ -161,6 +160,48 @@ export class AsterismStore {
     if (!this.columnExists("world_facts", "review_state")) {
       this.driver.exec(`ALTER TABLE world_facts ADD COLUMN review_state TEXT NOT NULL DEFAULT 'accepted'`);
     }
+    // World-fact COEXISTENCE (world-model.md §12). #86 shipped `world_facts` with a
+    // table-level UNIQUE(agent_id, subject) — one row per subject — which forced the
+    // conservative-skip (a proposed UPDATE could not coexist with the accepted note it
+    // would supersede). Coexistence relaxes that to two PARTIAL unique indexes
+    // (accepted-only, proposed-only). SQLite cannot DROP a table constraint, so an older
+    // database is brought across with a one-time table REBUILD, run only while the
+    // auto-created UNIQUE index is still present (PRAGMA index_list origin = 'u'). The
+    // review_state ALTER above runs first, so the rebuild's INSERT…SELECT always finds the
+    // column; no other table references `world_facts`, so dropping/renaming it cascades no
+    // FK. A fresh database (built from SCHEMA, no table-level UNIQUE) skips the rebuild, and
+    // after a rebuild there is no origin-'u' index, so re-opening is a no-op.
+    if (this.hasAutoUniqueIndex("world_facts")) {
+      this.driver.transaction(() => {
+        this.driver.exec(
+          `CREATE TABLE world_facts_new (
+             id           TEXT PRIMARY KEY,
+             agent_id     TEXT NOT NULL REFERENCES agents(id),
+             subject      TEXT NOT NULL,
+             value        TEXT NOT NULL,
+             review_state TEXT NOT NULL,
+             created_at   TEXT NOT NULL,
+             updated_at   TEXT NOT NULL
+           );
+           INSERT INTO world_facts_new (id, agent_id, subject, value, review_state, created_at, updated_at)
+             SELECT id, agent_id, subject, value, review_state, created_at, updated_at FROM world_facts;
+           DROP TABLE world_facts;
+           ALTER TABLE world_facts_new RENAME TO world_facts;
+           CREATE INDEX IF NOT EXISTS idx_world_facts_agent ON world_facts(agent_id);`,
+        );
+      });
+    }
+    // Create the two partial unique indexes (IF NOT EXISTS) for BOTH a fresh DB and a
+    // rebuilt older one. They live here, not in SCHEMA, because their WHERE clause
+    // references review_state — a column a v0.3.0 DB lacks until the ALTER above (SCHEMA
+    // runs before migrate, so a partial index there would throw on an older DB). By here
+    // the column is guaranteed and any table-level UNIQUE has been rebuilt away.
+    this.driver.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_world_facts_accepted_subject
+         ON world_facts(agent_id, subject) WHERE review_state = 'accepted';
+       CREATE UNIQUE INDEX IF NOT EXISTS idx_world_facts_proposed_subject
+         ON world_facts(agent_id, subject) WHERE review_state = 'proposed';`,
+    );
   }
 
   /** Whether `table` has a column named `column` (via PRAGMA table_info). */
@@ -169,6 +210,19 @@ export class AsterismStore {
     // not accept a bound parameter for the table name.
     const rows = this.driver.prepare(`PRAGMA table_info(${table})`).all();
     return rows.some((r) => String(r.name) === column);
+  }
+
+  /**
+   * Whether `table` carries an auto-created UNIQUE index implementing a table-level
+   * UNIQUE(...) constraint (PRAGMA index_list `origin = 'u'`). A `CREATE [UNIQUE] INDEX`
+   * has origin `'c'` and a PRIMARY KEY `'pk'`, so this is true ONLY when the constraint
+   * is baked into the CREATE TABLE — the signal that a `world_facts` table predates the
+   * coexistence rebuild and still forbids a proposed/accepted row coexisting per subject.
+   * `table` is a hard-coded literal (PRAGMA takes no bound table parameter).
+   */
+  private hasAutoUniqueIndex(table: string): boolean {
+    const rows = this.driver.prepare(`PRAGMA index_list(${table})`).all();
+    return rows.some((r) => String(r.origin) === "u");
   }
 
   // --- Audited orchestration -------------------------------------------------
@@ -1006,12 +1060,16 @@ export class AsterismStore {
    * takes its write lock only at the INSERT, so two processes adding DISTINCT new
    * subjects could each read a stale count and briefly overshoot the cap by one or two —
    * benign (no eviction, the bound is soft) and rare, never a same-subject double (the
-   * UNIQUE(agent_id, subject) upsert collapses that). Only a NEW subject grows the count
-   * (superseding is free); a new subject at cap is rejected loudly with a
+   * accepted partial unique index collapses that). The cap counts DISTINCT subjects, and
+   * only a brand-NEW subject (no accepted note AND no coexisting proposed update) grows it;
+   * superseding the accepted note, or recording a subject that already has a pending
+   * proposal, is free. A brand-new subject at cap is rejected loudly with a
    * {@link WorldFactCapError} (no silent eviction) — a resource bound, not a safety
-   * refusal, so it is not audited. On success: `world_fact.recorded` (references only —
-   * the id and whether it superseded an existing note, NEVER the subject/value, which are
-   * agent content like memory content).
+   * refusal, so it is not audited. This self-write touches ONLY the accepted row; a
+   * coexisting proposed UPDATE (a derived proposal, world-model.md §12) is left for the
+   * operator to review separately. On success: `world_fact.recorded` (references only —
+   * the id and whether it superseded an existing accepted note, NEVER the subject/value,
+   * which are agent content like memory content).
    *
    * `runId` stamps the originating run on the audit events (`world_fact.recorded` /
    * `world_fact.blocked`) when the write came from a run's `record_note` tool, so a
@@ -1043,15 +1101,21 @@ export class AsterismStore {
       throw err;
     }
     return this.driver.transaction(() => {
-      const existing = this.worldFacts.get(agentId, trimmedSubject);
-      if (existing === undefined && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
+      const acceptedExisting = this.worldFacts.getAccepted(agentId, trimmedSubject);
+      // Only a brand-NEW subject (no accepted note AND no coexisting proposed update) grows
+      // the DISTINCT-subject count; superseding the accepted note, or a subject that already
+      // has a pending proposal, takes no new slot.
+      const subjectIsNew =
+        acceptedExisting === undefined &&
+        this.worldFacts.getProposed(agentId, trimmedSubject) === undefined;
+      if (subjectIsNew && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
         throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
       }
       const fact = this.worldFacts.upsert(agentId, trimmedSubject, trimmedValue);
       this.emit(
         agentId,
         "world_fact.recorded",
-        { worldFactId: fact.id, superseded: existing !== undefined, reviewState: fact.reviewState },
+        { worldFactId: fact.id, superseded: acceptedExisting !== undefined, reviewState: fact.reviewState },
         runId,
       );
       return fact;
@@ -1088,28 +1152,35 @@ export class AsterismStore {
   }
 
   /**
-   * PROPOSE a world-fact for human review — the safe entry point a future derived-fact
-   * producer (#84 T3) and this slice's tests use to add a `proposed` note. NOT wired to any
-   * shipped surface in #86: the agent's `record_note` and the operator's `notes set` write
+   * PROPOSE a world-fact for human review — the entry point the #84 T3 harvest (and tests) use
+   * to add a `proposed` note. The agent's `record_note` and the operator's `notes set` write
    * `accepted` self-notes through {@link recordWorldFact}; this is the parallel path for a
-   * writer whose output must be ratified before it frames.
+   * DERIVED writer whose output must be ratified before it frames.
    *
-   * The governance discipline of {@link recordWorldFact}, with one addition. Firewall FIRST
+   * COEXISTENCE (world-model.md §12). The governance discipline of {@link recordWorldFact},
+   * adapted so a proposed UPDATE can sit BESIDE the accepted note it would supersede (instead
+   * of the old conservative-skip that refused to touch an accepted subject). Firewall FIRST
    * (screen subject + value + the rendered line, OUTSIDE the transaction so a blocked write's
    * `world_fact.blocked` audit survives the rollback). Then, under one transaction:
-   *   1. **Refuse to clobber an `accepted` subject.** One row per subject carries one review
-   *      state, so a `proposed` write to a subject that already holds an `accepted` row would
-   *      upsert-destroy that ratified note and drop it from framing — a governance regression.
-   *      So it throws {@link WorldFactConflictError} instead (no clobber). A still-`proposed`
-   *      row for the subject is fine to supersede (re-proposing). The clean coexistence /
-   *      supersede-on-accept policy is deferred to T3 (world-model.md §11.1).
-   *   2. **Cap** a NEW subject (superseding a proposed one is free), rejecting loudly with
-   *      {@link WorldFactCapError} at cap — a resource bound, not audited.
-   *   3. Upsert with `review_state = 'proposed'` and emit `world_fact.recorded`
-   *      (`reviewState: "proposed"` in the payload, so the audit shows it was QUEUED, not
-   *      declared — the `objective.added` analogue). References only — never subject/value.
+   *   1. **No-op suppression.** If the accepted note already holds this value (an unchanged
+   *      re-observation), or a pending proposal already carries it, propose nothing and return
+   *      `undefined` — so a "X → X" never queues. (The harvest counts `undefined` as skipped.)
+   *   2. **Cap** a brand-NEW subject only (no accepted note AND no pending proposal); an update
+   *      to an already-tracked subject takes no slot, so a tracked note is never cap-blocked.
+   *      A new subject at cap rejects loudly with {@link WorldFactCapError} — not audited.
+   *   3. Upsert with `review_state = 'proposed'` (targeting the PROPOSED partial index, so it
+   *      creates/supersedes the proposed row and NEVER clobbers the coexisting accepted note —
+   *      which keeps framing until the operator accepts) and emit `world_fact.recorded`
+   *      (`reviewState: "proposed"`, so the audit shows it was QUEUED — the `objective.added`
+   *      analogue). References only — never subject/value. Returns the proposed row, or
+   *      `undefined` for a suppressed no-op.
    */
-  proposeWorldFact(agentId: string, subject: string, value: string, runId?: string): WorldFact {
+  proposeWorldFact(
+    agentId: string,
+    subject: string,
+    value: string,
+    runId?: string,
+  ): WorldFact | undefined {
     const trimmedSubject = subject.trim();
     const trimmedValue = value.trim();
     try {
@@ -1123,21 +1194,24 @@ export class AsterismStore {
       throw err;
     }
     return this.driver.transaction(() => {
-      const existing = this.worldFacts.get(agentId, trimmedSubject);
-      // A proposed write may supersede a still-PROPOSED note for the same subject (re-propose),
-      // but must never clobber an ACCEPTED one — that would drop a ratified note from framing
-      // on an unreviewed write. Refuse loudly; T3 owns the supersession policy.
-      if (existing !== undefined && existing.reviewState === "accepted") {
-        throw new WorldFactConflictError(trimmedSubject);
+      const accepted = this.worldFacts.getAccepted(agentId, trimmedSubject);
+      const proposedExisting = this.worldFacts.getProposed(agentId, trimmedSubject);
+      // No-op: the value already holds for this subject (the accepted note has it, or a pending
+      // proposal already does), so there is nothing to review. Propose nothing.
+      if (accepted?.value === trimmedValue || proposedExisting?.value === trimmedValue) {
+        return undefined;
       }
-      if (existing === undefined && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
+      // Only a brand-NEW subject grows the distinct-subject count; an update to a subject that
+      // already has an accepted note or a pending proposal takes no slot.
+      const subjectIsNew = accepted === undefined && proposedExisting === undefined;
+      if (subjectIsNew && this.worldFacts.count(agentId) >= DEFAULT_WORLD_FACT_CAP) {
         throw new WorldFactCapError(DEFAULT_WORLD_FACT_CAP);
       }
       const fact = this.worldFacts.upsert(agentId, trimmedSubject, trimmedValue, "proposed");
       this.emit(
         agentId,
         "world_fact.recorded",
-        { worldFactId: fact.id, superseded: existing !== undefined, reviewState: fact.reviewState },
+        { worldFactId: fact.id, superseded: proposedExisting !== undefined, reviewState: fact.reviewState },
         runId,
       );
       return fact;
@@ -1154,20 +1228,24 @@ export class AsterismStore {
    * new value), so re-reading here would re-screen and ratify content the operator never saw.
    * Instead this re-screens `reviewed.subject` + `reviewed.value` + the rendered line (a hit
    * emits `world_fact.blocked` and rethrows — a note that passed the write screen but trips a
-   * tightened rule is never accepted), then CAS-settles `proposed → accepted` PINNED to
-   * `reviewed.value` ({@link WorldFactRepository.settleProposed}): the accept wins only while
-   * the row still holds the reviewed content, so a churn drops to undefined and the operator
-   * re-reviews. (`subject` is immutable for a given id — the upsert conflicts on subject — so
-   * pinning the value pins the whole screened rendered line.) Records `world_fact.reviewed`
-   * (`{ worldFactId, from: "proposed", to: "accepted" }`, references only). The re-screen lives
-   * kernel-side, so every accept path inherits it. The CAS is also the multi-drain race guard —
-   * two surfaces accepting one proposal cannot both win. Returns the accepted row to the winner,
-   * or undefined to a caller that lost the race, whose reviewed value no longer matches, or
-   * named an unknown / already-settled / cross-agent row.
+   * tightened rule is never accepted), then SUPERSEDES-ON-ACCEPT, pinned to `reviewed.value`
+   * ({@link WorldFactRepository.acceptProposed}): if the subject already has an accepted note,
+   * the reviewed value is applied to it in place (keeping its id + created_at) and the proposed
+   * row is consumed; otherwise the proposed row becomes the accepted note. The accept wins only
+   * while the proposed row still holds the reviewed content, so a concurrent re-propose that
+   * churned the value drops it to undefined and the operator re-reviews. (`subject` is immutable
+   * for a given id, so pinning the value pins the screened rendered line.) Records
+   * `world_fact.reviewed` (`{ worldFactId, from: "proposed", to: "accepted" }`, references only;
+   * `worldFactId` is the SURVIVING accepted note — in the supersede case that is the pre-existing
+   * accepted row, not the proposed one). The re-screen lives kernel-side, so every accept path
+   * inherits it. Also the multi-drain race guard — two surfaces accepting one proposal cannot
+   * both win. Returns the accepted row to the winner, or undefined to a caller that lost the
+   * race, whose reviewed value no longer matches, or named an unknown / already-settled /
+   * cross-agent row.
    *
-   * Not wrapped in a transaction: like {@link recordWorldFact}, a firewall block must commit
-   * its `world_fact.blocked` audit independently of the rollback that the rethrow would cause.
-   * The settle + its `world_fact.reviewed` event run in their own transaction below.
+   * Not wrapped in a transaction at the top: like {@link recordWorldFact}, a firewall block must
+   * commit its `world_fact.blocked` audit independently of the rollback that the rethrow would
+   * cause. The supersede + its `world_fact.reviewed` event run in their own transaction below.
    */
   acceptProposedWorldFact(agentId: string, reviewed: WorldFact): WorldFact | undefined {
     try {
@@ -1181,7 +1259,7 @@ export class AsterismStore {
       throw err;
     }
     return this.driver.transaction(() => {
-      const fact = this.worldFacts.settleProposed(agentId, reviewed.id, "accepted", reviewed.value);
+      const fact = this.worldFacts.acceptProposed(agentId, reviewed.id, reviewed.value);
       if (fact) {
         this.emit(agentId, "world_fact.reviewed", {
           worldFactId: fact.id,
@@ -1194,26 +1272,29 @@ export class AsterismStore {
   }
 
   /**
-   * Reject a PROPOSED world-fact — the human declined a queued note — via a single
-   * compare-and-set ({@link WorldFactRepository.settleProposed}) and record the transition as
-   * `world_fact.reviewed` (`{ worldFactId, from: "proposed", to: "rejected" }`, references
-   * only). No firewall screen — a rejected note frames nothing. Takes the OPERATOR-resolved
-   * `reviewed` row and PINS the CAS to `reviewed.value`, the same upsert-race guard accept uses:
-   * if a concurrent re-propose churned the value (`green → red`) since the operator resolved it,
-   * the reject matches nothing and the operator re-reviews, rather than silently rejecting a
-   * `red` proposal they never saw. The mirror of {@link rejectProposedMemory} /
-   * {@link settleProposedObjective}'s reject leg: the note stays for history but never frames.
-   * Returns the rejected row to the winner, or undefined to a caller that lost the race, whose
-   * reviewed value no longer matches, or named an unknown / already-settled / cross-agent row.
+   * Reject a PROPOSED world-fact — the human declined a queued note — by DISCARDING it
+   * ({@link WorldFactRepository.deleteProposed}): the proposed row is deleted and any accepted
+   * note for the subject is left untouched. A world-fact is volatile current-state, so a
+   * declined update has no lasting value — there are no `rejected`-history rows (world-model.md
+   * §12; this differs from memory/objectives, which keep a rejected row). Records the rejection
+   * as `world_fact.reviewed` (`{ worldFactId, from: "proposed", to: "rejected" }`, references
+   * only) on the discard — the audit survives the row's deletion, the same way `world_fact.cleared`
+   * is recorded on a delete. No firewall screen — a rejected note frames nothing. Takes the
+   * OPERATOR-resolved `reviewed` row and PINS the delete to `reviewed.value`: a concurrent
+   * re-propose that churned the value (`green → red`) since the operator resolved it makes the
+   * reject match nothing, so the operator re-reviews rather than discarding a `red` proposal
+   * they never saw. Returns the deleted row to the winner, or undefined to a caller that lost the
+   * race, whose reviewed value no longer matches, or named an unknown / already-settled /
+   * cross-agent row.
    */
   rejectProposedWorldFact(agentId: string, reviewed: WorldFact): WorldFact | undefined {
     return this.driver.transaction(() => {
-      const fact = this.worldFacts.settleProposed(agentId, reviewed.id, "rejected", reviewed.value);
+      const fact = this.worldFacts.deleteProposed(agentId, reviewed.id, reviewed.value);
       if (fact) {
         this.emit(agentId, "world_fact.reviewed", {
           worldFactId: fact.id,
           from: "proposed",
-          to: fact.reviewState,
+          to: "rejected",
         });
       }
       return fact;

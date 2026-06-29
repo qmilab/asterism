@@ -399,8 +399,8 @@ describe("harvest end-to-end — a run's changes become proposed working notes",
     expect(Object.keys(proposedNotes(alice.id))).toEqual(["file:secret.ts"]);
     expect(Object.keys(proposedNotes(carol.id))).toEqual(["file:carol.ts"]);
     // Cross-agent: alice's harvested subject is invisible under carol's id and vice versa.
-    expect(store.worldFacts.get(carol.id, "file:secret.ts")).toBeUndefined();
-    expect(store.worldFacts.get(alice.id, "file:carol.ts")).toBeUndefined();
+    expect(store.worldFacts.getProposed(carol.id, "file:secret.ts")).toBeUndefined();
+    expect(store.worldFacts.getProposed(alice.id, "file:carol.ts")).toBeUndefined();
   });
 
   test("over-cap: proposes up to the remaining cap, reports the rest dropped (no silent loss)", async () => {
@@ -438,30 +438,43 @@ describe("harvest end-to-end — a run's changes become proposed working notes",
     });
     // `file:a.ts` (sorted first) is dropped at the cap; `file:z.ts` still updates.
     expect(result.harvest).toEqual({ proposed: 1, dropped: 1, skipped: 0 });
-    expect(store.worldFacts.get(alice.id, "file:z.ts")).toMatchObject({
+    expect(store.worldFacts.getProposed(alice.id, "file:z.ts")).toMatchObject({
       value: "10 bytes", // updated, not the stale "old"
       reviewState: "proposed",
     });
-    expect(store.worldFacts.get(alice.id, "file:a.ts")).toBeUndefined();
+    expect(store.worldFacts.getProposed(alice.id, "file:a.ts")).toBeUndefined();
   });
 
-  test("accepted-subject conflict: the harvest never clobbers a ratified note (skips it)", async () => {
+  test("accepted-subject coexistence: the harvest proposes a coexisting UPDATE, never clobbering the ratified note", async () => {
     // The operator already accepted a note for this subject (a self-written/accepted row).
     store.recordWorldFact(alice.id, "file:app.ts", "100 bytes");
     const result = await executeRun(store, alice, "rewrite app + write new", {
       adapter: sequenceAdapter([
-        { tool: "write_file", args: { path: "app.ts", bytes: 200 } }, // conflicts: subject accepted
-        { tool: "write_file", args: { path: "new.ts", bytes: 5 } }, // fresh subject
+        { tool: "write_file", args: { path: "app.ts", bytes: 200 } }, // accepted subject → coexisting update
+        { tool: "write_file", args: { path: "new.ts", bytes: 5 } }, // fresh subject → proposed
       ]),
       capabilities: [writeCap()],
     });
-    expect(result.harvest).toEqual({ proposed: 1, dropped: 0, skipped: 1 });
-    // The accepted note is untouched at its reviewed value; only the new subject is proposed.
-    expect(store.worldFacts.get(alice.id, "file:app.ts")).toMatchObject({
+    // Both are proposed now (world-model.md §12) — the accepted subject gets a coexisting update.
+    expect(result.harvest).toEqual({ proposed: 2, dropped: 0, skipped: 0 });
+    // The accepted note keeps framing at its reviewed value; the update waits beside it.
+    expect(store.worldFacts.getAccepted(alice.id, "file:app.ts")).toMatchObject({
       value: "100 bytes",
       reviewState: "accepted",
     });
-    expect(proposedNotes(alice.id)).toEqual({ "file:new.ts": "5 bytes" });
+    expect(proposedNotes(alice.id)).toEqual({ "file:app.ts": "200 bytes", "file:new.ts": "5 bytes" });
+  });
+
+  test("no-op suppression: re-observing the accepted value proposes nothing (skipped)", async () => {
+    // The accepted note already holds the value the run re-establishes — nothing to review.
+    store.recordWorldFact(alice.id, "file:app.ts", "200 bytes");
+    const result = await executeRun(store, alice, "rewrite app to the same size", {
+      adapter: sequenceAdapter([{ tool: "write_file", args: { path: "app.ts", bytes: 200 } }]),
+      capabilities: [writeCap()],
+    });
+    expect(result.harvest).toEqual({ proposed: 0, dropped: 0, skipped: 1 });
+    expect(store.worldFacts.getProposed(alice.id, "file:app.ts")).toBeUndefined();
+    expect(store.worldFacts.getAccepted(alice.id, "file:app.ts")?.value).toBe("200 bytes");
   });
 
   test("an injection-shaped filename is REDACTED (neutralized), not persisted raw", async () => {
