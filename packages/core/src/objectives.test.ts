@@ -161,6 +161,36 @@ describe("objective lifecycle — audited, references-only, no-op safe", () => {
     expect(store.setObjectiveStatus(alice.id, "no-such-id", "done")).toBeUndefined();
     expect(store.events.tail(alice.id).length).toBe(before);
   });
+
+  test("applyObjectiveTransition is a guarded CAS — it never overwrites a concurrently changed objective", () => {
+    const o = store.createObjective(alice.id, "finish the migration");
+    // Active + accepted ⇒ the transition applies, audited from `active`.
+    const applied = store.applyObjectiveTransition(alice.id, o.id, "done");
+    expect(applied?.status).toBe("done");
+    const ev = store.events.tail(alice.id).find((e) => e.type === "objective.status_changed");
+    expect(ev!.payload).toEqual({ objectiveId: o.id, from: "active", to: "done" });
+
+    // A stale suggestion against an objective another session has since moved is a NO-OP: the CAS
+    // matches nothing, so the newer status is never overwritten and nothing is logged.
+    const o2 = store.createObjective(alice.id, "tidy the notes");
+    store.setObjectiveStatus(alice.id, o2.id, "dropped"); // another session drops it first
+    const before = store.events.tail(alice.id).length;
+    expect(store.applyObjectiveTransition(alice.id, o2.id, "done")).toBeUndefined(); // stale "done"
+    expect(store.objectives.get(alice.id, o2.id)?.status).toBe("dropped"); // not overwritten
+    expect(store.events.tail(alice.id).length).toBe(before); // nothing logged
+  });
+
+  test("applyObjectiveTransition refuses a non-accepted objective and is agent-scoped", () => {
+    // A proposed (not yet accepted) objective is not in the reviewed state ⇒ no apply.
+    const proposed = store.createObjective(alice.id, "a proposed goal", "proposed");
+    expect(store.applyObjectiveTransition(alice.id, proposed.id, "done")).toBeUndefined();
+    expect(store.objectives.get(alice.id, proposed.id)?.status).toBe("active");
+
+    // Cross-agent: bob cannot apply a transition to alice's objective.
+    const a = store.createObjective(alice.id, "alice's goal");
+    expect(store.applyObjectiveTransition(bob.id, a.id, "done")).toBeUndefined();
+    expect(store.objectives.get(alice.id, a.id)?.status).toBe("active");
+  });
 });
 
 // --- Slice 2: reflection-PROPOSED objectives, human-ratified ---------------

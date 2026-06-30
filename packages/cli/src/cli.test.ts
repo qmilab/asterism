@@ -1269,6 +1269,29 @@ test("reflect --review catches an older run that queued ONLY an objective propos
   expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
 });
 
+test("reflect --review skips a stale transition instead of overwriting a concurrently changed objective", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the migration"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  // The advisory is generated while the objective is active+accepted; this hook simulates ANOTHER
+  // session DROPPING it between generation and apply, then says "apply" — the guarded CAS must skip,
+  // never overwriting the newer status.
+  h.io.reviewTransition = async (item) => {
+    await runCli(["objective", "drop", "personal", item.objectiveId], h.io);
+    return "apply";
+  };
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("looks finished");
+  expect(out).toContain("the objective changed elsewhere — skipped");
+  expect(out).toContain("0 applied, 1 skipped");
+  // It stays dropped — the stale "done" never clobbered the concurrent change.
+  const list = await capture(["objective", "list", "personal"], h.io);
+  expect(list).toContain("· dropped");
+  expect(list).not.toContain("· done");
+});
+
 test("reflect --review drains the queue by rejecting too (a refused proposal leaves it)", async () => {
   const h = harness();
   await withFinishedRun(h);

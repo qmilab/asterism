@@ -2452,10 +2452,11 @@ async function reviewObjectiveTransitions(
       io.out("  · skipped");
       continue;
     }
-    // Apply through the EXISTING audited path. A returned row whose status is the proposed one is the
-    // applied transition; undefined (vanished / cross-agent) or any other status means it changed under
-    // us between the suggestion and the apply — reported, never crashed.
-    const result = store.setObjectiveStatus(agent.id, a.objective.id, a.proposedStatus);
+    // Apply through the GUARDED audited path: the CAS flips the status only if the objective is still
+    // active+accepted (the state the advisory was generated against). A concurrent change by another
+    // session (it was completed, dropped, or rejected meanwhile) makes the CAS match nothing — undefined
+    // — so a stale suggestion is reported skipped, never overwriting the newer status.
+    const result = store.applyObjectiveTransition(agent.id, a.objective.id, a.proposedStatus);
     if (result && result.status === a.proposedStatus) {
       applied++;
       io.out(`  ✓ marked ${a.proposedStatus}`);

@@ -1129,6 +1129,35 @@ export class AsterismStore {
     });
   }
 
+  /**
+   * Apply a reflection-SUGGESTED transition (Type B): advance the objective to `status` ONLY IF it
+   * is still `active` + `accepted` (the state the advisory was generated against), via a single
+   * guarded CAS ({@link ObjectiveRepository.setStatusIfActiveAccepted}). A concurrent change by
+   * another session — the objective was completed, dropped, or rejected meanwhile — makes the CAS
+   * match nothing, so this returns undefined and the surface reports it stale (skipped) rather than
+   * overwriting the newer status. On a real change it records `objective.status_changed` (references
+   * only; `from` is `active`, which the precondition guaranteed). The advisory path's counterpart to
+   * the operator's UNCONDITIONAL {@link setObjectiveStatus} (a human running `objective done`/`drop`
+   * directly DOES mean to change it regardless of its current state, so that path stays unguarded).
+   */
+  applyObjectiveTransition(
+    agentId: string,
+    id: string,
+    status: ObjectiveStatus,
+  ): Objective | undefined {
+    return this.driver.transaction(() => {
+      const objective = this.objectives.setStatusIfActiveAccepted(agentId, id, status);
+      if (objective) {
+        this.emit(agentId, "objective.status_changed", {
+          objectiveId: id,
+          from: "active",
+          to: objective.status,
+        });
+      }
+      return objective;
+    });
+  }
+
   /** An agent's objectives for a surface to render, oldest-first, optionally filtered by status. */
   listObjectives(agentId: string, query?: ObjectiveQuery): Objective[] {
     return this.objectives.list(agentId, query);

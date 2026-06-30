@@ -169,6 +169,33 @@ export class ObjectiveRepository {
   }
 
   /**
+   * Advance an objective to a terminal status ONLY IF it is still `active` AND `accepted` — the
+   * guarded CAS the Type-B transition advisory applies through. The advisory is generated against a
+   * snapshot of the active+accepted set, so by apply time another session may have moved the
+   * objective (to done/dropped, or rejected it); the precondition lives in the WHERE clause, so a
+   * concurrent change makes this match nothing (returns undefined → the surface reports it stale) and
+   * the newer status is never overwritten. `status` is validated through the same enum chokepoint;
+   * `updated_at` advances. Distinct from {@link setStatus}, the operator's UNCONDITIONAL change.
+   */
+  setStatusIfActiveAccepted(
+    agentId: string,
+    id: string,
+    status: ObjectiveStatus,
+  ): Objective | undefined {
+    requireAgentId(agentId);
+    validateEnum(status, OBJECTIVE_STATUSES, "objective status");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE objectives SET status = ?, updated_at = ?
+          WHERE id = ? AND agent_id = ? AND status = 'active' AND review_state = 'accepted'
+          RETURNING *`,
+      )
+      .get([status, now, id, agentId]);
+    return row ? mapObjective(row) : undefined;
+  }
+
+  /**
    * Atomically settle a PROPOSED objective: flip `review_state` from `proposed` to
    * `reviewState` in a SINGLE compare-and-set, the direct analogue of
    * {@link MemoryRepository.settleProposed}. The `review_state = 'proposed'`
