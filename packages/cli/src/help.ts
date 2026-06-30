@@ -35,6 +35,9 @@ Commands:
   objective add <agent> "<text>"    Give an agent a standing goal to work toward
   notes inspect <agent>             See an agent's own working notes (its situation)
   run <agent> "<task>"              Put an agent to work on a task
+  connect <from> <to> --mode <m>    Open a permissioned channel between two agents
+  connections <agent>               Show an agent's connections
+  handoff <from> <to> "<task>"      Have one agent hand a task to another
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
@@ -206,6 +209,49 @@ When a destructive action pauses a run, confirm it later with \`asterism confirm
 Choose a model with \`asterism config\` (or the ASTERISM_MODEL_ID environment
 variable), and set an API key in the environment (e.g. OPENAI_API_KEY), before
 running.`,
+
+  connect: `asterism connect <from> <to> --mode handoff
+
+Open an explicit channel from one agent to another, so the first can hand it work.
+Agents are separate by default and can't reach each other; a connection is the only
+thing that opens a path — and even then, only what the mode allows ever crosses.
+Nothing of the other agent's memory, secrets, or tools is ever shared.
+
+A connection is one-way: \`connect writer researcher\` lets writer hand off to
+researcher, not the other way round. Open a second connection for the reverse. You can
+re-run the same connect harmlessly — it won't make a duplicate.
+
+  --mode handoff   What may cross the channel. With 'handoff', the receiving agent does
+                   the task and hands back only its final result. (More modes, sharing
+                   less, are coming.) Default: handoff.
+
+Opening a connection is a deliberate act you take; from then on, either agent's record
+shows the channel exists and each time it is used — never the task text or any result.`,
+
+  connections: `asterism connections <agent>
+
+Show the channels one agent is on — the agents it can hand work to (outbound, →) and the
+agents that can hand work to it (inbound, ←), with each channel's mode. Only ever the
+named agent's own connections; it never reveals a channel between two other agents.`,
+
+  handoff: `asterism handoff <from> <to> "<task>"
+
+Have one agent hand a task to another over a channel you've already opened (with
+\`connect\`). The receiving agent does the work in ITS OWN workspace, at ITS OWN autonomy
+level, framed by ITS OWN memory and skills — and hands back only its final result. The
+asking agent never sees the other's memory, secrets, files, or how it got there.
+
+Because the work runs as the receiving agent, that agent's protections apply: a
+destructive action pauses for your confirmation according to the RECEIVING agent's
+autonomy, no matter how much autonomy the asking agent has. A handoff can never be a way
+around another agent's limits. If it pauses, confirm it on the receiving agent:
+  asterism confirm <to> <run>
+
+Open the channel first if you haven't:
+  asterism connect <from> <to> --mode handoff
+
+Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
+OPENAI_API_KEY) — the receiving agent needs one to run the task.`,
 
   confirm: `asterism confirm [<agent>] <run>
 

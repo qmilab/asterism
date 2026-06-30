@@ -19,6 +19,7 @@ import {
   WorldFactCapError,
 } from "./repositories/world-facts.js";
 import { CredentialRepository } from "./repositories/credentials.js";
+import { ConnectionRepository } from "./repositories/connections.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
 import { InstallSettingsRepository } from "./repositories/install-settings.js";
@@ -27,6 +28,8 @@ import type {
   AgentSettings,
   CapabilityGrant,
   CapabilityStanding,
+  Connection,
+  ConnectionMode,
   Credential,
   CognitionCaptureMode,
   CognitionProviderId,
@@ -35,10 +38,10 @@ import type {
   Objective,
   ObjectiveStatus,
   ReviewState,
+  RunStatus,
   TransitionStatus,
   RecallProviderId,
   Run,
-  RunStatus,
   Skill,
   StandingThresholds,
   TrustLevel,
@@ -65,6 +68,8 @@ export class AsterismStore {
   /** Per-agent world-facts — the agent's own running record of the current situation ("working notes"). */
   readonly worldFacts: WorldFactRepository;
   readonly credentials: CredentialRepository;
+  /** Explicit, permissioned channels between agents — the Phase 3 collaboration primitive. */
+  readonly connections: ConnectionRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
   /** Per-agent kernel settings — the operator-configurable tunables (e.g. recall budget). */
@@ -85,6 +90,7 @@ export class AsterismStore {
     this.objectives = new ObjectiveRepository(driver);
     this.worldFacts = new WorldFactRepository(driver);
     this.credentials = new CredentialRepository(driver);
+    this.connections = new ConnectionRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
     this.installSettings = new InstallSettingsRepository(driver);
@@ -1477,6 +1483,110 @@ export class AsterismStore {
         path: skill.path,
       });
       return skill;
+    });
+  }
+
+  // --- Collaboration (Phase 3) -----------------------------------------------
+  //
+  // A connection is the explicit, permissioned channel between two agents — the only
+  // thing that lets one agent's curated output reach another, while memory, secrets, and
+  // tools stay un-shared. Creating one is a human/operator act (recorded); using one (a
+  // handoff) is logged on BOTH participants' logs as content-free references. The handoff
+  // op itself lives in `run.ts` (it is an `executeRun` on the callee); these methods own
+  // the connection row and the audit, so the event log stays the kernel's to write.
+
+  /**
+   * Emit ONE collaboration event to BOTH participants' logs. A connection links two
+   * agents, so an event about it (created, used) is recorded once per agent — each row
+   * scoped to that agent — which is how `events tail` shows the same handoff on both sides
+   * while every log stays agent-scoped (golden rule 5, invariant 5). The payload is the
+   * SAME references-only object on both sides (ids, mode, status, a run id) — never the
+   * task input, the callee's output, the callee's memory, or any secret.
+   */
+  private emitToBoth(
+    fromAgentId: string,
+    toAgentId: string,
+    type: EventType,
+    payload: unknown,
+  ): void {
+    this.emit(fromAgentId, type, payload);
+    this.emit(toAgentId, type, payload);
+  }
+
+  /**
+   * Create (or return the existing) ACTIVE directional connection `fromAgentId →
+   * toAgentId` in `mode`, recording `connection.created` on BOTH agents' logs on a real
+   * create. The human-granted permission object: without it, no cross-agent interaction
+   * is possible (a handoff checks for exactly this). Idempotent — re-running `connect A B
+   * --mode handoff` returns the existing active connection with NO second event (the
+   * no-op-doesn't-log discipline used throughout the store); the partial unique index is
+   * the storage-layer backstop against a concurrent double-create. A self-connection is a
+   * kernel invariant violation (a connection is for cross-agent collaboration), refused
+   * loudly here so no surface can persist one. The `connection.created` payload is
+   * references only — the connection id, both agent ids, and the mode; never any content.
+   */
+  createConnection(fromAgentId: string, toAgentId: string, mode: ConnectionMode): Connection {
+    if (fromAgentId === toAgentId) {
+      throw new Error("an agent cannot connect to itself");
+    }
+    return this.driver.transaction(() => {
+      const existing = this.connections.findActive(fromAgentId, toAgentId, mode);
+      if (existing) return existing;
+      const connection = this.connections.create({ fromAgentId, toAgentId, mode });
+      this.emitToBoth(fromAgentId, toAgentId, "connection.created", {
+        connectionId: connection.id,
+        fromAgentId,
+        toAgentId,
+        mode: connection.mode,
+      });
+      return connection;
+    });
+  }
+
+  /** Every connection an agent participates in (inbound + outbound), for `connections <agent>`. */
+  listConnections(agentId: string): Connection[] {
+    return this.connections.listForAgent(agentId);
+  }
+
+  /** One connection by id, scoped so only a participant can read it (else undefined). */
+  getConnection(agentId: string, id: string): Connection | undefined {
+    return this.connections.get(agentId, id);
+  }
+
+  /**
+   * Record the START of a handoff — `handoff.requested` on BOTH participants' logs
+   * (references only: the connection id, both agent ids, the mode). Emitted by the kernel
+   * handoff op (`performHandoff`) just before it runs the callee, so the audit shows the
+   * caller invoked the channel even if the run then fails. No runId yet — the callee's run
+   * is created inside the `executeRun` that follows.
+   */
+  recordHandoffRequested(connection: Connection): void {
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "handoff.requested", {
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: connection.mode,
+    });
+  }
+
+  /**
+   * Record the RETURN of a handoff — `handoff.completed` on BOTH participants' logs
+   * (references only: the connection id, both agent ids, the callee's run id, and the
+   * run's final status). "Completed" marks the handoff CALL returning control to the
+   * caller, not run success — `status` carries done / failed / awaiting_confirmation, so a
+   * handoff that paused the callee's gate is recorded honestly. `runId` is the callee's
+   * run, carried as a reference in the payload (not stamped on the caller's runId column —
+   * the caller has no such run); it never lets the caller READ the callee's run, which
+   * stays scoped to the callee. Never the callee's output text, transcript, memory, or a
+   * secret.
+   */
+  recordHandoffCompleted(connection: Connection, runId: string, status: RunStatus): void {
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "handoff.completed", {
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      runId,
+      status,
     });
   }
 

@@ -27,12 +27,14 @@ import {
   BUILTIN_SOULS,
   COGNITION_CAPTURE_MODES,
   COGNITION_PROVIDER_IDS,
+  CONNECTION_MODES,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
   DEFAULT_WORLD_FACT_CAP,
   executeRun,
   MEMORY_TYPES,
   MemoryFirewallError,
+  performHandoff,
   proposeObjectiveTransitions,
   proposeReviewableMemories,
   proposeReviewableObjectives,
@@ -56,6 +58,8 @@ import type {
   Capability,
   CognitionCaptureMode,
   CognitionProviderId,
+  Connection,
+  ConnectionMode,
   FirewallFinding,
   HarvestSummary,
   Memory,
@@ -89,6 +93,7 @@ import { loadConfig, saveConfig } from "./config.js";
 import {
   formatActionSummary,
   formatAgentList,
+  formatConnectionList,
   formatEventLines,
   formatEventList,
   formatMemoryList,
@@ -1427,6 +1432,197 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       return 0;
     }
     io.err(`Run failed: ${result.error ?? "unknown error"}`);
+    return 1;
+  });
+}
+
+// --- collaboration (connect / connections / handoff) -----------------------
+
+/**
+ * `asterism connect <from> <to> --mode handoff` — open the explicit, permissioned channel
+ * that lets `from` hand a task to `to`. Directional (A→B only); idempotent (re-running is
+ * harmless). The kernel creates the connection and records it on both agents' logs; this
+ * surface only resolves the two named agents and reports.
+ */
+function cmdConnect(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.connect!);
+    return Promise.resolve(0);
+  }
+  const fromName = parsed.positionals[0];
+  const toName = parsed.positionals[1];
+  if (!fromName || !toName) {
+    io.err("Usage: asterism connect <from> <to> --mode handoff");
+    return Promise.resolve(1);
+  }
+  // The only mode in T1 is handoff; an ABSENT `--mode` defaults to it so the common case
+  // needs no flag. But `--mode` with NO value parses as boolean `true` — a malformed
+  // invocation (`--mode`, or `--mode --artifact-only`, where the next dash-token is read as
+  // its own flag). Since connect grants a permissioned channel, reject that loudly rather
+  // than silently opening the default connection (the absent case is `undefined`, which
+  // still correctly defaults). [Codex review P2: reject a missing connect mode value.]
+  const modeFlag = parsed.flags.mode;
+  if (modeFlag === true) {
+    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
+    return Promise.resolve(1);
+  }
+  // Validate any value given so an unimplemented mode is a clear error, not a silent
+  // connection nothing can use.
+  const mode = modeFlag ?? "handoff";
+  if (!(CONNECTION_MODES as readonly string[]).includes(mode)) {
+    io.err(`Unknown connection mode "${mode}". Supported: ${CONNECTION_MODES.join(", ")}.`);
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+    if (from.id === to.id) {
+      io.err("An agent can't connect to itself — a connection joins two different agents.");
+      return 1;
+    }
+    const connection = store.createConnection(from.id, to.id, mode as ConnectionMode);
+    io.out(
+      `Connected ${fromName} → ${toName} (${connection.mode}). ` +
+        `${fromName} can now hand off to ${toName}.`,
+    );
+    return 0;
+  });
+}
+
+/**
+ * `asterism connections <agent>` — the explicit channels an agent is on, inbound and
+ * outbound. Scoped to the named agent (the store only returns connections it participates
+ * in); the registry lookup resolves the other party's name for display.
+ */
+function cmdConnections(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.connections!);
+    return Promise.resolve(0);
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism connections <agent>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const connections = store.listConnections(agent.id);
+    const nameById = new Map(store.agents.list().map((a) => [a.id, a.name] as const));
+    io.out(formatConnectionList(connections, agent, nameById));
+    return 0;
+  });
+}
+
+/**
+ * `asterism handoff <from> <to> "<task>"` — operator-directed: `from` asks `to` to do the
+ * task over an existing handoff connection. The run executes AS the CALLEE (`to`), so every
+ * host concern is resolved for `to` (its model, recall, and workspace tools) — the callee's
+ * gate is sovereign. The caller receives only `to`'s final output; nothing of `to`'s memory
+ * or secrets crosses. Mirrors `cmdRun`'s shape, but the run, action summary, and harvest all
+ * belong to the callee.
+ */
+async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
+  // Help only when it LEADS — the task is FREE-FORM text taken RAW (deliberately NOT
+  // through `parseArgs`). `parseArgs` would eat any flag-looking token in the tail as an
+  // option, so `handoff writer researcher "--help"` would print help and an unquoted
+  // `--draft the proposal` task would be silently dropped — handing the callee a different
+  // task than the operator typed. Taking `args.slice(2)` verbatim preserves a dash-leading
+  // or flag-shaped task in full. The same discipline `objective add` / `secrets add` use
+  // for their free-form text; `handoff` has no flags of its own, so positional handling
+  // loses nothing. [Codex review P2: preserve flag-like handoff tasks.]
+  if (args[0] === "--help" || args[0] === "-h") {
+    io.out(COMMAND_HELP.handoff!);
+    return 0;
+  }
+  const fromName = args[0];
+  const toName = args[1];
+  // Every token after the two agents, joined and taken VERBATIM — a multi-word, dash-leading,
+  // or flag-shaped task is kept in full, never mistaken for an option.
+  const task = args.slice(2).join(" ").trim();
+  if (!fromName || !toName || !task) {
+    io.err('Usage: asterism handoff <from> <to> "<task>"');
+    return 1;
+  }
+
+  return withHomeStore(io, async (store, home) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    // The connection is the PERMISSION — check it before anything else (it is a cheap
+    // scoped read, and it is the more fundamental precondition than a model). With no
+    // active channel the handoff cannot proceed, so refuse here and build no adapter
+    // (mirroring `run`: no substrate is constructed for a run that cannot run). The kernel
+    // op re-checks authoritatively below, so this surface read never becomes the gate.
+    if (!store.connections.findActive(from.id, to.id, "handoff")) {
+      io.err(
+        `No active handoff connection from ${fromName} to ${toName}. ` +
+          `Open one first: asterism connect ${fromName} ${toName} --mode handoff`,
+      );
+      return 1;
+    }
+
+    // The handoff runs AS the callee, so resolve the CALLEE's substrate, recall, and
+    // workspace tools — never the caller's. This is what makes the callee's gate sovereign:
+    // it runs in its own workspace, on its own model, with its own scoped tools.
+    const made = await resolveAdapter(io, home, to, store);
+    if (!made.adapter) {
+      io.err(made.reason ?? "No model configured.");
+      return 1;
+    }
+    const recallMade = await resolveRecall(io, store, to);
+    if (recallMade.reason) {
+      io.err(recallMade.reason);
+      return 1;
+    }
+    const capabilities = io.capabilities?.(to.workspaceDir);
+
+    const outcome = await performHandoff(store, from, to, task, {
+      adapter: made.adapter,
+      readFile: (p) => readFileSync(p, "utf8"),
+      onEvent: (event) => {
+        const line = formatRunActivity(event);
+        if (line) io.err(line);
+      },
+      ...(io.confirm ? { confirm: io.confirm } : {}),
+      ...(capabilities ? { capabilities } : {}),
+      ...(recallMade.provider ? { recall: recallMade.provider } : {}),
+    });
+
+    if (outcome.kind === "no_connection") {
+      io.err(
+        `No active handoff connection from ${fromName} to ${toName}. ` +
+          `Open one first: asterism connect ${fromName} ${toName} --mode handoff`,
+      );
+      return 1;
+    }
+
+    const result = outcome.result;
+    // The run is the callee's, so what it did (action summary) and what it proposed to note
+    // (harvest) are surfaced for `to`, not `from`.
+    if (to.trustLevel !== "propose" && result.actions.length > 0) {
+      for (const line of formatActionSummary(result.actions)) io.err(line);
+    }
+    reportHarvest(io, result.harvest, toName);
+
+    if (result.status === "awaiting_confirmation") {
+      io.out(
+        `Handoff paused: ${toName} needs your confirmation before a destructive action can proceed.`,
+      );
+      io.out(`Confirm it to continue:  asterism confirm ${toName} ${shortId(result.run.id)}`);
+      return 0;
+    }
+    if (result.status === "done") {
+      io.out(result.output.trim().length > 0 ? result.output : `(${toName} produced no output)`);
+      return 0;
+    }
+    io.err(`Handoff failed: ${result.error ?? "unknown error"}`);
     return 1;
   });
 }
@@ -4506,6 +4702,12 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdTrust(rest, io);
     case "run":
       return cmdRun(rest, io);
+    case "connect":
+      return cmdConnect(rest, io);
+    case "connections":
+      return cmdConnections(rest, io);
+    case "handoff":
+      return cmdHandoff(rest, io);
     case "confirm":
       return cmdConfirm(rest, io);
     case "runs":

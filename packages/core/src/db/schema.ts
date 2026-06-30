@@ -172,6 +172,35 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id);
 
+-- CONNECTIONS -- the explicit, permissioned channels Phase 3 collaboration runs on.
+-- Agents are isolated by default; a connection is the only thing that lets one agent's
+-- curated output reach another, and it grants exactly its mode's exchange form. Unlike
+-- every other table this row carries TWO agent ids: it is DIRECTIONAL (from -> to), and
+-- both columns FK into agents(id). Every scoped query filters by a participant
+-- (from_agent_id and/or to_agent_id), so a connection is reachable only by an agent it
+-- links -- the agent is still the isolation boundary, a connection just names which two
+-- agents an explicit, operator-granted channel joins.
+--
+-- mode is the exchange form ('handoff' in T1); status is 'active' | 'revoked' (only an
+-- active connection grants its exchange). The partial unique index keeps at most ONE
+-- active connection per (from, to, mode) -- re-running 'connect A B --mode handoff' is
+-- idempotent -- while leaving a future 'revoked' row free to coexist (so a later
+-- reconnect is a fresh active row, not blocked by history). It is defined here, in the
+-- CREATE, because this is a brand-new table: every column it references exists from the
+-- start, so unlike the world_facts coexistence indexes it needs no deferral to migrate().
+CREATE TABLE IF NOT EXISTS connections (
+  id            TEXT PRIMARY KEY,
+  from_agent_id TEXT NOT NULL REFERENCES agents(id),
+  to_agent_id   TEXT NOT NULL REFERENCES agents(id),
+  mode          TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connections_from ON connections(from_agent_id);
+CREATE INDEX IF NOT EXISTS idx_connections_to ON connections(to_agent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_active_triple
+  ON connections(from_agent_id, to_agent_id, mode) WHERE status = 'active';
+
 -- An agent's earned standing per destructive capability — the "trust contract"
 -- underneath the coarse trust_level. Scoped by agent_id like every other table;
 -- one row per (agent, capability). standing is 'gated' or 'standing-grant'; only

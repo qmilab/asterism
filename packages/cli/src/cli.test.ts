@@ -3582,3 +3582,118 @@ test("objective text beginning with a dash is preserved verbatim (Codex P2)", as
   const single = await capture(["objective", "list", "personal"], h.io);
   expect(single).toContain("- review the notes folder");
 });
+
+// --- collaboration: connect / connections / handoff (Phase 3 · T1) ----------
+
+test("connect opens a directional channel and connections lists it", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+
+  expect(await runCli(["connect", "writer", "researcher", "--mode", "handoff"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Connected writer → researcher (handoff)");
+
+  // Outbound shows for writer (→ researcher); inbound shows for researcher (← writer).
+  const writerConns = await capture(["connections", "writer"], h.io);
+  expect(writerConns).toMatch(/→ researcher/);
+  const researcherConns = await capture(["connections", "researcher"], h.io);
+  expect(researcherConns).toMatch(/← writer/);
+});
+
+test("connect defaults to handoff and is idempotent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  // No --mode flag → defaults to handoff.
+  expect(await runCli(["connect", "a", "b"], h.io)).toBe(0);
+  expect(await runCli(["connect", "a", "b"], h.io)).toBe(0); // re-run is harmless
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).toContain("Connections for a (1)"); // still exactly one
+});
+
+test("connect rejects a self-connection and an unimplemented mode", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  expect(await runCli(["connect", "a", "a"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/can't connect to itself/i);
+
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
+});
+
+test("connect rejects --mode with no value rather than opening a default connection (Codex P2)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  // `--mode` with no value parses as a boolean flag — a malformed invocation. Granting a
+  // permissioned channel must not silently fall back to the default.
+  expect(await runCli(["connect", "a", "b", "--mode"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/--mode needs a value/i);
+  // `--mode --artifact-only` is the same shape (the dash-token is read as its own flag).
+  expect(await runCli(["connect", "a", "b", "--mode", "--artifact-only"], h.io)).toBe(1);
+  // Neither malformed invocation opened a connection.
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).toMatch(/no connections yet/i);
+});
+
+test("connect reports an unknown agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  expect(await runCli(["connect", "a", "ghost"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain('No agent named "ghost"');
+});
+
+test("handoff without a connection is refused with a pointer to connect", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  expect(await runCli(["handoff", "writer", "researcher", "do the thing"], io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/No active handoff connection/i);
+});
+
+test("handoff over a connection returns the callee's output", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "handoff"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  const out = await capture(["handoff", "writer", "researcher", "summarize the notes"], io);
+  // fakeAdapter resolves "hello from the agent" — the callee's output, crossed back.
+  expect(out).toContain("hello from the agent");
+});
+
+test("a handoff task beginning with a dash reaches the callee verbatim (Codex P2)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "handoff"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  // A task that starts with a dash must NOT be parsed as a flag and dropped — it must be
+  // handed to the callee in full, exactly as typed.
+  expect(await runCli(["handoff", "writer", "researcher", "--draft the Q3 proposal"], io)).toBe(0);
+  const store = openHomeStore(h);
+  try {
+    const researcher = agentNamed(store, "researcher");
+    expect(store.runs.list(researcher.id).at(-1)?.input).toBe("--draft the Q3 proposal");
+  } finally {
+    store.close();
+  }
+});
+
+test("connect / connections / handoff show help", async () => {
+  const h = harness();
+  for (const cmd of [["connect", "--help"], ["connections", "--help"], ["handoff", "--help"]]) {
+    const out = await capture(cmd, h.io);
+    expect(out.length).toBeGreaterThan(0);
+  }
+});

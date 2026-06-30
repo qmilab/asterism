@@ -196,7 +196,7 @@ export type {
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
-export { executeRun, resumeRun, declineRun, resolveRecallBudget } from "./run.js";
+export { executeRun, resumeRun, declineRun, performHandoff, resolveRecallBudget } from "./run.js";
 export type {
   ExecuteRunOptions,
   ExecuteRunResult,
@@ -204,6 +204,7 @@ export type {
   HarvestSummary,
   ResumeOutcome,
   DeclineOutcome,
+  HandoffOutcome,
 } from "./run.js";
 export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";
@@ -235,6 +236,8 @@ export {
 export type { WorldFactQuery } from "./repositories/world-facts.js";
 export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
+export { ConnectionRepository } from "./repositories/connections.js";
+export type { CreateConnectionInput } from "./repositories/connections.js";
 export { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 export { AgentSettingsRepository } from "./repositories/agent-settings.js";
 export { InstallSettingsRepository } from "./repositories/install-settings.js";

@@ -912,3 +912,71 @@ export function declineRun(store: AsterismStore, agent: Agent, runId: string): D
   const current = store.runs.get(agent.id, runId);
   return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
 }
+
+/**
+ * The outcome of {@link performHandoff} — a discriminated union so a surface maps each
+ * case to its own response without guessing:
+ * - `ok`            — an active connection authorized the handoff and the callee ran; the
+ *                     `result` is the SAME shape {@link executeRun} returns, carrying only
+ *                     the callee's final output and references (never its memory/secrets).
+ * - `no_connection` — there is no ACTIVE `from → to` connection in `handoff` mode, so the
+ *                     handoff is refused: default isolation holds (golden rule 5,
+ *                     invariant 1). The caller's only recourse is to have the operator
+ *                     create the connection (`asterism connect from to --mode handoff`).
+ */
+export type HandoffOutcome =
+  | { kind: "ok"; result: ExecuteRunResult }
+  | { kind: "no_connection" };
+
+/**
+ * Perform an OPERATOR-DIRECTED handoff: `from` asks `to` to do `input`, over an explicit,
+ * permissioned connection. This is Phase 3's first cross-agent operation, and it preserves
+ * every golden-rule-5 invariant by construction rather than by a special code path:
+ *
+ *   1. **No connection → no interaction.** The active `from → to` connection in `handoff`
+ *      mode IS the permission. With none, this returns `no_connection` and nothing runs —
+ *      the default-isolation refusal. (Using an existing connection is logged, not
+ *      re-gated: the human-created connection is the permission, settled decision D3.)
+ *   2/3. **The callee's gate is sovereign; only the mode's artifact crosses.** A handoff is
+ *      just an {@link executeRun} on the CALLEE (`to`): the run is recorded as `to`'s, in
+ *      `to`'s workspace, under `to`'s trust profile and scoped tools, framed by `to`'s own
+ *      memory/objectives/notes. `to`'s destructive-action gate fires identically whether
+ *      `to` is run directly or via a handoff — a handoff can neither raise nor lower it.
+ *      The caller receives back only the callee's {@link ExecuteRunResult} (its final
+ *      output text + references); `to`'s memory rows, transcript, and secrets never cross.
+ *      Critically, the CALLER passes the CALLEE's host concerns in `options` (the callee's
+ *      adapter, the callee's workspace capabilities, the callee's recall) — the run is the
+ *      callee's in every dimension.
+ *   5. **Initiating is audited.** `handoff.requested` is recorded on BOTH logs before the
+ *      run and `handoff.completed` after, content-free references both (the connection id,
+ *      agent ids, the callee's run id, the final status) — never the task input or the
+ *      callee's output.
+ *
+ * `from` and `to` are the resolved agents; the caller (a surface) has already looked them
+ * up and built `options` from `to`. The mode is fixed to `handoff` in T1 — the only mode
+ * with an implementation; the stricter modes are later threads.
+ */
+export async function performHandoff(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  input: string,
+  options: ExecuteRunOptions,
+): Promise<HandoffOutcome> {
+  // The connection IS the permission. A read straight off the scoped repository, the same
+  // way the rest of this module reads (`store.runs.get`); the directional `from → to`
+  // lookup means a B→A connection never satisfies an A→B handoff.
+  const connection = store.connections.findActive(from.id, to.id, "handoff");
+  if (!connection) return { kind: "no_connection" };
+  // Audit the request on both logs BEFORE the run, so the handoff is recorded even if the
+  // callee's run fails (the kernel writes the event log, not this op).
+  store.recordHandoffRequested(connection);
+  // The handoff IS an executeRun on the CALLEE. `to` drives the entire loop — its identity,
+  // trust, tools, workspace, memory — so the callee's gate is sovereign and nothing of the
+  // callee's beyond its final RunOutput is reachable by the caller.
+  const result = await executeRun(store, to, input, options);
+  // Audit the return on both logs, carrying the final status as a reference (done / failed
+  // / awaiting_confirmation) so a paused handoff is recorded honestly.
+  store.recordHandoffCompleted(connection, result.run.id, result.status);
+  return { kind: "ok", result };
+}

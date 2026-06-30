@@ -6,6 +6,7 @@ import type {
   ActionRecord,
   Agent,
   CapabilityGrant,
+  Connection,
   Event,
   Memory,
   Objective,
@@ -203,6 +204,37 @@ export function formatWorldFactList(
       lines.push(`  updated ${proposed.updatedAt}`);
     }
   }
+  return lines.join("\n").trimEnd();
+}
+
+/**
+ * Render an agent's connections for `connections <agent>` — the explicit, permissioned
+ * channels it is on. A connection is directional, so each line shows which way it runs
+ * relative to THIS agent: `→ other` is OUTBOUND (this agent may hand off to `other`), `←
+ * other` is INBOUND (`other` may hand off to this agent). The other agent is named via
+ * `nameById` (an id→name lookup the caller builds from the registry); an id with no entry
+ * (an agent removed since) falls back to a short id so a row is never blank. Each line
+ * leads with the mode and status, then the short connection id. Only ever the connections
+ * this agent participates in — the store scopes the list to a participant.
+ */
+export function formatConnectionList(
+  connections: readonly Connection[],
+  agent: Agent,
+  nameById: ReadonlyMap<string, string>,
+): string {
+  if (connections.length === 0) {
+    return `${agent.name} has no connections yet. Open one with: asterism connect ${agent.name} <other> --mode handoff`;
+  }
+  const lines: string[] = [`Connections for ${agent.name} (${connections.length}):`, ""];
+  for (const c of connections) {
+    const outbound = c.fromAgentId === agent.id;
+    const otherId = outbound ? c.toAgentId : c.fromAgentId;
+    const other = nameById.get(otherId) ?? shortId(otherId);
+    const arrow = outbound ? `→ ${other}` : `← ${other}`;
+    lines.push(`• ${arrow} · ${c.mode} · ${c.status} · ${shortId(c.id)}`);
+  }
+  lines.push("");
+  lines.push("→ outbound (this agent may hand off to the other) · ← inbound (the other may hand off to this agent)");
   return lines.join("\n").trimEnd();
 }
 
