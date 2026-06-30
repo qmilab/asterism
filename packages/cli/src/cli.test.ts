@@ -3655,6 +3655,25 @@ test("handoff over a connection returns the callee's output", async () => {
   expect(out).toContain("hello from the agent");
 });
 
+test("a handoff task beginning with a dash reaches the callee verbatim (Codex P2)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "handoff"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  // A task that starts with a dash must NOT be parsed as a flag and dropped — it must be
+  // handed to the callee in full, exactly as typed.
+  expect(await runCli(["handoff", "writer", "researcher", "--draft the Q3 proposal"], io)).toBe(0);
+  const store = openHomeStore(h);
+  try {
+    const researcher = agentNamed(store, "researcher");
+    expect(store.runs.list(researcher.id).at(-1)?.input).toBe("--draft the Q3 proposal");
+  } finally {
+    store.close();
+  }
+});
+
 test("connect / connections / handoff show help", async () => {
   const h = harness();
   for (const cmd of [["connect", "--help"], ["connections", "--help"], ["handoff", "--help"]]) {

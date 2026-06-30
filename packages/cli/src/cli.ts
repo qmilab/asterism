@@ -1517,16 +1517,23 @@ function cmdConnections(args: string[], io: CliIO): Promise<number> {
  * belong to the callee.
  */
 async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
-  if (helpRequested(parsed)) {
+  // Help only when it LEADS — the task is FREE-FORM text taken RAW (deliberately NOT
+  // through `parseArgs`). `parseArgs` would eat any flag-looking token in the tail as an
+  // option, so `handoff writer researcher "--help"` would print help and an unquoted
+  // `--draft the proposal` task would be silently dropped — handing the callee a different
+  // task than the operator typed. Taking `args.slice(2)` verbatim preserves a dash-leading
+  // or flag-shaped task in full. The same discipline `objective add` / `secrets add` use
+  // for their free-form text; `handoff` has no flags of its own, so positional handling
+  // loses nothing. [Codex review P2: preserve flag-like handoff tasks.]
+  if (args[0] === "--help" || args[0] === "-h") {
     io.out(COMMAND_HELP.handoff!);
     return 0;
   }
-  const fromName = parsed.positionals[0];
-  const toName = parsed.positionals[1];
-  // Every token after the two agents, joined — so an unquoted multi-word task is kept in
-  // full, exactly as `run` joins its task tail.
-  const task = parsed.positionals.slice(2).join(" ");
+  const fromName = args[0];
+  const toName = args[1];
+  // Every token after the two agents, joined and taken VERBATIM — a multi-word, dash-leading,
+  // or flag-shaped task is kept in full, never mistaken for an option.
+  const task = args.slice(2).join(" ").trim();
   if (!fromName || !toName || !task) {
     io.err('Usage: asterism handoff <from> <to> "<task>"');
     return 1;
