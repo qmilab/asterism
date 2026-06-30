@@ -191,6 +191,17 @@ describe("objective lifecycle — audited, references-only, no-op safe", () => {
     expect(store.applyObjectiveTransition(bob.id, a.id, "done")).toBeUndefined();
     expect(store.objectives.get(alice.id, a.id)?.status).toBe("active");
   });
+
+  test("applyObjectiveTransition rejects a non-transition target status — never writes `active`", () => {
+    const o = store.createObjective(alice.id, "finish the migration");
+    // Even an UNTYPED caller cannot use the transition path to write `active` (a no-op self-change
+    // that would emit a bogus `active → active` event) — the enum guard rejects it at the boundary.
+    expect(() => store.applyObjectiveTransition(alice.id, o.id, "active" as never)).toThrow();
+    expect(() => store.applyObjectiveTransition(alice.id, o.id, "nonsense" as never)).toThrow();
+    // The objective is untouched and no status-change event was ever emitted.
+    expect(store.objectives.get(alice.id, o.id)?.status).toBe("active");
+    expect(store.events.tail(alice.id).some((e) => e.type === "objective.status_changed")).toBe(false);
+  });
 });
 
 // --- Slice 2: reflection-PROPOSED objectives, human-ratified ---------------

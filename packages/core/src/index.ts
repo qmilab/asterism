@@ -98,12 +98,14 @@ export type { SecretRef } from "./secrets.js";
 // The ReflectionProvider contract — the kernel/reflection seam. Core defines it
 // (transcript in → proposed typed memory writes out) and depends on no model
 // client; the default hosted-model provider lives in `@qmilab/asterism-reflect`.
+// TRANSITION_STATUSES / TransitionStatus / isTransitionStatus moved to `types.js` (the leaf,
+// next to OBJECTIVE_STATUSES) so the repo/store can validate against them without a module cycle;
+// they reach the public surface via the `export * from "./types.js"` above — the export path is
+// unchanged for consumers.
 export {
   REFLECTION_MEMORY_TYPES,
-  TRANSITION_STATUSES,
   DEFAULT_REFLECT_RUN_LIMIT,
   isReflectionMemoryType,
-  isTransitionStatus,
   proposeReviewableMemories,
   proposeReviewableObjectives,
   proposeObjectiveTransitions,
@@ -117,7 +119,6 @@ export {
 } from "./reflection.js";
 export type {
   ReflectionMemoryType,
-  TransitionStatus,
   RunTranscript,
   ReflectionInput,
   ProposedMemory,

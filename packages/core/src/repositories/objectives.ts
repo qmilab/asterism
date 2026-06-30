@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow, SqlValue } from "../db/driver.js";
-import type { Objective, ObjectiveStatus, ReviewState } from "../types.js";
-import { OBJECTIVE_STATUSES, REVIEW_STATES, validateEnum } from "../types.js";
+import type { Objective, ObjectiveStatus, ReviewState, TransitionStatus } from "../types.js";
+import { OBJECTIVE_STATUSES, REVIEW_STATES, TRANSITION_STATUSES, validateEnum } from "../types.js";
 import { assertMemorySafe } from "../firewall.js";
 import { requireAgentId } from "./scope.js";
 
@@ -174,16 +174,19 @@ export class ObjectiveRepository {
    * snapshot of the active+accepted set, so by apply time another session may have moved the
    * objective (to done/dropped, or rejected it); the precondition lives in the WHERE clause, so a
    * concurrent change makes this match nothing (returns undefined → the surface reports it stale) and
-   * the newer status is never overwritten. `status` is validated through the same enum chokepoint;
-   * `updated_at` advances. Distinct from {@link setStatus}, the operator's UNCONDITIONAL change.
+   * the newer status is never overwritten. `status` is a {@link TransitionStatus} (`done`/`dropped`)
+   * — validated against {@link TRANSITION_STATUSES}, so even an untyped caller can never use this to
+   * write `active` (a no-op self-transition that would emit a bogus `active → active` event); the
+   * type forbids it for TS callers and the enum guard for the rest. `updated_at` advances. Distinct
+   * from {@link setStatus}, the operator's UNCONDITIONAL change (which DOES accept any status).
    */
   setStatusIfActiveAccepted(
     agentId: string,
     id: string,
-    status: ObjectiveStatus,
+    status: TransitionStatus,
   ): Objective | undefined {
     requireAgentId(agentId);
-    validateEnum(status, OBJECTIVE_STATUSES, "objective status");
+    validateEnum(status, TRANSITION_STATUSES, "objective transition status");
     const now = new Date().toISOString();
     const row = this.driver
       .prepare(

@@ -35,6 +35,7 @@ import type {
   Objective,
   ObjectiveStatus,
   ReviewState,
+  TransitionStatus,
   RecallProviderId,
   Run,
   RunStatus,
@@ -1143,7 +1144,7 @@ export class AsterismStore {
   applyObjectiveTransition(
     agentId: string,
     id: string,
-    status: ObjectiveStatus,
+    status: TransitionStatus,
   ): Objective | undefined {
     return this.driver.transaction(() => {
       const objective = this.objectives.setStatusIfActiveAccepted(agentId, id, status);

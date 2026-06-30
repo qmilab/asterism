@@ -20,7 +20,8 @@
 //      it (a Phase 0 constraint). The subset is checked against `MemoryType` at
 //      compile time so the two can never drift.
 
-import type { Agent, Memory, MemoryType, Objective, ObjectiveStatus, Run } from "./types.js";
+import type { Agent, Memory, MemoryType, Objective, Run, TransitionStatus } from "./types.js";
+import { isTransitionStatus } from "./types.js";
 import type { AsterismStore } from "./store.js";
 import { assertMemorySafe, MemoryFirewallError, screenMemory } from "./firewall.js";
 import type { FirewallFinding } from "./firewall.js";
@@ -44,22 +45,6 @@ export function isReflectionMemoryType(
   value: string,
 ): value is ReflectionMemoryType {
   return (REFLECTION_MEMORY_TYPES as readonly string[]).includes(value);
-}
-
-/**
- * The objective statuses reflection may propose a TRANSITION to — the non-`active` terminals
- * `done` and `dropped`. An objective is never "transitioned" to `active` (that is its starting
- * state); reflection only ever suggests winding one down. `satisfies readonly ObjectiveStatus[]`
- * makes this a compile-time-checked subset of the canonical {@link ObjectiveStatus} set, exactly
- * as {@link REFLECTION_MEMORY_TYPES} is of {@link MemoryType}, so the two can never drift.
- */
-export const TRANSITION_STATUSES = ["done", "dropped"] as const satisfies readonly ObjectiveStatus[];
-
-export type TransitionStatus = (typeof TRANSITION_STATUSES)[number];
-
-/** Whether `value` is a status reflection may propose transitioning an objective TO (`done`/`dropped`). */
-export function isTransitionStatus(value: string): value is TransitionStatus {
-  return (TRANSITION_STATUSES as readonly string[]).includes(value);
 }
 
 /**
