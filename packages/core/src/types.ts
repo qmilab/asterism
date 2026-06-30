@@ -94,6 +94,42 @@ export const CAPABILITY_STANDINGS = ["gated", "standing-grant"] as const;
 export type CapabilityStanding = (typeof CAPABILITY_STANDINGS)[number];
 
 /**
+ * The collaboration MODES a {@link Connection} can grant — the single dial for "how much
+ * of the callee does the caller get back". Phase 3 (Collaboration) opens the agent
+ * boundary ONLY through an explicit, permissioned connection, and a connection grants
+ * exactly its mode's exchange form and nothing wider (golden rule 5; design note
+ * `phase-3-collaboration.md` §4). T1 implements the FIRST and least-curated mode:
+ *
+ * - `handoff` — the caller asks the callee to perform a task; the callee runs it in its
+ *   OWN workspace, under its OWN trust profile and scoped tools, and the caller receives
+ *   only the callee's final `RunOutput` (its text/result) — never the callee's memory,
+ *   transcript, or secrets.
+ *
+ * Only the modes with a real implementation are enumerated, so the write boundary
+ * ({@link validateEnum}) can never persist a connection in a mode nothing consumes. The
+ * stricter modes (`artifact-only`, `read-summary`, `shared-brief`, `delegated-tool`) join
+ * this list as their threads (T2/T3) land — never a half-built mode.
+ */
+export const CONNECTION_MODES = ["handoff"] as const;
+export type ConnectionMode = (typeof CONNECTION_MODES)[number];
+
+/**
+ * A {@link Connection}'s lifecycle. A connection is the permission object: only an
+ * `active` one grants its mode's exchange (a handoff over a non-active connection is
+ * refused, the same default-isolation rule as no connection at all).
+ *
+ * - `active`  — the default on create, and the ONLY state that grants the exchange.
+ * - `revoked` — withdrawn; kept for audit/history, no longer grants anything.
+ *
+ * T1 creates only `active` connections (there is no revoke command yet); the state exists
+ * so the "active connection IS the permission" check is honest from day one, and so a
+ * later revoke is an additive transition, not a schema reshape — the same forward-compat
+ * discipline the reserved `teamId`/`ownerPrincipalId` columns follow.
+ */
+export const CONNECTION_STATUSES = ["active", "revoked"] as const;
+export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
+
+/**
  * The kernel's canonical event vocabulary. Every consequential action the kernel
  * performs writes one of these to the append-only log, scoped to its `agentId`:
  * agent + run lifecycle, memory writes (and firewall refusals), skill/credential
@@ -131,6 +167,9 @@ export const EVENT_TYPES = [
   "world_fact.cleared",
   "world_fact.reviewed",
   "skill.attached",
+  "connection.created",
+  "handoff.requested",
+  "handoff.completed",
   "credential.added",
   "credential.rotated",
   "credential.removed",
@@ -337,6 +376,32 @@ export interface CapabilityGrant {
   basis: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * A CONNECTION — the explicit, permissioned channel between two agents that Phase 3
+ * collaboration is built on. Agents are isolated by default (golden rule 5); a connection
+ * is the ONLY thing that lets one agent's curated output reach another, and it grants
+ * exactly its {@link ConnectionMode}'s exchange form and nothing wider — never the other
+ * agent's raw memory, credential values, or tool registry.
+ *
+ * Unlike every other entity, a connection carries TWO agent ids: it is **directional**
+ * (`fromAgentId → toAgentId`), so `connect A B` grants A→B only and B→A is its own
+ * separate connection (settled decision D1). Both ids are real references on the row, and
+ * every scoped query filters by a participant — a connection is reachable only by an agent
+ * it actually links, never by a third party. Creating one is an explicit operator act
+ * (the human-granted permission); *using* one is logged on both participants' event logs
+ * as content-free references (golden rule 5, invariant 5).
+ */
+export interface Connection {
+  id: string;
+  /** The initiating agent — the one that may hand off TO `toAgentId`. */
+  fromAgentId: string;
+  /** The receiving agent — the one a handoff runs AS (in its own workspace, under its own trust). */
+  toAgentId: string;
+  mode: ConnectionMode;
+  status: ConnectionStatus;
+  createdAt: string;
 }
 
 /**
