@@ -161,6 +161,47 @@ describe("objective lifecycle — audited, references-only, no-op safe", () => {
     expect(store.setObjectiveStatus(alice.id, "no-such-id", "done")).toBeUndefined();
     expect(store.events.tail(alice.id).length).toBe(before);
   });
+
+  test("applyObjectiveTransition is a guarded CAS — it never overwrites a concurrently changed objective", () => {
+    const o = store.createObjective(alice.id, "finish the migration");
+    // Active + accepted ⇒ the transition applies, audited from `active`.
+    const applied = store.applyObjectiveTransition(alice.id, o.id, "done");
+    expect(applied?.status).toBe("done");
+    const ev = store.events.tail(alice.id).find((e) => e.type === "objective.status_changed");
+    expect(ev!.payload).toEqual({ objectiveId: o.id, from: "active", to: "done" });
+
+    // A stale suggestion against an objective another session has since moved is a NO-OP: the CAS
+    // matches nothing, so the newer status is never overwritten and nothing is logged.
+    const o2 = store.createObjective(alice.id, "tidy the notes");
+    store.setObjectiveStatus(alice.id, o2.id, "dropped"); // another session drops it first
+    const before = store.events.tail(alice.id).length;
+    expect(store.applyObjectiveTransition(alice.id, o2.id, "done")).toBeUndefined(); // stale "done"
+    expect(store.objectives.get(alice.id, o2.id)?.status).toBe("dropped"); // not overwritten
+    expect(store.events.tail(alice.id).length).toBe(before); // nothing logged
+  });
+
+  test("applyObjectiveTransition refuses a non-accepted objective and is agent-scoped", () => {
+    // A proposed (not yet accepted) objective is not in the reviewed state ⇒ no apply.
+    const proposed = store.createObjective(alice.id, "a proposed goal", "proposed");
+    expect(store.applyObjectiveTransition(alice.id, proposed.id, "done")).toBeUndefined();
+    expect(store.objectives.get(alice.id, proposed.id)?.status).toBe("active");
+
+    // Cross-agent: bob cannot apply a transition to alice's objective.
+    const a = store.createObjective(alice.id, "alice's goal");
+    expect(store.applyObjectiveTransition(bob.id, a.id, "done")).toBeUndefined();
+    expect(store.objectives.get(alice.id, a.id)?.status).toBe("active");
+  });
+
+  test("applyObjectiveTransition rejects a non-transition target status — never writes `active`", () => {
+    const o = store.createObjective(alice.id, "finish the migration");
+    // Even an UNTYPED caller cannot use the transition path to write `active` (a no-op self-change
+    // that would emit a bogus `active → active` event) — the enum guard rejects it at the boundary.
+    expect(() => store.applyObjectiveTransition(alice.id, o.id, "active" as never)).toThrow();
+    expect(() => store.applyObjectiveTransition(alice.id, o.id, "nonsense" as never)).toThrow();
+    // The objective is untouched and no status-change event was ever emitted.
+    expect(store.objectives.get(alice.id, o.id)?.status).toBe("active");
+    expect(store.events.tail(alice.id).some((e) => e.type === "objective.status_changed")).toBe(false);
+  });
 });
 
 // --- Slice 2: reflection-PROPOSED objectives, human-ratified ---------------
@@ -242,6 +283,22 @@ describe("objective review orchestration — audited references-only", () => {
     expect(JSON.stringify(payload)).not.toContain("standing goal");
   });
 
+  test("createObjective threads sourceRunId onto a proposed objective; operator-declared has none", () => {
+    const proposed = store.createObjective(alice.id, "a goal noticed in a run", "proposed", "run-xyz");
+    expect(proposed.sourceRunId).toBe("run-xyz");
+    expect(store.objectives.get(alice.id, proposed.id)?.sourceRunId).toBe("run-xyz");
+    // An operator-declared objective carries no source run (provenance only, never gates framing).
+    const declared = store.createObjective(alice.id, "an operator goal");
+    expect(declared.sourceRunId).toBeUndefined();
+    expect(store.objectives.get(alice.id, declared.id)?.sourceRunId).toBeUndefined();
+  });
+
+  test("an edited-accept carries the original proposal's sourceRunId onto the new accepted row", () => {
+    const p = store.createObjective(alice.id, "rough goal from a run", "proposed", "run-abc");
+    const accepted = store.acceptEditedObjectiveProposal(alice.id, p, "the refined goal");
+    expect(accepted?.sourceRunId).toBe("run-abc");
+  });
+
   test("settleProposedObjective records objective.reviewed with from/to references only", () => {
     const p = store.createObjective(alice.id, "review me", "proposed");
     const settled = store.settleProposedObjective(alice.id, p.id, "accepted");
@@ -298,7 +355,7 @@ describe("objective review orchestration — audited references-only", () => {
   });
 });
 
-test("opening a pre-slice-2 objectives table migrates review_state in as 'accepted'", () => {
+test("opening a pre-slice-2 objectives table migrates review_state in as 'accepted' (and source_run_id as NULL)", () => {
   const driver = openDatabase(":memory:");
   // An older schema: the slice-1 objectives table, before review_state existed, with a row.
   driver.exec(`
@@ -318,9 +375,11 @@ test("opening a pre-slice-2 objectives table migrates review_state in as 'accept
   `);
   const migrated = new AsterismStore(driver);
   try {
-    // The pre-existing operator-declared objective backfills as `accepted`, so it still frames.
+    // The pre-existing operator-declared objective backfills as `accepted`, so it still frames,
+    // and source_run_id was added as a NULLABLE column — the old row has no source run.
     const row = migrated.objectives.get("a1", "o1");
     expect(row?.reviewState).toBe("accepted");
+    expect(row?.sourceRunId).toBeUndefined();
     expect(migrated.objectives.listActiveAccepted("a1").map((o) => o.id)).toEqual(["o1"]);
   } finally {
     migrated.close();

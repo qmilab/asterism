@@ -77,6 +77,22 @@ function fakeReflection(specs: ProposalSpec[]): ReflectionProvider {
   };
 }
 
+/** A reflection stand-in (Type B): proposes none, suggests marking every active objective "done". */
+function fakeTransitionProvider(): ReflectionProvider {
+  return {
+    async reflect() {
+      return [];
+    },
+    async proposeObjectiveTransitions(input) {
+      return input.objectives.map((o) => ({
+        objectiveId: o.id,
+        proposedStatus: "done" as const,
+        confidence: 0.9,
+      }));
+    },
+  };
+}
+
 /** Init an install, create an autonomous agent, and give it one finished run with output. */
 async function withFinishedRun(h: Harness, agentName = "personal"): Promise<void> {
   h.io.makeAdapter = () => ({ adapter: fakeAdapter });
@@ -1127,6 +1143,153 @@ test("reflect --propose then --review drains the queue and needs no model to do 
   const mem = await capture(["memory", "inspect", "personal"], h.io);
   expect(mem).toContain("a queued lesson");
   expect(mem).toContain("accepted");
+});
+
+// --- Type B: objective transition suggestions in `reflect --review` ---------
+
+test("reflect --review suggests finishing an objective the run completed, and applies it on yes", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  h.io.reviewTransition = () => "apply";
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("looks finished");
+  expect(out).toContain("looks done");
+  expect(out).toContain("1 applied");
+
+  // The objective is now done, and the audited transition is on the agent's event log.
+  expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
+  expect(await capture(["events", "tail", "personal"], h.io)).toContain("objective.status_changed");
+});
+
+test("reflect --review leaves an objective unchanged when the suggestion is skipped", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  h.io.reviewTransition = () => "skip";
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("looks finished");
+  expect(out).toContain("0 applied, 1 skipped");
+  // Still active — only an explicit apply changes it.
+  expect(await capture(["objective", "list", "personal"], h.io)).not.toContain("· done");
+});
+
+test("reflect --review surfaces no transition suggestion (and changes nothing) when unattended", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  // No `reviewTransition` hook wired ⇒ the transition step short-circuits: nothing surfaced, nothing applied.
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).not.toContain("looks finished");
+  expect(await capture(["objective", "list", "personal"], h.io)).not.toContain("· done");
+});
+
+test("reflect --review surfaces a transition from an OLDER queued run, not just the latest", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["objective", "add", "personal", "finish the migration"], h.io);
+  await runCli(["run", "personal", "run the migration"], h.io); // R1 completes the migration
+
+  // Capture R1's id from --propose's reflect call (only R1 is un-reflected then), and suggest a
+  // transition ONLY when R1's transcript is among the runs judged.
+  let r1Id = "";
+  const provider: ReflectionProvider = {
+    async reflect(i) {
+      r1Id = i.transcript.runId;
+      return [
+        { memoryType: "semantic", content: "did the migration", confidence: 0.8, sourceRunId: i.transcript.runId },
+      ];
+    },
+    async proposeObjectiveTransitions(i) {
+      return i.transcripts.some((t) => t.runId === r1Id)
+        ? i.objectives.map((o) => ({ objectiveId: o.id, proposedStatus: "done" as const, confidence: 0.9 }))
+        : [];
+    },
+  };
+  h.io.makeReflectionProvider = () => ({ provider });
+  await runCli(["reflect", "personal", "--propose"], h.io); // queues a memory whose source run is R1
+
+  await runCli(["run", "personal", "write a blog"], h.io); // R2 — newer, now the latest run
+
+  // Review drains the queued memory and surfaces transitions. The queued proposal's source run (R1)
+  // is judged even though R2 is now latest, so the migration completion still surfaces.
+  h.io.review = (): ReviewDecision => ({ kind: "reject" });
+  h.io.reviewTransition = () => "apply";
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("looks finished");
+  expect(out).toContain("1 applied");
+  expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
+});
+
+test("reflect --review catches an older run that queued ONLY an objective proposal (no memory)", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["objective", "add", "personal", "finish the migration"], h.io); // the ACTIVE objective
+  await runCli(["run", "personal", "run the migration"], h.io); // R1 completes it
+
+  // --propose queues ONLY an objective proposal for R1 (no memory), capturing R1's id. The proposed
+  // objective carries sourceRunId = R1, the only handle to that run once a newer run arrives.
+  let r1Id = "";
+  const provider: ReflectionProvider = {
+    async reflect() {
+      return [];
+    },
+    async proposeObjectives(i) {
+      r1Id = i.transcript.runId;
+      return [{ content: "keep the notes tidy", confidence: 0.7, sourceRunId: i.transcript.runId }];
+    },
+    async proposeObjectiveTransitions(i) {
+      return i.transcripts.some((t) => t.runId === r1Id)
+        ? i.objectives.map((o) => ({ objectiveId: o.id, proposedStatus: "done" as const, confidence: 0.9 }))
+        : [];
+    },
+  };
+  h.io.makeReflectionProvider = () => ({ provider });
+  await runCli(["reflect", "personal", "--propose"], h.io); // queues a PROPOSED objective from R1
+
+  await runCli(["run", "personal", "write a blog"], h.io); // R2 — newer, now the latest run
+
+  // Review drains the queued objective proposal and surfaces transitions. R1 is recovered from the
+  // queued objective's sourceRunId (it left no memory), so the migration completion still surfaces.
+  h.io.review = (): ReviewDecision => ({ kind: "reject" });
+  h.io.reviewTransition = () => "apply";
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("looks finished");
+  expect(out).toContain("1 applied");
+  expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
+});
+
+test("reflect --review skips a stale transition instead of overwriting a concurrently changed objective", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the migration"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  // The advisory is generated while the objective is active+accepted; this hook simulates ANOTHER
+  // session DROPPING it between generation and apply, then says "apply" — the guarded CAS must skip,
+  // never overwriting the newer status.
+  h.io.reviewTransition = async (item) => {
+    await runCli(["objective", "drop", "personal", item.objectiveId], h.io);
+    return "apply";
+  };
+
+  const out = await capture(["reflect", "personal", "--review"], h.io);
+  expect(out).toContain("looks finished");
+  expect(out).toContain("the objective changed elsewhere — skipped");
+  expect(out).toContain("0 applied, 1 skipped");
+  // It stays dropped — the stale "done" never clobbered the concurrent change.
+  const list = await capture(["objective", "list", "personal"], h.io);
+  expect(list).toContain("· dropped");
+  expect(list).not.toContain("· done");
 });
 
 test("reflect --review drains the queue by rejecting too (a refused proposal leaves it)", async () => {

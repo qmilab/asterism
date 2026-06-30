@@ -35,6 +35,7 @@ import type {
   Objective,
   ObjectiveStatus,
   ReviewState,
+  TransitionStatus,
   RecallProviderId,
   Run,
   RunStatus,
@@ -156,6 +157,14 @@ export class AsterismStore {
     // must be definitively framable (`accepted`) or not, never ambiguous.
     if (!this.columnExists("objectives", "review_state")) {
       this.driver.exec(`ALTER TABLE objectives ADD COLUMN review_state TEXT NOT NULL DEFAULT 'accepted'`);
+    }
+    // source_run_id joined `objectives` for the Type-B transition advisory (#87): a queued
+    // objective proposal carries the run it was noticed in, so the review's transition pass can
+    // judge that source run, not just the latest. NULLABLE with NO default — unlike review_state
+    // it is provenance only, never gates framing, so a pre-existing (operator-declared) objective
+    // is correctly left NULL rather than backfilled.
+    if (!this.columnExists("objectives", "source_run_id")) {
+      this.driver.exec(`ALTER TABLE objectives ADD COLUMN source_run_id TEXT`);
     }
     // The world-fact review state joined `world_facts` after slice 3 first shipped the
     // table (#86: a future derived writer PROPOSES facts, gated by a review state). Add it
@@ -968,12 +977,18 @@ export class AsterismStore {
    * `accepted`) until a human accepts it — and the `objective.added` audit shows it was
    * queued, not declared.
    */
-  createObjective(agentId: string, content: string, reviewState?: ReviewState): Objective {
+  createObjective(
+    agentId: string,
+    content: string,
+    reviewState?: ReviewState,
+    sourceRunId?: string,
+  ): Objective {
     let objective: Objective;
     try {
       objective = this.objectives.create(agentId, {
         content,
         ...(reviewState !== undefined ? { reviewState } : {}),
+        ...(sourceRunId !== undefined ? { sourceRunId } : {}),
       });
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
@@ -1043,7 +1058,13 @@ export class AsterismStore {
         from: "proposed",
         to: claimed.reviewState,
       });
-      const objective = this.objectives.create(agentId, { content, reviewState: "accepted" });
+      // Carry the original proposal's provenance onto the edited accepted row, so an edited-accept
+      // keeps the source run the same way an unedited accept (an in-place CAS) does.
+      const objective = this.objectives.create(agentId, {
+        content,
+        reviewState: "accepted",
+        ...(current.sourceRunId !== undefined ? { sourceRunId: current.sourceRunId } : {}),
+      });
       this.emit(agentId, "objective.added", {
         objectiveId: objective.id,
         status: objective.status,
@@ -1102,6 +1123,35 @@ export class AsterismStore {
         this.emit(agentId, "objective.status_changed", {
           objectiveId: id,
           from: current.status,
+          to: objective.status,
+        });
+      }
+      return objective;
+    });
+  }
+
+  /**
+   * Apply a reflection-SUGGESTED transition (Type B): advance the objective to `status` ONLY IF it
+   * is still `active` + `accepted` (the state the advisory was generated against), via a single
+   * guarded CAS ({@link ObjectiveRepository.setStatusIfActiveAccepted}). A concurrent change by
+   * another session — the objective was completed, dropped, or rejected meanwhile — makes the CAS
+   * match nothing, so this returns undefined and the surface reports it stale (skipped) rather than
+   * overwriting the newer status. On a real change it records `objective.status_changed` (references
+   * only; `from` is `active`, which the precondition guaranteed). The advisory path's counterpart to
+   * the operator's UNCONDITIONAL {@link setObjectiveStatus} (a human running `objective done`/`drop`
+   * directly DOES mean to change it regardless of its current state, so that path stays unguarded).
+   */
+  applyObjectiveTransition(
+    agentId: string,
+    id: string,
+    status: TransitionStatus,
+  ): Objective | undefined {
+    return this.driver.transaction(() => {
+      const objective = this.objectives.setStatusIfActiveAccepted(agentId, id, status);
+      if (objective) {
+        this.emit(agentId, "objective.status_changed", {
+          objectiveId: id,
+          from: "active",
           to: objective.status,
         });
       }

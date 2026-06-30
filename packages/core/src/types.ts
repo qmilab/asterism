@@ -57,6 +57,22 @@ export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
 export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];
 
 /**
+ * The statuses an objective may be TRANSITIONED to when it is wound down — the non-`active`
+ * terminals `done` and `dropped`. An objective is never transitioned back to `active` (its
+ * starting state), so this is the legal target set for both the operator's `objective done`/`drop`
+ * intent and the Type-B reflection transition advisory. `satisfies readonly ObjectiveStatus[]` makes
+ * it a compile-time-checked subset of {@link OBJECTIVE_STATUSES}, so the two can never drift.
+ */
+export const TRANSITION_STATUSES = ["done", "dropped"] as const satisfies readonly ObjectiveStatus[];
+
+export type TransitionStatus = (typeof TRANSITION_STATUSES)[number];
+
+/** Whether `value` is a status an objective may be transitioned TO (`done`/`dropped`, never `active`). */
+export function isTransitionStatus(value: string): value is TransitionStatus {
+  return (TRANSITION_STATUSES as readonly string[]).includes(value);
+}
+
+/**
  * An agent's EARNED autonomy on one destructive capability — the per-capability
  * "trust contract" that sits underneath the coarse, whole-agent {@link TrustLevel}.
  * Progressive, and the *only* value that changes gate behaviour is the top rung:
@@ -241,6 +257,12 @@ export interface Objective {
    * acting as a backdoor injection.
    */
   reviewState: ReviewState;
+  /**
+   * The run a reflection-PROPOSED objective was noticed in (so the Type-B transition advisory can
+   * judge that source run, not only the latest). Absent for an operator-declared objective —
+   * provenance only, it never gates framing. Mirrors {@link Memory.sourceRunId}.
+   */
+  sourceRunId?: string;
   createdAt: string;
   updatedAt: string;
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow, SqlValue } from "../db/driver.js";
-import type { Objective, ObjectiveStatus, ReviewState } from "../types.js";
-import { OBJECTIVE_STATUSES, REVIEW_STATES, validateEnum } from "../types.js";
+import type { Objective, ObjectiveStatus, ReviewState, TransitionStatus } from "../types.js";
+import { OBJECTIVE_STATUSES, REVIEW_STATES, TRANSITION_STATUSES, validateEnum } from "../types.js";
 import { assertMemorySafe } from "../firewall.js";
 import { requireAgentId } from "./scope.js";
 
@@ -14,6 +14,12 @@ export interface CreateObjectiveInput {
    * accepts it. Mirrors {@link CreateMemoryInput.reviewState}.
    */
   reviewState?: ReviewState;
+  /**
+   * The run a reflection PROPOSAL was noticed in — set on the proposed path so the Type-B
+   * transition advisory can later judge that source run. Omitted for an operator-declared
+   * objective (provenance only; it never gates framing). Mirrors {@link CreateMemoryInput.sourceRunId}.
+   */
+  sourceRunId?: string;
 }
 
 /**
@@ -36,6 +42,7 @@ function mapObjective(row: SqlRow): Objective {
     content: String(row.content),
     status: String(row.status) as ObjectiveStatus,
     reviewState: String(row.review_state) as ReviewState,
+    ...(row.source_run_id != null ? { sourceRunId: String(row.source_run_id) } : {}),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -71,11 +78,12 @@ export class ObjectiveRepository {
     const now = new Date().toISOString();
     const row = this.driver
       .prepare(
-        `INSERT INTO objectives (id, agent_id, content, status, review_state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO objectives
+           (id, agent_id, content, status, review_state, source_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING *`,
       )
-      .get([id, agentId, input.content, "active", reviewState, now, now]);
+      .get([id, agentId, input.content, "active", reviewState, input.sourceRunId ?? null, now, now]);
     if (!row) throw new Error("objective insert did not persist");
     return mapObjective(row);
   }
@@ -154,6 +162,36 @@ export class ObjectiveRepository {
       .prepare(
         `UPDATE objectives SET status = ?, updated_at = ?
           WHERE id = ? AND agent_id = ?
+          RETURNING *`,
+      )
+      .get([status, now, id, agentId]);
+    return row ? mapObjective(row) : undefined;
+  }
+
+  /**
+   * Advance an objective to a terminal status ONLY IF it is still `active` AND `accepted` — the
+   * guarded CAS the Type-B transition advisory applies through. The advisory is generated against a
+   * snapshot of the active+accepted set, so by apply time another session may have moved the
+   * objective (to done/dropped, or rejected it); the precondition lives in the WHERE clause, so a
+   * concurrent change makes this match nothing (returns undefined → the surface reports it stale) and
+   * the newer status is never overwritten. `status` is a {@link TransitionStatus} (`done`/`dropped`)
+   * — validated against {@link TRANSITION_STATUSES}, so even an untyped caller can never use this to
+   * write `active` (a no-op self-transition that would emit a bogus `active → active` event); the
+   * type forbids it for TS callers and the enum guard for the rest. `updated_at` advances. Distinct
+   * from {@link setStatus}, the operator's UNCONDITIONAL change (which DOES accept any status).
+   */
+  setStatusIfActiveAccepted(
+    agentId: string,
+    id: string,
+    status: TransitionStatus,
+  ): Objective | undefined {
+    requireAgentId(agentId);
+    validateEnum(status, TRANSITION_STATUSES, "objective transition status");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE objectives SET status = ?, updated_at = ?
+          WHERE id = ? AND agent_id = ? AND status = 'active' AND review_state = 'accepted'
           RETURNING *`,
       )
       .get([status, now, id, agentId]);

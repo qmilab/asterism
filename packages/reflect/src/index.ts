@@ -14,6 +14,9 @@ export {
   buildObjectiveReflectionUserPrompt,
   parseObjectiveProposals,
   OBJECTIVE_REFLECTION_SYSTEM_PROMPT,
+  buildObjectiveTransitionUserPrompt,
+  parseObjectiveTransitions,
+  OBJECTIVE_TRANSITION_SYSTEM_PROMPT,
 } from "./provider.js";
 
 export { createHttpChatClient } from "./model.js";
