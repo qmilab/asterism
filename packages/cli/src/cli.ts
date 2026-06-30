@@ -1452,14 +1452,24 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
   }
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
-  // The only mode in T1 is handoff; default to it so the common case needs no flag, but
-  // validate any value given so an unimplemented mode is a clear error, not a silent
-  // connection nothing can use.
-  const mode = stringFlag(parsed.flags.mode) ?? "handoff";
   if (!fromName || !toName) {
     io.err("Usage: asterism connect <from> <to> --mode handoff");
     return Promise.resolve(1);
   }
+  // The only mode in T1 is handoff; an ABSENT `--mode` defaults to it so the common case
+  // needs no flag. But `--mode` with NO value parses as boolean `true` — a malformed
+  // invocation (`--mode`, or `--mode --artifact-only`, where the next dash-token is read as
+  // its own flag). Since connect grants a permissioned channel, reject that loudly rather
+  // than silently opening the default connection (the absent case is `undefined`, which
+  // still correctly defaults). [Codex review P2: reject a missing connect mode value.]
+  const modeFlag = parsed.flags.mode;
+  if (modeFlag === true) {
+    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
+    return Promise.resolve(1);
+  }
+  // Validate any value given so an unimplemented mode is a clear error, not a silent
+  // connection nothing can use.
+  const mode = modeFlag ?? "handoff";
   if (!(CONNECTION_MODES as readonly string[]).includes(mode)) {
     io.err(`Unknown connection mode "${mode}". Supported: ${CONNECTION_MODES.join(", ")}.`);
     return Promise.resolve(1);

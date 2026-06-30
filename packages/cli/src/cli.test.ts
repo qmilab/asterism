@@ -3625,6 +3625,22 @@ test("connect rejects a self-connection and an unimplemented mode", async () => 
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
 });
 
+test("connect rejects --mode with no value rather than opening a default connection (Codex P2)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  // `--mode` with no value parses as a boolean flag — a malformed invocation. Granting a
+  // permissioned channel must not silently fall back to the default.
+  expect(await runCli(["connect", "a", "b", "--mode"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/--mode needs a value/i);
+  // `--mode --artifact-only` is the same shape (the dash-token is read as its own flag).
+  expect(await runCli(["connect", "a", "b", "--mode", "--artifact-only"], h.io)).toBe(1);
+  // Neither malformed invocation opened a connection.
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).toMatch(/no connections yet/i);
+});
+
 test("connect reports an unknown agent", async () => {
   const h = harness();
   await runCli(["init"], h.io);
