@@ -149,6 +149,14 @@ export class AsterismStore {
     if (!this.columnExists("agent_settings", "world_fact_cap")) {
       this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN world_fact_cap INTEGER`);
     }
+    // The install-wide world-fact cap default joined `install_settings` after that table
+    // first shipped (with only `recall_budget`), filling the middle tier of
+    // `resolveWorldFactCap` to match `resolveRecallBudget`'s three. Add it idempotently; a
+    // NULL default means an existing install reads as "no install-wide default set", so
+    // resolution falls through to the kernel DEFAULT_WORLD_FACT_CAP — the unchanged state.
+    if (!this.columnExists("install_settings", "world_fact_cap")) {
+      this.driver.exec(`ALTER TABLE install_settings ADD COLUMN world_fact_cap INTEGER`);
+    }
     // The objective review state joined `objectives` after slice 1 first shipped the
     // table (reflection now PROPOSES objectives, gated by a review state). Add it
     // idempotently with DEFAULT 'accepted': every pre-existing objective was
@@ -433,16 +441,25 @@ export class AsterismStore {
   }
 
   /**
-   * The agent's EFFECTIVE world-fact cap — the per-agent override if set, else the kernel
-   * {@link DEFAULT_WORLD_FACT_CAP}. The single source of truth for "how many distinct
-   * working notes may this agent hold", owned by the kernel so the two write-path
-   * enforcement sites ({@link recordWorldFact}, {@link proposeWorldFact}) and every surface
-   * that displays the cap read the same number. Two layers only by design — an install-wide
-   * default (the recall-budget #60 pattern) is a deferred additive follow-up, slotting in
-   * between these two when built, exactly as {@link resolveRecallBudget} layers its three.
+   * The agent's EFFECTIVE world-fact cap, in precedence order:
+   *
+   *   1. the agent's own per-agent override (`agent_settings.world_fact_cap`), else
+   *   2. the install-wide default (`install_settings.world_fact_cap`), else
+   *   3. the kernel's built-in constant ({@link DEFAULT_WORLD_FACT_CAP}).
+   *
+   * The single source of truth for "how many distinct working notes may this agent hold",
+   * owned by the kernel so the two write-path enforcement sites ({@link recordWorldFact},
+   * {@link proposeWorldFact}) and every surface that displays the cap read the same number.
+   * The three tiers mirror {@link resolveRecallBudget} exactly: the per-agent read is
+   * `agentId`-scoped, so an agent's own override is resolved only from its own setting, and
+   * the install-wide row carries no agent data.
    */
   resolveWorldFactCap(agentId: string): number {
-    return this.agentSettings.getWorldFactCap(agentId) ?? DEFAULT_WORLD_FACT_CAP;
+    const perAgent = this.agentSettings.getWorldFactCap(agentId);
+    if (perAgent !== undefined) return perAgent;
+    const installDefault = this.installSettings.getWorldFactCap();
+    if (installDefault !== undefined) return installDefault;
+    return DEFAULT_WORLD_FACT_CAP;
   }
 
   /**

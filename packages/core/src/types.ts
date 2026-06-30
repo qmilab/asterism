@@ -400,6 +400,13 @@ export interface InstallSettings {
    * {@link DEFAULT_RECALL_BUDGET}.
    */
   recallBudget?: number;
+  /**
+   * Install-wide default world-fact cap — the maximum distinct working notes an agent may
+   * hold, for any agent without its own `worldFactCap`. `undefined` ⇒ unset, so the kernel
+   * falls back to {@link DEFAULT_WORLD_FACT_CAP}. The middle tier of `resolveWorldFactCap`,
+   * mirroring `recallBudget` here.
+   */
+  worldFactCap?: number;
   createdAt: string;
   updatedAt: string;
 }

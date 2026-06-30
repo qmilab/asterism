@@ -271,6 +271,26 @@ describe("world-fact cap — per-agent override (#84 carry-forward)", () => {
     expect(store.resolveWorldFactCap(bob.id)).toBe(DEFAULT_WORLD_FACT_CAP);
   });
 
+  test("resolveWorldFactCap layers three tiers: per-agent > install-wide > kernel constant", () => {
+    // No setting anywhere ⇒ the kernel constant.
+    expect(store.resolveWorldFactCap(alice.id)).toBe(DEFAULT_WORLD_FACT_CAP);
+    // An install-wide default applies to every agent without its own override.
+    store.installSettings.setWorldFactCap(10);
+    expect(store.resolveWorldFactCap(alice.id)).toBe(10);
+    expect(store.resolveWorldFactCap(bob.id)).toBe(10);
+    // A per-agent override wins over the install-wide default — for that agent only.
+    store.setWorldFactCap(alice.id, 3);
+    expect(store.resolveWorldFactCap(alice.id)).toBe(3);
+    expect(store.resolveWorldFactCap(bob.id)).toBe(10);
+    // Clearing the per-agent override falls back to the install-wide default, not the constant.
+    store.clearWorldFactCap(alice.id);
+    expect(store.resolveWorldFactCap(alice.id)).toBe(10);
+    // Clearing the install-wide default then falls all the way back to the kernel constant.
+    store.installSettings.clearWorldFactCap();
+    expect(store.resolveWorldFactCap(alice.id)).toBe(DEFAULT_WORLD_FACT_CAP);
+    expect(store.resolveWorldFactCap(bob.id)).toBe(DEFAULT_WORLD_FACT_CAP);
+  });
+
   test("a lower per-agent cap bites earlier; the error carries the agent's actual cap", () => {
     store.setWorldFactCap(alice.id, 2);
     store.recordWorldFact(alice.id, "a", "1");

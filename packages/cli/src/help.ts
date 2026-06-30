@@ -313,7 +313,7 @@ already waiting needs no model.`,
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
 asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>
-asterism config world-fact-cap <agent> <n>  ·  --unset
+asterism config world-fact-cap <agent> <n>  ·  --unset  ·  --default <n>
 asterism config recall-provider <agent> local  ·  --unset
 asterism config cognition-provider <agent> lodestar  ·  --unset
 asterism config cognition-capture <agent> content  ·  references
@@ -351,6 +351,11 @@ its runs when you want it to differ.
                                         Clear it, so the agent uses the default again.
   asterism config world-fact-cap <agent>
                                         Show this agent's current world-fact cap.
+  asterism config world-fact-cap --default <n>
+                                        Set the install-wide default cap for every agent
+                                        without its own (·  --default --unset to clear,
+                                        ·  --default to show). Precedence: a per-agent
+                                        cap, then this, then the built-in.
   asterism config recall-provider <agent> local
                                         Rank this agent's memory by meaning, using a
                                         local embeddings endpoint (opt-in, off by
@@ -385,6 +390,12 @@ agent's own model overrides everything.
 An agent's recall budget caps how many of its saved memories are selected to frame a
 run — the most relevant are kept under the cap. Each agent's budget is its own; leave
 it unset to use the built-in default.
+
+An agent's world-fact cap bounds how many distinct working notes it may keep at once. At
+the cap, a new note is refused (loudly) rather than evicting an existing one — notes are
+never silently dropped. Set it per agent, or set one install-wide default with
+\`--default\`; the precedence is the same as the recall budget — a per-agent cap, then the
+install-wide default, then the built-in.
 
 Recall provider chooses HOW that selection is ranked. The default is a built-in
 keyword ranker that needs nothing and makes no network call. Opt an agent into

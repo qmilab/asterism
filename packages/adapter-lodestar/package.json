@@ -1,6 +1,6 @@
 {
   "name": "@qmilab/asterism-adapter-lodestar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Optional cognition layer: wraps an Asterism run to record an auditable trace via Lodestar. You probably want @qmilab/asterism.",
   "type": "module",
   "license": "Apache-2.0",

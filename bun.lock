@@ -12,7 +12,7 @@
     },
     "packages/adapter-lodestar": {
       "name": "@qmilab/asterism-adapter-lodestar",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@qmilab/asterism-core": "workspace:*",
         "@qmilab/lodestar-core": "0.4.0",
@@ -22,7 +22,7 @@
     },
     "packages/adapter-pi": {
       "name": "@qmilab/asterism-adapter-pi",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@earendil-works/pi-agent-core": "0.78.1",
         "@earendil-works/pi-ai": "0.78.1",
@@ -31,14 +31,14 @@
     },
     "packages/channels": {
       "name": "@qmilab/asterism-channels",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@qmilab/asterism-core": "workspace:*",
       },
     },
     "packages/cli": {
       "name": "@qmilab/asterism",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "bin": {
         "asterism": "./dist/bin.js",
       },
@@ -54,28 +54,28 @@
     },
     "packages/core": {
       "name": "@qmilab/asterism-core",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "optionalDependencies": {
         "better-sqlite3": "^12.10.0",
       },
     },
     "packages/recall-local": {
       "name": "@qmilab/asterism-recall-local",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@qmilab/asterism-core": "workspace:*",
       },
     },
     "packages/reflect": {
       "name": "@qmilab/asterism-reflect",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@qmilab/asterism-core": "workspace:*",
       },
     },
     "packages/server": {
       "name": "@qmilab/asterism-server",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@qmilab/asterism-core": "workspace:*",
       },

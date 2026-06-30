@@ -19,11 +19,11 @@ both `linux/amd64` and `linux/arm64`** — Intel/AMD servers and Apple Silicon M
 with no `--platform` flag:
 
 ```console
-$ docker pull ghcr.io/qmilab/asterism        # or :0.3.0 to pin a version
+$ docker pull ghcr.io/qmilab/asterism        # or :0.4.0 to pin a version
 $ docker run --rm ghcr.io/qmilab/asterism --help
 ```
 
-Tags: `latest`, the exact version (e.g. `0.3.0`), and the minor line (`0.3`). The examples
+Tags: `latest`, the exact version (e.g. `0.4.0`), and the minor line (`0.4`). The examples
 below use the short local tag `asterism`; substitute `ghcr.io/qmilab/asterism` anywhere to
 run the published image instead of building your own.
 

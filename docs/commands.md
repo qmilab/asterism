@@ -236,7 +236,9 @@ nothing external.
 Reflection can also **propose** objectives it notices the agent working toward —
 surfaced for your approval, never adopted on its own. A proposed objective does not
 frame runs until you accept it; review proposals with
-[`asterism reflect <agent> --review`](#reflect).
+[`asterism reflect <agent> --review`](#reflect). Reflection can likewise *suggest* that
+an active objective **looks finished** — but only your `objective done` (or an apply in
+`reflect --review`) actually retires it; an agent never marks its own objective done.
 
 ```console
 $ asterism objective add writer "keep the launch blog current and on-brand"
@@ -269,6 +271,8 @@ than one — says so rather than guessing.
 asterism notes inspect <agent>
 asterism notes set     <agent> "<subject>" "<value>"
 asterism notes clear   <agent> "<subject>"
+asterism notes accept  <agent> "<subject>"
+asterism notes reject  <agent> "<subject>"
 ```
 
 See and manage an agent's **working notes** — its own running record of the current
@@ -283,12 +287,19 @@ reviewed by you, so they are shown and framed plainly as the agent's own record,
 | `notes inspect <agent>` | Show the agent's working notes — its own record, and how full it is. |
 | `notes set <agent> "<subject>" "<value>"` | Set or correct a note yourself. Re-setting a subject **replaces** its value. |
 | `notes clear <agent> "<subject>"` | Remove one note. |
+| `notes accept <agent> "<subject>"` | Approve a note that is **awaiting your review**, so it starts framing runs. |
+| `notes reject <agent> "<subject>"` | Decline a note awaiting review; it is discarded and never frames. |
 
 The agent records and forgets its own notes mid-run through its tools; these operator
-verbs are how **you** inspect and revert them. A note is the agent's own scoped
-state — writing or clearing one is never destructive, and never crosses to another
-agent. An agent keeps a **bounded** number of notes; when they are full, clear one
-before a new subject will save. A note you set is run through the same
+verbs are how **you** inspect and revert them. Notes the agent sets directly take
+effect immediately. Some notes can instead arrive **marked awaiting your review** —
+surfaced for you to `accept` or `reject` — and until you accept one it does not frame
+the agent's runs (a subject can hold an accepted note *and* a proposed update to it
+side by side; the review verbs act on the proposed one). A note is the agent's own
+scoped state — writing, clearing, or reviewing one is never destructive, and never
+crosses to another agent. An agent keeps a **bounded** number of notes; when they are
+full, clear one before a new subject will save (tune the limit with
+[`config world-fact-cap`](#config)). A note you set is run through the same
 [safety screen](./concepts.md#reflection) as the agent's own (a write that trips the
 screen is refused, not stored).
 
@@ -306,11 +317,14 @@ Set working note "draft status" for writer.
 
 $ asterism notes clear writer "house style"
 Cleared working note "house style" for writer.
+
+$ asterism notes accept writer "draft status"
+Accepted working note "draft status" for writer; it now frames runs.
 ```
 
 An agent with no working notes says so, with the command to set one. Clearing a
-subject that has no note, or setting one when notes are full, reports the problem
-plainly rather than failing silently.
+subject that has no note, setting one when notes are full, or reviewing a note that is
+not awaiting review reports the problem plainly rather than failing silently.
 
 ---
 
@@ -512,6 +526,56 @@ other read, a live tail is scoped to the one agent.
 
 ---
 
+## `trace`
+
+```
+asterism trace <agent>
+```
+
+Review an agent's recorded **cognition trace** — an auditable, tool-by-tool record of
+what each of its runs did, rendered as a report. Only the named agent's own trace; it
+is never a way to see another agent's.
+
+A trace exists only for an agent you opt in with
+[`config cognition-provider <agent> lodestar`](#config). It is **observe-only**:
+recording a trace never changes what an agent may do — a destructive action still
+pauses for the same confirmation. By default it records **references only** (which tool
+ran, whether it succeeded, how much it returned) — never the contents of a tool's input
+or output. You can additionally record the **redacted content** each tool returned with
+[`config cognition-capture <agent> content`](#config); even then, input arguments are
+never kept, common secret shapes (keys, tokens, passwords, private keys) are scrubbed,
+and the captured text is bounded and stripped of terminal-control characters.
+
+> **The scrub is best-effort, not a guarantee.** Leave content capture off for an agent
+> that routinely handles secrets you cannot risk appearing in an audit record.
+
+The trace is kept in the install's own storage, **outside the agent's workspace**, so
+the agent cannot reach or tamper with its own record. An agent you haven't opted in is
+told how to start a trace; one opted in but not yet run reports it has no trace yet.
+
+```console
+$ asterism config cognition-provider writer lodestar
+Set writer's cognition provider to lodestar. Its runs now record an auditable trace — read it with `asterism trace writer`.
+
+$ asterism trace writer
+# ... per-run report (one section per run, oldest first), each ending with: ...
+
+Recorded tool calls (3):
+  1. read_file  [ok]  1240 bytes
+  2. write_file  [ok]  —
+  3. delete_file  [paused]  —
+```
+
+*(Illustrative — the exact layout reflects the run that was recorded.)* Each run is
+rendered as its own report, oldest first, ending with the tool calls it recorded — which
+tool ran, whether it succeeded, and how much it returned. Before any run, `trace` reports
+the agent has no trace yet; an agent you never opted in is shown the command to start one.
+
+This pairs with [Lodestar](https://github.com/qmilab/lodestar). It is opt-in and off by
+default — the default install records no trace and pulls in nothing for it.
+
+---
+
 ## `reflect`
 
 ```
@@ -561,6 +625,12 @@ Done — 1 saved, 1 rejected.
 
 If a proposal trips the memory firewall it is flagged with a `⚠`; if you accept
 a flagged one anyway, the firewall still refuses to save it (`⛔ blocked`).
+
+Finally, if the latest run looks to have **finished** one of the agent's standing
+objectives, `--review` suggests marking that objective **done** (or dropped) — you
+**apply** or **skip** each suggestion. The suggestion is advisory: only your apply
+changes the objective's status, and an agent never finishes its own objective. (When
+not run interactively, suggestions are listed, never applied.)
 
 ### `--propose` — fill the pile, unattended
 
@@ -641,16 +711,21 @@ its own; every memory and objective still waits for your `--review`.
 asterism config
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
-asterism config recall-budget <agent> <n>  ·  --unset
+asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>
+asterism config world-fact-cap <agent> <n>  ·  --unset  ·  --default <n>
 asterism config recall-provider <agent> local  ·  --unset
+asterism config cognition-provider <agent> lodestar  ·  --unset
+asterism config cognition-capture <agent> content  ·  references
 ```
 
-Choose the model your agents run on, and tune how each agent recalls its memory.
-Set one install-wide default model, and give any single agent its own model, its own
-recall budget, or its own recall provider when you want it to differ. The model
-settings live in `.asterism/config.json` and hold **only** which model to use —
-never an API key (keys stay in the [environment](./installation.md#api-keys)); the
-per-agent recall settings are kept in the kernel store, scoped to each agent.
+Choose the model your agents run on, and tune how each agent recalls its memory, what
+it remembers, and whether it keeps an auditable trace of its runs. Set one install-wide
+default model, and give any single agent its own model, its own recall or working-note
+limits, its own recall provider, or a [cognition trace](#trace) when you want it to
+differ. The model settings live in `.asterism/config.json` and hold **only** which
+model to use — never an API key (keys stay in the
+[environment](./installation.md#api-keys)); the per-agent kernel settings are kept in
+the kernel store, scoped to each agent.
 
 | Form | What it does |
 |---|---|
@@ -659,8 +734,11 @@ per-agent recall settings are kept in the kernel store, scoped to each agent.
 | `config set <id> --agent <name>` | Pin one agent to its own model. |
 | `config unset` | Clear the install default. |
 | `config unset --agent <name>` | Clear one agent's override. |
-| `config recall-budget <agent> <n>` | Cap how many memories this agent recalls into a run. `--unset` returns it to the default; with no value, shows the current setting. |
+| `config recall-budget <agent> <n>` | Cap how many memories this agent recalls into a run. `--unset` returns it to the default; with no value, shows the current setting. `--default <n>` sets one install-wide default for every agent without its own (precedence: per-agent → install-wide → built-in). |
+| `config world-fact-cap <agent> <n>` | Cap how many distinct working notes this agent may keep. At the cap a new note is refused, never silently dropped. `--unset` returns it to the default; with no value, shows the current setting. `--default <n>` sets one install-wide default for every agent without its own (same precedence as the recall budget). |
 | `config recall-provider <agent> local` | Rank this agent's memory by meaning using a local embeddings endpoint (opt-in; see [Tuning recall](#tuning-recall)). `--unset` returns it to the built-in keyword ranker; with no value, shows the current setting. |
+| `config cognition-provider <agent> lodestar` | Record an auditable [cognition trace](#trace) of this agent's runs (opt-in, off by default). `--unset` stops recording; with no value, shows the current setting. |
+| `config cognition-capture <agent> content` | Also record the *redacted content* each tool returned, not just references — only meaningful with a trace turned on. `references` (the default) records references only; with no value, shows the current setting. |
 
 | Option (for `set`) | Description |
 |---|---|
@@ -691,9 +769,15 @@ Per-agent model:
   work  →  claude-opus-4-8 (provider: anthropic)  [agent override]
   personal  →  gpt-4o-mini (provider: openai)  [install default]
 
+Install-wide recall budget: (none — built-in default 20)
 Per-agent recall budget:
   work  →  20  [default]
   personal  →  20  [default]
+
+Install-wide world-fact cap: (none — built-in default 32)
+Per-agent world-fact cap:
+  work  →  32  [default]
+  personal  →  32  [default]
 
 Per-agent recall provider:
   work  →  keyword (built-in)  [default]
@@ -744,6 +828,50 @@ If an opted-in agent has no endpoint configured, its runs stop with a clear mess
 rather than quietly falling back — so the misconfiguration is visible. If the
 endpoint is configured but *unreachable* during a run, recall degrades to the keyword
 ranker (it still frames correct memories) and says so, rather than failing the run.
+
+### Working notes cap
+
+An agent keeps **working notes** — short, current facts about its world (see
+[`notes`](#notes)). The world-fact cap bounds how many distinct notes it may hold at
+once. At the cap, a new note is **refused** (loudly) rather than evicting an existing
+one — notes are never silently dropped; clear one to make room.
+
+Set it per agent, or set one install-wide default with `--default`. The precedence is
+the same as the recall budget: a per-agent cap wins over the install-wide default, which
+wins over the built-in.
+
+```console
+$ asterism config world-fact-cap work 50
+Set work's world-fact cap to 50 notes.
+
+$ asterism config world-fact-cap --default 40
+Set the install-wide world-fact cap to 40 notes — every agent without its own override now uses it.
+```
+
+### Cognition trace
+
+Opt a single agent into recording an auditable **[cognition trace](#trace)** of its
+runs — what each tool did, in order — that you read back with `asterism trace`. It is
+**off by default**, and **observe-only**: recording a trace never changes what an agent
+may do.
+
+```console
+$ asterism config cognition-provider work lodestar
+Set work's cognition provider to lodestar. Its runs now record an auditable trace — read it with `asterism trace work`.
+```
+
+By default the trace records **references only** — which tool ran, success or failure,
+how much it returned. You can additionally record the **redacted content** each tool
+returned; even then, input arguments are never kept and common secret shapes are
+scrubbed, but the scrub is best-effort:
+
+```console
+$ asterism config cognition-capture work content
+```
+
+> **Opt-in, and off by default.** The default install records no trace. Leave content
+> capture off for an agent that routinely handles secrets you cannot risk in an audit
+> record. See [`trace`](#trace) for what the record contains and where it is kept.
 
 ---
 

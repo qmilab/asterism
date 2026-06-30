@@ -1,6 +1,6 @@
 {
   "name": "@qmilab/asterism-core",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The engine behind Asterism: agent identities, scoped memory, secrets, trust levels, and the event log. You probably want @qmilab/asterism.",
   "type": "module",
   "license": "Apache-2.0",

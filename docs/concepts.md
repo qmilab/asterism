@@ -241,7 +241,7 @@ The event types you will see:
 | `agent.created` | The agent was created. |
 | `agent.trust_changed` | Its trust level was changed. |
 | `agent.standing_changed` | A capability's earned standing changed — a grant given or revoked. |
-| `agent.setting_changed` | A per-agent setting changed (recall budget, recall provider, or an earning threshold). |
+| `agent.setting_changed` | A per-agent setting changed (recall budget, world-fact cap, recall provider, cognition provider/capture, or an earning threshold). |
 | `run.started` / `run.status_changed` | A run began / changed status. |
 | `run.resumed` | A paused run was confirmed and re-entered, naming the capabilities granted. |
 | `run.declined` | A paused run was declined; it ended without the action ever running. |
@@ -251,10 +251,34 @@ The event types you will see:
 | `action.awaiting_confirmation` | A destructive action paused for confirmation. |
 | `memory.recorded` / `memory.blocked` | A memory was saved / refused by the firewall. |
 | `memory.reviewed` | A proposed memory was accepted or rejected in review. |
+| `objective.added` / `objective.proposed` | A standing objective was declared / proposed by reflection. |
+| `objective.reviewed` / `objective.status_changed` | A proposed objective was accepted or rejected / an objective was marked done or dropped. |
+| `objective.blocked` | An objective write was refused by the firewall. |
+| `world_fact.recorded` / `world_fact.cleared` / `world_fact.blocked` | A working note was set / removed / refused by the firewall. |
+| `world_fact.reviewed` | A proposed working note was accepted or rejected. |
 | `reflection.proposed` | A scheduled `reflect --propose` queued proposals from a run. |
 | `skill.attached` | A skill was attached. |
 | `credential.added` / `credential.rotated` / `credential.removed` | A secret changed. |
 | `secret.read` | A secret value was read out. *(Reserved — no shipped tool reads a secret into a run, so you won't see this yet.)* |
+
+## Cognition trace
+
+Beyond the event log, an agent can keep a **cognition trace** — an auditable,
+tool-by-tool record of what each of its runs did, which you read back with
+[`asterism trace`](./commands.md#trace). It is **opt-in and off by default**: you turn
+it on for one agent with [`config cognition-provider <agent> lodestar`](./commands.md#config),
+and it pairs with [Lodestar](https://github.com/qmilab/lodestar).
+
+Two properties keep it honest. It is **observe-only** — recording a trace never changes
+what an agent may do; a destructive action still pauses for the same confirmation. And
+it is kept in the install's own storage, **outside the agent's workspace**, so the agent
+cannot reach or tamper with its own record. By default the trace records *references
+only* — which tool ran, whether it succeeded, how much it returned — never the contents
+of a tool's input or output. You can additionally record the **redacted content** each
+tool returned ([`config cognition-capture <agent> content`](./commands.md#config)); even
+then, input arguments are never kept and common secret shapes are scrubbed — but that
+scrub is best-effort, so leave content capture off for an agent that routinely handles
+secrets you cannot risk in an audit record.
 
 ## Reflection
 
