@@ -251,6 +251,10 @@ CREATE TABLE IF NOT EXISTS install_settings (
   -- Install-wide default recall budget, or NULL ⇒ the kernel constant. A per-agent
   -- override (agent_settings.recall_budget) still wins over this.
   recall_budget INTEGER,
+  -- Install-wide default world-fact cap, or NULL ⇒ the kernel constant. A per-agent
+  -- override (agent_settings.world_fact_cap) still wins over this — the same three-tier
+  -- shape as recall_budget (per-agent → install-wide → kernel constant).
+  world_fact_cap INTEGER,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );

@@ -2721,11 +2721,90 @@ test("config world-fact-cap reports an unknown agent", async () => {
   expect(h.err.join("\n")).toContain("No agent named");
 });
 
-test("config world-fact-cap rejects an install-wide --default (not available yet)", async () => {
+test("config world-fact-cap --default sets the install-wide default (not a per-agent setting)", async () => {
   const h = harness();
   await runCli(["init"], h.io);
-  expect(await runCli(["config", "world-fact-cap", "--default", "10"], h.io)).toBe(1);
-  expect(h.err.join("\n")).toContain("not available yet");
+  expect(await runCli(["config", "world-fact-cap", "--default", "40"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set the install-wide world-fact cap to 40 notes");
+
+  const store = openHomeStore(h);
+  try {
+    // Stored as an install-wide kernel setting (single row), not against any agent.
+    expect(store.installSettings.getWorldFactCap()).toBe(40);
+  } finally {
+    store.close();
+  }
+});
+
+test("config world-fact-cap --default=<n> (inline form) routes to the install-wide path", async () => {
+  // The parser records `--default=40` as the string "40", not boolean true; the dispatch
+  // must still treat it as install-wide mode (not fall through to the per-agent usage error).
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["config", "world-fact-cap", "--default=40"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Set the install-wide world-fact cap to 40 notes");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.installSettings.getWorldFactCap()).toBe(40);
+  } finally {
+    store.close();
+  }
+});
+
+test("config world-fact-cap --default shows and clears the install-wide default", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await capture(["config", "world-fact-cap", "--default"], h.io)).toContain(
+    "No install-wide world-fact cap set",
+  );
+  await runCli(["config", "world-fact-cap", "--default", "40"], h.io);
+  expect(await capture(["config", "world-fact-cap", "--default"], h.io)).toContain(
+    "Install-wide world-fact cap: 40",
+  );
+
+  h.out.length = 0;
+  expect(await runCli(["config", "world-fact-cap", "--default", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("built-in default");
+  // A second unset reports there was nothing set.
+  h.out.length = 0;
+  expect(await runCli(["config", "world-fact-cap", "--default", "--unset"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("No install-wide world-fact cap was set");
+});
+
+test("config world-fact-cap --default rejects a value that is not a positive whole number", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  for (const bad of ["0", "-5", "-2.5", "abc", "2.5"]) {
+    h.err.length = 0;
+    expect(await runCli(["config", "world-fact-cap", "--default", bad], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("positive whole number");
+  }
+  const store = openHomeStore(h);
+  try {
+    expect(store.installSettings.getWorldFactCap()).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("the install-wide world-fact cap applies to an un-set agent; a per-agent cap still wins", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["config", "world-fact-cap", "--default", "40"], h.io);
+  await runCli(["config", "world-fact-cap", "personal", "8"], h.io);
+
+  // `work` has no override → it reports the install-wide default as the value it uses.
+  expect(await capture(["config", "world-fact-cap", "work"], h.io)).toContain(
+    "install-wide default world-fact cap (40 notes)",
+  );
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("Install-wide world-fact cap: 40");
+  expect(shown).toContain("personal  →  8  [set]"); // per-agent wins
+  expect(shown).toContain("work  →  40  [install-wide default]"); // falls back to install-wide
 });
 
 test("config show lists each agent's world-fact cap, set or default", async () => {
@@ -2736,6 +2815,8 @@ test("config show lists each agent's world-fact cap, set or default", async () =
   await runCli(["config", "world-fact-cap", "personal", "8"], h.io);
 
   const shown = await capture(["config", "show"], h.io);
+  // No install-wide default set → the header reports the built-in fallback.
+  expect(shown).toContain("Install-wide world-fact cap: (none — built-in default 32)");
   expect(shown).toContain("Per-agent world-fact cap");
   expect(shown).toContain("personal  →  8  [set]");
   // The other agent is unaffected — a per-agent setting never crosses agents.

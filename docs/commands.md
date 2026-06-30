@@ -641,7 +641,8 @@ its own; every memory and objective still waits for your `--review`.
 asterism config
 asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]
 asterism config unset [--agent <name>]
-asterism config recall-budget <agent> <n>  ·  --unset
+asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>
+asterism config world-fact-cap <agent> <n>  ·  --unset  ·  --default <n>
 asterism config recall-provider <agent> local  ·  --unset
 ```
 
@@ -659,7 +660,8 @@ per-agent recall settings are kept in the kernel store, scoped to each agent.
 | `config set <id> --agent <name>` | Pin one agent to its own model. |
 | `config unset` | Clear the install default. |
 | `config unset --agent <name>` | Clear one agent's override. |
-| `config recall-budget <agent> <n>` | Cap how many memories this agent recalls into a run. `--unset` returns it to the default; with no value, shows the current setting. |
+| `config recall-budget <agent> <n>` | Cap how many memories this agent recalls into a run. `--unset` returns it to the default; with no value, shows the current setting. `--default <n>` sets one install-wide default for every agent without its own (precedence: per-agent → install-wide → built-in). |
+| `config world-fact-cap <agent> <n>` | Cap how many distinct working notes this agent may keep. At the cap a new note is refused, never silently dropped. `--unset` returns it to the default; with no value, shows the current setting. `--default <n>` sets one install-wide default for every agent without its own (same precedence as the recall budget). |
 | `config recall-provider <agent> local` | Rank this agent's memory by meaning using a local embeddings endpoint (opt-in; see [Tuning recall](#tuning-recall)). `--unset` returns it to the built-in keyword ranker; with no value, shows the current setting. |
 
 | Option (for `set`) | Description |
@@ -691,9 +693,15 @@ Per-agent model:
   work  →  claude-opus-4-8 (provider: anthropic)  [agent override]
   personal  →  gpt-4o-mini (provider: openai)  [install default]
 
+Install-wide recall budget: (none — built-in default 20)
 Per-agent recall budget:
   work  →  20  [default]
   personal  →  20  [default]
+
+Install-wide world-fact cap: (none — built-in default 32)
+Per-agent world-fact cap:
+  work  →  32  [default]
+  personal  →  32  [default]
 
 Per-agent recall provider:
   work  →  keyword (built-in)  [default]
@@ -744,6 +752,25 @@ If an opted-in agent has no endpoint configured, its runs stop with a clear mess
 rather than quietly falling back — so the misconfiguration is visible. If the
 endpoint is configured but *unreachable* during a run, recall degrades to the keyword
 ranker (it still frames correct memories) and says so, rather than failing the run.
+
+### Working notes cap
+
+An agent keeps **working notes** — short, current facts about its world (see
+[`notes`](#notes)). The world-fact cap bounds how many distinct notes it may hold at
+once. At the cap, a new note is **refused** (loudly) rather than evicting an existing
+one — notes are never silently dropped; clear one to make room.
+
+Set it per agent, or set one install-wide default with `--default`. The precedence is
+the same as the recall budget: a per-agent cap wins over the install-wide default, which
+wins over the built-in.
+
+```console
+$ asterism config world-fact-cap work 50
+Set work's world-fact cap to 50 notes.
+
+$ asterism config world-fact-cap --default 40
+Set the install-wide world-fact cap to 40 notes — every agent without its own override now uses it.
+```
 
 ---
 

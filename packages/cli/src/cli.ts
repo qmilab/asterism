@@ -2693,20 +2693,32 @@ function cmdConfigShow(io: CliIO): Promise<number> {
     }
 
     io.out("");
-    io.out(`Per-agent world-fact cap  (built-in default ${DEFAULT_WORLD_FACT_CAP}):`);
+    // The install-wide cap sits between the built-in constant and a per-agent override, the
+    // same three-tier shape as the recall budget above; surface it so the per-agent lines can
+    // name where an un-set agent's value comes from.
+    const installCap = store.installSettings.getWorldFactCap();
+    io.out(
+      installCap !== undefined
+        ? `Install-wide world-fact cap: ${installCap}  (built-in fallback: ${DEFAULT_WORLD_FACT_CAP})`
+        : `Install-wide world-fact cap: (none — built-in default ${DEFAULT_WORLD_FACT_CAP})`,
+    );
+    io.out("Per-agent world-fact cap:");
     if (agents.length === 0) {
       io.out("  (no agents yet)");
     } else {
       // How many distinct working notes each agent may hold. An unset agent resolves to the
-      // kernel constant (no install-wide tier yet); the kernel owns that resolution
-      // (`resolveWorldFactCap`), so this only reads the stored value and labels the source.
+      // install-wide default if one is set, else the kernel constant; the kernel owns that
+      // resolution (`resolveWorldFactCap`), so this only reads the stored values and labels
+      // the source.
       for (const agent of agents) {
         const cap = store.agentSettings.getWorldFactCap(agent.id);
-        io.out(
-          cap !== undefined
-            ? `  ${agent.name}  →  ${cap}  [set]`
-            : `  ${agent.name}  →  ${DEFAULT_WORLD_FACT_CAP}  [default]`,
-        );
+        if (cap !== undefined) {
+          io.out(`  ${agent.name}  →  ${cap}  [set]`);
+        } else if (installCap !== undefined) {
+          io.out(`  ${agent.name}  →  ${installCap}  [install-wide default]`);
+        } else {
+          io.out(`  ${agent.name}  →  ${DEFAULT_WORLD_FACT_CAP}  [default]`);
+        }
       }
     }
 
@@ -2907,24 +2919,20 @@ function cmdConfigInstallRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<nu
  * per-agent override; with `--unset`, clears it back to the kernel default; with
  * neither, shows the current setting. The kernel validates and stores it (agentId-scoped)
  * and owns the effective-value resolution (`resolveWorldFactCap`) — this surface only
- * parses, calls, and formats. Mirrors {@link cmdConfigRecallBudget} without the
- * install-wide `--default` tier: that is a deferred additive follow-up, so the only
- * fallback is the kernel constant.
+ * parses, calls, and formats. Mirrors {@link cmdConfigRecallBudget}, including the
+ * install-wide `--default` tier (dispatched to {@link cmdConfigInstallWorldFactCap}).
  */
 function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
-  // No install-wide tier yet (per-agent → kernel constant only). Reject `--default` with a
-  // clear, forward-looking message rather than silently ignoring it (it would otherwise fall
-  // through to a no-op).
-  if (parsed.flags.default !== undefined) {
-    io.err(
-      "An install-wide world-fact-cap default is not available yet — set it per agent: asterism config world-fact-cap <agent> <n>",
-    );
-    return Promise.resolve(1);
-  }
+  // `--default` operates on the INSTALL-WIDE default (no agent), which sits between the
+  // kernel constant and a per-agent override; otherwise it's a per-agent setting. Route on
+  // the flag being DEFINED, not `=== true`: the parser records `--default 30` as `true` (it
+  // is registered boolean) but the inline `--default=30` as the string `"30"`, and BOTH mean
+  // install-wide mode — the same dispatch as `cmdConfigRecallBudget`.
+  if (parsed.flags.default !== undefined) return cmdConfigInstallWorldFactCap(parsed, io);
 
   const agentName = parsed.positionals[1];
   if (!agentName) {
-    io.err("Usage: asterism config world-fact-cap <agent> <n>  ·  --unset");
+    io.err("Usage: asterism config world-fact-cap <agent> <n>  ·  --unset  ·  --default <n>");
     return Promise.resolve(1);
   }
   const unset = parsed.flags.unset === true;
@@ -2939,17 +2947,24 @@ function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
     const agent = findAgentByName(store, agentName);
     if (!agent) return noAgent(io, agentName);
 
+    // The effective default an un-set agent falls back to: the install-wide default if one
+    // is configured, else the kernel constant — so the messages name the value the agent
+    // ACTUALLY uses, not always the built-in constant.
+    const installDefault = store.installSettings.getWorldFactCap();
+    const effective = installDefault ?? CONSTANT;
+    const effectiveLabel = installDefault !== undefined ? "install-wide default" : "default";
+
     if (unset) {
       // Decide the message from the PRIOR value, not row existence: a cleared row persists
       // (with a NULL cap) to keep its created_at, so "is there a row" is not "was something
       // set". Skip the write entirely when nothing was set.
       const had = store.agentSettings.getWorldFactCap(agent.id);
       if (had === undefined) {
-        io.out(`${agentName} had no world-fact cap set — it already uses the default (${CONSTANT}).`);
+        io.out(`${agentName} had no world-fact cap set — it already uses the ${effectiveLabel} (${effective}).`);
         return 0;
       }
       store.clearWorldFactCap(agent.id);
-      io.out(`Cleared ${agentName}'s world-fact cap — it uses the default (${CONSTANT}) again.`);
+      io.out(`Cleared ${agentName}'s world-fact cap — it uses the ${effectiveLabel} (${effective}) again.`);
       return 0;
     }
 
@@ -2959,7 +2974,7 @@ function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
       io.out(
         current !== undefined
           ? `${agentName}'s world-fact cap: ${current} ${current === 1 ? "note" : "notes"}.`
-          : `${agentName} uses the default world-fact cap (${CONSTANT} notes).`,
+          : `${agentName} uses the ${effectiveLabel} world-fact cap (${effective} notes).`,
       );
       return 0;
     }
@@ -2975,6 +2990,59 @@ function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
     }
     store.setWorldFactCap(agent.id, cap);
     io.out(`Set ${agentName}'s world-fact cap to ${cap} ${cap === 1 ? "note" : "notes"}.`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism config world-fact-cap --default <n>` / `--default --unset` / `--default` —
+ * set, clear, or read the INSTALL-WIDE default world-fact cap. It applies to every agent
+ * without its own per-agent override, and itself sits above the kernel's built-in constant
+ * — so the precedence an operator sees is: per-agent setting > this install-wide default >
+ * built-in. The kernel resolves all three in one place (`resolveWorldFactCap`), so this verb
+ * only stores the value; every surface that reads the cap picks it up without further wiring.
+ * The direct analogue of {@link cmdConfigInstallRecallBudget}.
+ */
+function cmdConfigInstallWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const unset = parsed.flags.unset === true;
+  // The cap can arrive two ways: `--default 30` (registered boolean ⇒ `30` is the next
+  // positional after `world-fact-cap`) or `--default=30` (the parser's inline form ⇒ the value
+  // is the flag's own string). A bare negative (`--default -5` / `-2.5`) still arrives as a
+  // digit/dot-leading flag key, caught by `negativeValue` below.
+  const valueRaw =
+    typeof parsed.flags.default === "string" ? parsed.flags.default : parsed.positionals[1];
+  const negativeValue = hasNumericValueFlag(parsed);
+  const CONSTANT = DEFAULT_WORLD_FACT_CAP;
+
+  return withHomeStore(io, (store) => {
+    if (unset) {
+      const had = store.installSettings.getWorldFactCap();
+      if (had === undefined) {
+        io.out(`No install-wide world-fact cap was set — agents already use the built-in default (${CONSTANT}).`);
+        return 0;
+      }
+      store.installSettings.clearWorldFactCap();
+      io.out(`Cleared the install-wide world-fact cap — agents without their own setting use the built-in default (${CONSTANT}) again.`);
+      return 0;
+    }
+
+    if (valueRaw === undefined && !negativeValue) {
+      const current = store.installSettings.getWorldFactCap();
+      io.out(
+        current !== undefined
+          ? `Install-wide world-fact cap: ${current} ${current === 1 ? "note" : "notes"} (for any agent without its own).`
+          : `No install-wide world-fact cap set — agents use the built-in default (${CONSTANT} notes).`,
+      );
+      return 0;
+    }
+
+    const cap = valueRaw !== undefined ? intFlag(valueRaw) : undefined;
+    if (cap === undefined || cap <= 0) {
+      io.err("The world-fact cap must be a positive whole number.");
+      return 1;
+    }
+    store.installSettings.setWorldFactCap(cap);
+    io.out(`Set the install-wide world-fact cap to ${cap} ${cap === 1 ? "note" : "notes"} — every agent without its own override now uses it.`);
     return 0;
   });
 }

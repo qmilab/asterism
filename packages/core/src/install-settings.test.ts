@@ -57,3 +57,49 @@ test("clearRecallBudget on a fresh install is a no-op (nothing to clear)", () =>
   expect(store.installSettings.clearRecallBudget()).toBeUndefined();
   expect(store.installSettings.getRecallBudget()).toBeUndefined();
 });
+
+// World-fact cap — the sibling install-wide default, the same single-row shape as the
+// recall budget (the middle tier of resolveWorldFactCap).
+
+test("an unset install has no world-fact-cap default (resolution falls to the constant)", () => {
+  expect(store.installSettings.getWorldFactCap()).toBeUndefined();
+});
+
+test("setWorldFactCap persists the install-wide default and reads back", () => {
+  const settings = store.installSettings.setWorldFactCap(40);
+  expect(settings.worldFactCap).toBe(40);
+  expect(store.installSettings.getWorldFactCap()).toBe(40);
+});
+
+test("setWorldFactCap validates a positive whole number at the write boundary", () => {
+  expect(() => store.installSettings.setWorldFactCap(0)).toThrow();
+  expect(() => store.installSettings.setWorldFactCap(-3)).toThrow();
+  expect(() => store.installSettings.setWorldFactCap(2.5)).toThrow();
+  expect(store.installSettings.getWorldFactCap()).toBeUndefined(); // nothing persisted
+});
+
+test("clearWorldFactCap returns to the constant but keeps the row (created_at preserved)", () => {
+  const first = store.installSettings.setWorldFactCap(50);
+  store.installSettings.clearWorldFactCap();
+  expect(store.installSettings.getWorldFactCap()).toBeUndefined();
+  const again = store.installSettings.setWorldFactCap(30);
+  expect(again.createdAt).toBe(first.createdAt);
+  expect(again.worldFactCap).toBe(30);
+});
+
+test("clearWorldFactCap on a fresh install is a no-op (nothing to clear)", () => {
+  expect(store.installSettings.clearWorldFactCap()).toBeUndefined();
+  expect(store.installSettings.getWorldFactCap()).toBeUndefined();
+});
+
+test("the two install-wide defaults share one row without clobbering each other", () => {
+  store.installSettings.setRecallBudget(7);
+  store.installSettings.setWorldFactCap(45);
+  // Each setter touches only its own column, so neither clears the other.
+  expect(store.installSettings.getRecallBudget()).toBe(7);
+  expect(store.installSettings.getWorldFactCap()).toBe(45);
+  // Clearing one leaves the other intact.
+  store.installSettings.clearWorldFactCap();
+  expect(store.installSettings.getRecallBudget()).toBe(7);
+  expect(store.installSettings.getWorldFactCap()).toBeUndefined();
+});

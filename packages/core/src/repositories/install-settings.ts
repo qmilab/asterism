@@ -10,8 +10,10 @@ function intOrUnset(value: unknown): number | undefined {
 /** Map the single install-settings row to the public {@link InstallSettings}. */
 function mapSettings(row: SqlRow): InstallSettings {
   const recallBudget = intOrUnset(row.recall_budget);
+  const worldFactCap = intOrUnset(row.world_fact_cap);
   return {
     ...(recallBudget !== undefined ? { recallBudget } : {}),
+    ...(worldFactCap !== undefined ? { worldFactCap } : {}),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -84,6 +86,57 @@ export class InstallSettingsRepository {
     const row = this.driver
       .prepare(
         `UPDATE install_settings SET recall_budget = NULL, updated_at = ?
+           WHERE singleton = 1 RETURNING *`,
+      )
+      .get([now]);
+    return row ? mapSettings(row) : undefined;
+  }
+
+  /**
+   * The install-wide default world-fact cap, or undefined when unset (no row, or the
+   * column is NULL) — {@link AsterismStore.resolveWorldFactCap} reads this BELOW a per-agent
+   * override and ABOVE the kernel constant, the same three-tier shape as the recall budget.
+   */
+  getWorldFactCap(): number | undefined {
+    return this.get()?.worldFactCap;
+  }
+
+  /**
+   * Set the install-wide default world-fact cap. Validates a positive whole number at the
+   * write boundary (the kernel never trusts a surface to have checked), then upserts ONLY
+   * the `world_fact_cap` column — the sibling `recall_budget` default is left untouched, so
+   * setting one install-wide knob never clears another. `created_at` is preserved across
+   * updates; `updated_at` advances. The direct analogue of {@link setRecallBudget}.
+   */
+  setWorldFactCap(cap: number): InstallSettings {
+    validatePositiveInt(cap, "install world-fact cap");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `INSERT INTO install_settings (singleton, world_fact_cap, created_at, updated_at)
+         VALUES (1, ?, ?, ?)
+         ON CONFLICT(singleton) DO UPDATE SET
+           world_fact_cap = excluded.world_fact_cap,
+           updated_at = excluded.updated_at
+         RETURNING *`,
+      )
+      .get([cap, now, now]);
+    if (!row) throw new Error("install settings upsert did not persist");
+    return mapSettings(row);
+  }
+
+  /**
+   * Clear the install-wide default world-fact cap (back to the kernel constant) by setting
+   * only that column to NULL — the sibling `recall_budget` default is left untouched.
+   * Returns the updated row, or undefined when no row existed (nothing was set, so nothing
+   * to clear). The row itself is kept even when every default is now NULL, so a later
+   * setting preserves `created_at`. Symmetric with {@link clearRecallBudget}.
+   */
+  clearWorldFactCap(): InstallSettings | undefined {
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE install_settings SET world_fact_cap = NULL, updated_at = ?
            WHERE singleton = 1 RETURNING *`,
       )
       .get([now]);
