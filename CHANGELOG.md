@@ -2,6 +2,30 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.4.0 — 2026-06-30
+
+Phase 2 — Governed Learning, complete. This close-out release widens the learning loop from what you tell an agent to remember to what it *observes and does* in its own workspace: an agent proposes working notes from what its tools reveal, works with a richer set of workspace-scoped tools, and can keep an opt-in, observe-only record of how it thought through a run — all without loosening the agent boundary, the trust levels, or the destructive-action gate.
+
+### Added
+
+- **An auditable cognition trace — opt-in and observe-only.** Opt a single agent into recording a tool-by-tool trace of its runs — what it reached for and did, in order — and read it back with `asterism trace <agent>`. It is **off by default** and strictly **observe-only**: recording a trace never changes what an agent may do, remember, or reach. Turn it on per agent with `asterism config cognition-provider <agent> lodestar`; by default it records references only, and you can opt in to also capturing the content each tool returned — run through a best-effort scrub first — with `asterism config cognition-capture <agent> content`. This is where Asterism pairs with [Lodestar](https://github.com/qmilab/lodestar), wired in behind the same runtime seam as everything else.
+- **A richer set of workspace tools.** An agent's default toolkit grows beyond `read_file` / `write_file` / `delete_file` to add the read-only `list_dir`, `stat`, and `find`, and the writes `append_file`, `mkdir`, and `move`. Each stays scoped to the agent's own workspace, and every write still answers to the destructive-action gate — `move` refuses to overwrite an existing file, and deleting one still pauses for your confirmation, `autonomous` agents included.
+- **Working notes an agent proposes from what it observes.** Beyond the notes you set by hand, an agent now *proposes* working notes from what its tools reveal as it works — and, like a proposed memory, such a note is inert until you accept it (`asterism notes accept`, or `notes reject` to discard). A note you write yourself still applies directly; a note the agent proposes waits for your review, is screened the way memory is, stays scoped to that one agent, and is yours to inspect or revert. Cap how many an agent may keep with `asterism config world-fact-cap`.
+- **Reflection proposes when an objective looks finished.** Alongside the memories and objectives it already proposes, reflection can now point out that a standing objective *looks done* — purely advisory. Only your `asterism objective done` (or accepting the suggestion in `reflect --review`) actually retires it; an agent never marks its own objective complete.
+- **Install-wide defaults for recall and working notes.** Set one default for every agent that doesn't override it: `asterism config recall-budget --default <n>` for how many memories frame a run, and `asterism config world-fact-cap --default <n>` for how many working notes an agent may hold. Precedence is per-agent → install-wide → built-in.
+
+### Hardened
+
+- **Workspace confinement against symlink escape.** The file tools that read, write, append, create, move, and delete now resolve symbolic links before acting, so a symbolic link inside a workspace can no longer carry one of these operations outside it. This tightens the per-agent workspace boundary; as in every phase so far, it remains *logical* scoping — real, tested separation, but not yet containment of deliberately hostile code.
+
+### Documentation
+
+- The documentation home and README move off internal "phase" framing toward what each capability does for you, and the command reference and concepts gain the cognition trace, the richer workspace tools, agent-proposed working notes and their review, objective-completion proposals, and the install-wide `--default` caps.
+
+### Requirements
+
+- [Bun](https://bun.sh) 1.1+ (recommended), or [Node](https://nodejs.org) 20+. Installable with npm, pnpm, yarn, or Bun.
+
 ## 0.3.0 — 2026-06-20
 
 Phase 2 — Governed Learning. Each agent gains a learning loop you stay in control of: it recalls the right memories into a run, earns autonomy capability by capability, proposes what to remember for you to ratify, and carries durable objectives and its own working notes — all without loosening the agent boundary, the trust levels, or the destructive-action gate.
