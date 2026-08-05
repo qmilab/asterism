@@ -5,6 +5,7 @@
 import type {
   ActionRecord,
   Agent,
+  ArtifactRef,
   CapabilityGrant,
   Connection,
   Event,
@@ -234,8 +235,58 @@ export function formatConnectionList(
     lines.push(`• ${arrow} · ${c.mode} · ${c.status} · ${shortId(c.id)}`);
   }
   lines.push("");
-  lines.push("→ outbound (this agent may hand off to the other) · ← inbound (the other may hand off to this agent)");
+  // Mode-neutral wording: a channel may carry a handoff or an artifact-only exchange, so the
+  // legend describes the DIRECTION of work, not one mode's verb.
+  lines.push("→ outbound (this agent may send work to the other) · ← inbound (the other may send work to this agent)");
   return lines.join("\n").trimEnd();
+}
+
+/**
+ * Render the manifest an `artifact-only` exchange returned — the workspace artifacts the
+ * callee produced, as REFERENCES: path, size, and whether each still exists.
+ *
+ * Deliberately says what did NOT cross. The mode's whole point is that the callee's words
+ * and its file contents stay on its side of the boundary, so the footer names that plainly
+ * rather than leaving the operator to infer why there is no prose here — and points at the
+ * one place the bytes actually are (the callee's own workspace, on the operator's disk).
+ *
+ * A deleted path is shown too: the manifest describes everything the run CHANGED, so a file
+ * the callee wrote and then removed reads as `deleted` rather than silently vanishing.
+ */
+export function formatArtifactManifest(
+  artifacts: readonly ArtifactRef[],
+  calleeName: string,
+): string[] {
+  if (artifacts.length === 0) {
+    return [`${calleeName} produced no artifacts.`];
+  }
+  const lines = [`${calleeName} produced ${artifacts.length === 1 ? "1 artifact" : `${artifacts.length} artifacts`}:`];
+  for (const a of artifacts) {
+    const detail = !a.exists
+      ? "deleted"
+      : a.sizeBytes !== undefined
+        ? formatBytes(a.sizeBytes)
+        : a.kind === "dir"
+          ? "directory"
+          : "present";
+    lines.push(`  ${a.path}   ${detail}`);
+  }
+  lines.push("");
+  lines.push(
+    `Only these references crossed — not ${calleeName}'s words, memory, or the file contents.`,
+  );
+  lines.push(`The files are in ${calleeName}'s own workspace.`);
+  return lines;
+}
+
+/** Human-readable byte size for a manifest row — whole units, no false precision. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
 }
 
 /**

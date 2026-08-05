@@ -196,7 +196,14 @@ export type {
 // Run orchestration — the kernel's execute-a-run flow (start → trust-resolve +
 // gate → frame → substrate → persist outcome), shared by every surface so the
 // trust/gate path can never drift between the CLI and the HTTP endpoint.
-export { executeRun, resumeRun, declineRun, performHandoff, resolveRecallBudget } from "./run.js";
+export {
+  executeRun,
+  resumeRun,
+  declineRun,
+  performHandoff,
+  performArtifactExchange,
+  resolveRecallBudget,
+} from "./run.js";
 export type {
   ExecuteRunOptions,
   ExecuteRunResult,
@@ -205,9 +212,13 @@ export type {
   ResumeOutcome,
   DeclineOutcome,
   HandoffOutcome,
+  ArtifactExchangeResult,
+  ArtifactExchangeOutcome,
 } from "./run.js";
 export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";
+export { collectArtifactManifest } from "./artifact-manifest.js";
+export type { ArtifactRef } from "./artifact-manifest.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The
 // kernel's run-orchestration surfaces compose this around their own hooks.

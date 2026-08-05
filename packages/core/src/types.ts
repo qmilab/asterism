@@ -98,19 +98,25 @@ export type CapabilityStanding = (typeof CAPABILITY_STANDINGS)[number];
  * of the callee does the caller get back". Phase 3 (Collaboration) opens the agent
  * boundary ONLY through an explicit, permissioned connection, and a connection grants
  * exactly its mode's exchange form and nothing wider (golden rule 5; design note
- * `phase-3-collaboration.md` §4). T1 implements the FIRST and least-curated mode:
+ * `phase-3-collaboration.md` §4). Ordered least-to-most curated:
  *
  * - `handoff` — the caller asks the callee to perform a task; the callee runs it in its
  *   OWN workspace, under its OWN trust profile and scoped tools, and the caller receives
  *   only the callee's final `RunOutput` (its text/result) — never the callee's memory,
  *   transcript, or secrets.
+ * - `artifact-only` — the same task-driven exchange, but what crosses is the REFERENCES-
+ *   ONLY manifest of the workspace artifacts the callee produced (paths + sizes), with the
+ *   callee's final text suppressed at the boundary. Stricter than `handoff`: for when you
+ *   want the thing it made, not its words. The file BYTES do not cross (design note §9,
+ *   decision D8) — materializing one into the caller's workspace is a write into the
+ *   CALLER, so it belongs behind the caller's own destructive-action gate, a later slice.
  *
  * Only the modes with a real implementation are enumerated, so the write boundary
  * ({@link validateEnum}) can never persist a connection in a mode nothing consumes. The
- * stricter modes (`artifact-only`, `read-summary`, `shared-brief`, `delegated-tool`) join
- * this list as their threads (T2/T3) land — never a half-built mode.
+ * remaining modes (`read-summary`, `shared-brief`, `delegated-tool`) join this list as
+ * their threads (T2b/T3) land — never a half-built mode.
  */
-export const CONNECTION_MODES = ["handoff"] as const;
+export const CONNECTION_MODES = ["handoff", "artifact-only"] as const;
 export type ConnectionMode = (typeof CONNECTION_MODES)[number];
 
 /**

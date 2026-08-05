@@ -32,10 +32,12 @@ import {
 } from "./world-facts.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
+import { collectArtifactManifest } from "./artifact-manifest.js";
+import type { ArtifactRef } from "./artifact-manifest.js";
 import { WorldFactCapError } from "./repositories/world-facts.js";
 import { MemoryFirewallError } from "./firewall.js";
 import type { AsterismStore } from "./store.js";
-import type { Agent, Run, RunStatus } from "./types.js";
+import type { Agent, ConnectionMode, Run, RunStatus } from "./types.js";
 
 /** Host concerns a run needs that the kernel does not own — all injectable. */
 export interface ExecuteRunOptions {
@@ -157,6 +159,17 @@ export interface ExecuteRunResult {
    * exit — the resumed run harvests). References-only counts.
    */
   harvest?: HarvestSummary;
+  /**
+   * The workspace artifacts this run produced — references only (path/kind/exists/size),
+   * never file contents. Absent when the run produced none. Derived from the SAME
+   * state-changing observation stream the working-note harvest reduces, so it describes
+   * only what actually executed under the gate: an action withheld under `propose`, or
+   * paused and never confirmed, contributes no observation and therefore no artifact.
+   *
+   * This is the payload of the `artifact-only` collaboration mode (Phase 3 · T2a), and is
+   * populated for every run — an ordinary direct run simply has no surface that renders it.
+   */
+  artifacts?: readonly ArtifactRef[];
 }
 
 /**
@@ -445,6 +458,15 @@ async function runAndPersist(
     return { proposed, dropped, skipped };
   };
 
+  // The SECOND pure projection of the same observation stream (Phase 3 · T2a): the
+  // references-only manifest of workspace artifacts this run produced, which is what an
+  // `artifact-only` exchange returns to the caller in place of the callee's text. Called at
+  // every exit alongside the harvest, and for the same reason — an observation lives in
+  // `collected` only during the invocation whose tool produced it, so a run that acts and
+  // then pauses would otherwise lose the artifact it already made. Unlike the harvest this
+  // writes nothing; it is a pure reduction, so recomputing it on a resume is free.
+  const collectArtifacts = (): readonly ArtifactRef[] => collectArtifactManifest(collected);
+
   // Fail-safe asymmetry — autonomy is lost faster than it is earned. A run that
   // EXECUTED an earned (granted) destructive capability and then FAILED loses that
   // grant: the capability is downgraded to `gated`, so its next invocation pauses for
@@ -605,12 +627,14 @@ async function runAndPersist(
       // invocation's `collected`; a later resume that skips the already-performed action
       // would never re-observe it). Idempotent per subject on the eventual resume.
       const harvest = harvestWorkingNotes();
+      const artifacts = collectArtifacts();
       return {
         run: paused,
         status: "awaiting_confirmation",
         output: "",
         actions: collectActions(),
         ...(harvest ? { harvest } : {}),
+        ...(artifacts.length > 0 ? { artifacts } : {}),
       };
     }
     const failed = store.finishRun(agent.id, run.id, "", "failed");
@@ -618,6 +642,7 @@ async function runAndPersist(
     // Harvest the state-changing observations the run produced before it failed (a write
     // that landed is a true current-state fact worth proposing, even on a failed run).
     const harvest = harvestWorkingNotes();
+    const artifacts = collectArtifacts();
     return {
       run: failed ?? run,
       status: "failed",
@@ -625,6 +650,7 @@ async function runAndPersist(
       error: err instanceof Error ? err.message : String(err),
       actions: collectActions(),
       ...(harvest ? { harvest } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     };
   }
   await flushEvents(streamed);
@@ -640,12 +666,14 @@ async function runAndPersist(
         : current;
     // Pause exit — harvest what ran before the pause (see the catch-pause exit above).
     const harvest = harvestWorkingNotes();
+    const artifacts = collectArtifacts();
     return {
       run: persisted ?? current,
       status: "awaiting_confirmation",
       output: output.text,
       actions: collectActions(),
       ...(harvest ? { harvest } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     };
   }
 
@@ -666,6 +694,7 @@ async function runAndPersist(
   // that landed is a true current-state fact either way); the pause exits above harvest too,
   // so an intermediate confirmed action's change is never lost (idempotent per subject).
   const harvest = harvestWorkingNotes();
+  const artifacts = collectArtifacts();
   return {
     run: finished ?? current ?? run,
     status,
@@ -673,6 +702,7 @@ async function runAndPersist(
     ...(output.error !== undefined ? { error: output.error } : {}),
     actions: collectActions(),
     ...(harvest ? { harvest } : {}),
+    ...(artifacts.length > 0 ? { artifacts } : {}),
   };
 }
 
@@ -929,6 +959,53 @@ export type HandoffOutcome =
   | { kind: "no_connection" };
 
 /**
+ * What an `artifact-only` exchange returns to the caller (Phase 3 · T2a) — REFERENCES ONLY.
+ *
+ * Deliberately NOT an {@link ExecuteRunResult}, and deliberately not a superset of one. The
+ * mode's whole contract is that the callee's words do not cross, so this type is the
+ * boundary that enforces it: there is no field that can carry the callee's text, which
+ * makes invariant 2 a property of the TYPE rather than of a caller remembering not to read
+ * `output`.
+ *
+ * Three exclusions are load-bearing:
+ *   - **No `output`.** The callee's final text is the thing this mode withholds.
+ *   - **No `run` row.** {@link Run} carries `output` (the run's final text, persisted so a
+ *     later reflect has a transcript). Handing back the row would leak the callee's text
+ *     through the back door, so only the run ID crosses — a reference the caller can quote
+ *     in an audit but cannot read the callee's run through (every read is `agentId`-scoped).
+ *   - **No `error`.** A substrate error message is free-form callee-side text. The caller
+ *     learns `failed` from `status`; the operator reads the detail from the CALLEE's own
+ *     surfaces, where it never crossed an agent boundary to begin with.
+ *
+ * `actions` DOES cross: it is references-only (capability key + classified effect +
+ * decision) and is how an operator understands a short manifest — "the run paused before
+ * the delete" — without seeing anything the callee said. The callee's working-note harvest
+ * does not cross: it describes the callee's own review pile and is no business of the
+ * caller's.
+ */
+export interface ArtifactExchangeResult {
+  /** The callee's run id — a reference for audit, not a handle to read the run through. */
+  runId: string;
+  /** How the callee's run ended: `done` / `failed` / `awaiting_confirmation`. */
+  status: RunStatus;
+  /** The callee's gate decisions, in order — references only (capability + effect). */
+  actions: readonly ActionRecord[];
+  /** The workspace artifacts the callee produced — paths and sizes, never contents. */
+  artifacts: readonly ArtifactRef[];
+}
+
+/**
+ * The outcome of {@link performArtifactExchange} — the same discriminated shape as
+ * {@link HandoffOutcome}, so a surface maps each case without guessing. `no_connection`
+ * means there is no ACTIVE `from → to` connection **in `artifact-only` mode**: a
+ * `handoff`-mode connection between the same pair does NOT authorize this exchange, because
+ * a connection grants exactly its mode's form and nothing wider.
+ */
+export type ArtifactExchangeOutcome =
+  | { kind: "ok"; result: ArtifactExchangeResult }
+  | { kind: "no_connection" };
+
+/**
  * Perform an OPERATOR-DIRECTED handoff: `from` asks `to` to do `input`, over an explicit,
  * permissioned connection. This is Phase 3's first cross-agent operation, and it preserves
  * every golden-rule-5 invariant by construction rather than by a special code path:
@@ -953,8 +1030,9 @@ export type HandoffOutcome =
  *      callee's output.
  *
  * `from` and `to` are the resolved agents; the caller (a surface) has already looked them
- * up and built `options` from `to`. The mode is fixed to `handoff` in T1 — the only mode
- * with an implementation; the stricter modes are later threads.
+ * up and built `options` from `to`. This entry point is the `handoff` mode specifically;
+ * {@link performArtifactExchange} is the stricter `artifact-only` form over the same shared
+ * {@link performExchange}, and the remaining modes are later threads.
  */
 export async function performHandoff(
   store: AsterismStore,
@@ -963,20 +1041,87 @@ export async function performHandoff(
   input: string,
   options: ExecuteRunOptions,
 ): Promise<HandoffOutcome> {
+  const exchanged = await performExchange(store, from, to, input, "handoff", options);
+  if (exchanged === undefined) return { kind: "no_connection" };
+  // `handoff` is the least-curated mode: the callee's full ExecuteRunResult crosses (its
+  // final text + references), and nothing behind it (settled decision D2).
+  return { kind: "ok", result: exchanged };
+}
+
+/**
+ * Perform an OPERATOR-DIRECTED `artifact-only` exchange: `from` asks `to` to do `input`,
+ * and receives back only the REFERENCES-ONLY manifest of the workspace artifacts `to`
+ * produced — never `to`'s words, memory, secrets, or the file bytes (Phase 3 · T2a; design
+ * note §9, decision D8).
+ *
+ * Mechanically this is {@link performHandoff} with a different connection mode and a
+ * different projection: the callee still drives the entire run, so invariants 1, 3, 4 and 5
+ * hold for exactly the reasons documented there — they are properties of running the task
+ * AS the callee, not of this mode. What differs is invariant 2, and it is enforced HERE, at
+ * the kernel boundary, by returning a type that has nowhere to put the callee's text
+ * ({@link ArtifactExchangeResult}).
+ *
+ * Enforcing it at the boundary rather than in the CLI is the point: a surface-level filter
+ * would leave the callee's text one field access away for the next caller (the HTTP console,
+ * a channel, or the agent-initiated delegation of T5). The kernel owns what crosses.
+ */
+export async function performArtifactExchange(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  input: string,
+  options: ExecuteRunOptions,
+): Promise<ArtifactExchangeOutcome> {
+  const exchanged = await performExchange(store, from, to, input, "artifact-only", options);
+  if (exchanged === undefined) return { kind: "no_connection" };
+  return {
+    kind: "ok",
+    result: {
+      // The run ID only — never the Run row, which carries the callee's output text.
+      runId: exchanged.run.id,
+      status: exchanged.status,
+      actions: exchanged.actions,
+      // Absent when the run produced nothing; an empty manifest is the honest answer for a
+      // run that acted on nothing (or whose every action the callee's gate withheld).
+      artifacts: exchanged.artifacts ?? [],
+    },
+  };
+}
+
+/**
+ * The shared cross-agent exchange: check the permission, audit, run AS THE CALLEE, audit.
+ * Returns the callee's raw {@link ExecuteRunResult}, or `undefined` when no active
+ * connection in `mode` authorizes it.
+ *
+ * Every mode routes through this one function so the invariants cannot drift between modes:
+ * the connection check, the both-logs audit, and "the callee drives the whole loop" are
+ * written once. What a mode may differ in is only its PROJECTION of the result — which each
+ * public entry point applies, and which is the sole place invariant 2 is decided.
+ */
+async function performExchange(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  input: string,
+  mode: ConnectionMode,
+  options: ExecuteRunOptions,
+): Promise<ExecuteRunResult | undefined> {
   // The connection IS the permission. A read straight off the scoped repository, the same
   // way the rest of this module reads (`store.runs.get`); the directional `from → to`
-  // lookup means a B→A connection never satisfies an A→B handoff.
-  const connection = store.connections.findActive(from.id, to.id, "handoff");
-  if (!connection) return { kind: "no_connection" };
-  // Audit the request on both logs BEFORE the run, so the handoff is recorded even if the
+  // lookup means a B→A connection never satisfies an A→B exchange, and the MODE is part of
+  // the lookup, so a `handoff` connection never authorizes an `artifact-only` exchange.
+  const connection = store.connections.findActive(from.id, to.id, mode);
+  if (!connection) return undefined;
+  // Audit the request on both logs BEFORE the run, so the exchange is recorded even if the
   // callee's run fails (the kernel writes the event log, not this op).
   store.recordHandoffRequested(connection);
-  // The handoff IS an executeRun on the CALLEE. `to` drives the entire loop — its identity,
+  // The exchange IS an executeRun on the CALLEE. `to` drives the entire loop — its identity,
   // trust, tools, workspace, memory — so the callee's gate is sovereign and nothing of the
-  // callee's beyond its final RunOutput is reachable by the caller.
+  // callee's beyond what the mode projects is reachable by the caller.
   const result = await executeRun(store, to, input, options);
   // Audit the return on both logs, carrying the final status as a reference (done / failed
-  // / awaiting_confirmation) so a paused handoff is recorded honestly.
+  // / awaiting_confirmation) so a paused exchange is recorded honestly. The event payload
+  // already carries the connection's mode, so both logs distinguish the exchange forms.
   store.recordHandoffCompleted(connection, result.run.id, result.status);
-  return { kind: "ok", result };
+  return result;
 }

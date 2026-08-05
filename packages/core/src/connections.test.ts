@@ -127,8 +127,29 @@ test("every scoped connection method requires an agentId", () => {
 
 test("an unimplemented mode is refused at the write boundary", () => {
   // The repository validates the mode through the same enum chokepoint the kernel uses,
-  // so a connection in a mode nothing consumes can never be persisted.
-  expect(() => store.createConnection(alice.id, bob.id, "artifact-only" as "handoff")).toThrow(
+  // so a connection in a mode nothing consumes can never be persisted. `read-summary` is
+  // the next unimplemented mode (T2b); `artifact-only` became real in T2a and is asserted
+  // to persist below.
+  expect(() => store.createConnection(alice.id, bob.id, "read-summary" as "handoff")).toThrow(
     /invalid connection mode/,
   );
+});
+
+test("an artifact-only connection persists and is scoped to its participants", () => {
+  const conn = store.createConnection(alice.id, bob.id, "artifact-only");
+  expect(conn.mode).toBe("artifact-only");
+  expect(conn.status).toBe("active");
+  // Distinct permissions: an artifact-only channel does NOT satisfy a handoff lookup, and a
+  // third agent can never see it.
+  expect(store.connections.findActive(alice.id, bob.id, "artifact-only")?.id).toBe(conn.id);
+  expect(store.connections.findActive(alice.id, bob.id, "handoff")).toBeUndefined();
+  // Directional, like every mode: B→A is its own connection.
+  expect(store.connections.findActive(bob.id, alice.id, "artifact-only")).toBeUndefined();
+  // Recorded on BOTH participants' logs as content-free references.
+  for (const agentId of [alice.id, bob.id]) {
+    const created = store.events
+      .list(agentId, { limit: 50 })
+      .filter((e) => e.type === "connection.created");
+    expect(created.some((e) => JSON.stringify(e.payload).includes("artifact-only"))).toBe(true);
+  }
 });
