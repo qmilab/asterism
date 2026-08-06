@@ -21,7 +21,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { performArtifactExchange, performArtifactFetch, EXCHANGE_FETCH_KEY } from "./run.js";
-import type { ArtifactFetchHost, ArtifactFetchRequest } from "./run.js";
+import type { ArtifactFetchHost, ArtifactFetchRequest, ArtifactMaterializeRequest } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunOutput, ToolResult } from "./adapter.js";
 import type { Action, Capability } from "./trust.js";
@@ -64,8 +64,18 @@ afterEach(() => {
 
 interface HostLog {
   inspected: ArtifactFetchRequest[];
-  materialized: ArtifactFetchRequest[];
+  materialized: ArtifactMaterializeRequest[];
 }
+
+/** A source file as the stand-in models it: its size and when it was last written. */
+interface SourceFile {
+  size: number;
+  /** Epoch ms. Defaults far in the past, so an untouched fixture is never "modified since". */
+  modifiedAtMs: number;
+}
+
+const UNTOUCHED = 0; // epoch — before any exchange this test could record
+const file = (size: number, modifiedAtMs = UNTOUCHED): SourceFile => ({ size, modifiedAtMs });
 
 /**
  * A filesystem stand-in over an in-memory map of the callee's workspace. `destFiles` records
@@ -74,25 +84,40 @@ interface HostLog {
  */
 function fakeHost(
   log: HostLog,
-  sourceFiles: Map<string, number> = new Map([
-    [ARTIFACT_PATH, ARTIFACT_BYTES],
-    [NEVER_EXCHANGED, 99],
+  sourceFiles: Map<string, SourceFile> = new Map([
+    [ARTIFACT_PATH, file(ARTIFACT_BYTES)],
+    [NEVER_EXCHANGED, file(99)],
   ]),
   destFiles: Map<string, number> = new Map(),
 ): ArtifactFetchHost {
   return {
     inspect: (request) => {
       log.inspected.push(request);
-      const size = sourceFiles.get(request.path);
-      if (size === undefined) return { ok: false, reason: `cannot read '${request.path}' (ENOENT).` };
-      return { ok: true, sizeBytes: size, destExists: destFiles.has(request.path) };
+      const source = sourceFiles.get(request.path);
+      if (!source) return { ok: false, reason: `cannot read '${request.path}' (ENOENT).` };
+      return {
+        ok: true,
+        sizeBytes: source.size,
+        modifiedAtMs: source.modifiedAtMs,
+        destExists: destFiles.has(request.path),
+      };
     },
     materialize: (request) => {
       log.materialized.push(request);
-      const size = sourceFiles.get(request.path);
-      if (size === undefined) return { ok: false, reason: `could not fetch '${request.path}'.` };
-      destFiles.set(request.path, size);
-      return { ok: true, bytes: size };
+      const source = sourceFiles.get(request.path);
+      if (!source) return { ok: false, reason: `could not fetch '${request.path}'.` };
+      // The real host re-checks the expectation at the read; the stand-in mirrors it so a
+      // test that mutates the source between inspect and materialize is modelled honestly —
+      // INCLUDING the floor to whole milliseconds, since a mirror that disagreed with the
+      // real host would refuse what the kernel allowed.
+      if (
+        source.size !== request.expect.sizeBytes ||
+        Math.floor(source.modifiedAtMs) > request.expect.notModifiedAfterMs
+      ) {
+        return { ok: false, reason: `'${request.path}' changed while it was being fetched.` };
+      }
+      destFiles.set(request.path, source.size);
+      return { ok: true, bytes: source.size };
     },
   };
 }
@@ -362,12 +387,14 @@ test("the path the host is handed comes from the RECORD, and the two workspaces 
   });
   expect(outcome.kind).toBe("ok");
   expect(log.materialized).toHaveLength(1);
-  expect(log.materialized[0]).toEqual({
+  expect(log.materialized[0]).toMatchObject({
     // Read from the CALLEE's workspace, written into the CALLER's — neither is caller-chosen.
     sourceWorkspaceDir: helper.workspaceDir,
     destWorkspaceDir: writer.workspaceDir,
     path: ARTIFACT_PATH,
   });
+  // ...and it carries what the source must still BE, so the host re-checks at the read.
+  expect(log.materialized[0]?.expect.sizeBytes).toBe(ARTIFACT_BYTES);
 });
 
 // --- Invariant 3: the CALLER's gate governs the write -----------------------
@@ -491,7 +518,7 @@ test("an unreadable source is reported before the human is asked to approve anyt
   const asked: Action[] = [];
   const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
     // The callee deleted the file outside any exchange: the record stands, the bytes do not.
-    host: fakeHost(log, new Map()),
+    host: fakeHost(log, new Map<string, SourceFile>()),
     confirm: (action) => {
       asked.push(action);
       return true;
@@ -708,4 +735,161 @@ test("a fetch never becomes a standing-grant candidate — it has no run to earn
   const { proposeStandingGrants } = await import("./standing.js");
   const candidates = proposeStandingGrants(store, writer);
   expect(candidates.map((c) => c.capability)).not.toContain(EXCHANGE_FETCH_KEY);
+});
+
+// --- The reference identifies an ARTIFACT, not a path [Codex review P2] -----
+//
+// An exchange authorizes the thing the callee handed over. If the callee later rewrites that
+// path outside an exchange — a subsequent run, or the operator's own editor — the bytes there
+// are something else, and handing them over would make one exchanged path a durable read
+// grant into the callee's workspace. These prove the reference goes stale with the artifact.
+
+/** The state a rewrite leaves behind: same path, different content, later mtime. */
+function rewritten(size: number): Map<string, SourceFile> {
+  return new Map([
+    // `Date.now()` here is genuinely "after the exchange row was just written".
+    [ARTIFACT_PATH, file(size, Date.now() + 60_000)],
+    [NEVER_EXCHANGED, file(99)],
+  ]);
+}
+
+test("a source rewritten after the exchange is refused, not silently handed over", async () => {
+  await givenExchangedArtifact();
+  const log = emptyLog();
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(log, rewritten(120)),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("unavailable");
+  if (outcome.kind !== "unavailable") return;
+  expect(outcome.reason).toMatch(/changed since/i);
+  expect(log.materialized).toHaveLength(0);
+});
+
+test("a SAME-SIZE rewrite is still refused — the timestamp catches what the size cannot", async () => {
+  // The sharp version of the finding: private content that happens to be the same length as
+  // the artifact would sail past a size-only check.
+  await givenExchangedArtifact();
+  const log = emptyLog();
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(log, rewritten(ARTIFACT_BYTES)),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("unavailable");
+  expect(log.materialized).toHaveLength(0);
+});
+
+test("the human is never asked to approve a fetch of a stale artifact", async () => {
+  await givenExchangedArtifact();
+  const asked: Action[] = [];
+  await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(emptyLog(), rewritten(ARTIFACT_BYTES)),
+    confirm: (action) => {
+      asked.push(action);
+      return true;
+    },
+  });
+  // The staleness check runs before the gate, so nobody is prompted to approve a copy of
+  // something that is no longer the artifact.
+  expect(asked).toHaveLength(0);
+});
+
+test("a rewrite DURING the confirmation is caught at the read, not just before the prompt", async () => {
+  // The window the pre-prompt check cannot cover: a confirmation is a human-length pause, and
+  // the callee may write to its own workspace inside it. The expectation travels with the
+  // copy so the host re-checks the bytes it actually read.
+  await givenExchangedArtifact();
+  const log = emptyLog();
+  const sources = new Map([[ARTIFACT_PATH, file(ARTIFACT_BYTES)]]);
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(log, sources),
+    confirm: () => {
+      // The callee rewrites the path while the operator is deciding.
+      sources.set(ARTIFACT_PATH, file(ARTIFACT_BYTES, Date.now() + 60_000));
+      return true;
+    },
+  });
+  expect(outcome.kind).toBe("unavailable");
+  // The copy was attempted (the human said yes) and REFUSED by the host's own re-check.
+  expect(log.materialized).toHaveLength(1);
+});
+
+test("a reference whose exchange recorded no size cannot be fetched — unverifiable is not fetchable", async () => {
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  // A capability that establishes presence without measuring: nothing to verify against.
+  const presenceOnly: Capability = {
+    key: "fs.touch",
+    effect: "write",
+    tool: {
+      name: "touch",
+      description: "declare a file exists",
+      inputSchema: { type: "object", properties: {} },
+      execute: (): ToolResult => ({
+        output: "touched",
+        observation: {
+          schema: "asterism.fs.write@1",
+          facts: [{ subject: ARTIFACT_REF, relation: "exists", object: true }],
+        },
+      }),
+    },
+  };
+  await exchangeProducing([presenceOnly], [{ tool: "touch" }]);
+  expect(store.exchanges.listForAgent(writer.id)[0]?.sizeBytes).toBeUndefined();
+  const log = emptyLog();
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(log),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("unavailable");
+  expect(log.materialized).toHaveLength(0);
+});
+
+test("re-exchanging makes the current artifact fetchable again — staleness is recoverable", async () => {
+  await givenExchangedArtifact();
+  const rewrittenSources = rewritten(120);
+  const log = emptyLog();
+  expect(
+    (
+      await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+        host: fakeHost(log, rewrittenSources),
+        confirm: () => true,
+      })
+    ).kind,
+  ).toBe("unavailable");
+  // Asking for the work again records a fresh crossing of the CURRENT artifact...
+  await exchangeProducing([writeCapability(ARTIFACT_PATH, 120)], [{ tool: "write_file" }]);
+  // ...whose recorded size matches, and whose mtime now precedes the new record.
+  rewrittenSources.set(ARTIFACT_PATH, file(120));
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(log, rewrittenSources),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("ok");
+});
+
+test("the exchange row records the artifact's size, so the row identifies more than a path", async () => {
+  await givenExchangedArtifact();
+  const [row] = store.exchanges.listForAgent(writer.id);
+  expect(row?.sizeBytes).toBe(ARTIFACT_BYTES);
+});
+
+test("a sub-millisecond-fresh artifact is NOT stale — the comparison matches the record's resolution", async () => {
+  // The record's `createdAt` is an ISO string (whole ms); `mtimeMs` carries fractional ms. A
+  // file written 0.7ms before the row was recorded is the NORMAL case for a fast run, not a
+  // rewrite, and refusing it would make the check fire on healthy exchanges.
+  await givenExchangedArtifact();
+  const connection = store.connections.findActive(writer.id, helper.id, "artifact-only")!;
+  const recordedAtMs = Date.parse(store.findExchangedArtifact(connection, ARTIFACT_REF)!.createdAt);
+  const log = emptyLog();
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(log, new Map([[ARTIFACT_PATH, file(ARTIFACT_BYTES, recordedAtMs + 0.7)]])),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("ok");
+  // A full millisecond later IS a rewrite, and is refused.
+  const stale = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(log, new Map([[ARTIFACT_PATH, file(ARTIFACT_BYTES, recordedAtMs + 1)]])),
+    confirm: () => true,
+  });
+  expect(stale.kind).toBe("unavailable");
 });

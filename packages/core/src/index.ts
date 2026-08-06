@@ -223,6 +223,7 @@ export type {
   ArtifactFetchResult,
   ArtifactInspection,
   ArtifactMaterialization,
+  ArtifactMaterializeRequest,
 } from "./run.js";
 export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";

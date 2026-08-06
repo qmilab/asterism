@@ -224,6 +224,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_active_triple
 -- crossed can never disagree, and load-bearing at fetch time (a ref last recorded absent is
 -- refused rather than resolved against whatever now sits at that path). New table, so the
 -- index lives here in the CREATE -- every column exists from the start (connections' rule).
+--
+-- size_bytes + created_at are what make a row identify the ARTIFACT and not merely its PATH.
+-- A reference alone would stay resolvable through every later rewrite of that location, so a
+-- path handed over once would become a durable read grant into the callee's workspace -- which
+-- no exchange authorized. An artifact written during the exchange necessarily has a
+-- modification time at or before created_at, so a fetch can refuse a source modified since,
+-- and size_bytes backstops a rewrite that preserved the timestamp.
 CREATE TABLE IF NOT EXISTS exchanges (
   id            TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL REFERENCES connections(id),
@@ -232,6 +239,7 @@ CREATE TABLE IF NOT EXISTS exchanges (
   kind          TEXT NOT NULL,
   ref           TEXT NOT NULL,
   present       INTEGER NOT NULL,
+  size_bytes    INTEGER,
   run_id        TEXT NOT NULL REFERENCES runs(id),
   created_at    TEXT NOT NULL
 );

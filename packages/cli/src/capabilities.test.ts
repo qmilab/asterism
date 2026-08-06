@@ -22,6 +22,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -962,12 +963,18 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
     path,
   });
 
+  /** A materialize request whose expectation matches the source as it stands right now. */
+  const materializeRequest = (path: string, sizeBytes: number, notModifiedAfterMs = Date.now() + 60_000) => ({
+    ...request(path),
+    expect: { sizeBytes, notModifiedAfterMs },
+  });
+
   test("copies an artifact between the two workspaces, byte for byte", () => {
     mkdirSync(join(callee, "drafts"), { recursive: true });
     writeFileSync(join(callee, "drafts/market.md"), "MARKET SECTION");
     const inspection = host.inspect(request("drafts/market.md"));
-    expect(inspection).toEqual({ ok: true, sizeBytes: 14, destExists: false });
-    const materialized = host.materialize(request("drafts/market.md"));
+    expect(inspection).toMatchObject({ ok: true, sizeBytes: 14, destExists: false });
+    const materialized = host.materialize(materializeRequest("drafts/market.md", 14));
     expect(materialized).toEqual({ ok: true, bytes: 14 });
     // Parent folders are created, and the bytes are identical.
     expect(readFileSync(join(caller, "drafts/market.md"), "utf8")).toBe("MARKET SECTION");
@@ -978,7 +985,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
   test("preserves NON-TEXT bytes exactly (an artifact is whatever the callee produced)", () => {
     const bytes = Buffer.from([0x00, 0xff, 0xfe, 0x41, 0x00, 0x80]);
     writeFileSync(join(callee, "blob.bin"), bytes);
-    expect(host.materialize(request("blob.bin"))).toEqual({ ok: true, bytes: 6 });
+    expect(host.materialize(materializeRequest("blob.bin", 6))).toEqual({ ok: true, bytes: 6 });
     expect(readFileSync(join(caller, "blob.bin")).equals(bytes)).toBe(true);
   });
 
@@ -987,7 +994,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
     writeFileSync(join(caller, "notes.md"), "OLD-AND-LONGER");
     const inspection = host.inspect(request("notes.md"));
     expect(inspection).toMatchObject({ ok: true, destExists: true });
-    expect(host.materialize(request("notes.md"))).toEqual({ ok: true, bytes: 3 });
+    expect(host.materialize(materializeRequest("notes.md", 3))).toEqual({ ok: true, bytes: 3 });
     // Replaced in full — never appended to, and never left half-written from the longer file.
     expect(readFileSync(join(caller, "notes.md"), "utf8")).toBe("NEW");
   });
@@ -997,7 +1004,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
     for (const path of ["../escape.md", "/etc/passwd", "drafts/../../escape.md"]) {
       const inspection = host.inspect(request(path));
       expect(inspection.ok).toBe(false);
-      const materialized = host.materialize(request(path));
+      const materialized = host.materialize(materializeRequest(path, 1));
       expect(materialized.ok).toBe(false);
     }
   });
@@ -1009,7 +1016,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
       symlinkSync(outside, join(callee, "escape"));
       const inspection = host.inspect(request("escape/secret.txt"));
       expect(inspection.ok).toBe(false);
-      const materialized = host.materialize(request("escape/secret.txt"));
+      const materialized = host.materialize(materializeRequest("escape/secret.txt", 14));
       expect(materialized.ok).toBe(false);
       // The decisive check: the external contents never landed in the caller's workspace.
       expect(existsSync(join(caller, "escape/secret.txt"))).toBe(false);
@@ -1025,7 +1032,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
       writeFileSync(target, "OUTSIDE-SECRET");
       symlinkSync(target, join(callee, "link.md")); // in-workspace symlink → outside FILE
       expect(host.inspect(request("link.md")).ok).toBe(false);
-      expect(host.materialize(request("link.md")).ok).toBe(false);
+      expect(host.materialize(materializeRequest("link.md", 14)).ok).toBe(false);
       expect(existsSync(join(caller, "link.md"))).toBe(false);
     } finally {
       rmSync(outside, { recursive: true, force: true });
@@ -1039,7 +1046,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
       writeFileSync(join(callee, "escape/planted.md"), "PLANTED");
       symlinkSync(outside, join(caller, "escape")); // the CALLER's workspace has the escape
       expect(host.inspect(request("escape/planted.md")).ok).toBe(false);
-      expect(host.materialize(request("escape/planted.md")).ok).toBe(false);
+      expect(host.materialize(materializeRequest("escape/planted.md", 7)).ok).toBe(false);
       expect(existsSync(join(outside, "planted.md"))).toBe(false);
     } finally {
       rmSync(outside, { recursive: true, force: true });
@@ -1054,7 +1061,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
       // "stays inside" would CREATE the outside file. (The T4 R4 escape, on the fetch path.)
       symlinkSync(join(outside, "notyet.md"), join(caller, "report.md"));
       expect(host.inspect(request("report.md")).ok).toBe(false);
-      expect(host.materialize(request("report.md")).ok).toBe(false);
+      expect(host.materialize(materializeRequest("report.md", 6)).ok).toBe(false);
       expect(existsSync(join(outside, "notyet.md"))).toBe(false);
     } finally {
       rmSync(outside, { recursive: true, force: true });
@@ -1065,7 +1072,7 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
     mkdirSync(join(callee, "real"), { recursive: true });
     writeFileSync(join(callee, "real/doc.md"), "INSIDE");
     symlinkSync(join(callee, "real"), join(callee, "alias"));
-    expect(host.materialize(request("alias/doc.md"))).toEqual({ ok: true, bytes: 6 });
+    expect(host.materialize(materializeRequest("alias/doc.md", 6))).toEqual({ ok: true, bytes: 6 });
     expect(readFileSync(join(caller, "alias/doc.md"), "utf8")).toBe("INSIDE");
   });
 
@@ -1093,10 +1100,32 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
     expect(inspection.reason).not.toContain(tmpdir());
   });
 
+  test("materialize re-checks the expectation at the READ, not just before the prompt", () => {
+    // The kernel verifies before prompting, but a confirmation is a human-length pause during
+    // which the callee may rewrite its own file. The expectation travels with the copy, so a
+    // source that no longer matches is refused with nothing written. [Codex review P2.]
+    writeFileSync(join(callee, "report.md"), "ORIGINAL");
+    // Expect a size the source no longer has (i.e. it was rewritten since the exchange).
+    const wrongSize = host.materialize(materializeRequest("report.md", 999));
+    expect(wrongSize.ok).toBe(false);
+    if (!wrongSize.ok) expect(wrongSize.reason).toMatch(/changed while it was being fetched/i);
+    expect(existsSync(join(caller, "report.md"))).toBe(false);
+
+    // And a source modified AFTER the moment the crossing was recorded, at the same size.
+    const later = Date.now() / 1000 + 120;
+    utimesSync(join(callee, "report.md"), later, later);
+    const tooNew = host.materialize({
+      ...request("report.md"),
+      expect: { sizeBytes: 8, notModifiedAfterMs: Date.now() },
+    });
+    expect(tooNew.ok).toBe(false);
+    expect(existsSync(join(caller, "report.md"))).toBe(false);
+  });
+
   test("the workspace ROOT itself is not a fetchable path", () => {
     for (const path of [".", ""]) {
       expect(host.inspect(request(path)).ok).toBe(false);
-      expect(host.materialize(request(path)).ok).toBe(false);
+      expect(host.materialize(materializeRequest(path, 1)).ok).toBe(false);
     }
   });
 });

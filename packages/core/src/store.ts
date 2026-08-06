@@ -170,6 +170,14 @@ export class AsterismStore {
     if (!this.columnExists("install_settings", "world_fact_cap")) {
       this.driver.exec(`ALTER TABLE install_settings ADD COLUMN world_fact_cap INTEGER`);
     }
+    // `exchanges.size_bytes` joined that table WITHIN its own (unreleased) slice, once review
+    // showed that a row carrying only a reference makes a once-exchanged PATH permanently
+    // fetchable through later rewrites. No shipped release has this table, so this step only
+    // catches a database created from an earlier build of the same branch — cheap, idempotent,
+    // and it turns a confusing "no such column" into a no-op.
+    if (!this.columnExists("exchanges", "size_bytes")) {
+      this.driver.exec(`ALTER TABLE exchanges ADD COLUMN size_bytes INTEGER`);
+    }
     // The objective review state joined `objectives` after slice 1 first shipped the
     // table (reflection now PROPOSES objectives, gated by a review state). Add it
     // idempotently with DEFAULT 'accepted': every pre-existing objective was
@@ -1637,6 +1645,9 @@ export class AsterismStore {
           kind: "artifact",
           ref: artifactReference(artifact),
           present: artifact.exists,
+          // Carried through so the row identifies the ARTIFACT, not just where it lived —
+          // see the `Exchange.sizeBytes` contract and the fetch-time staleness check.
+          ...(artifact.sizeBytes !== undefined ? { sizeBytes: artifact.sizeBytes } : {}),
           runId,
         });
       }

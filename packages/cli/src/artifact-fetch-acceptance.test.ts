@@ -17,7 +17,15 @@
 //   5. Both event logs record content-free references — never the file's contents.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -56,6 +64,9 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
   let fetchedOut = "";
   let overwriteOut = "";
   let proposeOut = "";
+  let staleOut = "";
+  let landedAfterStale = true;
+  let contentAfterStale = "";
 
   /** Answers the destructive-action prompt; flipped per command by the script below. */
   let approve = true;
@@ -175,6 +186,21 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     // (3c) Fetching again OVERWRITES — allowed, but only after saying so.
     overwriteOut = await run(["artifact", "fetch", "writer", "helper", ARTIFACT_PATH]);
 
+    // (3e) The callee REWRITES the exchanged path outside any exchange — a later run, or the
+    // operator's own editor. The path is still in the manifest writer holds, but what sits
+    // there was never handed over, so the fetch must refuse rather than deliver it.
+    const exchangedPath = join(workspaceOf("helper"), ARTIFACT_PATH);
+    writeFileSync(exchangedPath, PRIVATE_BODY);
+    const later = Date.now() / 1000 + 120;
+    utimesSync(exchangedPath, later, later);
+    staleOut = await run(["artifact", "fetch", "writer", "helper", ARTIFACT_PATH]);
+    contentAfterStale = readFileSync(join(workspaceOf("writer"), ARTIFACT_PATH), "utf8");
+    landedAfterStale = contentAfterStale.includes(PRIVATE_BODY);
+    // Put the artifact back so the remaining steps see the state they expect.
+    writeFileSync(exchangedPath, ARTIFACT_BODY);
+    const before = Date.now() / 1000 - 120;
+    utimesSync(exchangedPath, before, before);
+
     // (3d) A `propose` caller writes nothing at all, even with a confirmation available.
     await run(["connect", "editor", "helper", "--mode", "artifact-only"]);
     await run(["artifact", "editor", "helper", "draft the market section"]);
@@ -278,6 +304,17 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     expect(proposeOut).toMatch(/\[proposed\] would copy/i);
     expect(proposeOut).toMatch(/Nothing was written/i);
     expect(existsSync(join(workspaceOf("editor"), ARTIFACT_PATH))).toBe(false);
+  });
+
+  test("a path REWRITTEN after the exchange is refused — a reference is not a read grant", () => {
+    // The heart of it: `drafts/market-section.md` is still in the manifest writer was handed,
+    // and it still exists on disk — but what is there now was never handed over.
+    expect(staleOut).toMatch(/has changed since helper handed it over/i);
+    expect(staleOut).toMatch(/Ask for the work again/i);
+    // The private content did not reach the caller, and the previously fetched copy is intact.
+    expect(landedAfterStale).toBe(false);
+    expect(contentAfterStale).toBe(ARTIFACT_BODY);
+    expect(staleOut).not.toContain(PRIVATE_BODY);
   });
 
   // --- 4. Cross-agent denial -------------------------------------------------

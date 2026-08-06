@@ -16,6 +16,8 @@ export interface RecordExchangeInput {
   kind: ExchangeKind;
   ref: string;
   present: boolean;
+  /** The artifact's size when it crossed, when the observation established one. */
+  sizeBytes?: number;
   runId: string;
 }
 
@@ -28,6 +30,9 @@ function mapExchange(row: SqlRow): Exchange {
     kind: String(row.kind) as ExchangeKind,
     ref: String(row.ref),
     present: Number(row.present) === 1,
+    ...(row.size_bytes === null || row.size_bytes === undefined
+      ? {}
+      : { sizeBytes: Number(row.size_bytes) }),
     runId: String(row.run_id),
     createdAt: String(row.created_at),
   };
@@ -71,8 +76,9 @@ export class ExchangeRepository {
     const row = this.driver
       .prepare(
         `INSERT INTO exchanges
-           (id, connection_id, from_agent_id, to_agent_id, kind, ref, present, run_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, connection_id, from_agent_id, to_agent_id, kind, ref, present, size_bytes,
+            run_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING *`,
       )
       .get([
@@ -83,6 +89,7 @@ export class ExchangeRepository {
         input.kind,
         input.ref,
         input.present ? 1 : 0,
+        input.sizeBytes ?? null,
         input.runId,
         createdAt,
       ]);

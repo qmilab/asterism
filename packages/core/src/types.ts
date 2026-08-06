@@ -453,8 +453,26 @@ export interface Exchange {
    * there.
    */
   present: boolean;
+  /**
+   * The artifact's size when it crossed, as the observation stream reported it. Absent when
+   * the observation established presence without measuring (a directory, or a custom
+   * capability).
+   *
+   * This is not decoration: it is half of what identifies the ARTIFACT rather than merely its
+   * path. A reference records where the artifact was; without something that says *which*
+   * bytes were handed over, a path once exchanged would stay fetchable through every later
+   * rewrite of that path — a durable read grant on a location, which is not what any exchange
+   * authorized. Together with {@link createdAt} it lets a fetch refuse a source that is no
+   * longer the artifact it resolved. [Codex review P2.]
+   */
+  sizeBytes?: number;
   /** The callee's run — the identity of the exchange instance these refs came from. */
   runId: string;
+  /**
+   * When the crossing was recorded. Load-bearing at fetch time as well as for audit: an
+   * artifact written during the exchange necessarily has a modification time at or before
+   * this, so a source that has been modified SINCE is provably not the thing that crossed.
+   */
   createdAt: string;
 }
 

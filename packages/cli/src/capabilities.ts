@@ -80,6 +80,7 @@ import type {
   ArtifactFetchRequest,
   ArtifactInspection,
   ArtifactMaterialization,
+  ArtifactMaterializeRequest,
 } from "@qmilab/asterism-core";
 
 // Structured-observation schemas and their CLOSED relation vocabulary. Each tool declares
@@ -1116,6 +1117,7 @@ export function artifactFetchHost(): ArtifactFetchHost {
       const sides = resolveSides(request);
       if (!sides.ok) return { ok: false, reason: sides.reason };
       let sizeBytes: number;
+      let modifiedAtMs: number;
       try {
         // `statSync`, following the leaf — the confinement check above already established
         // that whatever it follows to stays inside the callee's workspace.
@@ -1124,6 +1126,7 @@ export function artifactFetchHost(): ArtifactFetchHost {
           return { ok: false, reason: `'${request.path}' is a folder in the source workspace.` };
         }
         sizeBytes = st.size;
+        modifiedAtMs = st.mtimeMs;
       } catch (err) {
         return { ok: false, reason: `cannot read '${request.path}' (${failureReason(err)}).` };
       }
@@ -1142,10 +1145,10 @@ export function artifactFetchHost(): ArtifactFetchHost {
       } catch {
         destExists = false; // nothing there — an ordinary create.
       }
-      return { ok: true, sizeBytes, destExists };
+      return { ok: true, sizeBytes, modifiedAtMs, destExists };
     },
 
-    materialize: (request: ArtifactFetchRequest): ArtifactMaterialization => {
+    materialize: (request: ArtifactMaterializeRequest): ArtifactMaterialization => {
       const sides = resolveSides(request);
       if (!sides.ok) return { ok: false, reason: sides.reason };
       try {
@@ -1153,6 +1156,23 @@ export function artifactFetchHost(): ArtifactFetchHost {
         // decoding it would corrupt anything that is not text while buying nothing — the
         // kernel never inspects the contents, it only moves them.
         const bytes = readFileSync(sides.source);
+        // Re-check AFTER the read, against what the exchange recorded — not against a stat
+        // taken before it. The kernel already verified this before prompting, but a
+        // confirmation is a human-length pause during which the callee may write to its own
+        // workspace, so the bytes actually in hand must be re-established as the artifact.
+        // Statting after reading means a rewrite that raced the read is caught by the newer
+        // mtime; nothing is written unless what we read still matches what crossed.
+        const after = statSync(sides.source);
+        if (after.size !== request.expect.sizeBytes || after.size !== bytes.byteLength) {
+          return { ok: false, reason: `'${request.path}' changed while it was being fetched.` };
+        }
+        // Floored to whole milliseconds, matching the resolution the expectation was derived
+        // from (an ISO-8601 record) — otherwise a file written fractions of a millisecond
+        // before the record would read as modified after it. Same reasoning as the kernel's
+        // pre-prompt check, and the two must agree or one would refuse what the other allowed.
+        if (Math.floor(after.mtimeMs) > request.expect.notModifiedAfterMs) {
+          return { ok: false, reason: `'${request.path}' changed while it was being fetched.` };
+        }
         mkdirSync(dirname(sides.dest), { recursive: true });
         writeFileSync(sides.dest, bytes);
         return { ok: true, bytes: bytes.byteLength };

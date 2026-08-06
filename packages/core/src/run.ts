@@ -1153,8 +1153,31 @@ export interface ArtifactFetchHost {
   /**
    * Copy the source's bytes to the destination, creating parent folders as needed and
    * replacing an existing file. Only ever called once the caller's gate has authorized it.
+   *
+   * `expect` must be RE-CHECKED here, against the source as read — it is not a formality the
+   * kernel already handled. The kernel verifies before prompting, but a confirmation is a
+   * human-length pause, and the callee may write to its own workspace during it. Without a
+   * check at the read, a human could approve the artifact they were shown and receive
+   * whatever replaced it while they were deciding.
    */
-  materialize(request: ArtifactFetchRequest): ArtifactMaterialization;
+  materialize(request: ArtifactMaterializeRequest): ArtifactMaterialization;
+}
+
+/**
+ * A materialize request: a fetch, plus what the source must STILL be for the copy to happen.
+ * Separate from {@link ArtifactFetchRequest} so the expectation is required by the type
+ * rather than remembered by the host.
+ */
+export interface ArtifactMaterializeRequest extends ArtifactFetchRequest {
+  expect: {
+    /** The size the artifact had when it crossed. A different size is a different artifact. */
+    sizeBytes: number;
+    /**
+     * The moment the crossing was recorded. The source must not have been modified after it;
+     * anything later is a rewrite that happened since the artifact was handed over.
+     */
+    notModifiedAfterMs: number;
+  };
 }
 
 /**
@@ -1173,7 +1196,18 @@ export interface ArtifactFetchRequest {
 
 /** The result of {@link ArtifactFetchHost.inspect} — sizes and presence, never contents. */
 export type ArtifactInspection =
-  | { ok: true; sizeBytes: number; destExists: boolean }
+  | {
+      ok: true;
+      sizeBytes: number;
+      /**
+       * The source's last-modification time, in epoch milliseconds. Reported so the kernel
+       * can tell whether the file is still the artifact that crossed: one written during the
+       * exchange has a modification time at or before the exchange's own record, so anything
+       * later is provably a subsequent rewrite. A reference, not content.
+       */
+      modifiedAtMs: number;
+      destExists: boolean;
+    }
   | { ok: false; reason: string };
 
 /** The result of {@link ArtifactFetchHost.materialize} — how many bytes landed. */
@@ -1315,6 +1349,53 @@ export async function performArtifactFetch(
   if (!inspection.ok) return { kind: "unavailable", reason: inspection.reason };
   const { sizeBytes, destExists } = inspection;
 
+  // The reference resolved — but a reference names a LOCATION, and what the exchange
+  // authorized was an ARTIFACT. Those come apart the moment the callee rewrites that path
+  // outside an exchange: a later run (or the operator's own editor) can put entirely
+  // different content where the artifact used to be, and a path-only check would happily
+  // hand it over. That would make one exchanged path a durable read grant into the callee's
+  // workspace — which no exchange granted, and which under T5 an agent caller could poll
+  // indefinitely. So the source must still BE the artifact that crossed. [Codex review P2.]
+  //
+  // The evidence is what the exchange had, and the exchange never read the file — it
+  // projected the observation stream. That yields two checks, both fail-closed:
+  //
+  //   1. NOT MODIFIED SINCE. An artifact written during the exchange necessarily has a
+  //      modification time at or before the moment the crossing was recorded (the record is
+  //      written after the run finishes). A later timestamp is therefore proof of a
+  //      subsequent rewrite. This is the precise check: every ordinary write bumps mtime.
+  //   2. UNCHANGED SIZE. Backstops a rewrite that preserved the timestamp (a copy that
+  //      restores mtime, a filesystem with coarse granularity).
+  //
+  // A recorded size we never had means we cannot verify at all, so that refuses too — an
+  // unverifiable reference is not a fetchable one.
+  //
+  // Honest about its limit: this is a STALENESS check, not a cryptographic binding. A callee
+  // deliberately reproducing both the size and the timestamp is out of scope in exactly the
+  // way Phase 0's logical confinement is out of scope for hostile code; a snapshot taken at
+  // exchange time is the hardening if that threat model ever applies. What it does close is
+  // every ordinary way an artifact stops being the artifact.
+  const stale = (): ArtifactFetchOutcome => ({
+    kind: "unavailable",
+    reason:
+      `'${parsed.path}' has changed since ${to.name} handed it over, so it is no longer ` +
+      `the artifact that crossed. Ask for the work again to get a current one.`,
+  });
+  const expectedSize = exchanged.sizeBytes;
+  const recordedAtMs = Date.parse(exchanged.createdAt);
+  if (expectedSize === undefined) return stale();
+  if (inspection.sizeBytes !== expectedSize) return stale();
+  // An unparseable timestamp cannot establish the ordering, so it fails closed like the rest.
+  if (!Number.isFinite(recordedAtMs)) return stale();
+  // Compare at the RECORD's resolution. `createdAt` is an ISO-8601 string, so it carries
+  // whole milliseconds, while `mtimeMs` carries fractional ones — a file written at
+  // …01.0007 and recorded at …01.0009 would otherwise read as "modified 0.7ms after the
+  // record" and be refused, which for a fast run is the NORMAL case, not a rewrite. Flooring
+  // compares like with like. It costs nothing real: a rewrite that lands inside the same
+  // millisecond as the exchange record would have to be another process racing the run's own
+  // teardown, and the size check still applies to it.
+  if (Math.floor(inspection.modifiedAtMs) > recordedAtMs) return stale();
+
   // 3. The caller's gate. Exposure is exactly this one capability, and `autoApprove` is
   //    EMPTY by decision (see the doc comment) — so `decideGate` withholds under `propose`
   //    and confirms at every other level, with no grant able to skip it.
@@ -1337,7 +1418,12 @@ export async function performArtifactFetch(
       description: "Kernel-internal: materialize an exchanged artifact into the caller's workspace.",
       inputSchema: { type: "object", properties: {} },
       execute: (): Promise<ToolResult> => {
-        materialized = options.host.materialize(request);
+        // The expectation travels WITH the copy, so the source is re-checked at the read
+        // rather than trusting the pre-prompt inspection across the human's pause.
+        materialized = options.host.materialize({
+          ...request,
+          expect: { sizeBytes: expectedSize, notModifiedAfterMs: recordedAtMs },
+        });
         return Promise.resolve(
           materialized.ok
             ? { output: `Fetched ${materialized.bytes} bytes.`, isError: false }
