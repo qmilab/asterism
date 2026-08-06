@@ -58,6 +58,41 @@ test("write-then-delete of one path resolves to absent (a deletion dominates a s
   ]);
 });
 
+test("a delete-then-recreate without a new size reports present, not the STALE size (Codex P2)", () => {
+  const effects = [
+    wrote("drafts/a.md", 100),
+    obs("destructive", [{ subject: "file:drafts/a.md", relation: "exists", object: false }]),
+    // A presence-only observation — a capability that establishes existence without measuring.
+    obs("write", [{ subject: "file:drafts/a.md", relation: "exists", object: true }]),
+  ];
+  expect(collectArtifactManifest(effects)).toEqual([
+    { path: "drafts/a.md", kind: "file", exists: true },
+  ]);
+});
+
+test("a delete-then-recreate WITH a new size reports the new size", () => {
+  const effects = [
+    wrote("drafts/a.md", 100),
+    obs("destructive", [{ subject: "file:drafts/a.md", relation: "exists", object: false }]),
+    wrote("drafts/a.md", 250),
+  ];
+  expect(collectArtifactManifest(effects)).toEqual([
+    { path: "drafts/a.md", kind: "file", exists: true, sizeBytes: 250 },
+  ]);
+});
+
+test("facts ordered size-then-absent within one observation still resolve to absent", () => {
+  const effects = [
+    obs("destructive", [
+      { subject: "file:a.md", relation: "size_bytes", object: 10 },
+      { subject: "file:a.md", relation: "exists", object: false },
+    ]),
+  ];
+  expect(collectArtifactManifest(effects)).toEqual([
+    { path: "a.md", kind: "file", exists: false },
+  ]);
+});
+
 test("a re-write resolves to the LATEST size (last relation value wins)", () => {
   expect(collectArtifactManifest([wrote("drafts/a.md", 100), wrote("drafts/a.md", 250)])).toEqual([
     { path: "drafts/a.md", kind: "file", exists: true, sizeBytes: 250 },

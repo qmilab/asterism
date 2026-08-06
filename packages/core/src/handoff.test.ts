@@ -276,6 +276,7 @@ test("both logs record handoff.requested / handoff.completed as content-free ref
       connectionId: expect.any(String),
       fromAgentId: writer.id,
       toAgentId: researcher.id,
+      mode: "handoff",
       runId,
       status: "done",
     });

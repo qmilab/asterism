@@ -415,9 +415,14 @@ test("both logs record the exchange as content-free references carrying the mode
       // Nor the artifact paths — the log records the exchange, not its payload.
       expect(p).not.toContain("drafts/section.md");
     }
-    // The mode rides along, so both logs distinguish the exchange forms.
-    const created = events.find((e) => e.type === "connection.created");
-    expect(JSON.stringify(created?.payload)).toContain("artifact-only");
+    // The mode rides along on EVERY collaboration event, so both logs distinguish the
+    // exchange forms — including a `handoff.completed` read on its own, or a log filtered to
+    // completions only, where the mode is otherwise the one thing that tells an artifact
+    // exchange from a handoff. [Codex review P2.]
+    for (const type of ["connection.created", "handoff.requested", "handoff.completed"]) {
+      const event = events.find((e) => e.type === type);
+      expect((event?.payload as { mode?: string })?.mode).toBe("artifact-only");
+    }
   }
 
   // The CALLER's log holds only its own creation plus the collaboration markers — none of

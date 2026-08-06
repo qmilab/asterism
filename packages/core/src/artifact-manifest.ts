@@ -161,6 +161,14 @@ export function collectArtifactManifest(effects: readonly ObservedEffect[]): Art
         bySubject.set(subject, relations);
       }
       relations.set(relation, object);
+      // A DELETION invalidates any size accumulated before it. Relations are last-wins
+      // INDEPENDENTLY of each other, but `size_bytes` is only meaningful relative to the most
+      // recent `exists` transition: without this, write(100 bytes) → delete → a later
+      // presence-only observation (`exists = true`, no size — a future or custom capability
+      // that establishes existence without measuring) would resolve to "100 bytes", a stale
+      // size for a file recreated at an unknown one. Dropping it at the delete makes that
+      // subject resolve to `present`, which is the honest answer. [Codex review P2.]
+      if (relation === REL_EXISTS && object === false) relations.delete(REL_SIZE_BYTES);
     }
   }
 
