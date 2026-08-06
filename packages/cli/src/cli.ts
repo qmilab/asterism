@@ -35,6 +35,7 @@ import {
   MEMORY_TYPES,
   MemoryFirewallError,
   performArtifactExchange,
+  performArtifactFetch,
   performHandoff,
   proposeObjectiveTransitions,
   proposeReviewableMemories,
@@ -56,6 +57,7 @@ import {
 import type {
   Action,
   Agent,
+  ArtifactFetchHost,
   ArtifactRef,
   Capability,
   CognitionCaptureMode,
@@ -97,6 +99,7 @@ import {
   formatActionSummary,
   formatAgentList,
   formatArtifactManifest,
+  formatBytes,
   formatConnectionList,
   formatEventLines,
   formatEventList,
@@ -218,6 +221,19 @@ export interface CliIO {
    * conservatively.
    */
   capabilities?: (workspaceDir: string) => readonly Capability[];
+  /**
+   * The filesystem side of `artifact fetch` — reading an exchanged artifact out of the
+   * callee's workspace and writing it into the caller's. A host concern for the same reason
+   * the tool catalog is one (`core` owns no `node:fs`), and it carries the same obligation:
+   * it must refuse a path that resolves outside either workspace, symlinks included. Absent
+   * ⇒ `artifact fetch` is unavailable, which is the safe default — a surface that cannot
+   * confine the copy must not perform it.
+   *
+   * Note what the kernel does NOT delegate: whether the fetch is allowed at all. The
+   * connection check, the recorded-exchange resolution, and the caller's destructive-action
+   * gate all run before this is ever called.
+   */
+  fetchHost?: ArtifactFetchHost;
   /** Read piped standard input (for `secrets add` without an inline value). */
   readStdin?: () => Promise<string | undefined>;
   /**
@@ -1692,6 +1708,12 @@ async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
  * filter would leave the callee's output one field access away for the next surface.
  */
 async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
+  // `fetch` is a SUB-VERB, not a mode flag: it is a different operation on the same
+  // exchange (dereference what already crossed) rather than a variant of asking for work,
+  // so it takes its own argument shape — and its own gate. Dispatched before
+  // `parseExchangeArgs` because that helper deliberately treats every token after the two
+  // agents as free-form task text (D9), which a path argument is not.
+  if (args[0] === "fetch") return cmdArtifactFetch(args.slice(1), io);
   const parsed = parseExchangeArgs(args, io, "artifact");
   if (typeof parsed === "number") return parsed;
   const { fromName, toName, task } = parsed;
@@ -1740,6 +1762,106 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
     io.err(`See what happened:  asterism events tail ${toName}`);
     renderManifest();
     return 1;
+  });
+}
+
+/**
+ * `asterism artifact fetch <caller> <callee> <path>` — copy an artifact the callee produced
+ * into the caller's workspace, under the CALLER's own destructive-action gate.
+ *
+ * The completion of the `artifact-only` mode: the exchange hands back a list of what the
+ * callee made, and this is how the operator turns one of those references into the actual
+ * file — in the open, with a confirmation, rather than silently as a side effect of asking
+ * for help.
+ *
+ * `<path>` is a SELECTOR, not a path. It is matched against what the kernel recorded when
+ * the manifest crossed; a path the callee never produced simply does not resolve, and the
+ * file the kernel reads is the one it recorded, never a string typed here. Both agents are
+ * named explicitly (rather than inferring the callee from history) so the argument order
+ * matches every other exchange verb and a caller with several artifact-only channels never
+ * needs an ambiguity rule.
+ */
+async function cmdArtifactFetch(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP["artifact fetch"]!);
+    return 0;
+  }
+  const [fromName, toName, path] = parsed.positionals;
+  if (!fromName || !toName || !path) {
+    io.err("Usage: asterism artifact fetch <caller> <callee> <path>");
+    return 1;
+  }
+
+  return withHomeStore(io, async (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+    if (!io.fetchHost) {
+      io.err("This surface cannot fetch artifacts.");
+      return 1;
+    }
+
+    // The reference vocabulary is the kernel's (`file:<path>`), so accept the bare path an
+    // operator reads off the manifest and build the reference here. Only `file:` — a folder
+    // is a tree, not an artifact, and the kernel refuses one anyway.
+    const ref = `file:${path}`;
+    // Frame the confirmation before it is asked. The prompt itself stays the SAME generic
+    // destructive-action prompt every other capability gets (one prompt for the operator to
+    // learn); this only says, in words, what the arguments already carry — which direction
+    // the bytes move, and whether a file is about to be replaced.
+    const confirm = io.confirm;
+    const framedConfirm = confirm
+      ? async (action: Action): Promise<boolean> => {
+          const replacing =
+            action.args !== null &&
+            typeof action.args === "object" &&
+            (action.args as { overwrites?: unknown }).overwrites === true;
+          io.err(
+            `Fetching '${path}' from ${toName} into ${fromName}'s workspace` +
+              (replacing ? " — this REPLACES a file that is already there." : "."),
+          );
+          return confirm(action);
+        }
+      : undefined;
+    const outcome = await performArtifactFetch(store, from, to, ref, {
+      host: io.fetchHost,
+      ...(framedConfirm ? { confirm: framedConfirm } : {}),
+    });
+
+    switch (outcome.kind) {
+      case "no_connection":
+        return noConnection(io, fromName, toName, "artifact-only");
+      case "not_exchanged":
+        // Deliberately says nothing about whether the file exists in the callee's
+        // workspace: only what crossed can be fetched, and a reference that never crossed
+        // must look exactly like one that was never produced.
+        io.err(`${toName} has not handed ${fromName} an artifact at '${path}'.`);
+        io.err(`Ask for the work first:  asterism artifact ${fromName} ${toName} "<task>"`);
+        return 1;
+      case "unavailable":
+        io.err(`Cannot fetch '${path}': ${outcome.reason}`);
+        return 1;
+      case "withheld":
+        // `propose` never performs a side effect — report the plan step instead, exactly as
+        // a withheld tool call inside a run would be reported.
+        io.out(
+          `[proposed] would copy ${formatBytes(outcome.sizeBytes)} from ${toName} into ` +
+            `${fromName}'s workspace at '${outcome.path}'. Nothing was written.`,
+        );
+        io.out(`${fromName} is at trust level propose, so it does not act on its own.`);
+        return 0;
+      case "not_confirmed":
+        io.err(`Not fetched: '${outcome.path}' needs your explicit confirmation.`);
+        return 1;
+      case "ok":
+        io.out(
+          `Fetched '${outcome.result.path}' from ${toName} into ${fromName}'s workspace ` +
+            `(${formatBytes(outcome.result.bytes)}${outcome.result.overwrote ? ", replaced an existing file" : ""}).`,
+        );
+        return 0;
+    }
   });
 }
 

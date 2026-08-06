@@ -82,6 +82,29 @@ function parseSubject(subject: string): { kind: ArtifactRef["kind"]; path: strin
 }
 
 /**
+ * The stable REFERENCE string for one artifact — the same `kind:path` shape the observation
+ * stream uses as a subject (`file:drafts/market.md`). This is what the `exchanges` table
+ * persists and what `artifact fetch` resolves, so recording and resolving share one
+ * vocabulary and a reference is byte-identical wherever it appears.
+ */
+export function artifactReference(artifact: Pick<ArtifactRef, "kind" | "path">): string {
+  return `${artifact.kind}:${artifact.path}`;
+}
+
+/**
+ * The inverse of {@link artifactReference}: split a persisted reference back into its kind
+ * and path, or `undefined` for one this module does not model. Used by `artifact fetch` to
+ * turn a RECORDED reference into the workspace-relative path it will read — the caller's
+ * input is only ever matched against a recorded reference, never turned into a path itself.
+ */
+export function parseArtifactReference(
+  ref: string,
+): { kind: ArtifactRef["kind"]; path: string } | undefined {
+  const parsed = parseSubject(ref);
+  return parsed !== undefined && parsed.path.length > 0 ? parsed : undefined;
+}
+
+/**
  * Resolve a subject's final relation map to its end-of-run state, or `undefined` to SKIP
  * it (no renderable state — never guess). Priority mirrors the working-note harvest's
  * renderer so the two projections of one run can never disagree about what happened:
@@ -187,7 +210,7 @@ export function collectArtifactManifest(effects: readonly ObservedEffect[]): Art
     // Observations are untrusted tool output, so guard it here rather than emit a reference
     // that points at nothing.
     if (path.trim() === "") continue;
-    byRef.set(`${parsed.kind}:${path}`, {
+    byRef.set(artifactReference({ kind: parsed.kind, path }), {
       path,
       kind: parsed.kind,
       exists: state.exists,

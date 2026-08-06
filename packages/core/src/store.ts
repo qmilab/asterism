@@ -20,6 +20,7 @@ import {
 } from "./repositories/world-facts.js";
 import { CredentialRepository } from "./repositories/credentials.js";
 import { ConnectionRepository } from "./repositories/connections.js";
+import { ExchangeRepository } from "./repositories/exchanges.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
 import { InstallSettingsRepository } from "./repositories/install-settings.js";
@@ -31,6 +32,7 @@ import type {
   Connection,
   ConnectionMode,
   Credential,
+  Exchange,
   CognitionCaptureMode,
   CognitionProviderId,
   EventType,
@@ -47,6 +49,8 @@ import type {
   TrustLevel,
   WorldFact,
 } from "./types.js";
+import type { ArtifactRef } from "./artifact-manifest.js";
+import { artifactReference } from "./artifact-manifest.js";
 import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
@@ -70,6 +74,8 @@ export class AsterismStore {
   readonly credentials: CredentialRepository;
   /** Explicit, permissioned channels between agents — the Phase 3 collaboration primitive. */
   readonly connections: ConnectionRepository;
+  /** What actually crossed a connection, as resolvable references — the record `fetch` reads. */
+  readonly exchanges: ExchangeRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
   /** Per-agent kernel settings — the operator-configurable tunables (e.g. recall budget). */
@@ -91,6 +97,7 @@ export class AsterismStore {
     this.worldFacts = new WorldFactRepository(driver);
     this.credentials = new CredentialRepository(driver);
     this.connections = new ConnectionRepository(driver);
+    this.exchanges = new ExchangeRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
     this.installSettings = new InstallSettingsRepository(driver);
@@ -1594,6 +1601,82 @@ export class AsterismStore {
       mode: connection.mode,
       runId,
       status,
+    });
+  }
+
+  /**
+   * Persist an `artifact-only` exchange's manifest as resolvable references — one row per
+   * artifact, all sharing this exchange's `(connection, runId)`.
+   *
+   * Recorded because a reference nobody can dereference is only half a mode: `artifact
+   * fetch` reads exactly these rows to decide whether a path the caller names was genuinely
+   * produced by that callee over that connection. Nothing else may authorize a byte to move.
+   *
+   * Mirrors the manifest EXACTLY — including artifacts the run deleted (`exists: false` →
+   * `present = 0`). Filtering those out here would let the record and the manifest that
+   * crossed disagree, and it is `present` that later lets a deletion WITHDRAW an earlier
+   * reference instead of being outvoted by history.
+   *
+   * One transaction, so an exchange's references land together or not at all — a partially
+   * recorded manifest would make some of what crossed fetchable and the rest silently not.
+   * No event is emitted: `handoff.completed` already records the crossing on both logs, and
+   * a per-artifact event would put the same references on the log twice.
+   */
+  recordArtifactExchange(
+    connection: Connection,
+    runId: string,
+    artifacts: readonly ArtifactRef[],
+  ): void {
+    if (artifacts.length === 0) return;
+    this.driver.transaction(() => {
+      for (const artifact of artifacts) {
+        this.exchanges.record({
+          connectionId: connection.id,
+          fromAgentId: connection.fromAgentId,
+          toAgentId: connection.toAgentId,
+          kind: "artifact",
+          ref: artifactReference(artifact),
+          present: artifact.exists,
+          runId,
+        });
+      }
+    });
+  }
+
+  /**
+   * Resolve a reference the caller named against what actually crossed this connection, or
+   * `undefined` when it never did. The authorization read behind `artifact fetch`: a miss
+   * means no bytes move.
+   *
+   * Scoped to the connection the caller holds AND asserted against the caller as
+   * participant, so an artifact that crossed another channel — a different callee, the other
+   * direction, or a connection since revoked and replaced — does not resolve. That last case
+   * is a property worth naming: because the authorization is keyed on the connection ROW,
+   * revoking a connection also revokes the fetchability of everything exchanged over it.
+   */
+  findExchangedArtifact(connection: Connection, ref: string): Exchange | undefined {
+    return this.exchanges.findLatest(connection.id, connection.fromAgentId, "artifact", ref);
+  }
+
+  /**
+   * Record that an artifact's BYTES crossed into the caller's workspace — `artifact.fetched`
+   * on BOTH participants' logs, references only: the connection id, both agent ids, the
+   * artifact reference (already redacted at manifest construction), and the byte count.
+   *
+   * Emitted only when a fetch actually materialized the file. A withheld or unconfirmed
+   * fetch is recorded by the gate's own `action.*` audit on the CALLER's log, where it
+   * belongs: nothing crossed the boundary, so the callee's log has nothing to record. The
+   * file's CONTENTS never appear here — the event log stores references, never values, and
+   * this is the one operation in the phase where contents exist to be leaked.
+   */
+  recordArtifactFetched(connection: Connection, ref: string, bytes: number): void {
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "artifact.fetched", {
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: connection.mode,
+      ref,
+      bytes,
     });
   }
 

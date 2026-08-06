@@ -279,8 +279,12 @@ export function formatArtifactManifest(
   return lines;
 }
 
-/** Human-readable byte size for a manifest row — whole units, no false precision. */
-function formatBytes(bytes: number): string {
+/**
+ * Human-readable byte size for a manifest row — whole units, no false precision. Shared with
+ * `artifact fetch` so a size the operator read off the manifest is rendered the same way
+ * when the bytes actually land.
+ */
+export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "unknown size";
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;

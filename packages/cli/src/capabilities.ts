@@ -75,6 +75,12 @@ import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } 
 import { DEFAULT_MAX_OBSERVATION_FACTS } from "@qmilab/asterism-core";
 import type { Capability } from "@qmilab/asterism-core";
 import type { ObservedFact, ToolInvocation, ToolResult } from "@qmilab/asterism-core";
+import type {
+  ArtifactFetchHost,
+  ArtifactFetchRequest,
+  ArtifactInspection,
+  ArtifactMaterialization,
+} from "@qmilab/asterism-core";
 
 // Structured-observation schemas and their CLOSED relation vocabulary. Each tool declares
 // the facts it KNOWS it established — at the source, never reverse-engineered from output —
@@ -1041,4 +1047,118 @@ export function workspaceCapabilities(
     statNode,
     findNodes,
   ];
+}
+
+// --- artifact fetch (host side) --------------------------------------------
+//
+// The filesystem half of `asterism artifact fetch`. The kernel decides WHETHER a byte may
+// cross an agent boundary — active connection, recorded exchange, the caller's own
+// destructive-action gate — and calls back here to actually move it, for the same reason
+// `executeRun` takes an injected `readFile`: `core` owns no `node:fs`.
+//
+// This is host wiring with a real safety obligation, and it is discharged by REUSE rather
+// than by new path logic: `confine` + `targetEscapesWorkspace` are the identical guards
+// `read_file` and `write_file` use, applied to the callee's workspace on the read side and
+// the caller's on the write side. Writing a second, parallel confinement here is exactly how
+// the symlink-escape surface would be re-opened — every one of the T4 review rounds narrowed
+// that same surface, and there is no reason for a fetch to have its own version of it.
+//
+// Note what this does NOT do: it takes no path from any agent or operator. Both directories
+// come from the two agent rows and the relative path comes from a reference the kernel
+// recorded when the manifest crossed. It is a copy between two known workspaces, not a
+// file-open primitive.
+
+/**
+ * Resolve one side of a fetch to an absolute path inside `workspaceDir`, refusing a lexical
+ * climb-out and a symlinked component (leaf included) that resolves outside. The leaf is
+ * FOLLOWED on both sides, matching what actually happens: `readFileSync` reads through a
+ * symlinked source leaf and `writeFileSync` writes through a symlinked destination leaf, so
+ * an unfollowed leaf would be precisely the gap.
+ */
+function confineFetchSide(
+  workspaceDir: string,
+  path: string,
+  side: "source" | "destination",
+): { ok: true; abs: string } | { ok: false; reason: string } {
+  const c = confine(workspaceDir, path);
+  if (!c.ok) return { ok: false, reason: `'${path}' is not a path inside the ${side} workspace.` };
+  if (targetEscapesWorkspace(workspaceDir, c.path)) {
+    return { ok: false, reason: `'${path}' resolves outside the ${side} workspace.` };
+  }
+  return { ok: true, abs: c.path };
+}
+
+/**
+ * The host side of `artifact fetch`: read an artifact out of the callee's workspace and copy
+ * it into the caller's, at the same workspace-relative location.
+ *
+ * Both calls re-confine from scratch. `inspect` is a look-ahead so the operator is never
+ * asked to approve a write that cannot happen, NOT a permission the later `materialize`
+ * inherits — a host callback must never let an earlier answer stand in for its own check.
+ *
+ * Failure reasons name only the workspace-relative path and an errno code (`failureReason`),
+ * never a host path: a message that crosses back to a surface must not leak the operator's
+ * home directory or username, exactly as the file tools' failures must not.
+ */
+export function artifactFetchHost(): ArtifactFetchHost {
+  const resolveSides = (
+    request: ArtifactFetchRequest,
+  ): { ok: true; source: string; dest: string } | { ok: false; reason: string } => {
+    const source = confineFetchSide(request.sourceWorkspaceDir, request.path, "source");
+    if (!source.ok) return source;
+    const dest = confineFetchSide(request.destWorkspaceDir, request.path, "destination");
+    if (!dest.ok) return dest;
+    return { ok: true, source: source.abs, dest: dest.abs };
+  };
+
+  return {
+    inspect: (request: ArtifactFetchRequest): ArtifactInspection => {
+      const sides = resolveSides(request);
+      if (!sides.ok) return { ok: false, reason: sides.reason };
+      let sizeBytes: number;
+      try {
+        // `statSync`, following the leaf — the confinement check above already established
+        // that whatever it follows to stays inside the callee's workspace.
+        const st = statSync(sides.source);
+        if (st.isDirectory()) {
+          return { ok: false, reason: `'${request.path}' is a folder in the source workspace.` };
+        }
+        sizeBytes = st.size;
+      } catch (err) {
+        return { ok: false, reason: `cannot read '${request.path}' (${failureReason(err)}).` };
+      }
+      // A destination that exists but is not a file cannot be written over — say so now
+      // rather than letting the confirmed write fail with EISDIR after the human approved it.
+      let destExists = false;
+      try {
+        const st = statSync(sides.dest);
+        if (st.isDirectory()) {
+          return {
+            ok: false,
+            reason: `'${request.path}' is already a folder in the destination workspace.`,
+          };
+        }
+        destExists = true;
+      } catch {
+        destExists = false; // nothing there — an ordinary create.
+      }
+      return { ok: true, sizeBytes, destExists };
+    },
+
+    materialize: (request: ArtifactFetchRequest): ArtifactMaterialization => {
+      const sides = resolveSides(request);
+      if (!sides.ok) return { ok: false, reason: sides.reason };
+      try {
+        // Read as BYTES, not UTF-8 text: an artifact is whatever the callee produced, and
+        // decoding it would corrupt anything that is not text while buying nothing — the
+        // kernel never inspects the contents, it only moves them.
+        const bytes = readFileSync(sides.source);
+        mkdirSync(dirname(sides.dest), { recursive: true });
+        writeFileSync(sides.dest, bytes);
+        return { ok: true, bytes: bytes.byteLength };
+      } catch (err) {
+        return { ok: false, reason: `could not fetch '${request.path}' (${failureReason(err)}).` };
+      }
+    },
+  };
 }
