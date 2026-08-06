@@ -1570,21 +1570,28 @@ export class AsterismStore {
   }
 
   /**
-   * Record the RETURN of a handoff — `handoff.completed` on BOTH participants' logs
-   * (references only: the connection id, both agent ids, the callee's run id, and the
-   * run's final status). "Completed" marks the handoff CALL returning control to the
-   * caller, not run success — `status` carries done / failed / awaiting_confirmation, so a
-   * handoff that paused the callee's gate is recorded honestly. `runId` is the callee's
+   * Record the RETURN of an exchange — `handoff.completed` on BOTH participants' logs
+   * (references only: the connection id, both agent ids, the MODE, the callee's run id, and
+   * the run's final status). "Completed" marks the exchange CALL returning control to the
+   * caller, not run success — `status` carries done / failed / awaiting_confirmation, so an
+   * exchange that paused the callee's gate is recorded honestly. `runId` is the callee's
    * run, carried as a reference in the payload (not stamped on the caller's runId column —
    * the caller has no such run); it never lets the caller READ the callee's run, which
    * stays scoped to the callee. Never the callee's output text, transcript, memory, or a
    * secret.
+   *
+   * `mode` rides on this event for the same reason it rides on `handoff.requested`: more
+   * than one mode now shares this path, so a completion read on its own — or a log filtered
+   * to `handoff.completed` — must still say WHICH exchange form returned. Without it an
+   * `artifact-only` completion is indistinguishable from a `handoff` completion, and the
+   * mode-specific audit trail only half exists. [Codex review P2.]
    */
   recordHandoffCompleted(connection: Connection, runId: string, status: RunStatus): void {
     this.emitToBoth(connection.fromAgentId, connection.toAgentId, "handoff.completed", {
       connectionId: connection.id,
       fromAgentId: connection.fromAgentId,
       toAgentId: connection.toAgentId,
+      mode: connection.mode,
       runId,
       status,
     });

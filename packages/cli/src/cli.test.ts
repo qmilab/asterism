@@ -3621,8 +3621,12 @@ test("connect rejects a self-connection and an unimplemented mode", async () => 
   expect(h.err.join("\n")).toMatch(/can't connect to itself/i);
 
   await runCli(["new", "b", "--trust", "propose"], h.io);
-  expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(1);
+  // `read-summary` is the next mode with no implementation (T2b) — `artifact-only` became
+  // real in T2a, so the "unknown mode" assertion moves rather than disappearing.
+  expect(await runCli(["connect", "a", "b", "--mode", "read-summary"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
+  // The now-real mode opens a channel.
+  expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(0);
 });
 
 test("connect rejects --mode with no value rather than opening a default connection (Codex P2)", async () => {
@@ -3690,10 +3694,134 @@ test("a handoff task beginning with a dash reaches the callee verbatim (Codex P2
   }
 });
 
-test("connect / connections / handoff show help", async () => {
+test("connect / connections / handoff / artifact show help", async () => {
   const h = harness();
-  for (const cmd of [["connect", "--help"], ["connections", "--help"], ["handoff", "--help"]]) {
+  for (const cmd of [
+    ["connect", "--help"],
+    ["connections", "--help"],
+    ["handoff", "--help"],
+    ["artifact", "--help"],
+  ]) {
     const out = await capture(cmd, h.io);
     expect(out.length).toBeGreaterThan(0);
   }
+});
+
+// --- collaboration: artifact-only exchange (Phase 3 · T2a) ------------------
+
+test("artifact without a connection is refused with a pointer to the right mode", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  expect(await runCli(["artifact", "writer", "researcher", "do the thing"], io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/No active artifact-only connection/i);
+  expect(h.err.join("\n")).toMatch(/--mode artifact-only/);
+});
+
+test("artifact over a handoff-mode connection is still refused (modes are distinct permissions)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "handoff"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  expect(await runCli(["artifact", "writer", "researcher", "do the thing"], io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/No active artifact-only connection/i);
+});
+
+test("artifact returns a manifest and never the callee's output text", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "artifact-only"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  const out = await capture(["artifact", "writer", "researcher", "summarize the notes"], io);
+  // fakeAdapter resolves "hello from the agent" — the callee's words, which must NOT cross.
+  expect(out).not.toContain("hello from the agent");
+  // It produced no artifacts (no tools ran), and says so rather than showing nothing.
+  expect(out).toMatch(/produced no artifacts/i);
+});
+
+test("an artifact task beginning with a dash reaches the callee verbatim (shared with handoff)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "artifact-only"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  // The dash-leading-task protection lives in the shared exchange arg parser, so `artifact`
+  // inherits it — a flag-shaped task is never parsed away.
+  expect(await runCli(["artifact", "writer", "researcher", "--draft the Q3 proposal"], io)).toBe(0);
+  const store = openHomeStore(h);
+  try {
+    const researcher = agentNamed(store, "researcher");
+    expect(store.runs.list(researcher.id).at(-1)?.input).toBe("--draft the Q3 proposal");
+  } finally {
+    store.close();
+  }
+});
+
+test("artifact renders the manifest even when the run FAILED after producing a file (Codex P2)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "autonomous"], h.io);
+  await runCli(["connect", "writer", "helper", "--mode", "artifact-only"], h.io);
+
+  // The tool succeeds (its observation is collected), then the run fails. The file exists in
+  // the callee's workspace, so reporting "no artifacts" would be wrong.
+  const failAfterWriting = {
+    run(request: { tools: { list: () => { name: string; execute: (a: unknown) => unknown }[] } }) {
+      const output = (async () => {
+        const tool = request.tools.list().find((t) => t.name === "write_file");
+        await tool?.execute({ args: {} });
+        return { status: "failed" as const, text: "", error: "the model gave up" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const io = {
+    ...h.io,
+    makeAdapter: () => ({ adapter: failAfterWriting as never }),
+    capabilities: () => [
+      {
+        key: "write_file",
+        effect: "write" as const,
+        tool: {
+          name: "write_file",
+          description: "writes a file",
+          inputSchema: { type: "object", properties: {} },
+          execute: () => ({
+            output: "written",
+            observation: {
+              schema: "asterism.fs.write@1",
+              facts: [
+                { subject: "file:drafts/partial.md", relation: "exists", object: true },
+                { subject: "file:drafts/partial.md", relation: "size_bytes", object: 128 },
+              ],
+            },
+          }),
+        },
+      },
+    ],
+  };
+
+  expect(await runCli(["artifact", "writer", "helper", "draft it"], io)).toBe(1);
+  const all = [...h.out, ...h.err].join("\n");
+  expect(all).toMatch(/Exchange failed/i);
+  // The partial result is reported, not swallowed by the failure.
+  expect(all).toContain("drafts/partial.md");
+  // The callee's error prose still does not cross.
+  expect(all).not.toContain("the model gave up");
+});
+
+test("artifact reports usage when the task is missing", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["artifact", "writer", "researcher"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism artifact/);
 });

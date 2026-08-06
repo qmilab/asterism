@@ -34,6 +34,7 @@ import {
   executeRun,
   MEMORY_TYPES,
   MemoryFirewallError,
+  performArtifactExchange,
   performHandoff,
   proposeObjectiveTransitions,
   proposeReviewableMemories,
@@ -55,11 +56,13 @@ import {
 import type {
   Action,
   Agent,
+  ArtifactRef,
   Capability,
   CognitionCaptureMode,
   CognitionProviderId,
   Connection,
   ConnectionMode,
+  ExecuteRunOptions,
   FirewallFinding,
   HarvestSummary,
   Memory,
@@ -93,6 +96,7 @@ import { loadConfig, saveConfig } from "./config.js";
 import {
   formatActionSummary,
   formatAgentList,
+  formatArtifactManifest,
   formatConnectionList,
   formatEventLines,
   formatEventList,
@@ -1484,9 +1488,12 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
     const connection = store.createConnection(from.id, to.id, mode as ConnectionMode);
+    // Name the verb this channel actually enables — a mode grants exactly its own exchange
+    // form, so telling an artifact-only channel's operator to "hand off" would be wrong.
+    const verb = connection.mode === "artifact-only" ? "artifact" : "handoff";
     io.out(
       `Connected ${fromName} → ${toName} (${connection.mode}). ` +
-        `${fromName} can now hand off to ${toName}.`,
+        `Use it with: asterism ${verb} ${fromName} ${toName} "<task>"`,
     );
     return 0;
   });
@@ -1526,17 +1533,30 @@ function cmdConnections(args: string[], io: CliIO): Promise<number> {
  * or secrets crosses. Mirrors `cmdRun`'s shape, but the run, action summary, and harvest all
  * belong to the callee.
  */
-async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
-  // Help only when it LEADS — the task is FREE-FORM text taken RAW (deliberately NOT
-  // through `parseArgs`). `parseArgs` would eat any flag-looking token in the tail as an
-  // option, so `handoff writer researcher "--help"` would print help and an unquoted
-  // `--draft the proposal` task would be silently dropped — handing the callee a different
-  // task than the operator typed. Taking `args.slice(2)` verbatim preserves a dash-leading
-  // or flag-shaped task in full. The same discipline `objective add` / `secrets add` use
-  // for their free-form text; `handoff` has no flags of its own, so positional handling
-  // loses nothing. [Codex review P2: preserve flag-like handoff tasks.]
+/**
+ * Parse the shared `<from> <to> "<task>"` invocation of a cross-agent exchange verb
+ * (`handoff`, `artifact`), or print usage/help and return the exit code.
+ *
+ * Help only when it LEADS — the task is FREE-FORM text taken RAW (deliberately NOT through
+ * `parseArgs`). `parseArgs` would eat any flag-looking token in the tail as an option, so
+ * `handoff writer researcher "--help"` would print help and an unquoted `--draft the
+ * proposal` task would be silently dropped — handing the callee a different task than the
+ * operator typed. Taking `args.slice(2)` verbatim preserves a dash-leading or flag-shaped
+ * task in full. The same discipline `objective add` / `secrets add` use for their free-form
+ * text; these verbs have no flags of their own, so positional handling loses nothing.
+ * [Codex review P2: preserve flag-like handoff tasks.]
+ *
+ * This is also WHY the exchange modes get one verb each rather than a `--mode` flag on a
+ * single verb: a flag would have to be parsed out of the very tail this rule keeps verbatim
+ * (design note §9, decision D9).
+ */
+function parseExchangeArgs(
+  args: string[],
+  io: CliIO,
+  verb: "handoff" | "artifact",
+): { fromName: string; toName: string; task: string } | number {
   if (args[0] === "--help" || args[0] === "-h") {
-    io.out(COMMAND_HELP.handoff!);
+    io.out(COMMAND_HELP[verb]!);
     return 0;
   }
   const fromName = args[0];
@@ -1545,45 +1565,68 @@ async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
   // or flag-shaped task is kept in full, never mistaken for an option.
   const task = args.slice(2).join(" ").trim();
   if (!fromName || !toName || !task) {
-    io.err('Usage: asterism handoff <from> <to> "<task>"');
+    io.err(`Usage: asterism ${verb} <from> <to> "<task>"`);
     return 1;
   }
+  return { fromName, toName, task };
+}
 
-  return withHomeStore(io, async (store, home) => {
-    const from = findAgentByName(store, fromName);
-    if (!from) return noAgent(io, fromName);
-    const to = findAgentByName(store, toName);
-    if (!to) return noAgent(io, toName);
+/** The one message for "this channel does not exist", so every mode reports it identically. */
+function noConnection(io: CliIO, from: string, to: string, mode: ConnectionMode): number {
+  io.err(
+    `No active ${mode} connection from ${from} to ${to}. ` +
+      `Open one first: asterism connect ${from} ${to} --mode ${mode}`,
+  );
+  return 1;
+}
 
-    // The connection is the PERMISSION — check it before anything else (it is a cheap
-    // scoped read, and it is the more fundamental precondition than a model). With no
-    // active channel the handoff cannot proceed, so refuse here and build no adapter
-    // (mirroring `run`: no substrate is constructed for a run that cannot run). The kernel
-    // op re-checks authoritatively below, so this surface read never becomes the gate.
-    if (!store.connections.findActive(from.id, to.id, "handoff")) {
-      io.err(
-        `No active handoff connection from ${fromName} to ${toName}. ` +
-          `Open one first: asterism connect ${fromName} ${toName} --mode handoff`,
-      );
-      return 1;
-    }
+/**
+ * The shared prelude of every cross-agent exchange: resolve both agents, verify an ACTIVE
+ * connection in `mode` authorizes it, and build the CALLEE's run options.
+ *
+ * The connection is the PERMISSION — checked before anything else (a cheap scoped read, and
+ * a more fundamental precondition than a model). With no active channel the exchange cannot
+ * proceed, so refuse here and build no adapter (mirroring `run`: no substrate is constructed
+ * for a run that cannot run). The kernel op re-checks authoritatively, so this surface read
+ * never becomes the gate — it is a fast path and the race backstop, not the enforcement.
+ *
+ * Everything resolved here is the CALLEE's — its substrate, its recall, its workspace tools,
+ * never the caller's. That is what makes the callee's gate sovereign: the task runs in the
+ * callee's workspace, on the callee's model, with the callee's own scoped tools.
+ */
+async function prepareExchange(
+  store: AsterismStore,
+  home: string,
+  io: CliIO,
+  fromName: string,
+  toName: string,
+  mode: ConnectionMode,
+): Promise<{ from: Agent; to: Agent; options: ExecuteRunOptions } | number> {
+  const from = findAgentByName(store, fromName);
+  if (!from) return noAgent(io, fromName);
+  const to = findAgentByName(store, toName);
+  if (!to) return noAgent(io, toName);
 
-    // The handoff runs AS the callee, so resolve the CALLEE's substrate, recall, and
-    // workspace tools — never the caller's. This is what makes the callee's gate sovereign:
-    // it runs in its own workspace, on its own model, with its own scoped tools.
-    const made = await resolveAdapter(io, home, to, store);
-    if (!made.adapter) {
-      io.err(made.reason ?? "No model configured.");
-      return 1;
-    }
-    const recallMade = await resolveRecall(io, store, to);
-    if (recallMade.reason) {
-      io.err(recallMade.reason);
-      return 1;
-    }
-    const capabilities = io.capabilities?.(to.workspaceDir);
+  if (!store.connections.findActive(from.id, to.id, mode)) {
+    return noConnection(io, fromName, toName, mode);
+  }
 
-    const outcome = await performHandoff(store, from, to, task, {
+  const made = await resolveAdapter(io, home, to, store);
+  if (!made.adapter) {
+    io.err(made.reason ?? "No model configured.");
+    return 1;
+  }
+  const recallMade = await resolveRecall(io, store, to);
+  if (recallMade.reason) {
+    io.err(recallMade.reason);
+    return 1;
+  }
+  const capabilities = io.capabilities?.(to.workspaceDir);
+
+  return {
+    from,
+    to,
+    options: {
       adapter: made.adapter,
       readFile: (p) => readFileSync(p, "utf8"),
       onEvent: (event) => {
@@ -1593,15 +1636,22 @@ async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
       ...(io.confirm ? { confirm: io.confirm } : {}),
       ...(capabilities ? { capabilities } : {}),
       ...(recallMade.provider ? { recall: recallMade.provider } : {}),
-    });
+    },
+  };
+}
 
-    if (outcome.kind === "no_connection") {
-      io.err(
-        `No active handoff connection from ${fromName} to ${toName}. ` +
-          `Open one first: asterism connect ${fromName} ${toName} --mode handoff`,
-      );
-      return 1;
-    }
+async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseExchangeArgs(args, io, "handoff");
+  if (typeof parsed === "number") return parsed;
+  const { fromName, toName, task } = parsed;
+
+  return withHomeStore(io, async (store, home) => {
+    const prepared = await prepareExchange(store, home, io, fromName, toName, "handoff");
+    if (typeof prepared === "number") return prepared;
+    const { from, to, options } = prepared;
+
+    const outcome = await performHandoff(store, from, to, task, options);
+    if (outcome.kind === "no_connection") return noConnection(io, fromName, toName, "handoff");
 
     const result = outcome.result;
     // The run is the callee's, so what it did (action summary) and what it proposed to note
@@ -1623,6 +1673,72 @@ async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
       return 0;
     }
     io.err(`Handoff failed: ${result.error ?? "unknown error"}`);
+    return 1;
+  });
+}
+
+// --- artifact --------------------------------------------------------------
+
+/**
+ * `asterism artifact <from> <to> "<task>"` — the `artifact-only` exchange (Phase 3 · T2a).
+ *
+ * The callee does the task in its own space, and what comes back is the references-only
+ * manifest of the workspace artifacts it produced: paths, sizes, and whether each still
+ * exists. The callee's words never cross, and neither do the file bytes.
+ *
+ * Note what this surface CANNOT do, by construction: the kernel returns an
+ * `ArtifactExchangeResult`, which has no field carrying the callee's text — so there is
+ * nothing here to accidentally print. That is deliberate (design note §9): a surface-level
+ * filter would leave the callee's output one field access away for the next surface.
+ */
+async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseExchangeArgs(args, io, "artifact");
+  if (typeof parsed === "number") return parsed;
+  const { fromName, toName, task } = parsed;
+
+  return withHomeStore(io, async (store, home) => {
+    const prepared = await prepareExchange(store, home, io, fromName, toName, "artifact-only");
+    if (typeof prepared === "number") return prepared;
+    const { from, to, options } = prepared;
+
+    const outcome = await performArtifactExchange(store, from, to, task, options);
+    if (outcome.kind === "no_connection") return noConnection(io, fromName, toName, "artifact-only");
+
+    const result = outcome.result;
+    // The run is the callee's, so its action summary is surfaced for `to`. The callee's
+    // working-note harvest is NOT reported here: it describes the callee's own review pile,
+    // which this mode gives the caller no window into (the kernel does not cross it either).
+    if (to.trustLevel !== "propose" && result.actions.length > 0) {
+      for (const line of formatActionSummary(result.actions)) io.err(line);
+    }
+
+    // The manifest is rendered on EVERY outcome, not only success. The kernel collects
+    // artifacts at every exit — a file the callee wrote before it paused, or before a later
+    // step failed, genuinely exists in its workspace — so withholding the manifest on those
+    // paths would report "nothing produced" for work that actually landed. Only the message
+    // accompanying it differs. [Codex review P2: the failed branch dropped the manifest.]
+    const renderManifest = (): void => {
+      for (const line of formatArtifactManifest(result.artifacts, toName)) io.out(line);
+    };
+
+    if (result.status === "awaiting_confirmation") {
+      io.out(
+        `Exchange paused: ${toName} needs your confirmation before a destructive action can proceed.`,
+      );
+      io.out(`Confirm it to continue:  asterism confirm ${toName} ${shortId(result.runId)}`);
+      renderManifest();
+      return 0;
+    }
+    if (result.status === "done") {
+      renderManifest();
+      return 0;
+    }
+    // No error text crosses an `artifact-only` boundary (it is free-form callee-side text),
+    // so point the operator at the callee's own surfaces for the detail — but still report
+    // what the run managed to produce before it failed.
+    io.err(`Exchange failed: ${toName}'s run did not complete.`);
+    io.err(`See what happened:  asterism events tail ${toName}`);
+    renderManifest();
     return 1;
   });
 }
@@ -4708,6 +4824,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdConnections(rest, io);
     case "handoff":
       return cmdHandoff(rest, io);
+    case "artifact":
+      return cmdArtifact(rest, io);
     case "confirm":
       return cmdConfirm(rest, io);
     case "runs":

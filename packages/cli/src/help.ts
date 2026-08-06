@@ -38,6 +38,7 @@ Commands:
   connect <from> <to> --mode <m>    Open a permissioned channel between two agents
   connections <agent>               Show an agent's connections
   handoff <from> <to> "<task>"      Have one agent hand a task to another
+  artifact <from> <to> "<task>"     Like handoff, but hand back only the files produced
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
@@ -210,7 +211,7 @@ Choose a model with \`asterism config\` (or the ASTERISM_MODEL_ID environment
 variable), and set an API key in the environment (e.g. OPENAI_API_KEY), before
 running.`,
 
-  connect: `asterism connect <from> <to> --mode handoff
+  connect: `asterism connect <from> <to> --mode <handoff|artifact-only>
 
 Open an explicit channel from one agent to another, so the first can hand it work.
 Agents are separate by default and can't reach each other; a connection is the only
@@ -221,9 +222,13 @@ A connection is one-way: \`connect writer researcher\` lets writer hand off to
 researcher, not the other way round. Open a second connection for the reverse. You can
 re-run the same connect harmlessly — it won't make a duplicate.
 
-  --mode handoff   What may cross the channel. With 'handoff', the receiving agent does
-                   the task and hands back only its final result. (More modes, sharing
-                   less, are coming.) Default: handoff.
+  --mode <m>       What may cross the channel. Default: handoff.
+                     handoff        The receiving agent does the task and hands back only
+                                    its final result — use \`asterism handoff\`.
+                     artifact-only  It does the task and hands back only a list of the
+                                    files it produced — not its words, and not the file
+                                    contents. Use \`asterism artifact\`. (More modes,
+                                    sharing less, are coming.)
 
 Opening a connection is a deliberate act you take; from then on, either agent's record
 shows the channel exists and each time it is used — never the task text or any result.`,
@@ -249,6 +254,31 @@ around another agent's limits. If it pauses, confirm it on the receiving agent:
 
 Open the channel first if you haven't:
   asterism connect <from> <to> --mode handoff
+
+Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
+OPENAI_API_KEY) — the receiving agent needs one to run the task.`,
+
+  artifact: `asterism artifact <from> <to> "<task>"
+
+Have one agent ask another for work and get back only the FILES it produced — a list of
+what it made, with sizes — instead of its written answer. For when you want the thing it
+made, not its words.
+
+Everything true of \`handoff\` is true here: the receiving agent does the work in its own
+workspace, at its own autonomy level, framed by its own memory and skills. Its protections
+apply too — a destructive action pauses for your confirmation according to the RECEIVING
+agent's autonomy, no matter how much autonomy the asking agent has.
+
+What comes back is narrower. You get each file's path and size, and whether it still
+exists. You do NOT get the receiving agent's words, its memory, or the contents of those
+files — those stay on its side. The files themselves sit in the receiving agent's own
+workspace, on your machine, where you can read them directly.
+
+Open the channel first if you haven't:
+  asterism connect <from> <to> --mode artifact-only
+
+A channel opened for handoff does not work here, and vice versa — each mode is its own
+permission, so opening one never quietly grants the other.
 
 Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
 OPENAI_API_KEY) — the receiving agent needs one to run the task.`,

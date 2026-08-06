@@ -133,6 +133,15 @@ export function harvestWorldFactCandidates(
         bySubject.set(subject, relations);
       }
       relations.set(relation, object);
+      // A DELETION invalidates any size accumulated before it. Relations are last-wins
+      // INDEPENDENTLY, but `size_bytes` is only meaningful relative to the most recent
+      // `exists` transition: without this, write(412 bytes) → delete → a later presence-only
+      // observation (`exists = true`, no size) would render "412 bytes" and PROPOSE that as a
+      // working note — a stale size for a file recreated at an unknown one. Dropping it at
+      // the delete renders `present` instead, which is the honest answer.
+      // [Codex review P2 on the artifact manifest; the same accumulation, so the same fix —
+      // the two reducers must agree about what one run did.]
+      if (relation === REL_EXISTS && object === false) relations.delete(REL_SIZE_BYTES);
     }
   }
 

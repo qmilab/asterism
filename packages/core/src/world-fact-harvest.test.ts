@@ -53,6 +53,21 @@ describe("harvestWorldFactCandidates — the pure reducer", () => {
     expect(out).toEqual([{ subject: "file:x", value: "absent" }]);
   });
 
+  test("delete then recreate WITHOUT a new size → present, not the stale size (Codex P2)", () => {
+    // A deletion invalidates the size measured before it: a presence-only re-creation must
+    // not inherit the pre-delete size and propose it as a working note. Mirrors the same fix
+    // in the artifact manifest — the two reducers must agree about what one run did.
+    const out = harvestWorldFactCandidates([
+      obs("write", [
+        { subject: "file:x", relation: "size_bytes", object: 412 },
+        { subject: "file:x", relation: "exists", object: true },
+      ]),
+      obs("destructive", [{ subject: "file:x", relation: "exists", object: false }]),
+      obs("write", [{ subject: "file:x", relation: "exists", object: true }]),
+    ]);
+    expect(out).toEqual([{ subject: "file:x", value: "present" }]);
+  });
+
   test("re-write of a subject takes the latest size; delete then recreate → present size", () => {
     expect(
       harvestWorldFactCandidates([
