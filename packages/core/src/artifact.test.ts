@@ -338,6 +338,46 @@ test("a destructive action pauses per the callee's gate; the manifest reflects o
   ]);
 });
 
+test("a run that produced a file and THEN failed still reports that artifact (Codex P2)", async () => {
+  const helper = store.createAgent({
+    name: "helper",
+    role: "writes files",
+    soulRef: "casual-helper",
+    workspaceDir: "/tmp/helper",
+    trustLevel: "autonomous",
+  });
+  store.createConnection(writer.id, helper.id, "artifact-only");
+
+  // The tool succeeds (so its observation is collected), then the run fails afterwards —
+  // a later model/tool error. The file genuinely exists in the callee's workspace, so the
+  // manifest must still describe it: a partial result is not the same as no result.
+  const failAfterWriting: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        const tool = request.tools.list().find((t) => t.name === "write_file");
+        await tool?.execute({ args: {} }, request.signal);
+        return { status: "failed", text: "", error: "the model gave up" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const outcome = await performArtifactExchange(store, writer, helper, "draft it", {
+    adapter: failAfterWriting,
+    capabilities: [writingCapability("write_file", wrote("drafts/partial.md", 128))],
+  });
+  expect(outcome.kind).toBe("ok");
+  if (outcome.kind !== "ok") return;
+
+  expect(outcome.result.status).toBe("failed");
+  expect(outcome.result.artifacts).toEqual([
+    { path: "drafts/partial.md", kind: "file", exists: true, sizeBytes: 128 },
+  ]);
+  // The substrate's error text is callee-side prose and does not cross.
+  expect(JSON.stringify(outcome.result)).not.toContain("the model gave up");
+});
+
 // --- Invariant 4: cross-agent denial across a live connection ---------------
 
 test("with an artifact-only channel open, each agent's secrets and memory stay its own", async () => {

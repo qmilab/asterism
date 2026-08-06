@@ -1712,23 +1712,33 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
       for (const line of formatActionSummary(result.actions)) io.err(line);
     }
 
+    // The manifest is rendered on EVERY outcome, not only success. The kernel collects
+    // artifacts at every exit — a file the callee wrote before it paused, or before a later
+    // step failed, genuinely exists in its workspace — so withholding the manifest on those
+    // paths would report "nothing produced" for work that actually landed. Only the message
+    // accompanying it differs. [Codex review P2: the failed branch dropped the manifest.]
+    const renderManifest = (): void => {
+      for (const line of formatArtifactManifest(result.artifacts, toName)) io.out(line);
+    };
+
     if (result.status === "awaiting_confirmation") {
       io.out(
         `Exchange paused: ${toName} needs your confirmation before a destructive action can proceed.`,
       );
       io.out(`Confirm it to continue:  asterism confirm ${toName} ${shortId(result.runId)}`);
-      // Report what DID land before the pause — the manifest is honest about partial work.
-      for (const line of formatArtifactManifest(result.artifacts, toName)) io.out(line);
+      renderManifest();
       return 0;
     }
     if (result.status === "done") {
-      for (const line of formatArtifactManifest(result.artifacts, toName)) io.out(line);
+      renderManifest();
       return 0;
     }
     // No error text crosses an `artifact-only` boundary (it is free-form callee-side text),
-    // so point the operator at the callee's own surfaces for the detail.
+    // so point the operator at the callee's own surfaces for the detail — but still report
+    // what the run managed to produce before it failed.
     io.err(`Exchange failed: ${toName}'s run did not complete.`);
     io.err(`See what happened:  asterism events tail ${toName}`);
+    renderManifest();
     return 1;
   });
 }

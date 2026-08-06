@@ -3764,6 +3764,61 @@ test("an artifact task beginning with a dash reaches the callee verbatim (shared
   }
 });
 
+test("artifact renders the manifest even when the run FAILED after producing a file (Codex P2)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "autonomous"], h.io);
+  await runCli(["connect", "writer", "helper", "--mode", "artifact-only"], h.io);
+
+  // The tool succeeds (its observation is collected), then the run fails. The file exists in
+  // the callee's workspace, so reporting "no artifacts" would be wrong.
+  const failAfterWriting = {
+    run(request: { tools: { list: () => { name: string; execute: (a: unknown) => unknown }[] } }) {
+      const output = (async () => {
+        const tool = request.tools.list().find((t) => t.name === "write_file");
+        await tool?.execute({ args: {} });
+        return { status: "failed" as const, text: "", error: "the model gave up" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+  const io = {
+    ...h.io,
+    makeAdapter: () => ({ adapter: failAfterWriting as never }),
+    capabilities: () => [
+      {
+        key: "write_file",
+        effect: "write" as const,
+        tool: {
+          name: "write_file",
+          description: "writes a file",
+          inputSchema: { type: "object", properties: {} },
+          execute: () => ({
+            output: "written",
+            observation: {
+              schema: "asterism.fs.write@1",
+              facts: [
+                { subject: "file:drafts/partial.md", relation: "exists", object: true },
+                { subject: "file:drafts/partial.md", relation: "size_bytes", object: 128 },
+              ],
+            },
+          }),
+        },
+      },
+    ],
+  };
+
+  expect(await runCli(["artifact", "writer", "helper", "draft it"], io)).toBe(1);
+  const all = [...h.out, ...h.err].join("\n");
+  expect(all).toMatch(/Exchange failed/i);
+  // The partial result is reported, not swallowed by the failure.
+  expect(all).toContain("drafts/partial.md");
+  // The callee's error prose still does not cross.
+  expect(all).not.toContain("the model gave up");
+});
+
 test("artifact reports usage when the task is missing", async () => {
   const h = harness();
   await runCli(["init"], h.io);
