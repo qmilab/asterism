@@ -14,6 +14,7 @@
 //   - subject references are controlled + normalized (file:<workspace-relative-path>).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -22,6 +23,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,7 +31,7 @@ import { join } from "node:path";
 
 import type { ScopedTool, ToolResult } from "@qmilab/asterism-core";
 
-import { workspaceCapabilities } from "./capabilities.js";
+import { artifactFetchHost, workspaceCapabilities } from "./capabilities.js";
 
 describe("file tools emit structured observations", () => {
   let workspace: string;
@@ -931,5 +933,283 @@ describe("workspace-bounded write tools emit structured observations", () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+// The host side of `artifact fetch` — the one place file BYTES cross an agent boundary.
+//
+// The kernel decides WHETHER they may (active connection, recorded exchange, the caller's own
+// destructive gate — proven in `artifact-fetch.test.ts`); this proves the half the kernel
+// delegates: that the copy stays confined to the two workspaces, symlinks included, on BOTH
+// sides. The read side is `read_file`'s exfiltration surface pointed at another agent's
+// workspace, and the write side is `write_file`'s — so both are exercised against a real
+// filesystem here rather than trusted to a shared helper.
+describe("artifactFetchHost — confinement on both sides of a fetch", () => {
+  let callee: string; // the source workspace (where the artifact was produced)
+  let caller: string; // the destination workspace (where it lands)
+  const host = artifactFetchHost();
+
+  beforeEach(() => {
+    callee = mkdtempSync(join(tmpdir(), "asterism-fetch-src-"));
+    caller = mkdtempSync(join(tmpdir(), "asterism-fetch-dst-"));
+  });
+  afterEach(() => {
+    rmSync(callee, { recursive: true, force: true });
+    rmSync(caller, { recursive: true, force: true });
+  });
+
+  const request = (path: string) => ({
+    sourceWorkspaceDir: callee,
+    destWorkspaceDir: caller,
+    path,
+  });
+
+  /** A materialize request whose expectation matches the source as it stands right now. */
+  const materializeRequest = (path: string, sizeBytes: number, notModifiedAfterMs = Date.now() + 60_000) => ({
+    ...request(path),
+    expect: { sizeBytes, notModifiedAfterMs },
+  });
+
+  test("copies an artifact between the two workspaces, byte for byte", () => {
+    mkdirSync(join(callee, "drafts"), { recursive: true });
+    writeFileSync(join(callee, "drafts/market.md"), "MARKET SECTION");
+    const inspection = host.inspect(request("drafts/market.md"));
+    expect(inspection).toMatchObject({ ok: true, sizeBytes: 14, destExists: false });
+    const materialized = host.materialize(materializeRequest("drafts/market.md", 14));
+    expect(materialized).toEqual({ ok: true, bytes: 14 });
+    // Parent folders are created, and the bytes are identical.
+    expect(readFileSync(join(caller, "drafts/market.md"), "utf8")).toBe("MARKET SECTION");
+    // The source is untouched — a fetch copies, it does not move.
+    expect(existsSync(join(callee, "drafts/market.md"))).toBe(true);
+  });
+
+  test("preserves NON-TEXT bytes exactly (an artifact is whatever the callee produced)", () => {
+    const bytes = Buffer.from([0x00, 0xff, 0xfe, 0x41, 0x00, 0x80]);
+    writeFileSync(join(callee, "blob.bin"), bytes);
+    expect(host.materialize(materializeRequest("blob.bin", 6))).toEqual({ ok: true, bytes: 6 });
+    expect(readFileSync(join(caller, "blob.bin")).equals(bytes)).toBe(true);
+  });
+
+  test("reports an existing destination, and replaces it when asked", () => {
+    writeFileSync(join(callee, "notes.md"), "NEW");
+    writeFileSync(join(caller, "notes.md"), "OLD-AND-LONGER");
+    const inspection = host.inspect(request("notes.md"));
+    expect(inspection).toMatchObject({ ok: true, destExists: true });
+    expect(host.materialize(materializeRequest("notes.md", 3))).toEqual({ ok: true, bytes: 3 });
+    // Replaced in full — never appended to, and never left half-written from the longer file.
+    expect(readFileSync(join(caller, "notes.md"), "utf8")).toBe("NEW");
+  });
+
+  test("refuses a lexical climb-out on either side", () => {
+    writeFileSync(join(callee, "ok.md"), "x");
+    for (const path of ["../escape.md", "/etc/passwd", "drafts/../../escape.md"]) {
+      const inspection = host.inspect(request(path));
+      expect(inspection.ok).toBe(false);
+      const materialized = host.materialize(materializeRequest(path, 1));
+      expect(materialized.ok).toBe(false);
+    }
+  });
+
+  test("refuses reading a SOURCE that resolves outside the callee's workspace (symlinked dir)", () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-fetch-out-"));
+    try {
+      writeFileSync(join(outside, "secret.txt"), "OUTSIDE-SECRET");
+      symlinkSync(outside, join(callee, "escape"));
+      const inspection = host.inspect(request("escape/secret.txt"));
+      expect(inspection.ok).toBe(false);
+      const materialized = host.materialize(materializeRequest("escape/secret.txt", 14));
+      expect(materialized.ok).toBe(false);
+      // The decisive check: the external contents never landed in the caller's workspace.
+      expect(existsSync(join(caller, "escape/secret.txt"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses reading a SOURCE symlink LEAF whose target is outside", () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-fetch-leaf-"));
+    try {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "OUTSIDE-SECRET");
+      symlinkSync(target, join(callee, "link.md")); // in-workspace symlink → outside FILE
+      expect(host.inspect(request("link.md")).ok).toBe(false);
+      expect(host.materialize(materializeRequest("link.md", 14)).ok).toBe(false);
+      expect(existsSync(join(caller, "link.md"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses writing a DESTINATION that resolves outside the caller's workspace (symlinked dir)", () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-fetch-dstout-"));
+    try {
+      mkdirSync(join(callee, "escape"), { recursive: true });
+      writeFileSync(join(callee, "escape/planted.md"), "PLANTED");
+      symlinkSync(outside, join(caller, "escape")); // the CALLER's workspace has the escape
+      expect(host.inspect(request("escape/planted.md")).ok).toBe(false);
+      expect(host.materialize(materializeRequest("escape/planted.md", 7)).ok).toBe(false);
+      expect(existsSync(join(outside, "planted.md"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses writing through a DESTINATION symlink LEAF, including a DANGLING one", () => {
+    const outside = mkdtempSync(join(tmpdir(), "asterism-fetch-dangling-"));
+    try {
+      writeFileSync(join(callee, "report.md"), "REPORT");
+      // A dangling link: `realpathSync` throws on it, so a guard that treated the throw as
+      // "stays inside" would CREATE the outside file. (The T4 R4 escape, on the fetch path.)
+      symlinkSync(join(outside, "notyet.md"), join(caller, "report.md"));
+      expect(host.inspect(request("report.md")).ok).toBe(false);
+      expect(host.materialize(materializeRequest("report.md", 6)).ok).toBe(false);
+      expect(existsSync(join(outside, "notyet.md"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("still copies through a symlink that resolves INSIDE either workspace (no false refusal)", () => {
+    mkdirSync(join(callee, "real"), { recursive: true });
+    writeFileSync(join(callee, "real/doc.md"), "INSIDE");
+    symlinkSync(join(callee, "real"), join(callee, "alias"));
+    expect(host.materialize(materializeRequest("alias/doc.md", 6))).toEqual({ ok: true, bytes: 6 });
+    expect(readFileSync(join(caller, "alias/doc.md"), "utf8")).toBe("INSIDE");
+  });
+
+  test("refuses a source that is a folder, and a destination already occupied by one", () => {
+    mkdirSync(join(callee, "drafts"), { recursive: true });
+    const sourceIsDir = host.inspect(request("drafts"));
+    expect(sourceIsDir.ok).toBe(false);
+    if (!sourceIsDir.ok) expect(sourceIsDir.reason).toContain("folder");
+
+    writeFileSync(join(callee, "notes.md"), "x");
+    mkdirSync(join(caller, "notes.md"), { recursive: true }); // a FOLDER where the file would land
+    const destIsDir = host.inspect(request("notes.md"));
+    expect(destIsDir.ok).toBe(false);
+    if (!destIsDir.ok) expect(destIsDir.reason).toContain("folder");
+  });
+
+  test("a missing source is reported by errno, never by host path", () => {
+    const inspection = host.inspect(request("gone.md"));
+    expect(inspection.ok).toBe(false);
+    if (inspection.ok) return;
+    expect(inspection.reason).toContain("ENOENT");
+    // A failure message crosses back to a surface, so it must not carry the operator's
+    // home directory or username — only the workspace-relative path and the errno code.
+    expect(inspection.reason).not.toContain(callee);
+    expect(inspection.reason).not.toContain(tmpdir());
+  });
+
+  test("materialize re-checks the expectation at the READ, not just before the prompt", () => {
+    // The kernel verifies before prompting, but a confirmation is a human-length pause during
+    // which the callee may rewrite its own file. The expectation travels with the copy, so a
+    // source that no longer matches is refused with nothing written. [Codex review P2.]
+    writeFileSync(join(callee, "report.md"), "ORIGINAL");
+    // Expect a size the source no longer has (i.e. it was rewritten since the exchange).
+    const wrongSize = host.materialize(materializeRequest("report.md", 999));
+    expect(wrongSize.ok).toBe(false);
+    if (!wrongSize.ok) expect(wrongSize.reason).toMatch(/changed while it was being fetched/i);
+    expect(existsSync(join(caller, "report.md"))).toBe(false);
+
+    // And a source modified AFTER the moment the crossing was recorded, at the same size.
+    const later = Date.now() / 1000 + 120;
+    utimesSync(join(callee, "report.md"), later, later);
+    const tooNew = host.materialize({
+      ...request("report.md"),
+      expect: { sizeBytes: 8, notModifiedAfterMs: Date.now() },
+    });
+    expect(tooNew.ok).toBe(false);
+    expect(existsSync(join(caller, "report.md"))).toBe(false);
+  });
+
+  test("the workspace ROOT itself is not a fetchable path", () => {
+    for (const path of [".", ""]) {
+      expect(host.inspect(request(path)).ok).toBe(false);
+      expect(host.materialize(materializeRequest(path, 1)).ok).toBe(false);
+    }
+  });
+
+  // ---- special files: an artifact is a REGULAR file, never a pipe or device ----
+  //
+  // `statSync` succeeds on a FIFO and `isDirectory()` is false, so a not-a-directory test
+  // passes it — and then `readFileSync` blocks until something writes, which after a
+  // confirmation would hang the CLI outright with no timeout. [Codex review R4 P2.]
+
+  /** Create a FIFO at `abs` (no Node API for it; `mkfifo` is POSIX-standard). */
+  function execTouchFifo(abs: string): void {
+    execFileSync("mkfifo", [abs]);
+  }
+
+  test("a FIFO SOURCE is refused rather than read (it would block forever)", () => {
+    execFileSync("mkfifo", [join(callee, "pipe.md")]);
+    const inspection = host.inspect(request("pipe.md"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/not a regular file/i);
+    // And materialize refuses on its own, without inheriting inspect's verdict — the read
+    // never happens, so this test returns instead of hanging.
+    const materialized = host.materialize(materializeRequest("pipe.md", 0));
+    expect(materialized.ok).toBe(false);
+    expect(existsSync(join(caller, "pipe.md"))).toBe(false);
+  });
+
+  test("a FIFO DESTINATION is refused rather than written to (it would block too)", () => {
+    writeFileSync(join(callee, "report.md"), "REPORT");
+    execFileSync("mkfifo", [join(caller, "report.md")]);
+    const inspection = host.inspect(request("report.md"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/not a regular file/i);
+    const materialized = host.materialize(materializeRequest("report.md", 6));
+    expect(materialized.ok).toBe(false);
+    // The pipe is still a pipe — nothing was written through it and it was not replaced.
+    expect(lstatSync(join(caller, "report.md")).isFIFO()).toBe(true);
+  });
+
+  test("a size-0 FIFO cannot slip past the staleness check", () => {
+    // The narrow path that makes this reachable at all: a FIFO stats as size 0, so an
+    // artifact recorded as 0 bytes with an old-enough timestamp would satisfy every other
+    // check. The node-type guard is what stops it.
+    execTouchFifo(join(callee, "empty.md"));
+    const materialized = host.materialize({
+      ...request("empty.md"),
+      expect: { sizeBytes: 0, notModifiedAfterMs: Date.now() + 60_000 },
+    });
+    expect(materialized.ok).toBe(false);
+    expect(existsSync(join(caller, "empty.md"))).toBe(false);
+  });
+
+
+  // ---- preflight must not pass an impossible fetch to the confirmation gate ----
+
+  test("a destination whose PARENT is a file is refused in preflight, not after confirming", () => {
+    // The caller holds `drafts` as a regular FILE, so `drafts/market.md` can never be
+    // written: `statSync` throws ENOTDIR, which a blanket catch would read as "nothing there"
+    // and carry all the way to the destructive gate. [Codex review R5 P3.]
+    mkdirSync(join(callee, "drafts"), { recursive: true });
+    writeFileSync(join(callee, "drafts/market.md"), "ARTIFACT");
+    writeFileSync(join(caller, "drafts"), "I am a file, not a folder");
+    const inspection = host.inspect(request("drafts/market.md"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/cannot write .*ENOTDIR/i);
+    // And the write genuinely could not have happened.
+    expect(host.materialize(materializeRequest("drafts/market.md", 8)).ok).toBe(false);
+  });
+
+  test("a merely ABSENT destination is still an ordinary create", () => {
+    // The regression guard for the fix above: ENOENT must keep meaning "nothing there yet",
+    // or every first-time fetch would refuse.
+    writeFileSync(join(callee, "fresh.md"), "NEW");
+    const inspection = host.inspect(request("fresh.md"));
+    expect(inspection).toMatchObject({ ok: true, destExists: false });
+    expect(host.materialize(materializeRequest("fresh.md", 3))).toEqual({ ok: true, bytes: 3 });
+  });
+
+  test("a directory still reports as a folder, not a bare 'not a regular file'", () => {
+    // The friendlier message survives the stricter guard — a mistyped path that lands on a
+    // folder should say so rather than leaving the operator guessing.
+    mkdirSync(join(callee, "drafts"), { recursive: true });
+    const inspection = host.inspect(request("drafts"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/is a folder/i);
   });
 });

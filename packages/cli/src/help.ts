@@ -39,6 +39,7 @@ Commands:
   connections <agent>               Show an agent's connections
   handoff <from> <to> "<task>"      Have one agent hand a task to another
   artifact <from> <to> "<task>"     Like handoff, but hand back only the files produced
+  fetch <from> <to> <path>          Copy one of those files into the asking agent's space
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
@@ -274,6 +275,8 @@ exists. You do NOT get the receiving agent's words, its memory, or the contents 
 files — those stay on its side. The files themselves sit in the receiving agent's own
 workspace, on your machine, where you can read them directly.
 
+To bring one of those files across, use \`asterism fetch\` — it asks you first.
+
 Open the channel first if you haven't:
   asterism connect <from> <to> --mode artifact-only
 
@@ -282,6 +285,24 @@ permission, so opening one never quietly grants the other.
 
 Choose a model (\`asterism config\` or ASTERISM_MODEL_ID, and an API key, e.g.
 OPENAI_API_KEY) — the receiving agent needs one to run the task.`,
+
+  fetch: `asterism fetch <from> <to> <path>
+
+Copy one file the receiving agent produced into the ASKING agent's own workspace. This is
+how a list of files becomes an actual file: run \`asterism artifact\` first, read the paths
+it hands back, and fetch the one you want.
+
+  asterism artifact writer helper "draft the market section"
+  asterism fetch    writer helper drafts/market-section.md
+
+You are asked to confirm every time, at every autonomy level — copying a file in is a
+change to the asking agent's own workspace, and if a file is already there it says so
+before replacing it. An agent set to \`propose\` writes nothing at all; it tells you what it
+would copy and leaves it to you.
+
+Only a file the other agent actually handed over can be fetched. A path it never produced
+is refused, whatever is on disk — this brings across what you were shown, it is not a way
+to read another agent's files.`,
 
   confirm: `asterism confirm [<agent>] <run>
 

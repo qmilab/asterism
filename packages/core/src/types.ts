@@ -176,6 +176,7 @@ export const EVENT_TYPES = [
   "connection.created",
   "handoff.requested",
   "handoff.completed",
+  "artifact.fetched",
   "credential.added",
   "credential.rotated",
   "credential.removed",
@@ -409,6 +410,94 @@ export interface Connection {
   status: ConnectionStatus;
   createdAt: string;
 }
+
+/**
+ * One boundary-crossing artifact, recorded so a later operation can RESOLVE it (Phase 3 ·
+ * T2b-adjacent follow-up; design note §9 decision D10, §11 decision D13).
+ *
+ * Deliberately not created until something had to *query* exchange history — the promotion
+ * trigger D10 named. `artifact fetch` is that something: it must answer "did this callee
+ * actually produce this path, in an exchange over this connection?" before a single byte
+ * moves. Without a row, the only alternative would be to trust a path the caller typed,
+ * which is precisely the cross-agent file-read primitive this mode must never become.
+ *
+ * ONE ROW PER ARTIFACT REFERENCE, which is the design note's own "one boundary-crossing
+ * artifact" wording. The exchange *instance* is identified by `runId` — one exchange IS one
+ * callee run — so the refs of a single exchange share a `(connectionId, runId)` pair without
+ * needing a parent row. `ref` carries the kernel's existing subject vocabulary verbatim
+ * (`file:drafts/market.md` / `dir:notes`), so the artifact's kind needs no second column and
+ * the recorded reference is byte-identical to the one the observation stream produced.
+ *
+ * Scoping mirrors {@link Connection}: two agent ids rather than one `agentId` column,
+ * because a crossing belongs to a PAIR. Every read asserts a participant, so a third agent
+ * can never see (or resolve) an exchange it was not part of.
+ */
+export interface Exchange {
+  id: string;
+  /** The connection that authorized this crossing — and the key every resolve is scoped by. */
+  connectionId: string;
+  /** The agent that asked (the caller / `from` side of the connection). */
+  fromAgentId: string;
+  /** The agent that produced the artifact (the callee / `to` side). */
+  toAgentId: string;
+  /** Which exchange form this reference came from. */
+  kind: ExchangeKind;
+  /** The reference itself, in the kernel's subject vocabulary: `file:<path>` / `dir:<path>`. */
+  ref: string;
+  /**
+   * Whether the artifact EXISTED at the end of the exchange. Recorded rather than filtered
+   * so the row set mirrors exactly the manifest that crossed (a manifest reports a deletion
+   * as `deleted`; hiding it here would let the record and the manifest disagree). It is also
+   * load-bearing: `artifact fetch` refuses a ref the latest exchange recorded as absent, so
+   * a path deleted in an exchange cannot later be dereferenced into whatever happens to sit
+   * there.
+   */
+  present: boolean;
+  /**
+   * The artifact's size when it crossed, as the observation stream reported it. Absent when
+   * the observation established presence without measuring (a directory, or a custom
+   * capability).
+   *
+   * This is not decoration: it is half of what identifies the ARTIFACT rather than merely its
+   * path. A reference records where the artifact was; without something that says *which*
+   * bytes were handed over, a path once exchanged would stay fetchable through every later
+   * rewrite of that path — a durable read grant on a location, which is not what any exchange
+   * authorized. Together with {@link createdAt} it lets a fetch refuse a source that is no
+   * longer the artifact it resolved. [Codex review P2.]
+   */
+  sizeBytes?: number;
+  /**
+   * True when the kernel's redaction boundary CHANGED the path before it became this `ref` —
+   * so `ref` is a DISPLAY reference, not the real one.
+   *
+   * Recorded because the consequence is a refusal: a redacted ref does not name the file the
+   * callee wrote, and something else may sit at the marker-bearing path it does name, so
+   * resolving it could materialize a file that was never handed over. The real path is
+   * deliberately NOT kept alongside it — storing an unredacted secret-shaped path to make it
+   * fetchable would reintroduce exactly the leak the redaction exists to prevent. A redacted
+   * artifact is reported in the manifest and refused by fetch. [Codex review R3 P2.]
+   */
+  redacted: boolean;
+  /** The callee's run — the identity of the exchange instance these refs came from. */
+  runId: string;
+  /**
+   * When the crossing was recorded. Load-bearing at fetch time as well as for audit: an
+   * artifact written during the exchange necessarily has a modification time at or before
+   * this, so a source that has been modified SINCE is provably not the thing that crossed.
+   */
+  createdAt: string;
+}
+
+/**
+ * The exchange forms a recorded crossing can take. Like {@link CONNECTION_MODES}, only the
+ * kinds something actually consumes are enumerated, so the write boundary can never persist
+ * a kind nothing resolves. `artifact` is the references-only manifest of an `artifact-only`
+ * exchange. A `handoff`'s crossing is the callee's TEXT — there is no durable reference to
+ * record and nothing to resolve later — so it deliberately writes no row; the both-logs
+ * `handoff.requested` / `handoff.completed` audit already covers it.
+ */
+export const EXCHANGE_KINDS = ["artifact"] as const;
+export type ExchangeKind = (typeof EXCHANGE_KINDS)[number];
 
 /**
  * An agent's per-agent kernel settings — the operator-configurable knobs that

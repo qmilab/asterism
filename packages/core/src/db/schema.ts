@@ -201,6 +201,61 @@ CREATE INDEX IF NOT EXISTS idx_connections_to ON connections(to_agent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_active_triple
   ON connections(from_agent_id, to_agent_id, mode) WHERE status = 'active';
 
+-- EXCHANGES -- what actually crossed a connection, as resolvable REFERENCES. One row per
+-- boundary-crossing artifact: an 'artifact-only' exchange producing three files writes
+-- three rows, all sharing (connection_id, run_id) -- the callee's run IS the identity of
+-- the exchange instance, which is why no parent row is needed.
+--
+-- This table exists for one reason: 'artifact fetch' must be able to answer "did this
+-- callee actually produce this path, in an exchange over this connection?" before any byte
+-- moves. Without it the only alternative is trusting a path the caller supplied, which is
+-- exactly the cross-agent file-read primitive the mode must never become. Nothing resolves
+-- a handoff's crossing (it is the callee's text, not a durable reference), so handoff
+-- writes no row here -- the both-logs handoff.requested/completed audit already covers it.
+--
+-- Like connections, a row carries TWO agent ids rather than one agent_id column: a crossing
+-- belongs to a PAIR. Every read asserts a participant, so a third agent can neither see nor
+-- resolve an exchange it was not part of.
+--
+-- ref is the kernel's own subject vocabulary verbatim ('file:drafts/market.md'), already
+-- redacted at manifest construction -- so a secret-shaped path is stored screened, and (by
+-- construction) can never be dereferenced back to the real file. present mirrors the
+-- manifest's exists bit: recorded rather than filtered so the row set and the manifest that
+-- crossed can never disagree, and load-bearing at fetch time (a ref last recorded absent is
+-- refused rather than resolved against whatever now sits at that path). New table, so the
+-- index lives here in the CREATE -- every column exists from the start (connections' rule).
+--
+-- size_bytes + created_at are what make a row identify the ARTIFACT and not merely its PATH.
+-- A reference alone would stay resolvable through every later rewrite of that location, so a
+-- path handed over once would become a durable read grant into the callee's workspace -- which
+-- no exchange authorized. An artifact written during the exchange necessarily has a
+-- modification time at or before created_at, so a fetch can refuse a source modified since,
+-- and size_bytes backstops a rewrite that preserved the timestamp.
+--
+-- redacted marks a ref whose path the redaction boundary CHANGED (a secret-shaped filename, a
+-- control character). Such a ref is a DISPLAY reference: it does not name the file the callee
+-- wrote, and something else may sit at the marker-bearing path it does name -- so it is
+-- reported but never materialized. The real path is deliberately not stored beside it;
+-- keeping an unredacted secret-shaped path so it could be fetched would reintroduce the very
+-- leak the redaction prevents.
+CREATE TABLE IF NOT EXISTS exchanges (
+  id            TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES connections(id),
+  from_agent_id TEXT NOT NULL REFERENCES agents(id),
+  to_agent_id   TEXT NOT NULL REFERENCES agents(id),
+  kind          TEXT NOT NULL,
+  ref           TEXT NOT NULL,
+  present       INTEGER NOT NULL,
+  size_bytes    INTEGER,
+  redacted      INTEGER NOT NULL DEFAULT 0,
+  run_id        TEXT NOT NULL REFERENCES runs(id),
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exchanges_resolve
+  ON exchanges(connection_id, kind, ref);
+CREATE INDEX IF NOT EXISTS idx_exchanges_from ON exchanges(from_agent_id);
+CREATE INDEX IF NOT EXISTS idx_exchanges_to ON exchanges(to_agent_id);
+
 -- An agent's earned standing per destructive capability — the "trust contract"
 -- underneath the coarse trust_level. Scoped by agent_id like every other table;
 -- one row per (agent, capability). standing is 'gated' or 'standing-grant'; only

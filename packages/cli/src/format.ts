@@ -269,7 +269,11 @@ export function formatArtifactManifest(
         : a.kind === "dir"
           ? "directory"
           : "present";
-    lines.push(`  ${a.path}   ${detail}`);
+    // A screened name is shown, but say so — otherwise the operator reads a path that looks
+    // real, tries to fetch it, and gets a refusal with no idea why. The name itself is not
+    // recoverable here by design; the honest thing is to name the limitation next to it.
+    const note = a.redacted ? "  (name partly screened — cannot be fetched)" : "";
+    lines.push(`  ${a.path}   ${detail}${note}`);
   }
   lines.push("");
   lines.push(
@@ -279,8 +283,12 @@ export function formatArtifactManifest(
   return lines;
 }
 
-/** Human-readable byte size for a manifest row — whole units, no false precision. */
-function formatBytes(bytes: number): string {
+/**
+ * Human-readable byte size for a manifest row — whole units, no false precision. Shared with
+ * `artifact fetch` so a size the operator read off the manifest is rendered the same way
+ * when the bytes actually land.
+ */
+export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "unknown size";
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;

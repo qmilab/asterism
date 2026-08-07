@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision, TransitionDecision } from "./cli.js";
-import { workspaceCapabilities } from "./capabilities.js";
+import { artifactFetchHost, workspaceCapabilities } from "./capabilities.js";
 import { createNodeTerminal } from "./dashboard/terminal-node.js";
 import { ask, readPipedStdin } from "./runtime.js";
 import type { Action } from "@qmilab/asterism-core";
@@ -35,6 +35,10 @@ const io: CliIO = {
   // workspace so each tool is confined to that agent's directory; the kernel does
   // the trust scoping and the destructive-action gating on top.
   capabilities: workspaceCapabilities,
+  // The filesystem side of `artifact fetch` — the same workspace confinement the file
+  // tools use, applied to the callee's workspace on the read and the caller's on the
+  // write. The kernel decides whether a byte may cross; this only moves it.
+  fetchHost: artifactFetchHost(),
   out: (text) => {
     process.stdout.write(`${text}\n`);
   },

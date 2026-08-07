@@ -51,6 +51,18 @@ export interface ArtifactRef {
   exists: boolean;
   /** Size in bytes, when the observation established one. Absent for directories. */
   sizeBytes?: number;
+  /**
+   * Set when the kernel's redaction boundary CHANGED this path — a secret-shaped filename, a
+   * control character, an injection-shaped span. Present only when it happened.
+   *
+   * The consequence is what matters: `path` is then a DISPLAY reference and not the real one,
+   * so it must never be used as a filesystem path. It does not name the file the callee wrote
+   * (that name is deliberately not kept anywhere), and something else could sit at the
+   * marker-bearing path it does name. A redacted reference is therefore reported but not
+   * materializable — `artifact fetch` refuses it rather than resolving a path that means
+   * something different from what it appears to. [Codex review R3 P2.]
+   */
+  redacted?: true;
 }
 
 // The `asterism.fs.*@1` current-state relations this reducer understands, and the subject
@@ -79,6 +91,29 @@ function parseSubject(subject: string): { kind: ArtifactRef["kind"]; path: strin
     if (subject.startsWith(prefix)) return { kind, path: subject.slice(prefix.length) };
   }
   return undefined;
+}
+
+/**
+ * The stable REFERENCE string for one artifact — the same `kind:path` shape the observation
+ * stream uses as a subject (`file:drafts/market.md`). This is what the `exchanges` table
+ * persists and what `artifact fetch` resolves, so recording and resolving share one
+ * vocabulary and a reference is byte-identical wherever it appears.
+ */
+export function artifactReference(artifact: Pick<ArtifactRef, "kind" | "path">): string {
+  return `${artifact.kind}:${artifact.path}`;
+}
+
+/**
+ * The inverse of {@link artifactReference}: split a persisted reference back into its kind
+ * and path, or `undefined` for one this module does not model. Used by `artifact fetch` to
+ * turn a RECORDED reference into the workspace-relative path it will read — the caller's
+ * input is only ever matched against a recorded reference, never turned into a path itself.
+ */
+export function parseArtifactReference(
+  ref: string,
+): { kind: ArtifactRef["kind"]; path: string } | undefined {
+  const parsed = parseSubject(ref);
+  return parsed !== undefined && parsed.path.length > 0 ? parsed : undefined;
 }
 
 /**
@@ -174,7 +209,9 @@ export function collectArtifactManifest(effects: readonly ObservedEffect[]): Art
 
   // Keyed by the REDACTED reference, so the manifest has one entry per safe artifact. Two
   // raw paths that redact identically collapse (last-wins) — the safe outcome, since they
-  // cannot be told apart without the secret they contain.
+  // cannot be told apart without the secret they contain. Both are flagged `redacted` and so
+  // neither is materializable, which is what keeps the collapse harmless rather than making
+  // one artifact resolvable under another's reference.
   const byRef = new Map<string, ArtifactRef>();
   for (const [subject, relations] of bySubject) {
     const parsed = parseSubject(subject);
@@ -187,11 +224,18 @@ export function collectArtifactManifest(effects: readonly ObservedEffect[]): Art
     // Observations are untrusted tool output, so guard it here rather than emit a reference
     // that points at nothing.
     if (path.trim() === "") continue;
-    byRef.set(`${parsed.kind}:${path}`, {
+    // Did the boundary CHANGE the path? Compared as a whole rather than by reading the
+    // redaction summary's individual counters, so truncation, control-char stripping and
+    // every present or future marker rule are all caught by one test. When it did, `path` is
+    // a display reference — it no longer names the file the callee wrote, so a consumer must
+    // not treat it as one (see `ArtifactRef.redacted`).
+    const redacted = path !== parsed.path;
+    byRef.set(artifactReference({ kind: parsed.kind, path }), {
       path,
       kind: parsed.kind,
       exists: state.exists,
       ...(state.sizeBytes !== undefined ? { sizeBytes: state.sizeBytes } : {}),
+      ...(redacted ? { redacted: true as const } : {}),
     });
   }
 

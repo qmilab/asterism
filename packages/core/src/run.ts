@@ -15,7 +15,7 @@
 // the structured result. Filesystem and environment access stay at the surface;
 // this function takes an injected `readFile` and never imports `node:fs`.
 
-import type { RuntimeAdapter, RunOutput, RunEvent } from "./adapter.js";
+import type { RuntimeAdapter, RunOutput, RunEvent, ToolResult } from "./adapter.js";
 import { frameRun, resolveSoul } from "./framing.js";
 import type { SkillContext } from "./framing.js";
 import { DEFAULT_RECALL_BUDGET, defaultRecallProvider, enforceRecall } from "./recall.js";
@@ -32,12 +32,12 @@ import {
 } from "./world-facts.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
-import { collectArtifactManifest } from "./artifact-manifest.js";
+import { collectArtifactManifest, parseArtifactReference } from "./artifact-manifest.js";
 import type { ArtifactRef } from "./artifact-manifest.js";
 import { WorldFactCapError } from "./repositories/world-facts.js";
 import { MemoryFirewallError } from "./firewall.js";
 import type { AsterismStore } from "./store.js";
-import type { Agent, ConnectionMode, Run, RunStatus } from "./types.js";
+import type { Agent, Connection, ConnectionMode, Run, RunStatus } from "./types.js";
 
 /** Host concerns a run needs that the kernel does not own — all injectable. */
 export interface ExecuteRunOptions {
@@ -1044,8 +1044,11 @@ export async function performHandoff(
   const exchanged = await performExchange(store, from, to, input, "handoff", options);
   if (exchanged === undefined) return { kind: "no_connection" };
   // `handoff` is the least-curated mode: the callee's full ExecuteRunResult crosses (its
-  // final text + references), and nothing behind it (settled decision D2).
-  return { kind: "ok", result: exchanged };
+  // final text + references), and nothing behind it (settled decision D2). Nothing is
+  // recorded in `exchanges`: what crossed is the callee's TEXT, which is not a durable
+  // reference and which nothing resolves later — the both-logs `handoff.*` audit is the
+  // whole record. Only a mode whose crossing can be DEREFERENCED needs a row.
+  return { kind: "ok", result: exchanged.result };
 }
 
 /**
@@ -1074,16 +1077,429 @@ export async function performArtifactExchange(
 ): Promise<ArtifactExchangeOutcome> {
   const exchanged = await performExchange(store, from, to, input, "artifact-only", options);
   if (exchanged === undefined) return { kind: "no_connection" };
+  const { connection, result } = exchanged;
+  // Absent when the run produced nothing; an empty manifest is the honest answer for a run
+  // that acted on nothing (or whose every action the callee's gate withheld).
+  const artifacts = result.artifacts ?? [];
+  // Persist the manifest as resolvable references, so the caller can later DEREFERENCE what
+  // it was told about (`artifact fetch`) instead of being handed a list it has no way to
+  // act on. Recorded at EVERY outcome for the same reason the CLI renders the manifest at
+  // every outcome: a file written before a later failure or a pause genuinely exists, and a
+  // reference that crossed but was never recorded would be un-fetchable for no honest
+  // reason. Recording does not move a byte — it only makes an already-crossed reference
+  // resolvable, and every byte still waits on the caller's own gate.
+  store.recordArtifactExchange(connection, result.run.id, artifacts);
   return {
     kind: "ok",
     result: {
       // The run ID only — never the Run row, which carries the callee's output text.
-      runId: exchanged.run.id,
-      status: exchanged.status,
-      actions: exchanged.actions,
-      // Absent when the run produced nothing; an empty manifest is the honest answer for a
-      // run that acted on nothing (or whose every action the callee's gate withheld).
-      artifacts: exchanged.artifacts ?? [],
+      runId: result.run.id,
+      status: result.status,
+      actions: result.actions,
+      artifacts,
+    },
+  };
+}
+
+// --- artifact fetch --------------------------------------------------------
+//
+// Materializing an artifact the callee produced INTO the caller's workspace — the deferred
+// half of decision D8 and the completion of the `artifact-only` mode. This is the one
+// operation in Phase 3 where file BYTES cross an agent boundary, so it is also the one that
+// carries the most enforcement. Three properties are load-bearing, and each is enforced in a
+// different place on purpose:
+//
+//   1. THE CALLER NEVER SUPPLIES A PATH. What a surface passes in is a REFERENCE, matched
+//      exactly against the `exchanges` rows for this connection. The path that reaches the
+//      filesystem is the one the KERNEL recorded when the manifest crossed. There is no code
+//      path in which a caller-chosen string becomes a path, which is what keeps `fetch` from
+//      being a cross-agent file-read primitive. Its consequence is worth stating positively:
+//      a fetch reveals nothing the caller did not already learn from the manifest it was
+//      handed — a reference that never crossed misses exactly as an unknown one does.
+//   2. THE BYTES ARE READ KERNEL-SIDE. The caller's tool registry gains nothing: the fetch
+//      capability below is built here, gated here, and handed to no adapter, ever. No agent
+//      is ever offered a tool that can see out of its own workspace.
+//   3. THE CALLER'S OWN GATE DECIDES. The write lands in the CALLER's workspace, so it is
+//      the caller's trust profile and the caller's destructive-action gate that govern it —
+//      never the callee's, and never the connection's existence alone (golden rule 4).
+
+/** The capability key the caller's gate governs a fetch by. */
+export const EXCHANGE_FETCH_KEY = "exchange.fetch";
+
+/**
+ * What a host must do for a fetch that the kernel cannot: touch the filesystem. `core` owns
+ * no `node:fs` (the same rule that makes `executeRun` take an injected `readFile`), so the
+ * kernel decides WHETHER a byte may move and the host performs the move.
+ *
+ * The host's obligation is confinement in both directions, and it is not optional: `read`
+ * must refuse a source that resolves outside the CALLEE's workspace, and `write` a
+ * destination that resolves outside the CALLER's — including through a symlink, which a
+ * lexical check cannot see. The host that ships with Asterism satisfies this by reusing the
+ * very same guards its workspace file tools use, rather than writing fresh path logic.
+ */
+export interface ArtifactFetchHost {
+  /**
+   * Look at the source and destination WITHOUT writing anything: the source's size, and
+   * whether the destination already holds a file. Called after authorization and before the
+   * gate, so a fetch that cannot succeed fails before a human is asked to approve it, and so
+   * the confirmation can say plainly whether it overwrites.
+   *
+   * `destExists` informs the PROMPT, never the classification — a fetch is destructive
+   * either way (design note §11, decision D12). That is what makes the gap between this call
+   * and {@link materialize} harmless: a destination that appears in between changes the
+   * wording of a question already answered, not whether the question was asked.
+   */
+  inspect(request: ArtifactFetchRequest): ArtifactInspection;
+  /**
+   * Copy the source's bytes to the destination, creating parent folders as needed and
+   * replacing an existing file. Only ever called once the caller's gate has authorized it.
+   *
+   * `expect` must be RE-CHECKED here, against the source as read — it is not a formality the
+   * kernel already handled. The kernel verifies before prompting, but a confirmation is a
+   * human-length pause, and the callee may write to its own workspace during it. Without a
+   * check at the read, a human could approve the artifact they were shown and receive
+   * whatever replaced it while they were deciding.
+   */
+  materialize(request: ArtifactMaterializeRequest): ArtifactMaterialization;
+}
+
+/**
+ * A materialize request: a fetch, plus what the source must STILL be for the copy to happen.
+ * Separate from {@link ArtifactFetchRequest} so the expectation is required by the type
+ * rather than remembered by the host.
+ */
+export interface ArtifactMaterializeRequest extends ArtifactFetchRequest {
+  expect: {
+    /** The size the artifact had when it crossed. A different size is a different artifact. */
+    sizeBytes: number;
+    /**
+     * The moment the crossing was recorded. The source must not have been modified after it;
+     * anything later is a rewrite that happened since the artifact was handed over.
+     */
+    notModifiedAfterMs: number;
+  };
+}
+
+/**
+ * One fetch, in host terms: copy `path` from the callee's workspace into the caller's, at
+ * the SAME workspace-relative location. `path` comes from a recorded reference, never from a
+ * surface's argument.
+ */
+export interface ArtifactFetchRequest {
+  /** The callee's workspace — where the bytes are read from. */
+  sourceWorkspaceDir: string;
+  /** The caller's workspace — where the bytes land. */
+  destWorkspaceDir: string;
+  /** The recorded, workspace-relative path, identical on both sides. */
+  path: string;
+}
+
+/** The result of {@link ArtifactFetchHost.inspect} — sizes and presence, never contents. */
+export type ArtifactInspection =
+  | {
+      ok: true;
+      sizeBytes: number;
+      /**
+       * The source's last-modification time, in epoch milliseconds. Reported so the kernel
+       * can tell whether the file is still the artifact that crossed: one written during the
+       * exchange has a modification time at or before the exchange's own record, so anything
+       * later is provably a subsequent rewrite. A reference, not content.
+       */
+      modifiedAtMs: number;
+      destExists: boolean;
+    }
+  | { ok: false; reason: string };
+
+/** The result of {@link ArtifactFetchHost.materialize} — how many bytes landed. */
+export type ArtifactMaterialization = { ok: true; bytes: number } | { ok: false; reason: string };
+
+/** Host concerns a fetch needs. Both are the caller's; the kernel supplies everything else. */
+export interface ArtifactFetchOptions {
+  /** The filesystem side of the operation (see {@link ArtifactFetchHost}). */
+  host: ArtifactFetchHost;
+  /**
+   * Resolve the caller's destructive-action confirmation. Absent ⇒ nothing is fetched and
+   * the outcome is `not_confirmed` — the same safe default every other destructive action
+   * has for a non-interactive caller. Asterism never moves bytes across an agent boundary on
+   * an agent's behalf.
+   */
+  confirm?: (action: Action) => boolean | Promise<boolean>;
+}
+
+/** What a successful fetch did — references and counts only. */
+export interface ArtifactFetchResult {
+  /** The reference that was resolved, exactly as it was recorded. */
+  ref: string;
+  /** The workspace-relative path the bytes landed at, in the CALLER's workspace. */
+  path: string;
+  /** How many bytes were written. */
+  bytes: number;
+  /** Whether the write replaced a file the caller already had there. */
+  overwrote: boolean;
+}
+
+/**
+ * The outcome of {@link performArtifactFetch} — a discriminated union so a surface maps each
+ * case to its own message without guessing, and so a refusal is never mistaken for a
+ * failure:
+ *
+ * - `ok`            — the caller's gate authorized it and the bytes landed.
+ * - `no_connection` — no ACTIVE `from → to` connection in `artifact-only` mode (invariant 1).
+ * - `not_exchanged` — the reference never crossed this connection, so there is nothing to
+ *                     dereference (invariant 2 — the sharp one).
+ * - `unavailable`   — authorized, but the artifact cannot be materialized: recorded as
+ *                     deleted, a directory, since removed, or unreadable. `reason` is
+ *                     host-supplied and path-free.
+ * - `withheld`      — the caller's trust level is `propose`, so the side effect was not
+ *                     performed; the fetch is reported as a plan step instead.
+ * - `not_confirmed` — the destructive gate fired and no human approved it. Nothing was
+ *                     written, and nothing is parked: re-run the fetch to be asked again.
+ */
+export type ArtifactFetchOutcome =
+  | { kind: "ok"; result: ArtifactFetchResult }
+  | { kind: "no_connection" }
+  | { kind: "not_exchanged" }
+  | { kind: "unavailable"; reason: string }
+  | { kind: "withheld"; ref: string; path: string; sizeBytes: number }
+  | { kind: "not_confirmed"; ref: string; path: string; sizeBytes: number };
+
+/**
+ * Materialize an artifact the callee produced into the CALLER's workspace, under the
+ * caller's own destructive-action gate.
+ *
+ * The order of the four steps is itself the design, and each step is a refusal point:
+ *
+ *   1. **The connection.** An ACTIVE `from → to` connection in `artifact-only` mode is the
+ *      permission, re-checked here at fetch time rather than inherited from the exchange
+ *      that produced the artifact. So revoking a channel stops future fetches over it, and
+ *      a caller cannot dereference a manifest it received through a channel it has lost.
+ *   2. **The record.** The reference must resolve to something the callee actually produced
+ *      over THIS connection — and to something that still existed when the exchange ended
+ *      (`present`). Only a `file:` reference can be fetched; a directory is a tree, not an
+ *      artifact, and is out of scope by design rather than by omission.
+ *   3. **The gate.** The caller's trust profile decides, through the SAME
+ *      `resolveToolRegistry` chokepoint every capability passes through — classification,
+ *      decision, confirmation, and audit are the kernel's one implementation, not a second
+ *      one written for this op. A fetch is declared `destructive` unconditionally (D12), so
+ *      it confirms at `notify` and `autonomous` alike and is withheld under `propose`.
+ *   4. **The move.** Only now does the host copy bytes, and only then is `artifact.fetched`
+ *      recorded on both logs.
+ *
+ * Deliberately NOT a run. There is no model call, no framing, and nothing to resume — a
+ * `Run` row would claim the caller "ran" when it did not, and would drag in the
+ * at-most-once replay accounting that exists for actions a re-entered agent loop repeats. A
+ * declined fetch simply does not happen; the operator runs the command again. That is also
+ * why the gate audit here carries no run id and no argument fingerprint: a fingerprint
+ * exists to bind an out-of-band confirmation to one invocation of a *parked run*, and
+ * nothing is parked.
+ *
+ * The caller's standing grants are deliberately NOT consulted (D15): `autoApprove` is empty,
+ * so no earned or configured grant can make a byte cross without a human. Earned standing is
+ * built from a track record of in-run executions under the agent's own gate, and this is not
+ * that — it is the one payload D8 exists to keep from moving on its own. Stricter than
+ * golden rule 4 requires, never looser.
+ *
+ * Two independent things hold that line, which is worth naming because either alone would be
+ * enough and neither is a coincidence. (a) The empty `autoApprove` above: even a grant
+ * written straight into the store leaves this gate untouched. (b) `exchange.fetch` cannot
+ * BECOME a grant candidate in the first place — standing evidence is read from gate events
+ * that carry a `runId` (`standing.ts` skips the rest), and a fetch has no run, so its
+ * executions never enter an earning window and `trust --review` can never propose it. So the
+ * confusing state "the operator granted it and it still asks" is not merely refused, it is
+ * unreachable.
+ */
+export async function performArtifactFetch(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  ref: string,
+  options: ArtifactFetchOptions,
+): Promise<ArtifactFetchOutcome> {
+  // 1. The connection is the permission — the same directional, mode-specific read every
+  //    exchange makes, at the moment the bytes would move rather than when they were made.
+  const connection = store.connections.findActive(from.id, to.id, "artifact-only");
+  if (!connection) return { kind: "no_connection" };
+
+  // 2. The reference must be one that actually crossed this connection. This is the check
+  //    that keeps `fetch` from being a cross-agent read: the path used below comes from the
+  //    RECORD, and the surface's argument only ever selected which record.
+  const exchanged = store.findExchangedArtifact(connection, ref);
+  if (!exchanged) return { kind: "not_exchanged" };
+  if (!exchanged.present) {
+    return { kind: "unavailable", reason: `'${ref}' was deleted by ${to.name} in that exchange.` };
+  }
+  const parsed = parseArtifactReference(exchanged.ref);
+  if (!parsed) return { kind: "unavailable", reason: `'${ref}' is not a fetchable reference.` };
+  if (parsed.kind !== "file") {
+    return {
+      kind: "unavailable",
+      reason: `'${parsed.path}' is a folder — fetch materializes single files.`,
+    };
+  }
+  // A REDACTED reference is reported but never materialized. When the redaction boundary
+  // changed a path (a secret-shaped filename, a control character), what was recorded is a
+  // DISPLAY string, not the file's name — so using it as a path would resolve to something
+  // else entirely, and a callee holding a file at the marker-bearing path could have it
+  // fetched despite never handing it over. Refused BEFORE the request is built, so the host
+  // is never handed the marker path at all.
+  //
+  // The real path is deliberately not stored beside it to make this fetchable: keeping an
+  // unredacted secret-shaped path in the record purely so it could be dereferenced would
+  // reintroduce exactly the leak the redaction exists to prevent. The recovery is to rename
+  // the file and exchange again. [Codex review R3 P2.]
+  if (exchanged.redacted) {
+    return {
+      kind: "unavailable",
+      reason:
+        `'${parsed.path}' is shown with part of its name screened out, so it cannot be ` +
+        `matched to a file. Have ${to.name} rename it and hand it over again.`,
+    };
+  }
+  const request: ArtifactFetchRequest = {
+    sourceWorkspaceDir: to.workspaceDir,
+    destWorkspaceDir: from.workspaceDir,
+    path: parsed.path,
+  };
+
+  // Look before asking: an artifact the callee has since deleted, or one the host refuses to
+  // read, is reported as unavailable instead of prompting a human to approve a write that
+  // cannot happen. Read-only, and reached only after both authorization checks passed.
+  const inspection = options.host.inspect(request);
+  if (!inspection.ok) return { kind: "unavailable", reason: inspection.reason };
+  const { sizeBytes, destExists } = inspection;
+
+  // The reference resolved — but a reference names a LOCATION, and what the exchange
+  // authorized was an ARTIFACT. Those come apart the moment the callee rewrites that path
+  // outside an exchange: a later run (or the operator's own editor) can put entirely
+  // different content where the artifact used to be, and a path-only check would happily
+  // hand it over. That would make one exchanged path a durable read grant into the callee's
+  // workspace — which no exchange granted, and which under T5 an agent caller could poll
+  // indefinitely. So the source must still BE the artifact that crossed. [Codex review P2.]
+  //
+  // The evidence is what the exchange had, and the exchange never read the file — it
+  // projected the observation stream. That yields two checks, both fail-closed:
+  //
+  //   1. NOT MODIFIED SINCE. An artifact written during the exchange necessarily has a
+  //      modification time at or before the moment the crossing was recorded (the record is
+  //      written after the run finishes). A later timestamp is therefore proof of a
+  //      subsequent rewrite. This is the precise check: every ordinary write bumps mtime.
+  //   2. UNCHANGED SIZE. Backstops a rewrite that preserved the timestamp (a copy that
+  //      restores mtime, a filesystem with coarse granularity).
+  //
+  // A recorded size we never had means we cannot verify at all, so that refuses too — an
+  // unverifiable reference is not a fetchable one.
+  //
+  // Honest about its limit: this is a STALENESS check, not a cryptographic binding. A callee
+  // deliberately reproducing both the size and the timestamp is out of scope in exactly the
+  // way Phase 0's logical confinement is out of scope for hostile code; a snapshot taken at
+  // exchange time is the hardening if that threat model ever applies. What it does close is
+  // every ordinary way an artifact stops being the artifact.
+  const stale = (): ArtifactFetchOutcome => ({
+    kind: "unavailable",
+    reason:
+      `'${parsed.path}' has changed since ${to.name} handed it over, so it is no longer ` +
+      `the artifact that crossed. Ask for the work again to get a current one.`,
+  });
+  const expectedSize = exchanged.sizeBytes;
+  const recordedAtMs = Date.parse(exchanged.createdAt);
+  if (expectedSize === undefined) return stale();
+  if (inspection.sizeBytes !== expectedSize) return stale();
+  // An unparseable timestamp cannot establish the ordering, so it fails closed like the rest.
+  if (!Number.isFinite(recordedAtMs)) return stale();
+  // Compare at the RECORD's resolution. `createdAt` is an ISO-8601 string, so it carries
+  // whole milliseconds, while `mtimeMs` carries fractional ones — a file written at
+  // …01.0007 and recorded at …01.0009 would otherwise read as "modified 0.7ms after the
+  // record" and be refused, which for a fast run is the NORMAL case, not a rewrite. Flooring
+  // compares like with like. It costs nothing real: a rewrite that lands inside the same
+  // millisecond as the exchange record would have to be another process racing the run's own
+  // teardown, and the size check still applies to it.
+  if (Math.floor(inspection.modifiedAtMs) > recordedAtMs) return stale();
+
+  // 3. The caller's gate. Exposure is exactly this one capability, and `autoApprove` is
+  //    EMPTY by decision (see the doc comment) — so `decideGate` withholds under `propose`
+  //    and confirms at every other level, with no grant able to skip it.
+  const profile = trustProfile({ level: from.trustLevel, capabilities: [EXCHANGE_FETCH_KEY] });
+  let decision: "executed" | "withheld" | "paused" | undefined;
+  let materialized: ArtifactMaterialization | undefined;
+  const capability: Capability = {
+    key: EXCHANGE_FETCH_KEY,
+    // Declared destructive, unconditionally. Not "destructive when the destination exists":
+    // that would make the classification depend on a filesystem state that can change
+    // between the check and the write, and would let the byte-crossing this whole mode is
+    // built around happen silently in the common case. The overwrite risk changes what the
+    // human is TOLD, never whether they are asked. (Design note §11, decision D12.)
+    effect: "destructive",
+    tool: {
+      // Never handed to an adapter — this registry is built, consumed, and discarded inside
+      // this function, so the name and schema exist only to satisfy the shared shape. No
+      // agent is ever offered a tool that reaches outside its own workspace.
+      name: "fetch_artifact",
+      description: "Kernel-internal: materialize an exchanged artifact into the caller's workspace.",
+      inputSchema: { type: "object", properties: {} },
+      execute: (): Promise<ToolResult> => {
+        // The expectation travels WITH the copy, so the source is re-checked at the read
+        // rather than trusting the pre-prompt inspection across the human's pause.
+        materialized = options.host.materialize({
+          ...request,
+          expect: { sizeBytes: expectedSize, notModifiedAfterMs: recordedAtMs },
+        });
+        return Promise.resolve(
+          materialized.ok
+            ? { output: `Fetched ${materialized.bytes} bytes.`, isError: false }
+            : { output: materialized.reason, isError: true },
+        );
+      },
+    },
+  };
+  const baseHooks: TrustHooks = {
+    onExecute: () => {
+      decision = "executed";
+    },
+    onWithhold: () => {
+      decision = "withheld";
+    },
+    onAwaitConfirmation: () => {
+      decision = "paused";
+    },
+    ...(options.confirm ? { confirm: options.confirm } : {}),
+  };
+  // Audited to the CALLER's log — the gate decision is the caller's own policy, so it
+  // belongs on the caller's log whichever way it goes. Nothing is emitted to the callee's
+  // log unless bytes actually cross (`artifact.fetched`, below): a withheld or unconfirmed
+  // fetch touched the callee not at all.
+  const tools = resolveToolRegistry(
+    profile,
+    [capability],
+    auditTrustHooks(store.events, from.id, {}, baseHooks),
+  );
+  const gated = tools.list()[0];
+  // The exposure filter cannot drop a capability whose key this function just put in the
+  // profile, so this is the type-required guard for `list()[0]`, not a real branch.
+  if (!gated) return { kind: "unavailable", reason: "the fetch capability was not resolved." };
+  // The arguments the human sees on the prompt, and the only thing the gate is told about
+  // this invocation: references and counts. `overwrites` is why the operator is not
+  // approving "a fetch" but this fetch, of this size, over this file.
+  await gated.execute({
+    args: { from: to.name, ref: exchanged.ref, bytes: sizeBytes, overwrites: destExists },
+  });
+
+  if (decision === "withheld") {
+    return { kind: "withheld", ref: exchanged.ref, path: parsed.path, sizeBytes };
+  }
+  if (decision !== "executed" || materialized === undefined) {
+    return { kind: "not_confirmed", ref: exchanged.ref, path: parsed.path, sizeBytes };
+  }
+  if (!materialized.ok) return { kind: "unavailable", reason: materialized.reason };
+
+  // 4. The bytes crossed — record it on BOTH logs, references only.
+  store.recordArtifactFetched(connection, exchanged.ref, materialized.bytes);
+  return {
+    kind: "ok",
+    result: {
+      ref: exchanged.ref,
+      path: parsed.path,
+      bytes: materialized.bytes,
+      overwrote: destExists,
     },
   };
 }
@@ -1105,7 +1521,7 @@ async function performExchange(
   input: string,
   mode: ConnectionMode,
   options: ExecuteRunOptions,
-): Promise<ExecuteRunResult | undefined> {
+): Promise<{ connection: Connection; result: ExecuteRunResult } | undefined> {
   // The connection IS the permission. A read straight off the scoped repository, the same
   // way the rest of this module reads (`store.runs.get`); the directional `from → to`
   // lookup means a B→A connection never satisfies an A→B exchange, and the MODE is part of
@@ -1123,5 +1539,10 @@ async function performExchange(
   // / awaiting_confirmation) so a paused exchange is recorded honestly. The event payload
   // already carries the connection's mode, so both logs distinguish the exchange forms.
   store.recordHandoffCompleted(connection, result.run.id, result.status);
-  return result;
+  // The connection travels back with the result because a mode's projection may need to
+  // RECORD what it crossed, not just shape it: `artifact-only` persists its manifest as
+  // resolvable `exchanges` rows keyed on this connection. Returning it here keeps that
+  // recording in the mode's own entry point (where the projection is decided) rather than
+  // making this shared function know which modes have a durable crossing.
+  return { connection, result };
 }

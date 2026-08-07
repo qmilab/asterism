@@ -202,6 +202,8 @@ export {
   declineRun,
   performHandoff,
   performArtifactExchange,
+  performArtifactFetch,
+  EXCHANGE_FETCH_KEY,
   resolveRecallBudget,
 } from "./run.js";
 export type {
@@ -214,10 +216,22 @@ export type {
   HandoffOutcome,
   ArtifactExchangeResult,
   ArtifactExchangeOutcome,
+  ArtifactFetchHost,
+  ArtifactFetchOptions,
+  ArtifactFetchOutcome,
+  ArtifactFetchRequest,
+  ArtifactFetchResult,
+  ArtifactInspection,
+  ArtifactMaterialization,
+  ArtifactMaterializeRequest,
 } from "./run.js";
 export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";
-export { collectArtifactManifest } from "./artifact-manifest.js";
+export {
+  artifactReference,
+  collectArtifactManifest,
+  parseArtifactReference,
+} from "./artifact-manifest.js";
 export type { ArtifactRef } from "./artifact-manifest.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The
@@ -249,6 +263,8 @@ export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
 export { ConnectionRepository } from "./repositories/connections.js";
 export type { CreateConnectionInput } from "./repositories/connections.js";
+export { ExchangeRepository } from "./repositories/exchanges.js";
+export type { RecordExchangeInput } from "./repositories/exchanges.js";
 export { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 export { AgentSettingsRepository } from "./repositories/agent-settings.js";
 export { InstallSettingsRepository } from "./repositories/install-settings.js";
