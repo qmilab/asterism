@@ -10,6 +10,7 @@ import type {
   Connection,
   Event,
   Memory,
+  MemorySummary,
   Objective,
   Run,
   RunEvent,
@@ -280,6 +281,69 @@ export function formatArtifactManifest(
     `Only these references crossed — not ${calleeName}'s words, memory, or the file contents.`,
   );
   lines.push(`The files are in ${calleeName}'s own workspace.`);
+  return lines;
+}
+
+/**
+ * Render the curated extract a `read-summary` pull returned — what the callee KNOWS,
+ * projected to kind + screened content, never its memory records (Phase 3 · T2b).
+ *
+ * The counts lead, because a bounded extract that does not say it is bounded is the one way
+ * this rendering could mislead: an operator reading eight lines needs to know whether that was
+ * everything. The screen's refusals are reported separately from the budget's cap, since one
+ * is a refusal and the other is a bound — and the reason is named, because "3 held back" with
+ * no explanation reads as a malfunction rather than the boundary working.
+ *
+ * The copy is deliberately exact about what this is. The mode is called `read-summary`, but
+ * nothing wrote a summary: what crossed is a screened extract of ratified memory, and saying
+ * "summary" as though a model had composed one would overclaim in precisely the way the
+ * project's isolation copy is careful not to.
+ */
+export function formatMemorySummary(summary: MemorySummary, calleeName: string): string[] {
+  if (summary.eligible === 0) {
+    return [
+      `${calleeName} has no ratified memory to share.`,
+      `Only memory its operator has accepted can cross — nothing proposed, rejected, or archived.`,
+    ];
+  }
+  if (summary.items.length === 0) {
+    const why =
+      summary.withheld > 0
+        ? `all ${summary.withheld === 1 ? "of it was" : `${summary.withheld} were`} held back by the outbound screen`
+        : `none of it matched`;
+    return [`Nothing crossed from ${calleeName}: ${why}.`];
+  }
+
+  const noun = summary.included === 1 ? "note" : "notes";
+  const lines = [
+    `${calleeName} knows ${summary.included} of ${summary.eligible} ratified ${noun}` +
+      (summary.focus !== undefined ? `, on "${summary.focus}"` : "") +
+      ":",
+    "",
+  ];
+  // Pad the kind so the content lines up — the kind is a label, not the point.
+  const width = Math.max(...summary.items.map((i) => i.memoryType.length));
+  for (const item of summary.items) {
+    const kind = item.memoryType.padEnd(width);
+    // A screened item is marked, for the same reason a screened artifact path is: the operator
+    // is reading text the boundary CHANGED, and text that looks untouched but isn't is worse
+    // than text that says so.
+    const note = item.screened ? "   (screened)" : "";
+    lines.push(`  ${kind}  ${item.content}${note}`);
+  }
+  lines.push("");
+  if (summary.withheld > 0) {
+    lines.push(
+      `${summary.withheld} more ${summary.withheld === 1 ? "note was" : "notes were"} held back by the outbound screen.`,
+    );
+  }
+  const capped = summary.eligible - summary.included - summary.withheld;
+  if (capped > 0) {
+    lines.push(`${capped} more did not fit this extract — ask again with a focus to reach them.`);
+  }
+  lines.push(
+    `Only this extract crossed — not ${calleeName}'s memory records, its runs, or anything it has not accepted.`,
+  );
   return lines;
 }
 

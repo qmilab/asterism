@@ -110,13 +110,18 @@ export type CapabilityStanding = (typeof CAPABILITY_STANDINGS)[number];
  *   want the thing it made, not its words. The file BYTES do not cross (design note §9,
  *   decision D8) — materializing one into the caller's workspace is a write into the
  *   CALLER, so it belongs behind the caller's own destructive-action gate, a later slice.
+ * - `read-summary` — the first PULL: the callee runs NOTHING. What crosses is a curated,
+ *   screened extract of the memory it already holds — projected to kind + content, never
+ *   the rows themselves, and only what the operator has already ratified (`active` +
+ *   `accepted`). Deterministic and kernel-owned: no model curates it, because nothing could
+ *   re-impose the kernel's guarantees on generated text (design note §13, decision D16).
  *
  * Only the modes with a real implementation are enumerated, so the write boundary
  * ({@link validateEnum}) can never persist a connection in a mode nothing consumes. The
- * remaining modes (`read-summary`, `shared-brief`, `delegated-tool`) join this list as
- * their threads (T2b/T3) land — never a half-built mode.
+ * remaining modes (`shared-brief`, `delegated-tool`) join this list as their thread (T3)
+ * lands — never a half-built mode.
  */
-export const CONNECTION_MODES = ["handoff", "artifact-only"] as const;
+export const CONNECTION_MODES = ["handoff", "artifact-only", "read-summary"] as const;
 export type ConnectionMode = (typeof CONNECTION_MODES)[number];
 
 /**
@@ -177,6 +182,8 @@ export const EVENT_TYPES = [
   "handoff.requested",
   "handoff.completed",
   "artifact.fetched",
+  "summary.requested",
+  "summary.provided",
   "credential.added",
   "credential.rotated",
   "credential.removed",

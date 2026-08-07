@@ -37,6 +37,7 @@ import {
   performArtifactExchange,
   performArtifactFetch,
   performHandoff,
+  performSummaryExchange,
   proposeObjectiveTransitions,
   proposeReviewableMemories,
   proposeReviewableObjectives,
@@ -102,6 +103,7 @@ import {
   formatBytes,
   formatConnectionList,
   formatEventLines,
+  formatMemorySummary,
   formatEventList,
   formatMemoryList,
   formatObjectiveList,
@@ -1504,13 +1506,17 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
     const connection = store.createConnection(from.id, to.id, mode as ConnectionMode);
-    // Name the verb this channel actually enables — a mode grants exactly its own exchange
-    // form, so telling an artifact-only channel's operator to "hand off" would be wrong.
-    const verb = connection.mode === "artifact-only" ? "artifact" : "handoff";
-    io.out(
-      `Connected ${fromName} → ${toName} (${connection.mode}). ` +
-        `Use it with: asterism ${verb} ${fromName} ${toName} "<task>"`,
-    );
+    // Name the invocation this channel actually enables — a mode grants exactly its own
+    // exchange form, so telling an artifact-only channel's operator to "hand off" would be
+    // wrong, and telling a read-summary one to pass a task would be wrong twice over: that
+    // mode runs nothing, so it takes a focus, not work.
+    const usage =
+      connection.mode === "read-summary"
+        ? `asterism summary ${fromName} ${toName} ["<focus>"]`
+        : connection.mode === "artifact-only"
+          ? `asterism artifact ${fromName} ${toName} "<task>"`
+          : `asterism handoff ${fromName} ${toName} "<task>"`;
+    io.out(`Connected ${fromName} → ${toName} (${connection.mode}). Use it with: ${usage}`);
     return 0;
   });
 }
@@ -1569,7 +1575,7 @@ function cmdConnections(args: string[], io: CliIO): Promise<number> {
 function parseExchangeArgs(
   args: string[],
   io: CliIO,
-  verb: "handoff" | "artifact",
+  verb: "handoff" | "artifact" | "summary",
 ): { fromName: string; toName: string; task: string } | number {
   if (args[0] === "--help" || args[0] === "-h") {
     io.out(COMMAND_HELP[verb]!);
@@ -1580,8 +1586,16 @@ function parseExchangeArgs(
   // Every token after the two agents, joined and taken VERBATIM — a multi-word, dash-leading,
   // or flag-shaped task is kept in full, never mistaken for an option.
   const task = args.slice(2).join(" ").trim();
-  if (!fromName || !toName || !task) {
-    io.err(`Usage: asterism ${verb} <from> <to> "<task>"`);
+  // `summary` is the one PULL: the callee runs nothing, so it takes no task — only an OPTIONAL
+  // focus to rank against. An empty tail is a valid invocation there and a usage error
+  // everywhere else, which is the only thing this helper varies by verb.
+  const tailOptional = verb === "summary";
+  if (!fromName || !toName || (!task && !tailOptional)) {
+    io.err(
+      tailOptional
+        ? `Usage: asterism ${verb} <from> <to> ["<focus>"]`
+        : `Usage: asterism ${verb} <from> <to> "<task>"`,
+    );
     return 1;
   }
   return { fromName, toName, task };
@@ -1756,6 +1770,46 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
     io.err(`See what happened:  asterism events tail ${toName}`);
     renderManifest();
     return 1;
+  });
+}
+
+// --- summary ---------------------------------------------------------------
+
+/**
+ * `asterism summary <caller> <callee> ["<focus>"]` — read a curated extract of what the
+ * callee already knows, over a `read-summary` connection (Phase 3 · T2b).
+ *
+ * The one PULL in the collaboration surface: the callee runs NOTHING. Look at what this
+ * command does not do — no `prepareExchange`, so no adapter is resolved, no recall provider is
+ * built, no workspace capabilities are constructed. There is no substrate to build, because
+ * nothing executes. Two consequences worth knowing: the callee's trust level is irrelevant (a
+ * `propose` agent shares its extract exactly as an `autonomous` one does — trust governs what
+ * an agent DOES), and this works on an install with no model configured at all.
+ *
+ * The focus is optional and free-form, taken verbatim like every other exchange verb's tail.
+ * With one, the kernel ranks the callee's ratified memory against it; without one, the
+ * eligible set in the callee's own order, bounded.
+ *
+ * A TOP-LEVEL, agent-first verb, per the same rule `fetch` established: nothing may ever be
+ * dispatched as a sub-verb from a position that holds an agent name.
+ */
+function cmdSummary(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseExchangeArgs(args, io, "summary");
+  if (typeof parsed === "number") return Promise.resolve(parsed);
+  const { fromName, toName, task: focus } = parsed;
+
+  return withHomeStore(io, (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    const outcome = performSummaryExchange(store, from, to, focus ? { focus } : {});
+    if (outcome.kind === "no_connection") {
+      return noConnection(io, fromName, toName, "read-summary");
+    }
+    for (const line of formatMemorySummary(outcome.result, toName)) io.out(line);
+    return 0;
   });
 }
 
@@ -4954,6 +5008,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdArtifact(rest, io);
     case "fetch":
       return cmdFetch(rest, io);
+    case "summary":
+      return cmdSummary(rest, io);
     case "confirm":
       return cmdConfirm(rest, io);
     case "runs":

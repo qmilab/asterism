@@ -203,6 +203,7 @@ export {
   performHandoff,
   performArtifactExchange,
   performArtifactFetch,
+  performSummaryExchange,
   EXCHANGE_FETCH_KEY,
   resolveRecallBudget,
 } from "./run.js";
@@ -224,6 +225,7 @@ export type {
   ArtifactInspection,
   ArtifactMaterialization,
   ArtifactMaterializeRequest,
+  SummaryExchangeOutcome,
 } from "./run.js";
 export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";
@@ -233,6 +235,13 @@ export {
   parseArtifactReference,
 } from "./artifact-manifest.js";
 export type { ArtifactRef } from "./artifact-manifest.js";
+export { curateMemorySummary, DEFAULT_SUMMARY_BUDGET } from "./memory-summary.js";
+export type {
+  MemorySummary,
+  MemorySummaryBudget,
+  MemorySummaryItem,
+  MemorySummaryOptions,
+} from "./memory-summary.js";
 
 // The audit bridge — turns trust-gate decisions into append-only events. The
 // kernel's run-orchestration surfaces compose this around their own hooks.
