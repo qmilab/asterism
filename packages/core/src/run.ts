@@ -34,6 +34,8 @@ import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
 import { collectArtifactManifest, parseArtifactReference } from "./artifact-manifest.js";
 import type { ArtifactRef } from "./artifact-manifest.js";
+import { curateMemorySummary } from "./memory-summary.js";
+import type { MemorySummary, MemorySummaryOptions } from "./memory-summary.js";
 import { WorldFactCapError } from "./repositories/world-facts.js";
 import { MemoryFirewallError } from "./firewall.js";
 import type { AsterismStore } from "./store.js";
@@ -1101,6 +1103,75 @@ export async function performArtifactExchange(
   };
 }
 
+// --- read-summary ----------------------------------------------------------
+
+/**
+ * The outcome of {@link performSummaryExchange} — the same discriminated shape the other
+ * modes use, so a surface maps each case without guessing. `no_connection` means there is no
+ * ACTIVE `from → to` connection **in `read-summary` mode**: neither a `handoff` nor an
+ * `artifact-only` connection between the same pair authorizes a pull, because a connection
+ * grants exactly its mode's form and nothing wider.
+ */
+export type SummaryExchangeOutcome =
+  | { kind: "ok"; result: MemorySummary }
+  | { kind: "no_connection" };
+
+/**
+ * Perform an OPERATOR-DIRECTED `read-summary` pull: `from` reads a curated extract of the
+ * memory `to` already holds (Phase 3 · T2b; design note §13, decisions D16–D18).
+ *
+ * This is the phase's first mode that is not a push. Every other exchange runs the callee and
+ * projects the result; here **the callee runs nothing**, which changes what each invariant is
+ * grounded in:
+ *
+ *   1. **No connection → no interaction**, exactly as elsewhere — {@link requireChannel} is
+ *      the same permission read the run-driven modes use, so direction and mode are enforced
+ *      identically. It is also the ONLY gate, which is decision D3 applied unchanged: the
+ *      operator-created connection is the permission, and using it is logged, not re-asked.
+ *   2. **Only the mode's artifact crosses.** Enforced in two places, both structural. The
+ *      SOURCE is `listActiveAccepted` — the callee's own `active` + `accepted` rows, so a
+ *      `proposed`, `rejected`, or `archived` memory cannot cross at any budget, and the query
+ *      is `agentId`-scoped so it cannot reach a third agent's rows. The SHAPE is
+ *      {@link MemorySummary}, which has nowhere to put a {@link Memory} — no id, no
+ *      `sourceRunId`, no confidence, no review state — so "never raw rows" is a property of
+ *      the type rather than of a caller remembering not to read a field.
+ *   3. **The callee's gate is not consulted, and that is the correct answer rather than a
+ *      gap.** Nothing executes: no adapter is built, no tool registry is resolved, no trust
+ *      profile is read. So a `propose`-trust callee exposes its summary exactly as an
+ *      `autonomous` one does — trust governs what an agent DOES, and this mode makes it do
+ *      nothing. (A visible consequence worth knowing: the pull works on an install with no
+ *      model configured at all.)
+ *   4. **`agentId` on every read.** The candidates are resolved scoped to the callee.
+ *   5. **The pull is audited on BOTH logs** — `summary.requested` before, `summary.provided`
+ *      after, carrying counts only. Never the caller's focus, never memory content, never a
+ *      memory id.
+ *
+ * Nothing is written to `exchanges`, for the same reason `handoff` writes nothing: what
+ * crosses is text that nothing later dereferences, so there is no reference to resolve (D13 —
+ * the kind enum grows only by a kind something consumes).
+ *
+ * Synchronous, and that is a signal rather than an accident: there is no substrate to await.
+ */
+export function performSummaryExchange(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  options: MemorySummaryOptions = {},
+): SummaryExchangeOutcome {
+  const connection = requireChannel(store, from, to, "read-summary");
+  if (!connection) return { kind: "no_connection" };
+  // Audit the request BEFORE reading the callee's memory, mirroring `performExchange`: the
+  // channel's use is recorded even if the projection below throws.
+  store.recordSummaryRequested(connection);
+  // The eligible set: the CALLEE's own ratified memory. `listActiveAccepted` is the same
+  // resolver recall uses to frame a run, and the same predicate reflection treats as "already
+  // known" — so what may cross is exactly what the operator has already read and accepted.
+  const candidates = store.memories.listActiveAccepted(to.id);
+  const result = curateMemorySummary(candidates, options);
+  store.recordSummaryProvided(connection, result);
+  return { kind: "ok", result };
+}
+
 // --- artifact fetch --------------------------------------------------------
 //
 // Materializing an artifact the callee produced INTO the caller's workspace — the deferred
@@ -1505,6 +1576,29 @@ export async function performArtifactFetch(
 }
 
 /**
+ * The one place a cross-agent permission is read. The connection IS the permission — a read
+ * straight off the scoped repository, the same way the rest of this module reads
+ * (`store.runs.get`). Two properties come from the lookup's shape rather than from a check:
+ * it is DIRECTIONAL, so a B→A connection never satisfies an A→B exchange; and the MODE is
+ * part of the key, so a `handoff` connection never authorizes an `artifact-only` exchange or
+ * a `read-summary` pull. Absent (or revoked) ⇒ `undefined` ⇒ default isolation holds.
+ *
+ * Extracted so the run-driven exchanges ({@link performExchange}) and the run-LESS pull
+ * ({@link performSummaryExchange}) cannot drift apart on the question that matters most. A
+ * pull cannot share the rest of `performExchange` — its middle step is an `executeRun` — so
+ * without this the permission read would exist in two places, which is how one of them ends
+ * up missing the mode or the direction.
+ */
+function requireChannel(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  mode: ConnectionMode,
+): Connection | undefined {
+  return store.connections.findActive(from.id, to.id, mode);
+}
+
+/**
  * The shared cross-agent exchange: check the permission, audit, run AS THE CALLEE, audit.
  * Returns the callee's raw {@link ExecuteRunResult}, or `undefined` when no active
  * connection in `mode` authorizes it.
@@ -1522,11 +1616,7 @@ async function performExchange(
   mode: ConnectionMode,
   options: ExecuteRunOptions,
 ): Promise<{ connection: Connection; result: ExecuteRunResult } | undefined> {
-  // The connection IS the permission. A read straight off the scoped repository, the same
-  // way the rest of this module reads (`store.runs.get`); the directional `from → to`
-  // lookup means a B→A connection never satisfies an A→B exchange, and the MODE is part of
-  // the lookup, so a `handoff` connection never authorizes an `artifact-only` exchange.
-  const connection = store.connections.findActive(from.id, to.id, mode);
+  const connection = requireChannel(store, from, to, mode);
   if (!connection) return undefined;
   // Audit the request on both logs BEFORE the run, so the exchange is recorded even if the
   // callee's run fails (the kernel writes the event log, not this op).

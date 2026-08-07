@@ -1702,6 +1702,52 @@ export class AsterismStore {
   }
 
   /**
+   * Record the START of a `read-summary` pull — `summary.requested` on BOTH participants'
+   * logs (references only: the connection id, both agent ids, the mode).
+   *
+   * The caller's FOCUS is deliberately not recorded. It is free-form caller-authored text,
+   * and the event log stores references, not content — the same reason a handoff's task
+   * input never appears in `handoff.requested`. What the log establishes is that the channel
+   * was used, by whom, in which direction; what was asked is the surfaces' business.
+   *
+   * No runId, at either end of the pair: nothing runs. That absence is the mode, not a gap.
+   */
+  recordSummaryRequested(connection: Connection): void {
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "summary.requested", {
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: connection.mode,
+    });
+  }
+
+  /**
+   * Record the RETURN of a `read-summary` pull — `summary.provided` on BOTH participants'
+   * logs, carrying COUNTS ONLY: how many of the callee's memories were eligible, how many
+   * crossed, and how many the outbound screen refused.
+   *
+   * Counts are the honest maximum here. They let an operator read either log and see the
+   * shape of what happened — "12 eligible, 8 crossed, 1 screened out" — which is what makes a
+   * silent widening of the mode visible after the fact. No memory CONTENT and no memory IDS:
+   * an id is a handle into the callee's own store, and putting one on the caller's log would
+   * make the audit trail itself a cross-agent reference the mode never granted.
+   */
+  recordSummaryProvided(
+    connection: Connection,
+    counts: { eligible: number; included: number; withheld: number },
+  ): void {
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "summary.provided", {
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: connection.mode,
+      eligible: counts.eligible,
+      included: counts.included,
+      withheld: counts.withheld,
+    });
+  }
+
+  /**
    * Read a credential value for an agent, recording the disclosure as a
    * `secret.read` event — references only: the key and its `valueRef`, NEVER the
    * value. Reading a value is destructive under the trust model, so every

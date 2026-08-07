@@ -3621,12 +3621,14 @@ test("connect rejects a self-connection and an unimplemented mode", async () => 
   expect(h.err.join("\n")).toMatch(/can't connect to itself/i);
 
   await runCli(["new", "b", "--trust", "propose"], h.io);
-  // `read-summary` is the next mode with no implementation (T2b) — `artifact-only` became
-  // real in T2a, so the "unknown mode" assertion moves rather than disappearing.
-  expect(await runCli(["connect", "a", "b", "--mode", "read-summary"], h.io)).toBe(1);
+  // `shared-brief` is the next mode with no implementation (T3) — `artifact-only` became
+  // real in T2a and `read-summary` in T2b, so the "unknown mode" assertion moves rather than
+  // disappearing.
+  expect(await runCli(["connect", "a", "b", "--mode", "shared-brief"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
-  // The now-real mode opens a channel.
+  // The now-real modes open channels.
   expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(0);
+  expect(await runCli(["connect", "a", "b", "--mode", "read-summary"], h.io)).toBe(0);
 });
 
 test("connect rejects --mode with no value rather than opening a default connection (Codex P2)", async () => {
@@ -3705,6 +3707,90 @@ test("connect / connections / handoff / artifact show help", async () => {
     const out = await capture(cmd, h.io);
     expect(out.length).toBeGreaterThan(0);
   }
+});
+
+// --- collaboration: read-summary pull (Phase 3 · T2b) -----------------------
+
+test("summary without a connection is refused with a pointer to the right mode", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  expect(await runCli(["summary", "writer", "researcher"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/No active read-summary connection/i);
+  expect(h.err.join("\n")).toMatch(/--mode read-summary/);
+});
+
+test("summary needs no model — it builds no adapter, because nothing runs", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "read-summary"], h.io);
+  // An IO whose adapter factory THROWS: a pull that reached for a substrate would fail here.
+  // Every other exchange verb needs one; this is the visible consequence of the mode running
+  // nothing (design note §13, D16).
+  const io = {
+    ...h.io,
+    makeAdapter: () => {
+      throw new Error("summary must not build an adapter");
+    },
+  };
+  expect(await runCli(["summary", "writer", "researcher"], io)).toBe(0);
+});
+
+test("summary reports an agent with nothing ratified rather than looking broken", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "read-summary"], h.io);
+  const out = await capture(["summary", "writer", "researcher"], h.io);
+  expect(out).toMatch(/no ratified memory to share/i);
+});
+
+test("summary usage names the focus as optional, and an unknown agent is reported", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["summary"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism summary <from> <to> \["<focus>"\]/);
+  expect(await runCli(["summary", "ghost", "phantom"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/ghost/);
+});
+
+test("a summary focus beginning with a dash reaches the kernel verbatim", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "researcher", "--mode", "read-summary"], h.io);
+  // The shared exchange arg parser takes the tail raw, so a flag-shaped focus is not eaten as
+  // an option — the same protection `handoff` and `artifact` rely on.
+  expect(await runCli(["summary", "writer", "researcher", "--pricing"], h.io)).toBe(0);
+});
+
+test("an agent NAMED summary can still be a caller — summary is a top-level verb, not a sub-verb", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "summary", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  await runCli(["connect", "summary", "researcher", "--mode", "read-summary"], h.io);
+  // `summary summary researcher` — the verb, then an agent that happens to share its name.
+  // The R2 rule holds: nothing is dispatched as a sub-verb from a position holding an agent.
+  const out = await capture(["summary", "summary", "researcher"], h.io);
+  expect(out).toMatch(/researcher/);
+});
+
+test("connect names the summary verb for a read-summary channel", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "researcher", "--trust", "propose"], h.io);
+  const out = await capture(["connect", "writer", "researcher", "--mode", "read-summary"], h.io);
+  // A mode grants exactly its own form, so the hint must not tell the operator to pass a task
+  // to a channel that runs nothing.
+  expect(out).toContain("asterism summary writer researcher");
+  expect(out).not.toContain('"<task>"');
 });
 
 // --- collaboration: artifact-only exchange (Phase 3 · T2a) ------------------

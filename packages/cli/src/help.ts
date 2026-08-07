@@ -40,6 +40,7 @@ Commands:
   handoff <from> <to> "<task>"      Have one agent hand a task to another
   artifact <from> <to> "<task>"     Like handoff, but hand back only the files produced
   fetch <from> <to> <path>          Copy one of those files into the asking agent's space
+  summary <from> <to> ["<focus>"]   Read a curated extract of what another agent knows
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
@@ -212,7 +213,7 @@ Choose a model with \`asterism config\` (or the ASTERISM_MODEL_ID environment
 variable), and set an API key in the environment (e.g. OPENAI_API_KEY), before
 running.`,
 
-  connect: `asterism connect <from> <to> --mode <handoff|artifact-only>
+  connect: `asterism connect <from> <to> --mode <handoff|artifact-only|read-summary>
 
 Open an explicit channel from one agent to another, so the first can hand it work.
 Agents are separate by default and can't reach each other; a connection is the only
@@ -228,8 +229,11 @@ re-run the same connect harmlessly — it won't make a duplicate.
                                     its final result — use \`asterism handoff\`.
                      artifact-only  It does the task and hands back only a list of the
                                     files it produced — not its words, and not the file
-                                    contents. Use \`asterism artifact\`. (More modes,
-                                    sharing less, are coming.)
+                                    contents. Use \`asterism artifact\`.
+                     read-summary   The receiving agent does NO work at all. It shares a
+                                    short, screened extract of what it has already learned
+                                    and you have accepted. Use \`asterism summary\`.
+                                    (More modes, sharing less, are coming.)
 
 Opening a connection is a deliberate act you take; from then on, either agent's record
 shows the channel exists and each time it is used — never the task text or any result.`,
@@ -303,6 +307,33 @@ would copy and leaves it to you.
 Only a file the other agent actually handed over can be fetched. A path it never produced
 is refused, whatever is on disk — this brings across what you were shown, it is not a way
 to read another agent's files.`,
+
+  summary: `asterism summary <from> <to> ["<focus>"]
+
+Read a short, screened extract of what another agent has learned. Add a focus in quotes to
+ask about one subject:
+
+  asterism summary writer researcher
+  asterism summary writer researcher "pricing"
+
+This is the one command where the other agent does NO work — nothing runs, no model is
+called, and it works even with no model set up. It reads what that agent already knows.
+
+Only what YOU have accepted can cross. Anything still waiting for your review, anything
+you rejected, and anything archived stays where it is, at any size of extract. What comes
+back is the knowledge itself — never the underlying records, when they were learned, what
+run produced them, or how sure the agent is of them.
+
+Anything that looks like a password or key is removed before it crosses, and a note whose
+wording could be an attempt to steer the reading agent is held back whole. The extract
+tells you how many notes were held back, and how many did not fit — ask again with a focus
+to reach those.
+
+Open the channel first if you haven't:
+  asterism connect <from> <to> --mode read-summary
+
+A channel opened for handoff or artifact-only does not work here — each mode is its own
+permission, so opening one never quietly grants another.`,
 
   confirm: `asterism confirm [<agent>] <run>
 
