@@ -981,3 +981,36 @@ test("an ordinary path is NOT marked redacted, and still fetches", async () => {
   });
   expect(outcome.kind).toBe("ok");
 });
+
+test("an unusable DESTINATION is reported before the gate, never as a failed confirmation", async () => {
+  // A fetch that cannot land must not reach the destructive gate: the operator would be asked
+  // to approve a copy that then fails, and a non-interactive caller would be told
+  // `not_confirmed` when confirmation was never the problem. [Codex review R5 P3.]
+  await givenExchangedArtifact();
+  const asked: Action[] = [];
+  const log = emptyLog();
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: {
+      // The host reports the destination as unusable (a parent component is a file, an
+      // unreadable directory) rather than merely absent.
+      inspect: (request) => {
+        log.inspected.push(request);
+        return { ok: false, reason: `cannot write '${request.path}' (ENOTDIR).` };
+      },
+      materialize: (request) => {
+        log.materialized.push(request);
+        return { ok: true, bytes: 1 };
+      },
+    },
+    confirm: (action) => {
+      asked.push(action);
+      return true;
+    },
+  });
+  expect(outcome.kind).toBe("unavailable");
+  if (outcome.kind !== "unavailable") return;
+  expect(outcome.reason).toMatch(/ENOTDIR/);
+  // Nobody was asked, and nothing was copied.
+  expect(asked).toHaveLength(0);
+  expect(log.materialized).toHaveLength(0);
+});

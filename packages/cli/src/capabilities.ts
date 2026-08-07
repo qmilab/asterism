@@ -1074,6 +1074,20 @@ export function workspaceCapabilities(
 // file-open primitive.
 
 /**
+ * Whether a filesystem error means the node simply is not there (`ENOENT`), as opposed to
+ * existing-but-unusable. The distinction matters wherever "absent" is a legitimate outcome:
+ * every OTHER errno is a real failure and must not be silently read as "nothing there".
+ */
+function isMissing(err: unknown): boolean {
+  return (
+    err !== null &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code: unknown }).code === "ENOENT"
+  );
+}
+
+/**
  * Say what a fetch side is, when it is not the regular file an artifact must be. Names the
  * node KIND (folder, pipe, device…) rather than a bare refusal, so an operator can tell a
  * mistyped path from a path that is genuinely something else — and never leaks a host path.
@@ -1162,8 +1176,19 @@ export function artifactFetchHost(): ArtifactFetchHost {
           return { ok: false, reason: describeNonFile(request.path, st, "destination") };
         }
         destExists = true;
-      } catch {
-        destExists = false; // nothing there — an ordinary create.
+      } catch (err) {
+        // ONLY a missing destination is an ordinary create. Every other stat failure means
+        // the write cannot land — `ENOTDIR` when a parent component is itself a file (the
+        // caller holds `drafts` as a file and the artifact is `drafts/market.md`), `EACCES`
+        // on an unreadable parent, `ELOOP` on a symlink cycle. Treating those as "nothing
+        // there" would carry an impossible fetch all the way to the destructive gate: the
+        // operator gets asked to approve a copy that then fails, or a non-interactive caller
+        // is told it was `not_confirmed` when confirmation was never the problem. That
+        // defeats the reason this preflight exists at all. [Codex review R5 P3.]
+        if (!isMissing(err)) {
+          return { ok: false, reason: `cannot write '${request.path}' (${failureReason(err)}).` };
+        }
+        destExists = false;
       }
       return { ok: true, sizeBytes, modifiedAtMs, destExists };
     },

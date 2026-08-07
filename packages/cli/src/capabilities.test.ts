@@ -1178,6 +1178,32 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
     expect(existsSync(join(caller, "empty.md"))).toBe(false);
   });
 
+
+  // ---- preflight must not pass an impossible fetch to the confirmation gate ----
+
+  test("a destination whose PARENT is a file is refused in preflight, not after confirming", () => {
+    // The caller holds `drafts` as a regular FILE, so `drafts/market.md` can never be
+    // written: `statSync` throws ENOTDIR, which a blanket catch would read as "nothing there"
+    // and carry all the way to the destructive gate. [Codex review R5 P3.]
+    mkdirSync(join(callee, "drafts"), { recursive: true });
+    writeFileSync(join(callee, "drafts/market.md"), "ARTIFACT");
+    writeFileSync(join(caller, "drafts"), "I am a file, not a folder");
+    const inspection = host.inspect(request("drafts/market.md"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/cannot write .*ENOTDIR/i);
+    // And the write genuinely could not have happened.
+    expect(host.materialize(materializeRequest("drafts/market.md", 8)).ok).toBe(false);
+  });
+
+  test("a merely ABSENT destination is still an ordinary create", () => {
+    // The regression guard for the fix above: ENOENT must keep meaning "nothing there yet",
+    // or every first-time fetch would refuse.
+    writeFileSync(join(callee, "fresh.md"), "NEW");
+    const inspection = host.inspect(request("fresh.md"));
+    expect(inspection).toMatchObject({ ok: true, destExists: false });
+    expect(host.materialize(materializeRequest("fresh.md", 3))).toEqual({ ok: true, bytes: 3 });
+  });
+
   test("a directory still reports as a folder, not a bare 'not a regular file'", () => {
     // The friendlier message survives the stricter guard — a mistyped path that lands on a
     // folder should say so rather than leaving the operator guessing.
