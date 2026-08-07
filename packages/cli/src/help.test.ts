@@ -15,6 +15,8 @@ test("usage lists every command in the surface", () => {
     "connect <from>",
     "connections <agent>",
     "handoff <from>",
+    "artifact <from>",
+    "fetch <from>",
     "confirm",
     "runs <agent>",
     "memory inspect",

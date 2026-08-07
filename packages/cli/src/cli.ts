@@ -1708,12 +1708,6 @@ async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
  * filter would leave the callee's output one field access away for the next surface.
  */
 async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
-  // `fetch` is a SUB-VERB, not a mode flag: it is a different operation on the same
-  // exchange (dereference what already crossed) rather than a variant of asking for work,
-  // so it takes its own argument shape — and its own gate. Dispatched before
-  // `parseExchangeArgs` because that helper deliberately treats every token after the two
-  // agents as free-form task text (D9), which a path argument is not.
-  if (args[0] === "fetch") return cmdArtifactFetch(args.slice(1), io);
   const parsed = parseExchangeArgs(args, io, "artifact");
   if (typeof parsed === "number") return parsed;
   const { fromName, toName, task } = parsed;
@@ -1766,8 +1760,8 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
 }
 
 /**
- * `asterism artifact fetch <caller> <callee> <path>` — copy an artifact the callee produced
- * into the caller's workspace, under the CALLER's own destructive-action gate.
+ * `asterism fetch <caller> <callee> <path>` — copy an artifact the callee produced into the
+ * caller's workspace, under the CALLER's own destructive-action gate.
  *
  * The completion of the `artifact-only` mode: the exchange hands back a list of what the
  * callee made, and this is how the operator turns one of those references into the actual
@@ -1780,16 +1774,26 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
  * named explicitly (rather than inferring the callee from history) so the argument order
  * matches every other exchange verb and a caller with several artifact-only channels never
  * needs an ambiguity rule.
+ *
+ * A TOP-LEVEL verb, not `artifact fetch`, and the reason is a rule worth stating: a command
+ * whose first positional is an AGENT NAME cannot also dispatch a sub-verb from that position.
+ * `artifact <from> <to> "<task>"` takes an agent first, so nesting `fetch` there shadowed a
+ * legitimately-named agent — `artifact fetch helper "task"` stopped meaning "the agent named
+ * `fetch` asks helper" and became a fetch. Every other grouped command in this CLI
+ * (`memory inspect <agent>`, `secrets add <agent> …`) puts the literal sub-verb FIRST and the
+ * agent second, so the collision cannot arise there. Flat is also how the rest of the
+ * collaboration surface already reads (`connect` / `connections` / `handoff` / `artifact`).
+ * [Codex review R2 P2.]
  */
-async function cmdArtifactFetch(args: string[], io: CliIO): Promise<number> {
+async function cmdFetch(args: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(args, ["help", "h"]);
   if (helpRequested(parsed)) {
-    io.out(COMMAND_HELP["artifact fetch"]!);
+    io.out(COMMAND_HELP.fetch!);
     return 0;
   }
   const [fromName, toName, path] = parsed.positionals;
   if (!fromName || !toName || !path) {
-    io.err("Usage: asterism artifact fetch <caller> <callee> <path>");
+    io.err("Usage: asterism fetch <caller> <callee> <path>");
     return 1;
   }
 
@@ -4948,6 +4952,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdHandoff(rest, io);
     case "artifact":
       return cmdArtifact(rest, io);
+    case "fetch":
+      return cmdFetch(rest, io);
     case "confirm":
       return cmdConfirm(rest, io);
     case "runs":

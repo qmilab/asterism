@@ -164,7 +164,7 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     writeFileSync(priv, PRIVATE_BODY);
 
     // (1) Fetch before any connection exists — refused.
-    noConnOut = await run(["artifact", "fetch", "writer", "helper", ARTIFACT_PATH]);
+    noConnOut = await run(["fetch", "writer", "helper", ARTIFACT_PATH]);
     landedAfterNoConnection = existsSync(join(workspaceOf("writer"), ARTIFACT_PATH));
 
     // Open the channel and do the exchange, so there is a recorded manifest.
@@ -172,19 +172,19 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     await run(["artifact", "writer", "helper", "draft the market section"]);
 
     // (2) A real file the callee never handed over — refused despite existing on disk.
-    notExchangedOut = await run(["artifact", "fetch", "writer", "helper", PRIVATE_PATH]);
+    notExchangedOut = await run(["fetch", "writer", "helper", PRIVATE_PATH]);
 
     // (3a) The caller is autonomous — it STILL asks, and a decline writes nothing.
     approve = false;
-    declinedOut = await run(["artifact", "fetch", "writer", "helper", ARTIFACT_PATH]);
+    declinedOut = await run(["fetch", "writer", "helper", ARTIFACT_PATH]);
     landedAfterDecline = existsSync(join(workspaceOf("writer"), ARTIFACT_PATH));
 
     // (3b) Confirmed — the bytes land.
     approve = true;
-    fetchedOut = await run(["artifact", "fetch", "writer", "helper", ARTIFACT_PATH]);
+    fetchedOut = await run(["fetch", "writer", "helper", ARTIFACT_PATH]);
 
     // (3c) Fetching again OVERWRITES — allowed, but only after saying so.
-    overwriteOut = await run(["artifact", "fetch", "writer", "helper", ARTIFACT_PATH]);
+    overwriteOut = await run(["fetch", "writer", "helper", ARTIFACT_PATH]);
 
     // (3e) The callee REWRITES the exchanged path outside any exchange — a later run, or the
     // operator's own editor. The path is still in the manifest writer holds, but what sits
@@ -193,7 +193,7 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     writeFileSync(exchangedPath, PRIVATE_BODY);
     const later = Date.now() / 1000 + 120;
     utimesSync(exchangedPath, later, later);
-    staleOut = await run(["artifact", "fetch", "writer", "helper", ARTIFACT_PATH]);
+    staleOut = await run(["fetch", "writer", "helper", ARTIFACT_PATH]);
     contentAfterStale = readFileSync(join(workspaceOf("writer"), ARTIFACT_PATH), "utf8");
     landedAfterStale = contentAfterStale.includes(PRIVATE_BODY);
     // Put the artifact back so the remaining steps see the state they expect.
@@ -204,7 +204,7 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     // (3d) A `propose` caller writes nothing at all, even with a confirmation available.
     await run(["connect", "editor", "helper", "--mode", "artifact-only"]);
     await run(["artifact", "editor", "helper", "draft the market section"]);
-    proposeOut = await run(["artifact", "fetch", "editor", "helper", ARTIFACT_PATH]);
+    proposeOut = await run(["fetch", "editor", "helper", ARTIFACT_PATH]);
 
     store = AsterismStore.open(dbPath(join(dir, HOME_DIR_NAME)));
     const byName = (name: string): Agent => {
@@ -226,7 +226,7 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
 
   test("with no active artifact-only connection the fetch is refused", () => {
     expect(noConnOut).toMatch(/No active artifact-only connection/i);
-    expect(exitCodes.find(([c]) => c === `artifact fetch writer helper ${ARTIFACT_PATH}`)?.[1]).toBe(1);
+    expect(exitCodes.find(([c]) => c === `fetch writer helper ${ARTIFACT_PATH}`)?.[1]).toBe(1);
     // Nothing landed (observed at the time of the refusal).
     expect(landedAfterNoConnection).toBe(false);
   });
@@ -248,7 +248,7 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
   test("a traversal path is refused the same way — the argument selects a record", async () => {
     const out = transcript.length;
     const code = await runCli(
-      ["artifact", "fetch", "writer", "helper", "../helper/private/helper-notes.md"],
+      ["fetch", "writer", "helper", "../helper/private/helper-notes.md"],
       {
         cwd: dir,
         env: {},
@@ -275,7 +275,7 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
   test("a declined confirmation writes nothing", () => {
     expect(declinedOut).toMatch(/Not fetched/i);
     expect(landedAfterDecline).toBe(false);
-    expect(exitCodes.filter(([c]) => c.startsWith("artifact fetch writer helper drafts")).map(([, x]) => x))
+    expect(exitCodes.filter(([c]) => c.startsWith("fetch writer helper drafts")).map(([, x]) => x))
       .toContain(1);
   });
 

@@ -3828,30 +3828,30 @@ test("artifact reports usage when the task is missing", async () => {
 
 // --- collaboration: artifact fetch (the deferred half of D8) ----------------
 
-test("artifact fetch shows help and rejects an incomplete invocation", async () => {
+test("fetch shows help and rejects an incomplete invocation", async () => {
   const h = harness();
-  const help = await capture(["artifact", "fetch", "--help"], h.io);
-  expect(help).toMatch(/artifact fetch <from> <to> <path>/);
+  const help = await capture(["fetch", "--help"], h.io);
+  expect(help).toMatch(/asterism fetch <from> <to> <path>/);
   // The help must promise the two properties the command exists for.
   expect(help).toMatch(/confirm/i);
   expect(help).toMatch(/not a way\s+to read another agent's files/i);
   await runCli(["init"], h.io);
   // Missing the path (and missing the callee) are usage errors, not silent no-ops.
-  expect(await runCli(["artifact", "fetch", "writer", "helper"], h.io)).toBe(1);
-  expect(await runCli(["artifact", "fetch", "writer"], h.io)).toBe(1);
-  expect(h.err.join("\n")).toMatch(/Usage: asterism artifact fetch <caller> <callee> <path>/);
+  expect(await runCli(["fetch", "writer", "helper"], h.io)).toBe(1);
+  expect(await runCli(["fetch", "writer"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism fetch <caller> <callee> <path>/);
 });
 
-test("artifact fetch reports an unknown agent on either side", async () => {
+test("fetch reports an unknown agent on either side", async () => {
   const h = harness();
   await runCli(["init"], h.io);
   await runCli(["new", "writer", "--trust", "autonomous"], h.io);
-  expect(await runCli(["artifact", "fetch", "ghost", "writer", "x.md"], h.io)).toBe(1);
-  expect(await runCli(["artifact", "fetch", "writer", "ghost", "x.md"], h.io)).toBe(1);
+  expect(await runCli(["fetch", "ghost", "writer", "x.md"], h.io)).toBe(1);
+  expect(await runCli(["fetch", "writer", "ghost", "x.md"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/ghost/);
 });
 
-test("artifact fetch is unavailable on a surface with no filesystem host", async () => {
+test("fetch is unavailable on a surface with no filesystem host", async () => {
   // The seam's ABSENCE is the safe default: a surface that cannot confine the copy must
   // not perform it, rather than falling back to some looser path.
   const h = harness();
@@ -3859,20 +3859,41 @@ test("artifact fetch is unavailable on a surface with no filesystem host", async
   await runCli(["new", "writer", "--trust", "autonomous"], h.io);
   await runCli(["new", "helper", "--trust", "autonomous"], h.io);
   await runCli(["connect", "writer", "helper", "--mode", "artifact-only"], h.io);
-  expect(await runCli(["artifact", "fetch", "writer", "helper", "x.md"], h.io)).toBe(1);
+  expect(await runCli(["fetch", "writer", "helper", "x.md"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/cannot fetch artifacts/i);
 });
 
-test("`fetch` as the first token is the sub-verb, never a two-agent exchange", async () => {
-  // `artifact fetch a b "task"` must not be read as "agent `fetch` asks agent `a`" — the
-  // sub-verb is dispatched before the shared exchange parser sees the tail.
+test("an agent NAMED `fetch` can still run an artifact exchange", async () => {
+  // `fetch` is a valid agent name (`isValidAgentName` allows it), and `artifact` takes an
+  // AGENT as its first positional — so a `fetch` sub-verb nested there would shadow that
+  // agent and silently turn its exchange into something else. This is why the verb is
+  // top-level instead. [Codex review R2 P2.]
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "fetch", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "autonomous"], h.io);
+  await runCli(["connect", "fetch", "helper", "--mode", "artifact-only"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  expect(await runCli(["artifact", "fetch", "helper", "draft the section"], io)).toBe(0);
+  const store = openHomeStore(h);
+  try {
+    // The exchange really happened: the CALLEE ran the task the operator typed, verbatim.
+    const helper = agentNamed(store, "helper");
+    expect(store.runs.list(helper.id).at(-1)?.input).toBe("draft the section");
+    // ...and it was an exchange, not a fetch — the caller started no run of its own.
+    expect(store.runs.list(agentNamed(store, "fetch").id)).toHaveLength(0);
+  } finally {
+    store.close();
+  }
+});
+
+test("the top-level fetch verb is a fetch, and starts no run for anyone", async () => {
   const h = harness();
   await runCli(["init"], h.io);
   await runCli(["new", "writer", "--trust", "autonomous"], h.io);
   await runCli(["new", "helper", "--trust", "autonomous"], h.io);
   const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
-  expect(await runCli(["artifact", "fetch", "writer", "helper", "notes.md"], io)).toBe(1);
-  // A connection check for a *fetch*, not an exchange: no run was started for anyone.
+  expect(await runCli(["fetch", "writer", "helper", "notes.md"], io)).toBe(1);
   const store = openHomeStore(h);
   try {
     expect(store.runs.list(agentNamed(store, "helper").id)).toHaveLength(0);
