@@ -58,7 +58,11 @@
 import {
   type Dirent,
   appendFileSync,
+  closeSync,
+  constants,
+  fstatSync,
   lstatSync,
+  openSync,
   mkdirSync,
   opendirSync,
   readdirSync,
@@ -1070,6 +1074,20 @@ export function workspaceCapabilities(
 // file-open primitive.
 
 /**
+ * Say what a fetch side is, when it is not the regular file an artifact must be. Names the
+ * node KIND (folder, pipe, device…) rather than a bare refusal, so an operator can tell a
+ * mistyped path from a path that is genuinely something else — and never leaks a host path.
+ */
+function describeNonFile(
+  path: string,
+  st: { isDirectory(): boolean; isSymbolicLink(): boolean },
+  side: "source" | "destination",
+): string {
+  const kind = st.isDirectory() ? "a folder" : "not a regular file";
+  return `'${path}' is ${kind} in the ${side} workspace.`;
+}
+
+/**
  * Resolve one side of a fetch to an absolute path inside `workspaceDir`, refusing a lexical
  * climb-out and a symlinked component (leaf included) that resolves outside. The leaf is
  * FOLLOWED on both sides, matching what actually happens: `readFileSync` reads through a
@@ -1122,24 +1140,26 @@ export function artifactFetchHost(): ArtifactFetchHost {
         // `statSync`, following the leaf — the confinement check above already established
         // that whatever it follows to stays inside the callee's workspace.
         const st = statSync(sides.source);
-        if (st.isDirectory()) {
-          return { ok: false, reason: `'${request.path}' is a folder in the source workspace.` };
+        // A REGULAR FILE, not merely "not a directory". A FIFO, socket or device node passes
+        // a not-a-directory test and then behaves nothing like a file: reading a FIFO blocks
+        // until someone writes to it, which after a confirmation would hang the CLI outright.
+        // An artifact is a regular file; anything else is refused. [Codex review R4 P2.]
+        if (!st.isFile()) {
+          return { ok: false, reason: describeNonFile(request.path, st, "source") };
         }
         sizeBytes = st.size;
         modifiedAtMs = st.mtimeMs;
       } catch (err) {
         return { ok: false, reason: `cannot read '${request.path}' (${failureReason(err)}).` };
       }
-      // A destination that exists but is not a file cannot be written over — say so now
-      // rather than letting the confirmed write fail with EISDIR after the human approved it.
+      // A destination that exists but is not a regular file cannot be written over — say so
+      // now rather than letting the confirmed write fail (or, for a FIFO, block) after the
+      // human approved it. Same reasoning as the source, in the other direction.
       let destExists = false;
       try {
         const st = statSync(sides.dest);
-        if (st.isDirectory()) {
-          return {
-            ok: false,
-            reason: `'${request.path}' is already a folder in the destination workspace.`,
-          };
+        if (!st.isFile()) {
+          return { ok: false, reason: describeNonFile(request.path, st, "destination") };
         }
         destExists = true;
       } catch {
@@ -1151,18 +1171,34 @@ export function artifactFetchHost(): ArtifactFetchHost {
     materialize: (request: ArtifactMaterializeRequest): ArtifactMaterialization => {
       const sides = resolveSides(request);
       if (!sides.ok) return { ok: false, reason: sides.reason };
+      // Everything below works on a FILE DESCRIPTOR rather than re-resolving the path,
+      // because "stat it, then open it" is a check on one thing and a use of another. Opening
+      // with O_NONBLOCK means even a FIFO cannot stall the open, `fstat` then describes the
+      // exact node we hold, and the read and the freshness re-check both come from that same
+      // fd — so a swap between the check and the use has nothing to swap. This is the discipline
+      // the workspace tools' symlink guards exist for, applied to node TYPE. [Codex review R4 P2.]
+      let fd: number;
       try {
+        fd = openSync(sides.source, constants.O_RDONLY | constants.O_NONBLOCK);
+      } catch (err) {
+        return { ok: false, reason: `could not fetch '${request.path}' (${failureReason(err)}).` };
+      }
+      try {
+        const opened = fstatSync(fd);
+        if (!opened.isFile()) {
+          return { ok: false, reason: describeNonFile(request.path, opened, "source") };
+        }
         // Read as BYTES, not UTF-8 text: an artifact is whatever the callee produced, and
         // decoding it would corrupt anything that is not text while buying nothing — the
         // kernel never inspects the contents, it only moves them.
-        const bytes = readFileSync(sides.source);
+        const bytes = readFileSync(fd);
         // Re-check AFTER the read, against what the exchange recorded — not against a stat
         // taken before it. The kernel already verified this before prompting, but a
         // confirmation is a human-length pause during which the callee may write to its own
         // workspace, so the bytes actually in hand must be re-established as the artifact.
-        // Statting after reading means a rewrite that raced the read is caught by the newer
-        // mtime; nothing is written unless what we read still matches what crossed.
-        const after = statSync(sides.source);
+        // Statting the same fd after reading means a rewrite that raced the read is caught by
+        // the newer mtime; nothing is written unless what we read still matches what crossed.
+        const after = fstatSync(fd);
         if (after.size !== request.expect.sizeBytes || after.size !== bytes.byteLength) {
           return { ok: false, reason: `'${request.path}' changed while it was being fetched.` };
         }
@@ -1174,10 +1210,33 @@ export function artifactFetchHost(): ArtifactFetchHost {
           return { ok: false, reason: `'${request.path}' changed while it was being fetched.` };
         }
         mkdirSync(dirname(sides.dest), { recursive: true });
-        writeFileSync(sides.dest, bytes);
+        // The destination gets the same treatment, for the same reason in reverse: writing to
+        // a FIFO blocks until something reads it. O_NONBLOCK keeps the open from stalling, and
+        // the write only happens once `fstat` confirms the node we opened is a regular file.
+        let out: number;
+        try {
+          out = openSync(
+            sides.dest,
+            constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NONBLOCK,
+            0o600,
+          );
+        } catch (err) {
+          return { ok: false, reason: `could not fetch '${request.path}' (${failureReason(err)}).` };
+        }
+        try {
+          const target = fstatSync(out);
+          if (!target.isFile()) {
+            return { ok: false, reason: describeNonFile(request.path, target, "destination") };
+          }
+          writeFileSync(out, bytes);
+        } finally {
+          closeSync(out);
+        }
         return { ok: true, bytes: bytes.byteLength };
       } catch (err) {
         return { ok: false, reason: `could not fetch '${request.path}' (${failureReason(err)}).` };
+      } finally {
+        closeSync(fd);
       }
     },
   };

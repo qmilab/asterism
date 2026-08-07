@@ -14,6 +14,7 @@
 //   - subject references are controlled + normalized (file:<workspace-relative-path>).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -1127,5 +1128,62 @@ describe("artifactFetchHost — confinement on both sides of a fetch", () => {
       expect(host.inspect(request(path)).ok).toBe(false);
       expect(host.materialize(materializeRequest(path, 1)).ok).toBe(false);
     }
+  });
+
+  // ---- special files: an artifact is a REGULAR file, never a pipe or device ----
+  //
+  // `statSync` succeeds on a FIFO and `isDirectory()` is false, so a not-a-directory test
+  // passes it — and then `readFileSync` blocks until something writes, which after a
+  // confirmation would hang the CLI outright with no timeout. [Codex review R4 P2.]
+
+  /** Create a FIFO at `abs` (no Node API for it; `mkfifo` is POSIX-standard). */
+  function execTouchFifo(abs: string): void {
+    execFileSync("mkfifo", [abs]);
+  }
+
+  test("a FIFO SOURCE is refused rather than read (it would block forever)", () => {
+    execFileSync("mkfifo", [join(callee, "pipe.md")]);
+    const inspection = host.inspect(request("pipe.md"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/not a regular file/i);
+    // And materialize refuses on its own, without inheriting inspect's verdict — the read
+    // never happens, so this test returns instead of hanging.
+    const materialized = host.materialize(materializeRequest("pipe.md", 0));
+    expect(materialized.ok).toBe(false);
+    expect(existsSync(join(caller, "pipe.md"))).toBe(false);
+  });
+
+  test("a FIFO DESTINATION is refused rather than written to (it would block too)", () => {
+    writeFileSync(join(callee, "report.md"), "REPORT");
+    execFileSync("mkfifo", [join(caller, "report.md")]);
+    const inspection = host.inspect(request("report.md"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/not a regular file/i);
+    const materialized = host.materialize(materializeRequest("report.md", 6));
+    expect(materialized.ok).toBe(false);
+    // The pipe is still a pipe — nothing was written through it and it was not replaced.
+    expect(lstatSync(join(caller, "report.md")).isFIFO()).toBe(true);
+  });
+
+  test("a size-0 FIFO cannot slip past the staleness check", () => {
+    // The narrow path that makes this reachable at all: a FIFO stats as size 0, so an
+    // artifact recorded as 0 bytes with an old-enough timestamp would satisfy every other
+    // check. The node-type guard is what stops it.
+    execTouchFifo(join(callee, "empty.md"));
+    const materialized = host.materialize({
+      ...request("empty.md"),
+      expect: { sizeBytes: 0, notModifiedAfterMs: Date.now() + 60_000 },
+    });
+    expect(materialized.ok).toBe(false);
+    expect(existsSync(join(caller, "empty.md"))).toBe(false);
+  });
+
+  test("a directory still reports as a folder, not a bare 'not a regular file'", () => {
+    // The friendlier message survives the stricter guard — a mistyped path that lands on a
+    // folder should say so rather than leaving the operator guessing.
+    mkdirSync(join(callee, "drafts"), { recursive: true });
+    const inspection = host.inspect(request("drafts"));
+    expect(inspection.ok).toBe(false);
+    if (!inspection.ok) expect(inspection.reason).toMatch(/is a folder/i);
   });
 });
