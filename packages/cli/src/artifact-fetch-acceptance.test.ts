@@ -46,6 +46,10 @@ const ARTIFACT_BODY = "# Market\n\nThe market is large and growing.\n";
 // must fail even though it is right there on disk — the sharp invariant.
 const PRIVATE_PATH = "private/helper-notes.md";
 const PRIVATE_BODY = "HELPER PRIVATE NOTES — never handed over";
+// A filename carrying a secret-shaped span, so the manifest screens it before it crosses.
+// The recorded reference is then a DISPLAY string, not this name.
+const SECRET_NAME = "keys/AKIAIOSFODNN7EXAMPLE.txt";
+const SECRET_BODY = "the artifact behind a screened name";
 
 describe("Phase 3 · artifact fetch — acceptance", () => {
   let dir: string;
@@ -65,11 +69,15 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
   let overwriteOut = "";
   let proposeOut = "";
   let staleOut = "";
+  let secretManifestOut = "";
+  let secretFetchOut = "";
   let landedAfterStale = true;
   let contentAfterStale = "";
 
   /** Answers the destructive-action prompt; flipped per command by the script below. */
   let approve = true;
+  /** Switches the callee's write tool to the secret-shaped-filename one. */
+  let secretNamed = false;
   // Filesystem state captured DURING the script — a later step legitimately creates the
   // file, so "nothing landed" has to be observed at the moment of the refusal, not after.
   let landedAfterNoConnection = true;
@@ -96,6 +104,35 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
               facts: [
                 { subject: `file:${ARTIFACT_PATH}`, relation: "size_bytes", object: bytes },
                 { subject: `file:${ARTIFACT_PATH}`, relation: "exists", object: true },
+              ],
+            },
+          };
+        },
+      },
+    };
+  }
+
+  /** A write tool whose artifact has a SECRET-SHAPED filename — the manifest must screen it. */
+  function secretNameCapability(workspaceDir: string): Capability {
+    return {
+      key: "fs.write",
+      effect: "write",
+      tool: {
+        name: "write_file",
+        description: "write a file whose name looks like a secret",
+        inputSchema: { type: "object", properties: {} },
+        execute: () => {
+          const abs = join(workspaceDir, SECRET_NAME);
+          mkdirSync(dirname(abs), { recursive: true });
+          writeFileSync(abs, SECRET_BODY);
+          const bytes = Buffer.byteLength(SECRET_BODY, "utf8");
+          return {
+            output: `wrote ${bytes} bytes`,
+            observation: {
+              schema: "asterism.fs.write@1",
+              facts: [
+                { subject: `file:${SECRET_NAME}`, relation: "size_bytes", object: bytes },
+                { subject: `file:${SECRET_NAME}`, relation: "exists", object: true },
               ],
             },
           };
@@ -135,7 +172,8 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
       out: (t) => transcript.push(t),
       err: (t) => transcript.push(t),
       makeAdapter: () => ({ adapter: scriptedAdapter(["write_file"], CALLEE_PROSE) }),
-      capabilities: (workspaceDir) => [writeCapability(workspaceDir)],
+      capabilities: (workspaceDir) =>
+        secretNamed ? [secretNameCapability(workspaceDir)] : [writeCapability(workspaceDir)],
       // The REAL host: real confinement, real bytes.
       fetchHost: artifactFetchHost(),
       confirm: (action: Action) => {
@@ -205,6 +243,23 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     await run(["connect", "editor", "helper", "--mode", "artifact-only"]);
     await run(["artifact", "editor", "helper", "draft the market section"]);
     proposeOut = await run(["fetch", "editor", "helper", ARTIFACT_PATH]);
+
+    // (3f) An artifact whose FILENAME looks like a secret: the manifest screens the name, so
+    // the recorded reference is a display string. It is reported, and refused by fetch — the
+    // screened string is not the file's name, and resolving it could hand over something else.
+    secretNamed = true;
+    secretManifestOut = await run(["artifact", "writer", "helper", "draft the keys note"]);
+    const screened = secretManifestOut
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.includes("[redacted"));
+    secretFetchOut = await run([
+      "fetch",
+      "writer",
+      "helper",
+      (screened ?? "").split(/\s{2,}/)[0] ?? "",
+    ]);
+    secretNamed = false;
 
     store = AsterismStore.open(dbPath(join(dir, HOME_DIR_NAME)));
     const byName = (name: string): Agent => {
@@ -315,6 +370,20 @@ describe("Phase 3 · artifact fetch — acceptance", () => {
     expect(landedAfterStale).toBe(false);
     expect(contentAfterStale).toBe(ARTIFACT_BODY);
     expect(staleOut).not.toContain(PRIVATE_BODY);
+  });
+
+  test("an artifact with a secret-shaped FILENAME is reported screened and cannot be fetched", () => {
+    // The name never crossed...
+    expect(secretManifestOut).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(secretManifestOut).toContain("[redacted");
+    // ...the operator is told why it is not fetchable, rather than left to guess...
+    expect(secretManifestOut).toMatch(/name partly screened — cannot be fetched/i);
+    // ...and fetching the screened reference is refused.
+    expect(secretFetchOut).toMatch(/screened/i);
+    expect(secretFetchOut).not.toContain(SECRET_BODY);
+    // The artifact's real file stayed on the callee's side; nothing landed under either name.
+    expect(readFileSync(join(workspaceOf("helper"), SECRET_NAME), "utf8")).toBe(SECRET_BODY);
+    expect(existsSync(join(workspaceOf("writer"), SECRET_NAME))).toBe(false);
   });
 
   // --- 4. Cross-agent denial -------------------------------------------------

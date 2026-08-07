@@ -178,6 +178,13 @@ export class AsterismStore {
     if (!this.columnExists("exchanges", "size_bytes")) {
       this.driver.exec(`ALTER TABLE exchanges ADD COLUMN size_bytes INTEGER`);
     }
+    // `exchanges.redacted` joined the same table one review round later, for the same
+    // in-branch reason. DEFAULT 0 is the right backfill: an ordinary (unredacted) path is the
+    // overwhelming case and must stay fetchable, and a pre-existing redacted row simply keeps
+    // failing to resolve as it already did.
+    if (!this.columnExists("exchanges", "redacted")) {
+      this.driver.exec(`ALTER TABLE exchanges ADD COLUMN redacted INTEGER NOT NULL DEFAULT 0`);
+    }
     // The objective review state joined `objectives` after slice 1 first shipped the
     // table (reflection now PROPOSES objectives, gated by a review state). Add it
     // idempotently with DEFAULT 'accepted': every pre-existing objective was
@@ -1648,6 +1655,9 @@ export class AsterismStore {
           // Carried through so the row identifies the ARTIFACT, not just where it lived —
           // see the `Exchange.sizeBytes` contract and the fetch-time staleness check.
           ...(artifact.sizeBytes !== undefined ? { sizeBytes: artifact.sizeBytes } : {}),
+          // A redacted reference is recorded (the manifest showed it, so the record must too)
+          // but marked unresolvable — its path is a display string, not the file's name.
+          redacted: artifact.redacted === true,
           runId,
         });
       }

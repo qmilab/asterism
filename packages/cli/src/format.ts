@@ -269,7 +269,11 @@ export function formatArtifactManifest(
         : a.kind === "dir"
           ? "directory"
           : "present";
-    lines.push(`  ${a.path}   ${detail}`);
+    // A screened name is shown, but say so — otherwise the operator reads a path that looks
+    // real, tries to fetch it, and gets a refusal with no idea why. The name itself is not
+    // recoverable here by design; the honest thing is to name the limitation next to it.
+    const note = a.redacted ? "  (name partly screened — cannot be fetched)" : "";
+    lines.push(`  ${a.path}   ${detail}${note}`);
   }
   lines.push("");
   lines.push(

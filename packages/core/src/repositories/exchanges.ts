@@ -18,6 +18,8 @@ export interface RecordExchangeInput {
   present: boolean;
   /** The artifact's size when it crossed, when the observation established one. */
   sizeBytes?: number;
+  /** True when the redaction boundary changed the path, so `ref` is a display reference. */
+  redacted: boolean;
   runId: string;
 }
 
@@ -33,6 +35,7 @@ function mapExchange(row: SqlRow): Exchange {
     ...(row.size_bytes === null || row.size_bytes === undefined
       ? {}
       : { sizeBytes: Number(row.size_bytes) }),
+    redacted: Number(row.redacted) === 1,
     runId: String(row.run_id),
     createdAt: String(row.created_at),
   };
@@ -77,8 +80,8 @@ export class ExchangeRepository {
       .prepare(
         `INSERT INTO exchanges
            (id, connection_id, from_agent_id, to_agent_id, kind, ref, present, size_bytes,
-            run_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            redacted, run_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING *`,
       )
       .get([
@@ -90,6 +93,7 @@ export class ExchangeRepository {
         input.ref,
         input.present ? 1 : 0,
         input.sizeBytes ?? null,
+        input.redacted ? 1 : 0,
         input.runId,
         createdAt,
       ]);

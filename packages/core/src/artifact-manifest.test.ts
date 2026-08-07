@@ -181,3 +181,44 @@ test("a file and a directory at the same path are distinct entries", () => {
     { path: "build", kind: "file", exists: true },
   ]);
 });
+
+test("a path the redaction boundary changed is flagged, so no consumer treats it as a path", () => {
+  // The manifest already screened a secret-shaped path; the flag is what tells a consumer
+  // that the screened result is a DISPLAY string and not the file's name. [Codex review R3.]
+  const manifest = collectArtifactManifest([
+    {
+      effect: "write",
+      observation: {
+        schema: "asterism.fs.write@1",
+        facts: [
+          { subject: "file:keys/AKIAIOSFODNN7EXAMPLE.txt", relation: "size_bytes", object: 10 },
+          { subject: "file:notes/clean.md", relation: "size_bytes", object: 20 },
+        ],
+      },
+    },
+  ]);
+  const screened = manifest.find((a) => a.path.includes("[redacted"));
+  expect(screened?.redacted).toBe(true);
+  expect(screened?.path).not.toContain("AKIAIOSFODNN7EXAMPLE");
+  // A clean path is untouched and carries no flag — the field is present only when it fired.
+  const clean = manifest.find((a) => a.path === "notes/clean.md");
+  expect(clean).toBeDefined();
+  expect(clean?.redacted).toBeUndefined();
+});
+
+test("a control character stripped from a path also marks the reference redacted", () => {
+  // Not only the secret rules: ANY change the boundary makes means the recorded string no
+  // longer names the file, so the flag is derived from "did the path change at all". Here the
+  // control char is stripped, leaving a plausible-looking path that is not the real one.
+  const manifest = collectArtifactManifest([
+    {
+      effect: "write",
+      observation: {
+        schema: "asterism.fs.write@1",
+        facts: [{ subject: "file:notes/od\u0007d.md", relation: "size_bytes", object: 4 }],
+      },
+    },
+  ]);
+  expect(manifest[0]?.redacted).toBe(true);
+  expect(manifest[0]?.path).toBe("notes/odd.md");
+});

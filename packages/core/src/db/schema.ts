@@ -231,6 +231,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_active_triple
 -- no exchange authorized. An artifact written during the exchange necessarily has a
 -- modification time at or before created_at, so a fetch can refuse a source modified since,
 -- and size_bytes backstops a rewrite that preserved the timestamp.
+--
+-- redacted marks a ref whose path the redaction boundary CHANGED (a secret-shaped filename, a
+-- control character). Such a ref is a DISPLAY reference: it does not name the file the callee
+-- wrote, and something else may sit at the marker-bearing path it does name -- so it is
+-- reported but never materialized. The real path is deliberately not stored beside it;
+-- keeping an unredacted secret-shaped path so it could be fetched would reintroduce the very
+-- leak the redaction prevents.
 CREATE TABLE IF NOT EXISTS exchanges (
   id            TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL REFERENCES connections(id),
@@ -240,6 +247,7 @@ CREATE TABLE IF NOT EXISTS exchanges (
   ref           TEXT NOT NULL,
   present       INTEGER NOT NULL,
   size_bytes    INTEGER,
+  redacted      INTEGER NOT NULL DEFAULT 0,
   run_id        TEXT NOT NULL REFERENCES runs(id),
   created_at    TEXT NOT NULL
 );

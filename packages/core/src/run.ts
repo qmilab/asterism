@@ -1336,6 +1336,25 @@ export async function performArtifactFetch(
       reason: `'${parsed.path}' is a folder — fetch materializes single files.`,
     };
   }
+  // A REDACTED reference is reported but never materialized. When the redaction boundary
+  // changed a path (a secret-shaped filename, a control character), what was recorded is a
+  // DISPLAY string, not the file's name — so using it as a path would resolve to something
+  // else entirely, and a callee holding a file at the marker-bearing path could have it
+  // fetched despite never handing it over. Refused BEFORE the request is built, so the host
+  // is never handed the marker path at all.
+  //
+  // The real path is deliberately not stored beside it to make this fetchable: keeping an
+  // unredacted secret-shaped path in the record purely so it could be dereferenced would
+  // reintroduce exactly the leak the redaction exists to prevent. The recovery is to rename
+  // the file and exchange again. [Codex review R3 P2.]
+  if (exchanged.redacted) {
+    return {
+      kind: "unavailable",
+      reason:
+        `'${parsed.path}' is shown with part of its name screened out, so it cannot be ` +
+        `matched to a file. Have ${to.name} rename it and hand it over again.`,
+    };
+  }
   const request: ArtifactFetchRequest = {
     sourceWorkspaceDir: to.workspaceDir,
     destWorkspaceDir: from.workspaceDir,

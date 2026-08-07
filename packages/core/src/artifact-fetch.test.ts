@@ -21,6 +21,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { performArtifactExchange, performArtifactFetch, EXCHANGE_FETCH_KEY } from "./run.js";
+import { parseArtifactReference } from "./artifact-manifest.js";
 import type { ArtifactFetchHost, ArtifactFetchRequest, ArtifactMaterializeRequest } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunOutput, ToolResult } from "./adapter.js";
@@ -892,4 +893,91 @@ test("a sub-millisecond-fresh artifact is NOT stale — the comparison matches t
     confirm: () => true,
   });
   expect(stale.kind).toBe("unavailable");
+});
+
+// --- A redacted reference is a display string, not a path [Codex review R3] --
+//
+// The manifest redacts an agent-chosen path before it crosses, so a secret-shaped filename is
+// screened. What was recorded is then NOT the file's name — and a fetch that used it as one
+// would resolve to something else entirely.
+
+// A path carrying a secret-shaped span (`redactForTrace`'s AWS-key rule), so the manifest
+// stores the marker instead of the real name.
+const SECRET_PATH = "keys/AKIAIOSFODNN7EXAMPLE.txt";
+const SECRET_REF = `file:${SECRET_PATH}`;
+
+/** The reference the manifest actually recorded for {@link SECRET_PATH}. */
+function recordedSecretRef(): string {
+  const rows = store.exchanges.listForAgent(writer.id);
+  const row = rows.find((r) => r.redacted);
+  if (!row) throw new Error("expected a redacted exchange row");
+  return row.ref;
+}
+
+test("a secret-shaped artifact path is recorded screened, and marked unresolvable", async () => {
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  await exchangeProducing([writeCapability(SECRET_PATH)], [{ tool: "write_file" }]);
+  const [row] = store.exchanges.listForAgent(writer.id);
+  expect(row?.redacted).toBe(true);
+  // The real name never reached the record...
+  expect(row?.ref).not.toContain("AKIAIOSFODNN7EXAMPLE");
+  // ...and what did is a marker-bearing display string.
+  expect(row?.ref).toContain("[redacted");
+});
+
+test("a redacted reference is refused, and the host is never handed the marker path", async () => {
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  await exchangeProducing([writeCapability(SECRET_PATH)], [{ tool: "write_file" }]);
+  const log = emptyLog();
+  const outcome = await performArtifactFetch(store, writer, helper, recordedSecretRef(), {
+    host: fakeHost(log),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("unavailable");
+  if (outcome.kind !== "unavailable") return;
+  expect(outcome.reason).toMatch(/screened/i);
+  // Refused before the request is built, so the marker path never reaches the filesystem.
+  expect(log.inspected).toHaveLength(0);
+  expect(log.materialized).toHaveLength(0);
+});
+
+test("a DECOY file at the marker path cannot be fetched through a redacted reference", async () => {
+  // The attack the flag exists to stop: the callee holds a file at the very path the marker
+  // spells out, sized and dated to pass the staleness check. Resolving the display string as
+  // a path would hand over a file that was never produced in any exchange.
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  await exchangeProducing([writeCapability(SECRET_PATH)], [{ tool: "write_file" }]);
+  const ref = recordedSecretRef();
+  const markerPath = parseArtifactReference(ref)!.path;
+  const log = emptyLog();
+  const outcome = await performArtifactFetch(store, writer, helper, ref, {
+    // A decoy sitting exactly where the marker points, matching the recorded size and old
+    // enough to look unmodified — everything the other checks would accept.
+    host: fakeHost(log, new Map([[markerPath, file(ARTIFACT_BYTES)]])),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("unavailable");
+  expect(log.materialized).toHaveLength(0);
+});
+
+test("the real path is NOT kept beside the redacted ref — the record cannot leak it", async () => {
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  await exchangeProducing([writeCapability(SECRET_PATH)], [{ tool: "write_file" }]);
+  // Storing the unredacted path so the artifact could be fetched would reintroduce exactly
+  // the leak the redaction prevents, so no column anywhere holds it.
+  const serialized = JSON.stringify(store.exchanges.listForAgent(writer.id));
+  expect(serialized).not.toContain("AKIAIOSFODNN7EXAMPLE");
+});
+
+test("an ordinary path is NOT marked redacted, and still fetches", async () => {
+  // The flag must fire on a changed path only — a clean path passes through untouched, or
+  // this fix would break every normal fetch.
+  await givenExchangedArtifact();
+  const [row] = store.exchanges.listForAgent(writer.id);
+  expect(row?.redacted).toBe(false);
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host: fakeHost(emptyLog()),
+    confirm: () => true,
+  });
+  expect(outcome.kind).toBe("ok");
 });

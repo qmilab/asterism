@@ -466,6 +466,18 @@ export interface Exchange {
    * longer the artifact it resolved. [Codex review P2.]
    */
   sizeBytes?: number;
+  /**
+   * True when the kernel's redaction boundary CHANGED the path before it became this `ref` —
+   * so `ref` is a DISPLAY reference, not the real one.
+   *
+   * Recorded because the consequence is a refusal: a redacted ref does not name the file the
+   * callee wrote, and something else may sit at the marker-bearing path it does name, so
+   * resolving it could materialize a file that was never handed over. The real path is
+   * deliberately NOT kept alongside it — storing an unredacted secret-shaped path to make it
+   * fetchable would reintroduce exactly the leak the redaction exists to prevent. A redacted
+   * artifact is reported in the manifest and refused by fetch. [Codex review R3 P2.]
+   */
+  redacted: boolean;
   /** The callee's run — the identity of the exchange instance these refs came from. */
   runId: string;
   /**
