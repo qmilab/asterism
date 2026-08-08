@@ -1186,7 +1186,23 @@ export async function performArtifactExchange(
   // reference that crossed but was never recorded would be un-fetchable for no honest
   // reason. Recording does not move a byte — it only makes an already-crossed reference
   // resolvable, and every byte still waits on the caller's own gate.
-  store.recordArtifactExchange(connection, result.run.id, artifacts);
+  //
+  // ...but only while the grant still holds. A run is the longest window in the phase, so
+  // the connection is re-read HERE rather than trusted from before it — the same discipline
+  // `resumeRun` and the fetch's post-confirmation re-check use, and the initial path has no
+  // business being laxer than the resumed one.
+  //
+  // Worth being exact about what this does and does not fix, because the two differ. Rows
+  // recorded over a withdrawn channel were already UNRESOLVABLE — `findExchangedArtifact` is
+  // only ever called with an ACTIVE connection, and a reconnect mints a fresh id these rows
+  // are not keyed on (verified: `no_connection`, then `not_exchanged`). So this closes no
+  // leak. What it removes is a row set that is unreachable by virtue of how a DIFFERENT
+  // function happens to be called — which is the shape of thing that stops being unreachable
+  // when someone adds a caller.
+  const stillGranted = store.connections.findActive(from.id, to.id, "artifact-only");
+  if (stillGranted && stillGranted.id === connection.id) {
+    store.recordArtifactExchange(connection, result.run.id, artifacts);
+  }
   return {
     kind: "ok",
     result: {
@@ -1588,6 +1604,10 @@ export async function performArtifactFetch(
   const profile = trustProfile({ level: from.trustLevel, capabilities: [EXCHANGE_FETCH_KEY] });
   let decision: "executed" | "withheld" | "paused" | undefined;
   let materialized: ArtifactMaterialization | undefined;
+  // Set when the channel was withdrawn while the human was deciding — see the re-check in
+  // `execute` below. Kept separate from `materialized` so the refusal is not mistaken for a
+  // declined confirmation, which is a different fact.
+  let withdrawn = false;
   const capability: Capability = {
     key: EXCHANGE_FETCH_KEY,
     // Declared destructive, unconditionally. Not "destructive when the destination exists":
@@ -1604,6 +1624,33 @@ export async function performArtifactFetch(
       description: "Kernel-internal: materialize an exchanged artifact into the caller's workspace.",
       inputSchema: { type: "object", properties: {} },
       execute: (): Promise<ToolResult> => {
+        // THE PERMISSION IS RE-READ HERE, after the human's pause and before a byte moves.
+        //
+        // A confirmation is human-length, and the operator on the other side may withdraw the
+        // channel while this prompt is open. Step 1's read happened before that pause, so
+        // trusting it across the prompt is what let a fetch materialize bytes and log
+        // `artifact.fetched` AFTER `connection.revoked` — the revoke failing to withdraw
+        // fetchability for exactly the fetch that was in progress. This mirrors the
+        // expectation that already travels with the copy: the SOURCE is re-checked at the
+        // read, so the PERMISSION must be too. [Codex review R1 P2.]
+        //
+        // The row's identity is compared, not merely "some active connection exists": a
+        // revoke followed by a reconnect during the prompt leaves a different channel active,
+        // and a fresh channel does not inherit the old one's references (D20). Requiring the
+        // same row is what keeps that from becoming a way to launder a withdrawn reference.
+        //
+        // Honest about what remains: this narrows the window from human-length to the gap
+        // between this read and the host call — it does not eliminate it, because holding a
+        // row across filesystem I/O would mean a transaction spanning the copy. That residual
+        // race is the one every permission check has, and is not what the revoke was failing.
+        const current = store.connections.findActive(from.id, to.id, "artifact-only");
+        if (!current || current.id !== connection.id) {
+          withdrawn = true;
+          return Promise.resolve({
+            output: `the channel from ${from.name} to ${to.name} was withdrawn.`,
+            isError: true,
+          });
+        }
         // The expectation travels WITH the copy, so the source is re-checked at the read
         // rather than trusting the pre-prompt inspection across the human's pause.
         materialized = options.host.materialize({
@@ -1650,6 +1697,13 @@ export async function performArtifactFetch(
     args: { from: to.name, ref: exchanged.ref, bytes: sizeBytes, overwrites: destExists },
   });
 
+  // Checked BEFORE the confirmation outcomes, because the gate DID execute (it was the tool
+  // that refused, not the human) — so without this the caller would be told the fetch was
+  // never confirmed, when confirmation was not the problem. Reported as `no_connection`, the
+  // same answer re-running the command now gives: a refusal should read the same whenever in
+  // the sequence the permission went away, and a distinct kind would only tell the caller
+  // WHEN it was withdrawn.
+  if (withdrawn) return { kind: "no_connection" };
   if (decision === "withheld") {
     return { kind: "withheld", ref: exchanged.ref, path: parsed.path, sizeBytes };
   }

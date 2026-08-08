@@ -217,6 +217,103 @@ test("revoke withdraws READABILITY of ratified memory (the test T2b dropped)", (
   expect(store.memories.listActiveAccepted(helper.id)).toHaveLength(1);
 });
 
+// --- Invariant 1b: the withdrawal beats work already in progress ------------
+
+test("a revoke landing DURING the fetch confirmation stops the bytes [Codex R1 P2]", async () => {
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  await exchangeArtifact();
+
+  const log = { inspected: 0 };
+  const materialized: string[] = [];
+  const host: ArtifactFetchHost = {
+    ...fakeHost(log),
+    materialize: (request) => {
+      materialized.push(request.path);
+      return { ok: true, bytes: ARTIFACT_BYTES };
+    },
+  };
+
+  // A confirmation is human-length, and the operator on the other side withdraws the channel
+  // while the prompt is open. Before the fix the fetch trusted the connection it had read
+  // BEFORE the pause: bytes crossed, and `artifact.fetched` was logged on both agents' logs
+  // AFTER `connection.revoked` — the revoke failing to withdraw fetchability for exactly the
+  // fetch that was in flight.
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host,
+    confirm: () => {
+      store.revokeConnection(writer.id, helper.id, "artifact-only");
+      return true;
+    },
+  });
+
+  expect(outcome.kind).toBe("no_connection");
+  expect(materialized).toHaveLength(0);
+  for (const id of [writer.id, helper.id]) {
+    expect(store.events.tail(id).filter((e) => e.type === "artifact.fetched")).toHaveLength(0);
+  }
+});
+
+test("a revoke AND reconnect during the confirmation still stops the bytes", async () => {
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  await exchangeArtifact();
+
+  const materialized: string[] = [];
+  const host: ArtifactFetchHost = {
+    ...fakeHost({ inspected: 0 }),
+    materialize: (request) => {
+      materialized.push(request.path);
+      return { ok: true, bytes: ARTIFACT_BYTES };
+    },
+  };
+
+  // The re-check compares the connection's IDENTITY, not merely "some active channel
+  // exists" — otherwise a revoke followed by a reconnect inside the prompt would leave a
+  // fresh channel active and launder a reference the revoke had withdrawn, which is exactly
+  // what D20 says a new channel must not inherit.
+  const outcome = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host,
+    confirm: () => {
+      store.revokeConnection(writer.id, helper.id, "artifact-only");
+      store.createConnection(writer.id, helper.id, "artifact-only");
+      return true;
+    },
+  });
+
+  expect(outcome.kind).toBe("no_connection");
+  expect(materialized).toHaveLength(0);
+});
+
+test("a revoke landing DURING the exchange's run records no references", async () => {
+  const connection = store.createConnection(writer.id, helper.id, "artifact-only");
+
+  // A run is the longest window in the phase, so the grant is re-read at recording time
+  // rather than trusted from before it. The rows were already unresolvable over a withdrawn
+  // channel — this keeps the initial path from being laxer than the resumed one, which does
+  // re-check.
+  const outcome = await performArtifactExchange(store, writer, helper, "draft it", {
+    adapter: {
+      run: (request) => {
+        const output = (async () => {
+          const tool = request.tools.list().find((t) => t.name === "write_file");
+          if (tool) await tool.execute({ args: {} }, request.signal);
+          store.revokeConnection(writer.id, helper.id, "artifact-only");
+          return { status: "done" as const, text: "prose" };
+        })();
+        async function* noEvents() {}
+        return { events: noEvents(), output };
+      },
+    },
+    capabilities: [writeCapability()],
+  });
+
+  // The manifest still comes back — the operator asked for the work and the callee did it.
+  expect(outcome.kind).toBe("ok");
+  if (outcome.kind === "ok") expect(outcome.result.artifacts).toHaveLength(1);
+  // Nothing was recorded as resolvable over the channel that was withdrawn mid-run.
+  expect(store.exchanges.listForAgent(writer.id)).toHaveLength(0);
+  expect(store.getConnection(writer.id, connection.id)?.status).toBe("revoked");
+});
+
 // --- Invariant 2: revoke is exact ------------------------------------------
 
 test("revoke is DIRECTIONAL: withdrawing A→B leaves B→A untouched", () => {
