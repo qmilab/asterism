@@ -353,6 +353,45 @@ test("a revoke landing DURING a handoff run withholds the callee's TEXT", async 
   }
 });
 
+test("a revoke landing BEFORE the run starts is a clean refusal, not an internal error", async () => {
+  store.createConnection(writer.id, helper.id, "handoff");
+
+  // The narrowest window in the flow: AFTER the permission read has succeeded and BEFORE the
+  // callee's run row exists. Another operator's `disconnect` can land exactly there, so the
+  // revoke is injected between the two reads rather than before either — revoking up front
+  // would be caught by the first check and would exercise nothing.
+  const realFindActive = store.connections.findActive.bind(store.connections);
+  let reads = 0;
+  store.connections.findActive = (f, t, m) => {
+    const found = realFindActive(f, t, m);
+    // Let the permission read succeed, then withdraw before anyone can act on it.
+    if (++reads === 1) store.revokeConnection(writer.id, helper.id, "handoff");
+    return found;
+  };
+  let emitted = 0;
+  const realEmit = store.recordHandoffRequested.bind(store);
+  store.recordHandoffRequested = (c) => {
+    emitted += 1;
+    realEmit(c);
+  };
+
+  // A legitimate concurrent revoke must resolve to the outcome this flow already models —
+  // an internal error message would be the surface admitting it has no answer for a race the
+  // operator caused on purpose. [Codex R4 P2.]
+  const outcome = await performHandoff(store, writer, helper, "do it", {
+    adapter: sequenceAdapter([]),
+  });
+  expect(outcome.kind).toBe("no_connection");
+  // Nothing ran, and — because the run row is created BEFORE the audit — nothing was logged
+  // either. An earlier ordering could strand `handoff.requested` with no completion, an event
+  // pair describing an exchange that never began.
+  expect(store.runs.list(helper.id)).toHaveLength(0);
+  expect(emitted).toBe(0);
+  for (const id of [writer.id, helper.id]) {
+    expect(store.events.tail(id).filter((e) => e.type === "handoff.requested")).toHaveLength(0);
+  }
+});
+
 test("a reconnect DURING the run does not stand in for the channel that asked", async () => {
   store.createConnection(writer.id, helper.id, "artifact-only");
   const outcome = await performArtifactExchange(store, writer, helper, "draft it", {

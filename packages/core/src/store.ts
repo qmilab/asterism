@@ -750,6 +750,12 @@ export class AsterismStore {
    *   - the grant is re-asserted as LIVE here, so a stale or revoked connection object
    *     cannot start an exchange run at all.
    *
+   * Returns `undefined` — rather than throwing — when the grant is not live. A withdrawal
+   * landing in this window is an ORDINARY, expected race (another operator ran `disconnect`
+   * a moment ago), not a broken invariant, and the exchange models that outcome already. An
+   * exception here would turn a legitimate concurrent revoke into an internal error message
+   * on a surface that has a perfectly good answer for it. [Codex review R4 P2.]
+   *
    * Honest about the boundary this draws. A caller of the kernel API can still do kernel
    * things — `recordArtifactExchange` has always been able to write a crossing directly, and
    * that is what a kernel API is. What this removes is the ability to create one through
@@ -758,15 +764,13 @@ export class AsterismStore {
    * claim is "not settable through the ordinary path", not "unforgeable" — an earlier version
    * of this slice asserted the latter, and it was not true. [Codex review R2 P2.]
    */
-  startExchangeRun(connection: Connection, input: string): Run {
+  startExchangeRun(connection: Connection, input: string): Run | undefined {
     const live = this.connections.findActive(
       connection.fromAgentId,
       connection.toAgentId,
       connection.mode,
     );
-    if (!live || live.id !== connection.id) {
-      throw new Error("an exchange run needs a live connection");
-    }
+    if (!live || live.id !== connection.id) return undefined;
     return this.driver.transaction(() => {
       const run = this.runs.create(connection.toAgentId, { input }, connection.id);
       this.emit(

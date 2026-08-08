@@ -3806,6 +3806,54 @@ test("a channel withdrawn mid-run reports BOTH facts: the work ran, nothing came
   expect(said).not.toContain("CALLEE PROSE");
 });
 
+test("a withdrawn channel over a PAUSED callee points at the confirmation, not at 'finished'", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "autonomous"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "handoff"], h.io);
+
+  // The revoke lands BEFORE the callee reaches its own destructive gate, so the run is parked
+  // rather than done. Saying "finished" would be false, and would omit the only action still
+  // open to this operator — the paused run is theirs, and a revoke does not resolve it (D19).
+  const io: CliIO = {
+    ...h.io,
+    capabilities: () => [
+      {
+        key: "fs.delete",
+        effect: "destructive",
+        tool: {
+          name: "delete_file",
+          description: "delete",
+          inputSchema: { type: "object", properties: {} },
+          execute: () => ({ output: "deleted" }),
+        },
+      },
+    ],
+    makeAdapter: () => ({
+      adapter: {
+        run: (request) => {
+          const output = (async () => {
+            await runCli(["disconnect", "a", "b"], { ...h.io, out: () => {}, err: () => {} });
+            const tool = request.tools.list().find((t) => t.name === "delete_file");
+            if (tool) await tool.execute({ args: {} }, request.signal);
+            return { status: "done" as const, text: "CALLEE PROSE" };
+          })();
+          async function* noEvents() {}
+          return { events: noEvents(), output };
+        },
+      },
+    }),
+  };
+  expect(await runCli(["handoff", "a", "b", "clean dist/"], io)).toBe(1);
+  const said = [...h.out, ...h.err].join("\n");
+  expect(said).toContain("was withdrawn while it was working");
+  expect(said).toContain("still paused on a destructive action");
+  expect(said).toContain("asterism confirm b ");
+  expect(said).not.toContain("finished in its own space");
+  expect(said).not.toContain("CALLEE PROSE");
+});
+
 test("connect / disconnect / connections / handoff / artifact show help", async () => {
   const h = harness();
   for (const cmd of [

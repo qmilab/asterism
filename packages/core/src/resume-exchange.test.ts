@@ -548,10 +548,17 @@ test("a stale or withdrawn connection cannot start an exchange run", () => {
   store.revokeConnection(writer.id, helper.id, "artifact-only");
   // The connection OBJECT is still in hand and still looks active to anyone holding it; the
   // grant is re-asserted against the store, so it cannot be used after withdrawal.
-  expect(() => store.startExchangeRun(connection, "do it")).toThrow(/live connection/);
+  //
+  // It RETURNS rather than throws: a withdrawal landing in this window is an ordinary race
+  // (another operator ran `disconnect` a moment ago), and the exchange already models that
+  // outcome. Throwing turned a legitimate concurrent revoke into an internal error message.
+  // [Codex review R4 P2.]
+  expect(store.startExchangeRun(connection, "do it")).toBeUndefined();
   // Nor can a reconnected channel's object be swapped for the old one's identity.
   store.createConnection(writer.id, helper.id, "artifact-only");
-  expect(() => store.startExchangeRun(connection, "do it")).toThrow(/live connection/);
+  expect(store.startExchangeRun(connection, "do it")).toBeUndefined();
+  // Nothing was recorded for a run that never began.
+  expect(store.runs.list(helper.id)).toHaveLength(0);
 });
 
 test("a CALLER-side run wearing the stamp records nothing on resume", async () => {

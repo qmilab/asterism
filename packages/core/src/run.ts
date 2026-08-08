@@ -274,36 +274,24 @@ export async function executeRun(
   input: string,
   options: ExecuteRunOptions,
 ): Promise<ExecuteRunResult> {
-  return startAndPersist(store, agent, input, options);
+  const run = store.startRun(agent.id, { input });
+  return persistRun(store, agent, run, input, options);
 }
 
 /**
- * {@link executeRun}, plus the one thing a surface must not be able to say: which connection
- * ASKED for this run.
+ * Drive a freshly-CREATED run to completion: mark it `running` and enter the loop.
  *
- * The stamp is kept off BOTH general-purpose shapes, and it took a review round to get that
- * right. It is not a field on {@link ExecuteRunOptions}, so no surface can mark an ordinary
- * `asterism run` as exchange-originated; and it is not a field on `CreateRunInput` either, so
- * the kernel's own `startRun` cannot express it. Either would have been enough to turn a
- * surface bug into a permission bug — a confirmed run recording an artifact crossing no
- * exchange authorized, after which the caller could fetch a file the callee never handed over.
- *
- * The write goes through `store.startExchangeRun`, which DERIVES the callee from the
- * connection and re-asserts that the grant is live, so a stamp can only ever describe a run
- * that really does sit on the channel it names.
+ * Split from run creation so a caller that needs to do something between the two — an
+ * exchange, which audits the request only once it knows there is a run to audit — does not
+ * have to choose between duplicating this or creating the run too early.
  */
-async function startAndPersist(
+async function persistRun(
   store: AsterismStore,
   agent: Agent,
+  run: Run,
   input: string,
   options: ExecuteRunOptions,
-  connection?: Connection,
 ): Promise<ExecuteRunResult> {
-  // Record the run and move it to `running`; the kernel logs each transition.
-  const run =
-    connection === undefined
-      ? store.startRun(agent.id, { input })
-      : store.startExchangeRun(connection, input);
   store.setRunStatus(agent.id, run.id, "running");
   // A fresh run has nothing executed and nothing confirmed, so every destructive
   // action gates (pauses) regardless of trust level. The resume path (`resumeRun`) is
@@ -1812,18 +1800,30 @@ async function performExchange(
 ): Promise<ExchangeRun> {
   const connection = requireChannel(store, from, to, mode);
   if (!connection) return { kind: "no_connection" };
-  // Audit the request on both logs BEFORE the run, so the exchange is recorded even if the
-  // callee's run fails (the kernel writes the event log, not this op).
-  store.recordHandoffRequested(connection);
-  // The exchange IS an executeRun on the CALLEE. `to` drives the entire loop — its identity,
-  // trust, tools, workspace, memory — so the callee's gate is sovereign and nothing of the
-  // callee's beyond what the mode projects is reachable by the caller.
+
+  // Create the callee's run FIRST, which re-asserts the grant at the moment of creation.
   //
-  // The callee's run is STAMPED with this connection, which is what lets a later `confirm`
-  // find its way back to the permission: `resumeRun` is driven directly by every confirm
-  // surface, so without the stamp a resumed exchange could neither re-check the grant nor
-  // record what it produced (§15, D19).
-  const result = await startAndPersist(store, to, input, options, connection);
+  // The ordering matters twice over. A withdrawal can land between the permission read above
+  // and this line — another operator running `disconnect` a moment ago — and that is an
+  // ordinary race, not a broken invariant, so it resolves to the outcome this flow already
+  // models rather than to an error. And because nothing has been audited yet, that race
+  // leaves NO trace: an earlier ordering emitted `handoff.requested` first and could strand
+  // it with no completion, describing an exchange that never began. [Codex review R4 P2.]
+  //
+  // The run is STAMPED with this connection, which is what lets a later `confirm` find its
+  // way back to the permission: `resumeRun` is driven directly by every confirm surface, so
+  // without the stamp a resumed exchange could neither re-check the grant nor record what it
+  // produced (§15, D19).
+  const run = store.startExchangeRun(connection, input);
+  if (!run) return { kind: "no_connection" };
+
+  // Audit the request on both logs BEFORE the run executes, so the exchange is recorded even
+  // if the callee's run then fails (the kernel writes the event log, not this op).
+  store.recordHandoffRequested(connection);
+  // The exchange IS a run on the CALLEE. `to` drives the entire loop — its identity, trust,
+  // tools, workspace, memory — so the callee's gate is sovereign and nothing of the callee's
+  // beyond what the mode projects is reachable by the caller.
+  const result = await persistRun(store, to, run, input, options);
   // Audit the return on both logs, carrying the final status as a reference (done / failed
   // / awaiting_confirmation) so a paused exchange is recorded honestly. The event payload
   // already carries the connection's mode, so both logs distinguish the exchange forms.

@@ -65,6 +65,7 @@ import type {
   CognitionProviderId,
   Connection,
   ConnectionMode,
+  RunStatus,
   ExecuteRunOptions,
   FirewallFinding,
   HarvestSummary,
@@ -1700,13 +1701,24 @@ function noConnection(io: CliIO, from: string, to: string, mode: ConnectionMode)
  * suggest nothing ran, when the callee acted in its own workspace), and nothing came back
  * (implying otherwise would make the withdrawal look ineffective). Points at the callee's own
  * record, since the work is not lost — it simply did not cross.
+ *
+ * The callee's `status` decides the second line, because a withdrawal that lands BEFORE the
+ * callee reaches its destructive-action gate leaves the run PARKED, not finished. Telling that
+ * operator their agent "finished" would be false and would omit the only action still open to
+ * them — the run is theirs to confirm or decline, and a revoke on the caller's side does not
+ * touch it (D19). [Codex review R4 P3.]
  */
-function withdrawnMidRun(io: CliIO, toName: string, runId: string): number {
+function withdrawnMidRun(io: CliIO, toName: string, runId: string, status: RunStatus): number {
   io.err(
     `The channel to ${toName} was withdrawn while it was working, so nothing came back.`,
   );
+  if (status === "awaiting_confirmation") {
+    io.err(`${toName} is still paused on a destructive action of its own, and that is yours to`);
+    io.err(`answer — the withdrawal does not resolve it:  asterism confirm ${toName} ${shortId(runId)}`);
+    return 1;
+  }
   io.err(
-    `${toName} finished in its own space — see what it did:  asterism runs ${toName} ${shortId(runId)}`,
+    `${toName} ${status === "failed" ? "stopped" : "finished"} in its own space — see what it did:  asterism runs ${toName} ${shortId(runId)}`,
   );
   return 1;
 }
@@ -1783,7 +1795,8 @@ async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
 
     const outcome = await performHandoff(store, from, to, task, options);
     if (outcome.kind === "no_connection") return noConnection(io, fromName, toName, "handoff");
-    if (outcome.kind === "withdrawn") return withdrawnMidRun(io, toName, outcome.runId);
+    if (outcome.kind === "withdrawn")
+      return withdrawnMidRun(io, toName, outcome.runId, outcome.status);
 
     const result = outcome.result;
     // The run is the callee's, so what it did (action summary) and what it proposed to note
@@ -1835,7 +1848,8 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
 
     const outcome = await performArtifactExchange(store, from, to, task, options);
     if (outcome.kind === "no_connection") return noConnection(io, fromName, toName, "artifact-only");
-    if (outcome.kind === "withdrawn") return withdrawnMidRun(io, toName, outcome.runId);
+    if (outcome.kind === "withdrawn")
+      return withdrawnMidRun(io, toName, outcome.runId, outcome.status);
 
     const result = outcome.result;
     // The run is the callee's, so its action summary is surfaced for `to`. The callee's
