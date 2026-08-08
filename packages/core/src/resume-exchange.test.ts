@@ -543,6 +543,26 @@ test("an exchange run is DERIVED from the connection, so it cannot be misattribu
   expect(store.runs.get(writer.id, run.id)).toBeUndefined();
 });
 
+test("the grant test is INSIDE the insert, so there is no window to lose [Codex R5 P2]", () => {
+  const connection = store.createConnection(writer.id, helper.id, "artifact-only");
+
+  // `startExchangeRun` used to READ the grant and then insert. Another process committing a
+  // `disconnect` between those two statements got a run created and executed over a withdrawn
+  // channel — demonstrated by making the read return a value already stale by insert time.
+  // That probe is inert now, and the reason is the fix: the read no longer exists.
+  const realFindActive = store.connections.findActive.bind(store.connections);
+  let reads = 0;
+  store.connections.findActive = (f, t, m) => {
+    reads += 1;
+    return realFindActive(f, t, m);
+  };
+  expect(store.startExchangeRun(connection, "do it")).toBeDefined();
+  // No separate permission read to race with — the `WHERE EXISTS` inside the INSERT is the
+  // whole check, so there is no instant between deciding and writing.
+  expect(reads).toBe(0);
+  store.connections.findActive = realFindActive;
+});
+
 test("a stale or withdrawn connection cannot start an exchange run", () => {
   const connection = store.createConnection(writer.id, helper.id, "artifact-only");
   store.revokeConnection(writer.id, helper.id, "artifact-only");

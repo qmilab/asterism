@@ -765,14 +765,17 @@ export class AsterismStore {
    * of this slice asserted the latter, and it was not true. [Codex review R2 P2.]
    */
   startExchangeRun(connection: Connection, input: string): Run | undefined {
-    const live = this.connections.findActive(
-      connection.fromAgentId,
-      connection.toAgentId,
-      connection.mode,
-    );
-    if (!live || live.id !== connection.id) return undefined;
     return this.driver.transaction(() => {
-      const run = this.runs.create(connection.toAgentId, { input }, connection.id);
+      // The grant test is INSIDE the insert (`createForExchange`), not a read before it.
+      // Checking first and inserting after leaves a window for another process's `disconnect`
+      // to commit between the two — verified reachable — after which a run is created and
+      // executed over a withdrawn channel. One statement removes the instant in which that
+      // could happen. [Codex review R5 P2.]
+      //
+      // The callee is still DERIVED from the connection rather than passed, so a run can
+      // never be attributed to a channel it does not sit on (R2).
+      const run = this.runs.createForExchange(connection.toAgentId, input, connection.id);
+      if (!run) return undefined;
       this.emit(
         connection.toAgentId,
         "run.started",

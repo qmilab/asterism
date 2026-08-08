@@ -33,17 +33,8 @@ function mapRun(row: SqlRow): Run {
 export class RunRepository {
   constructor(private readonly driver: SqlDriver) {}
 
-  /**
-   * Record a new run.
-   *
-   * `exchangeConnectionId` is a SEPARATE argument rather than a field on
-   * {@link CreateRunInput}, and that is the whole point: `startRun` — the general entry
-   * point every surface calls — has no way to express it, so a crossing cannot be created by
-   * adding a property to an ordinary run's input. The only caller that passes it is
-   * `AsterismStore.startExchangeRun`, which derives the agent from the connection and
-   * re-asserts that the grant is live.
-   */
-  create(agentId: string, input: CreateRunInput, exchangeConnectionId?: string): Run {
+  /** Record a new, ordinary run. Carries no exchange stamp — see {@link CreateRunInput}. */
+  create(agentId: string, input: CreateRunInput): Run {
     requireAgentId(agentId);
     const status = input.status ?? "pending";
     validateEnum(status, RUN_STATUSES, "run status");
@@ -53,20 +44,52 @@ export class RunRepository {
       .prepare(
         `INSERT INTO runs
            (id, agent_id, input, status, started_at, finished_at, exchange_connection_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, NULL)
          RETURNING *`,
       )
-      .get([
-        id,
-        agentId,
-        input.input,
-        status,
-        startedAt,
-        null,
-        exchangeConnectionId ?? null,
-      ]);
+      .get([id, agentId, input.input, status, startedAt, null]);
     if (!row) throw new Error("run insert did not persist");
     return mapRun(row);
+  }
+
+  /**
+   * Record the CALLEE's run for a cross-agent exchange, stamped with the connection that
+   * asked for it — but only if that connection is still `active`. Returns undefined when it
+   * is not, so no run is created over a channel that has been withdrawn.
+   *
+   * The grant test is part of the INSERT, not a read before it, and that is the point. A
+   * check-then-insert leaves a window in which another process commits a `disconnect` between
+   * the two, after which the run is created and executed over a channel that no longer
+   * exists — verified reachable before this was written. Expressing it as one statement makes
+   * the race structurally impossible rather than merely unlikely, and it needs no reasoning
+   * about snapshot isolation to be convincing: SQLite evaluates the `WHERE EXISTS` and the
+   * insert together, so there is no instant between them for anything to change.
+   * [Codex review R5 P2.]
+   *
+   * Keyed on the connection's ID, which subsumes the identity check the store used to make
+   * separately: a revoke-then-reconnect leaves a DIFFERENT active row, and this one still
+   * fails to match — a fresh grant did not ask for this work (D20).
+   *
+   * `exchangeConnectionId` lives here rather than on {@link CreateRunInput} so `startRun` —
+   * the general entry point every surface calls — cannot express a stamp at all, and a
+   * crossing cannot be conjured by adding a property to an ordinary run's input.
+   */
+  createForExchange(agentId: string, input: string, connectionId: string): Run | undefined {
+    requireAgentId(agentId);
+    const id = randomUUID();
+    const startedAt = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `INSERT INTO runs
+           (id, agent_id, input, status, started_at, finished_at, exchange_connection_id)
+         SELECT ?, ?, ?, 'pending', ?, NULL, ?
+          WHERE EXISTS (
+            SELECT 1 FROM connections WHERE id = ? AND status = 'active'
+          )
+         RETURNING *`,
+      )
+      .get([id, agentId, input, startedAt, connectionId, connectionId]);
+    return row ? mapRun(row) : undefined;
   }
 
   get(agentId: string, id: string): Run | undefined {
