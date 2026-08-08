@@ -13,6 +13,7 @@ test("usage lists every command in the surface", () => {
     "objective add",
     "run",
     "connect <from>",
+    "disconnect <from>",
     "connections <agent>",
     "handoff <from>",
     "artifact <from>",

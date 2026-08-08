@@ -274,8 +274,35 @@ export async function executeRun(
   input: string,
   options: ExecuteRunOptions,
 ): Promise<ExecuteRunResult> {
+  return startAndPersist(store, agent, input, options);
+}
+
+/**
+ * {@link executeRun}, plus the one thing a surface must not be able to say: which connection
+ * ASKED for this run.
+ *
+ * The stamp is deliberately NOT a field on {@link ExecuteRunOptions}. If it were, any surface
+ * could mark an ordinary `asterism run` as exchange-originated, and confirming that run would
+ * then record an artifact crossing no exchange ever authorized — a surface bug promoted into
+ * a permission bug. Keeping it as an internal parameter means `performExchange` is the only
+ * caller that can set it, which is exactly the set of runs that genuinely arrived over a
+ * connection.
+ *
+ * (The resume re-resolves the id through the scoped `getConnection` regardless, so even a
+ * stamp that somehow got written wrong can only ever read as "not from an exchange".)
+ */
+async function startAndPersist(
+  store: AsterismStore,
+  agent: Agent,
+  input: string,
+  options: ExecuteRunOptions,
+  exchangeConnectionId?: string,
+): Promise<ExecuteRunResult> {
   // Record the run and move it to `running`; the kernel logs each transition.
-  const run = store.startRun(agent.id, { input });
+  const run = store.startRun(agent.id, {
+    input,
+    ...(exchangeConnectionId !== undefined ? { exchangeConnectionId } : {}),
+  });
   store.setRunStatus(agent.id, run.id, "running");
   // A fresh run has nothing executed and nothing confirmed, so every destructive
   // action gates (pauses) regardless of trust level. The resume path (`resumeRun`) is
@@ -868,6 +895,28 @@ export type ResumeOutcome =
  * One honest cost remains: a parked run's NON-destructive side effects (ordinary
  * writes done before the gate stopped it) DO run again on resume — only destructive
  * actions are tracked and skipped.
+ *
+ * ## When the run arrived over a connection
+ *
+ * A run started by a cross-agent exchange carries the connection that asked for it
+ * (`runs.exchange_connection_id`). Every confirm surface drives THIS function rather
+ * than the exchange op, so this is the only place that can close the loop, and it
+ * does two things once the resumed run finishes (design note §15, D19/D21):
+ *
+ *   1. **Re-checks the grant, and records the crossing only while it holds.** The
+ *      connection is read AFTER the run, not before — the same discipline
+ *      `performArtifactFetch` uses, so a revoke landing during a long model call is
+ *      caught. Still active ⇒ the resumed run's manifest is recorded as `exchanges`
+ *      rows; revoked ⇒ nothing is recorded and nothing new becomes fetchable.
+ *   2. **Emits the completion on both logs.** Without it a caller's log ends on
+ *      `handoff.completed status=awaiting_confirmation` forever, never learning the
+ *      exchange it started was resolved.
+ *
+ * The run itself always resumes, revoked or not. A connection is permission for a
+ * CROSSING, not a lease on the callee's execution: this run is the callee's own work in
+ * its own workspace, parked at its own destructive-action gate, and golden rule 4 puts
+ * that confirmation with the callee's operator. A revoke on the other side must never be
+ * able to strand it.
  */
 export async function resumeRun(
   store: AsterismStore,
@@ -906,6 +955,40 @@ export async function resumeRun(
     executedCount,
     confirmedCount,
   });
+
+  // If this run arrived over a connection, close the exchange's loop. Everything below is
+  // audit and recording — the run above has already happened either way.
+  if (claimed.exchangeConnectionId !== undefined) {
+    // Resolved AFTER the run, deliberately: the question is whether the grant holds NOW, at
+    // the moment a crossing would be recorded, not whether it held when the confirm started.
+    // A revoke that landed during the model call is caught here. Scoped to the resuming
+    // agent, so an id naming a connection it is not on resolves to nothing and this run
+    // simply reads as an ordinary one.
+    const connection = store.getConnection(agent.id, claimed.exchangeConnectionId);
+    if (connection) {
+      // The completion the caller's log never got. Emitted whether or not the connection was
+      // revoked: this is content-free audit of what became of a run, and an operator who
+      // revoked must not end up seeing LESS history than one who did not. Revoke withdraws
+      // what may cross, never what may be recorded about the past. A re-pause emits again
+      // with `awaiting_confirmation`, which is the honest reading of what happened.
+      store.recordHandoffCompleted(connection, result.run.id, result.status);
+      // The crossing itself, and the ONE thing a revoked connection withholds here.
+      //
+      // Only `artifact-only` has a durable crossing to record (D13: a handoff's crossing is
+      // the callee's text, which nothing dereferences later). The resumed run's manifest is
+      // recorded WHOLE rather than as a delta, because a resume re-derives everything — so
+      // one write both records what the callee produced after the confirmation and refreshes
+      // the references that crossed before it. That refresh matters more than it looks: a
+      // resume re-runs the callee's ordinary writes, which bumps each file's mtime past the
+      // `created_at` the original rows recorded, and the fetch staleness check then refuses
+      // them. Without this, confirming a paused exchange did not merely fail to record new
+      // artifacts — it silently un-fetched the ones already handed over (#114).
+      if (connection.status === "active" && connection.mode === "artifact-only") {
+        store.recordArtifactExchange(connection, result.run.id, result.artifacts ?? []);
+      }
+    }
+  }
+
   return { kind: "resumed", result };
 }
 
@@ -940,7 +1023,20 @@ export type DeclineOutcome =
  */
 export function declineRun(store: AsterismStore, agent: Agent, runId: string): DeclineOutcome {
   const declined = store.declineRun(agent.id, runId);
-  if (declined) return { kind: "declined", run: declined };
+  if (declined) {
+    // A decline is the OTHER terminal outcome of a parked exchange, so it closes the same
+    // audit loop a resume does: without this the caller's log would end on
+    // `handoff.completed status=awaiting_confirmation` forever for a run that was in fact
+    // resolved — the exact gap D21 exists to close, just reached through the other door.
+    // Nothing is recorded as a crossing, because a declined run re-enters no loop and
+    // produces nothing new; the connection is read only to name the channel in the audit,
+    // and a revoked one is reported exactly as an active one is.
+    if (declined.exchangeConnectionId !== undefined) {
+      const connection = store.getConnection(agent.id, declined.exchangeConnectionId);
+      if (connection) store.recordHandoffCompleted(connection, declined.id, declined.status);
+    }
+    return { kind: "declined", run: declined };
+  }
   const current = store.runs.get(agent.id, runId);
   return current ? { kind: "not_paused", run: current } : { kind: "not_found" };
 }
@@ -1624,7 +1720,12 @@ async function performExchange(
   // The exchange IS an executeRun on the CALLEE. `to` drives the entire loop — its identity,
   // trust, tools, workspace, memory — so the callee's gate is sovereign and nothing of the
   // callee's beyond what the mode projects is reachable by the caller.
-  const result = await executeRun(store, to, input, options);
+  //
+  // The callee's run is STAMPED with this connection, which is what lets a later `confirm`
+  // find its way back to the permission: `resumeRun` is driven directly by every confirm
+  // surface, so without the stamp a resumed exchange could neither re-check the grant nor
+  // record what it produced (§15, D19).
+  const result = await startAndPersist(store, to, input, options, connection.id);
   // Audit the return on both logs, carrying the final status as a reference (done / failed
   // / awaiting_confirmation) so a paused exchange is recorded honestly. The event payload
   // already carries the connection's mode, so both logs distinguish the exchange forms.

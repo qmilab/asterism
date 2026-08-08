@@ -218,6 +218,13 @@ export function formatWorldFactList(
  * (an agent removed since) falls back to a short id so a row is never blank. Each line
  * leads with the mode and status, then the short connection id. Only ever the connections
  * this agent participates in — the store scopes the list to a participant.
+ *
+ * WITHDRAWN channels stay listed, sorted after the open ones and labelled. This is the
+ * surface an operator checks to answer "did that revoke take effect?", so hiding a revoked
+ * row would remove the evidence at exactly the place it is looked for — and a
+ * revoke-then-reconnect pair would read as though nothing had ever happened. Sorting keeps
+ * them from crowding the channels that still carry work; the label keeps them from being
+ * mistaken for one.
  */
 export function formatConnectionList(
   connections: readonly Connection[],
@@ -228,12 +235,21 @@ export function formatConnectionList(
     return `${agent.name} has no connections yet. Open one with: asterism connect ${agent.name} <other> --mode handoff`;
   }
   const lines: string[] = [`Connections for ${agent.name} (${connections.length}):`, ""];
-  for (const c of connections) {
+  // Open channels first, withdrawn ones after — a stable partition of the store's existing
+  // oldest-first order, not a re-sort, so rows keep their order within each group.
+  const ordered = [
+    ...connections.filter((c) => c.status === "active"),
+    ...connections.filter((c) => c.status !== "active"),
+  ];
+  for (const c of ordered) {
     const outbound = c.fromAgentId === agent.id;
     const otherId = outbound ? c.toAgentId : c.fromAgentId;
     const other = nameById.get(otherId) ?? shortId(otherId);
     const arrow = outbound ? `→ ${other}` : `← ${other}`;
-    lines.push(`• ${arrow} · ${c.mode} · ${c.status} · ${shortId(c.id)}`);
+    // A revoked row is history, so it says so in words as well as in the status field —
+    // `revoked` alone reads as a state a channel might come back from, and it cannot.
+    const withdrawn = c.status === "revoked" ? "  (withdrawn — nothing crosses it)" : "";
+    lines.push(`• ${arrow} · ${c.mode} · ${c.status} · ${shortId(c.id)}${withdrawn}`);
   }
   lines.push("");
   // Mode-neutral wording: a channel may carry a handoff or an artifact-only exchange, so the

@@ -179,6 +179,7 @@ export const EVENT_TYPES = [
   "world_fact.reviewed",
   "skill.attached",
   "connection.created",
+  "connection.revoked",
   "handoff.requested",
   "handoff.completed",
   "artifact.fetched",
@@ -253,6 +254,20 @@ export interface Run {
   finishedAt?: string;
   /** The run's final output text, once it has finished with output. Reflection reads it. */
   output?: string;
+  /**
+   * The connection that ASKED for this run, when it arrived through a cross-agent exchange
+   * (`handoff` / `artifact-only`). Absent on an ordinary `asterism run`.
+   *
+   * It exists so a RESUME can find its way back to the permission. `asterism confirm` drives
+   * `resumeRun` directly, not the exchange op, so without this the kernel could not tell an
+   * exchange-originated run from any other — and could neither re-check the grant nor record
+   * what the resumed run produced (design note §15, D19).
+   *
+   * Stamped only by the kernel's own exchange path; no surface can set it. Reading it back
+   * always goes through the scoped `getConnection`, so a value naming a connection this agent
+   * is not on resolves to nothing and reads as "not from an exchange" — fail-closed.
+   */
+  exchangeConnectionId?: string;
 }
 
 export interface Memory {

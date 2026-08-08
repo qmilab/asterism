@@ -3696,10 +3696,89 @@ test("a handoff task beginning with a dash reaches the callee verbatim (Codex P2
   }
 });
 
-test("connect / connections / handoff / artifact show help", async () => {
+// --- collaboration: disconnect (Phase 3 · revoke, #117) ---------------------
+
+test("disconnect withdraws the single open channel without needing --mode", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io);
+
+  expect(await runCli(["disconnect", "a", "b"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Disconnected a → b (artifact-only)");
+  // The row stays, marked — `connections` is where an operator checks that it took effect.
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).toContain("Connections for a (1)");
+  expect(conns).toContain("(withdrawn — nothing crosses it)");
+});
+
+test("disconnect refuses to guess when the pair has several open channels", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "handoff"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "read-summary"], h.io);
+
+  // Defaulting to `handoff` the way `connect` does would be a safety bug here: an operator
+  // meaning the read-summary channel would be told it was withdrawn while it stayed open.
+  expect(await runCli(["disconnect", "a", "b"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("2 open channels");
+  expect(h.err.join("\n")).toContain("--mode handoff");
+  expect(h.err.join("\n")).toContain("--mode read-summary");
+  // Nothing was withdrawn.
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).not.toContain("withdrawn");
+});
+
+test("disconnect rejects a malformed or unknown --mode rather than falling through", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "handoff"], h.io);
+
+  expect(await runCli(["disconnect", "a", "b", "--mode"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/--mode needs a value/i);
+  expect(await runCli(["disconnect", "a", "b", "--mode", "shared-brief"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
+  // Neither malformed invocation withdrew the open channel.
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).not.toContain("withdrawn");
+});
+
+test("disconnect reports a channel that is not open, and an unknown agent", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+
+  expect(await runCli(["disconnect", "a", "b"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/no open channel/i);
+  expect(await runCli(["disconnect", "a", "ghost"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain('No agent named "ghost"');
+  expect(await runCli(["disconnect", "a"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism disconnect/);
+});
+
+test("an agent named `disconnect` can still be connected and disconnected", async () => {
+  // The R2 rule from the fetch review, held: `disconnect` is a TOP-LEVEL verb, not a
+  // sub-verb of the agent-first `connect`, so a legitimately-named agent is never shadowed.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "disconnect", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  expect(await runCli(["connect", "disconnect", "b", "--mode", "handoff"], h.io)).toBe(0);
+  expect(await runCli(["disconnect", "disconnect", "b"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("Disconnected disconnect → b (handoff)");
+});
+
+test("connect / disconnect / connections / handoff / artifact show help", async () => {
   const h = harness();
   for (const cmd of [
     ["connect", "--help"],
+    ["disconnect", "--help"],
     ["connections", "--help"],
     ["handoff", "--help"],
     ["artifact", "--help"],

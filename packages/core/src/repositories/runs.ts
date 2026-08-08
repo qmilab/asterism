@@ -7,6 +7,11 @@ import { requireAgentId } from "./scope.js";
 export interface CreateRunInput {
   input: string;
   status?: RunStatus;
+  /**
+   * The connection this run arrived through, when it is a cross-agent exchange's callee run.
+   * Set ONLY by the kernel's own exchange path — see {@link Run.exchangeConnectionId}.
+   */
+  exchangeConnectionId?: string;
 }
 
 function mapRun(row: SqlRow): Run {
@@ -18,6 +23,9 @@ function mapRun(row: SqlRow): Run {
     startedAt: String(row.started_at),
     ...(row.finished_at != null ? { finishedAt: String(row.finished_at) } : {}),
     ...(row.output != null ? { output: String(row.output) } : {}),
+    ...(row.exchange_connection_id != null
+      ? { exchangeConnectionId: String(row.exchange_connection_id) }
+      : {}),
   };
 }
 
@@ -32,11 +40,20 @@ export class RunRepository {
     const startedAt = new Date().toISOString();
     const row = this.driver
       .prepare(
-        `INSERT INTO runs (id, agent_id, input, status, started_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO runs
+           (id, agent_id, input, status, started_at, finished_at, exchange_connection_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          RETURNING *`,
       )
-      .get([id, agentId, input.input, status, startedAt, null]);
+      .get([
+        id,
+        agentId,
+        input.input,
+        status,
+        startedAt,
+        null,
+        input.exchangeConnectionId ?? null,
+      ]);
     if (!row) throw new Error("run insert did not persist");
     return mapRun(row);
   }

@@ -1522,6 +1522,90 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
 }
 
 /**
+ * `asterism disconnect <from> <to> [--mode <mode>]` — withdraw a channel that was granted.
+ * The inverse of `connect`, and a TOP-LEVEL verb rather than a `connect` sub-verb: `connect`
+ * takes an agent name in its first position, so dispatching a sub-verb from there would
+ * shadow an agent legitimately named `revoke` (the rule the `artifact fetch` review's second
+ * round established).
+ *
+ * `--mode` is INFERRED when the pair has exactly one open channel, and never guessed. Copying
+ * `connect`'s default of `handoff` would be a safety bug rather than a convenience: an
+ * operator with only an `artifact-only` channel who ran `asterism disconnect writer helper`
+ * would be told there was nothing to disconnect, and would walk away believing they had
+ * withdrawn a channel that was still open.
+ */
+function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.disconnect!);
+    return Promise.resolve(0);
+  }
+  const fromName = parsed.positionals[0];
+  const toName = parsed.positionals[1];
+  if (!fromName || !toName) {
+    io.err("Usage: asterism disconnect <from> <to> [--mode <mode>]");
+    return Promise.resolve(1);
+  }
+  // `--mode` with no value parses as boolean `true` (`--mode`, or `--mode --foo` where the
+  // next dash-token is read as its own flag). Reject it loudly rather than falling through to
+  // inference, which would silently withdraw a channel the operator did not name. Mirrors
+  // `connect`'s handling of the same malformed invocation.
+  const modeFlag = parsed.flags.mode;
+  if (modeFlag === true) {
+    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
+    return Promise.resolve(1);
+  }
+  if (modeFlag !== undefined && !(CONNECTION_MODES as readonly string[]).includes(modeFlag)) {
+    io.err(`Unknown connection mode "${modeFlag}". Supported: ${CONNECTION_MODES.join(", ")}.`);
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    // Resolve which channel is meant, before withdrawing anything.
+    let mode = modeFlag as ConnectionMode | undefined;
+    if (mode === undefined) {
+      const open = store.listActiveConnectionsForPair(from.id, to.id);
+      if (open.length === 0) {
+        io.err(`${fromName} has no open channel to ${toName}.`);
+        return 1;
+      }
+      if (open.length > 1) {
+        io.err(
+          `${fromName} has ${open.length} open channels to ${toName} — name the one to withdraw:`,
+        );
+        for (const c of open) io.err(`  asterism disconnect ${fromName} ${toName} --mode ${c.mode}`);
+        return 1;
+      }
+      mode = open[0]!.mode;
+    }
+
+    const revoked = store.revokeConnection(from.id, to.id, mode);
+    if (!revoked) {
+      // Either it never existed or it was already withdrawn — the same message for both, so
+      // the outcome the operator cares about ("that channel is not open") reads the same way
+      // regardless of how it got that way.
+      io.err(`${fromName} has no open ${mode} channel to ${toName}.`);
+      return 1;
+    }
+    // Say what was taken away in terms of what the agent can no longer do — the behavioral
+    // outcome, per mode, mirroring how `connect` names what its channel enables.
+    const withdrawn =
+      revoked.mode === "read-summary"
+        ? `${toName} no longer shares what it has learned with ${fromName}.`
+        : revoked.mode === "artifact-only"
+          ? `${fromName} can no longer ask ${toName} for work, and files ${toName} already handed over can no longer be fetched.`
+          : `${fromName} can no longer hand work to ${toName}.`;
+    io.out(`Disconnected ${fromName} → ${toName} (${revoked.mode}). ${withdrawn}`);
+    io.out(`Reconnecting opens a new channel — it does not bring the old one back.`);
+    return 0;
+  });
+}
+
+/**
  * `asterism connections <agent>` — the explicit channels an agent is on, inbound and
  * outbound. Scoped to the named agent (the store only returns connections it participates
  * in); the registry lookup resolves the other party's name for display.
@@ -5000,6 +5084,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdRun(rest, io);
     case "connect":
       return cmdConnect(rest, io);
+    case "disconnect":
+      return cmdDisconnect(rest, io);
     case "connections":
       return cmdConnections(rest, io);
     case "handoff":

@@ -125,6 +125,14 @@ export class AsterismStore {
     if (!this.columnExists("runs", "reflected_at")) {
       this.driver.exec(`ALTER TABLE runs ADD COLUMN reflected_at TEXT`);
     }
+    // `runs.exchange_connection_id` joined the table with connection revoke (§15, D19): a
+    // resume must be able to find the grant its run arrived under. Add it idempotently; a
+    // NULL default means every pre-existing run reads as "not from an exchange", which is the
+    // correct and conservative backfill — a run recorded before this column existed records
+    // no crossing on resume, exactly as it already did.
+    if (!this.columnExists("runs", "exchange_connection_id")) {
+      this.driver.exec(`ALTER TABLE runs ADD COLUMN exchange_connection_id TEXT`);
+    }
     // The earned-standing thresholds joined `agent_settings` after it first shipped
     // (with only `recall_budget`), so a database created by that release has the
     // table but not these columns. Add them, idempotently, for those databases; a
@@ -1565,12 +1573,76 @@ export class AsterismStore {
     });
   }
 
-  /** Every connection an agent participates in (inbound + outbound), for `connections <agent>`. */
+  /**
+   * Withdraw the ACTIVE `fromAgentId → toAgentId` connection in `mode`, recording
+   * `connection.revoked` on BOTH agents' logs. Returns the revoked connection, or undefined
+   * when there was no active one — in which case NOTHING is emitted, so a re-revoke is a
+   * silent no-op rather than a second withdrawal in the audit.
+   *
+   * What this actually takes away is the point, and it is more than the ability to ask for
+   * work. Because every exchange re-reads the ACTIVE connection at the moment it acts, and
+   * because `exchanges` authorization is keyed on the connection ROW, one revoke withdraws
+   * all four capabilities at once:
+   *
+   *   - `handoff`  — the callee can no longer be asked to run work
+   *   - `artifact` — nor to produce a manifest
+   *   - `fetch`    — every artifact ever exchanged over this connection stops resolving
+   *   - `summary`  — the callee's ratified memory stops being readable
+   *
+   * TERMINAL: there is no reverse transition, here or in the repository. Reconnecting means
+   * {@link createConnection} again, which mints a fresh row — old `exchanges` rows stay keyed
+   * on the revoked id, so what crossed the old channel does not travel to the new one (design
+   * note §15, D20). The payload is references only, exactly like `connection.created`.
+   *
+   * Work already in flight is deliberately NOT interrupted: a run this connection asked for
+   * that is parked at its own destructive-action gate still resumes, under its own operator's
+   * confirmation. What the revoke takes away is the CROSSING — the resumed run records
+   * nothing back over the withdrawn channel (D19, and see {@link resumeRun}).
+   */
+  revokeConnection(
+    fromAgentId: string,
+    toAgentId: string,
+    mode: ConnectionMode,
+  ): Connection | undefined {
+    return this.driver.transaction(() => {
+      const connection = this.connections.revoke(fromAgentId, toAgentId, mode);
+      if (!connection) return undefined;
+      this.emitToBoth(fromAgentId, toAgentId, "connection.revoked", {
+        connectionId: connection.id,
+        fromAgentId,
+        toAgentId,
+        mode: connection.mode,
+      });
+      return connection;
+    });
+  }
+
+  /**
+   * Every connection an agent participates in (inbound + outbound), for `connections <agent>`.
+   * Returns EVERY status, revoked included: this read is the operator's history of the
+   * channel, and a withdrawn connection is the evidence that a permission was taken away.
+   * Nothing here grants anything — the permission reads are `findActive` /
+   * {@link listActiveConnectionsForPair}.
+   */
   listConnections(agentId: string): Connection[] {
     return this.connections.listForAgent(agentId);
   }
 
-  /** One connection by id, scoped so only a participant can read it (else undefined). */
+  /**
+   * The ACTIVE channels from one agent to another, in any mode — the pair-scoped read behind
+   * `disconnect`'s mode inference, so a surface can distinguish "exactly one open channel"
+   * from "several" instead of guessing which the operator meant.
+   */
+  listActiveConnectionsForPair(fromAgentId: string, toAgentId: string): Connection[] {
+    return this.connections.listActiveForPair(fromAgentId, toAgentId);
+  }
+
+  /**
+   * One connection by id, scoped so only a participant can read it (else undefined). Returns
+   * a REVOKED connection too, and that is load-bearing rather than incidental: a resuming run
+   * looks its originating connection up here precisely to discover whether the grant it
+   * arrived under still holds, which it cannot do if a withdrawn channel reads as missing.
+   */
   getConnection(agentId: string, id: string): Connection | undefined {
     return this.connections.get(agentId, id);
   }
@@ -1671,9 +1743,15 @@ export class AsterismStore {
    *
    * Scoped to the connection the caller holds AND asserted against the caller as
    * participant, so an artifact that crossed another channel — a different callee, the other
-   * direction, or a connection since revoked and replaced — does not resolve. That last case
-   * is a property worth naming: because the authorization is keyed on the connection ROW,
-   * revoking a connection also revokes the fetchability of everything exchanged over it.
+   * direction, or a connection since revoked and REPLACED — does not resolve.
+   *
+   * That last case is what the connection-row keying actually buys, and it is worth stating
+   * precisely, because an earlier version of this comment attributed the wrong effect to it.
+   * A revoke alone never reaches this lookup: `performArtifactFetch` reads the ACTIVE
+   * connection first and returns `no_connection` before asking what crossed. What the keying
+   * uniquely handles is the RECONNECT — a fresh `connect` mints a new row, these rows stay
+   * keyed on the revoked one, so a caller cannot re-open a channel to recover references the
+   * revoke withdrew. Both refusals are correct; they just come from different places.
    */
   findExchangedArtifact(connection: Connection, ref: string): Exchange | undefined {
     return this.exchanges.findLatest(connection.id, connection.fromAgentId, "artifact", ref);
