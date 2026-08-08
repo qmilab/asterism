@@ -487,24 +487,95 @@ test("opening a pre-existing database without runs.exchange_connection_id migrat
   `);
   const migrated = new AsterismStore(driver);
   try {
-    const agent = migrated.createAgent({
+    const caller = migrated.createAgent({
       name: "personal",
       role: "",
       soulRef: "casual-helper",
       workspaceDir: "/tmp/personal",
       trustLevel: "autonomous",
     });
+    const callee = migrated.createAgent({
+      name: "work",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/work",
+      trustLevel: "autonomous",
+    });
     // The write that would throw "no such column" on the un-migrated table works...
-    const run = migrated.startRun(agent.id, { input: "t", exchangeConnectionId: "c1" });
-    expect(run.exchangeConnectionId).toBe("c1");
-    // ...and a run recorded before the column existed reads as "not from an exchange", which
-    // is the conservative backfill: its confirm records no crossing, exactly as it already
-    // did.
-    const plain = migrated.startRun(agent.id, { input: "u" });
+    const connection = migrated.createConnection(caller.id, callee.id, "artifact-only");
+    const run = migrated.startExchangeRun(connection, "t");
+    expect(run.exchangeConnectionId).toBe(connection.id);
+    // ...and an ordinary run reads as "not from an exchange", which is also the conservative
+    // backfill for every run recorded before the column existed: its confirm records no
+    // crossing, exactly as it already did.
+    const plain = migrated.startRun(callee.id, { input: "u" });
     expect(plain.exchangeConnectionId).toBeUndefined();
   } finally {
     migrated.close();
   }
+});
+
+// --- the stamp cannot be conjured -------------------------------------------
+
+test("the ORDINARY run path cannot express an exchange stamp at all [Codex R2 P2]", async () => {
+  const connection = store.createConnection(writer.id, helper.id, "artifact-only");
+
+  // `CreateRunInput` has no such field, so this is the whole surface a caller of `startRun`
+  // has — and there is nothing on it to set. Before the fix, adding one property here was
+  // enough to make an ordinary run's artifacts fetchable by the other agent.
+  const run = store.startRun(helper.id, { input: "private work" });
+  expect(run.exchangeConnectionId).toBeUndefined();
+  expect(Object.keys(run)).not.toContain("exchangeConnectionId");
+  // Passing it anyway (as untyped JS would) changes nothing — it is not read from the input.
+  const sneaky = store.startRun(helper.id, {
+    input: "private work",
+    ...({ exchangeConnectionId: connection.id } as object),
+  });
+  expect(sneaky.exchangeConnectionId).toBeUndefined();
+});
+
+test("an exchange run is DERIVED from the connection, so it cannot be misattributed", () => {
+  const connection = store.createConnection(writer.id, helper.id, "artifact-only");
+  // The agent is never passed — it is `connection.toAgentId`, so an exchange run always
+  // belongs to the callee of the channel it names.
+  const run = store.startExchangeRun(connection, "do it");
+  expect(run.agentId).toBe(helper.id);
+  expect(store.runs.get(writer.id, run.id)).toBeUndefined();
+});
+
+test("a stale or withdrawn connection cannot start an exchange run", () => {
+  const connection = store.createConnection(writer.id, helper.id, "artifact-only");
+  store.revokeConnection(writer.id, helper.id, "artifact-only");
+  // The connection OBJECT is still in hand and still looks active to anyone holding it; the
+  // grant is re-asserted against the store, so it cannot be used after withdrawal.
+  expect(() => store.startExchangeRun(connection, "do it")).toThrow(/live connection/);
+  // Nor can a reconnected channel's object be swapped for the old one's identity.
+  store.createConnection(writer.id, helper.id, "artifact-only");
+  expect(() => store.startExchangeRun(connection, "do it")).toThrow(/live connection/);
+});
+
+test("a CALLER-side run wearing the stamp records nothing on resume", async () => {
+  // Defence at the read side: `getConnection` is scoped to a PARTICIPANT, so it matches the
+  // caller's side too. A caller-side run wearing this stamp would otherwise record the
+  // CALLER's own artifacts as though the callee had handed them over.
+  const connection = store.createConnection(writer.id, helper.id, "artifact-only");
+  // Reach past the store to construct the state the write path now refuses to create, so the
+  // read path is proven independently of it.
+  const run = store.startExchangeRun(connection, "callee work");
+  store.driver.exec(
+    `UPDATE runs SET agent_id = '${writer.id}', status = 'awaiting_confirmation' WHERE id = '${run.id}'`,
+  );
+
+  const resumed = await resumeRun(store, writer, run.id, {
+    adapter: sequenceAdapter([`write_${ARTIFACT_PATH.replace(/\W/g, "_")}`]),
+    capabilities: [writeCapability(ARTIFACT_PATH)],
+    confirm: () => true,
+  });
+  expect(resumed.kind).toBe("resumed");
+  expect(store.exchanges.listForAgent(writer.id)).toHaveLength(0);
+  expect(store.events.tail(writer.id).filter((e) => e.type === "handoff.completed")).toHaveLength(
+    0,
+  );
 });
 
 // --- an ordinary run's resume is untouched ----------------------------------

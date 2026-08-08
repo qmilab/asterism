@@ -281,28 +281,29 @@ export async function executeRun(
  * {@link executeRun}, plus the one thing a surface must not be able to say: which connection
  * ASKED for this run.
  *
- * The stamp is deliberately NOT a field on {@link ExecuteRunOptions}. If it were, any surface
- * could mark an ordinary `asterism run` as exchange-originated, and confirming that run would
- * then record an artifact crossing no exchange ever authorized — a surface bug promoted into
- * a permission bug. Keeping it as an internal parameter means `performExchange` is the only
- * caller that can set it, which is exactly the set of runs that genuinely arrived over a
- * connection.
+ * The stamp is kept off BOTH general-purpose shapes, and it took a review round to get that
+ * right. It is not a field on {@link ExecuteRunOptions}, so no surface can mark an ordinary
+ * `asterism run` as exchange-originated; and it is not a field on `CreateRunInput` either, so
+ * the kernel's own `startRun` cannot express it. Either would have been enough to turn a
+ * surface bug into a permission bug — a confirmed run recording an artifact crossing no
+ * exchange authorized, after which the caller could fetch a file the callee never handed over.
  *
- * (The resume re-resolves the id through the scoped `getConnection` regardless, so even a
- * stamp that somehow got written wrong can only ever read as "not from an exchange".)
+ * The write goes through `store.startExchangeRun`, which DERIVES the callee from the
+ * connection and re-asserts that the grant is live, so a stamp can only ever describe a run
+ * that really does sit on the channel it names.
  */
 async function startAndPersist(
   store: AsterismStore,
   agent: Agent,
   input: string,
   options: ExecuteRunOptions,
-  exchangeConnectionId?: string,
+  connection?: Connection,
 ): Promise<ExecuteRunResult> {
   // Record the run and move it to `running`; the kernel logs each transition.
-  const run = store.startRun(agent.id, {
-    input,
-    ...(exchangeConnectionId !== undefined ? { exchangeConnectionId } : {}),
-  });
+  const run =
+    connection === undefined
+      ? store.startRun(agent.id, { input })
+      : store.startExchangeRun(connection, input);
   store.setRunStatus(agent.id, run.id, "running");
   // A fresh run has nothing executed and nothing confirmed, so every destructive
   // action gates (pauses) regardless of trust level. The resume path (`resumeRun`) is
@@ -965,7 +966,12 @@ export async function resumeRun(
     // agent, so an id naming a connection it is not on resolves to nothing and this run
     // simply reads as an ordinary one.
     const connection = store.getConnection(agent.id, claimed.exchangeConnectionId);
-    if (connection) {
+    // The resuming agent must be the CALLEE of the channel it names. `getConnection` is
+    // scoped to a PARTICIPANT, so it also matches the caller's side — and a caller-side run
+    // wearing this stamp would record the CALLER's own artifacts as though the callee had
+    // handed them over. Checking the direction makes the resume's trust in the stamp
+    // structural rather than a matter of who wrote it.
+    if (connection && connection.toAgentId === agent.id) {
       // The completion the caller's log never got. Emitted whether or not the connection was
       // revoked: this is content-free audit of what became of a run, and an operator who
       // revoked must not end up seeing LESS history than one who did not. Revoke withdraws
@@ -1033,7 +1039,10 @@ export function declineRun(store: AsterismStore, agent: Agent, runId: string): D
     // and a revoked one is reported exactly as an active one is.
     if (declined.exchangeConnectionId !== undefined) {
       const connection = store.getConnection(agent.id, declined.exchangeConnectionId);
-      if (connection) store.recordHandoffCompleted(connection, declined.id, declined.status);
+      // Same direction check as the resume: only the CALLEE's own run closes an exchange.
+      if (connection && connection.toAgentId === agent.id) {
+        store.recordHandoffCompleted(connection, declined.id, declined.status);
+      }
     }
     return { kind: "declined", run: declined };
   }
@@ -1779,7 +1788,7 @@ async function performExchange(
   // find its way back to the permission: `resumeRun` is driven directly by every confirm
   // surface, so without the stamp a resumed exchange could neither re-check the grant nor
   // record what it produced (§15, D19).
-  const result = await startAndPersist(store, to, input, options, connection.id);
+  const result = await startAndPersist(store, to, input, options, connection);
   // Audit the return on both logs, carrying the final status as a reference (done / failed
   // / awaiting_confirmation) so a paused exchange is recorded honestly. The event payload
   // already carries the connection's mode, so both logs distinguish the exchange forms.

@@ -723,11 +723,58 @@ export class AsterismStore {
     });
   }
 
-  /** Start a run and record `run.started`, stamping the run id onto the event. */
+  /**
+   * Start a run and record `run.started`, stamping the run id onto the event.
+   *
+   * This is the ORDINARY path, and it cannot mark a run as exchange-originated: the stamp is
+   * not a field on {@link CreateRunInput}, so there is no property to set. Cross-agent runs
+   * go through {@link startExchangeRun}.
+   */
   startRun(agentId: string, input: CreateRunInput): Run {
     return this.driver.transaction(() => {
       const run = this.runs.create(agentId, input);
       this.emit(agentId, "run.started", { runId: run.id, status: run.status }, run.id);
+      return run;
+    });
+  }
+
+  /**
+   * Start the CALLEE's run for a cross-agent exchange — the only path that can stamp a run
+   * with the connection that asked for it.
+   *
+   * Everything about the run is DERIVED from the connection rather than passed alongside it,
+   * which is what makes the stamp mean something at resume time:
+   *
+   *   - the agent is `connection.toAgentId`, so a run can never be attributed to a channel
+   *     that does not run through it (no stamping agent X's run with a Y→Z connection);
+   *   - the grant is re-asserted as LIVE here, so a stale or revoked connection object
+   *     cannot start an exchange run at all.
+   *
+   * Honest about the boundary this draws. A caller of the kernel API can still do kernel
+   * things — `recordArtifactExchange` has always been able to write a crossing directly, and
+   * that is what a kernel API is. What this removes is the ability to create one through
+   * `startRun`, the general entry point every surface calls, where an `exchangeConnectionId`
+   * property would look like bookkeeping rather than like granting a cross-agent read. The
+   * claim is "not settable through the ordinary path", not "unforgeable" — an earlier version
+   * of this slice asserted the latter, and it was not true. [Codex review R2 P2.]
+   */
+  startExchangeRun(connection: Connection, input: string): Run {
+    const live = this.connections.findActive(
+      connection.fromAgentId,
+      connection.toAgentId,
+      connection.mode,
+    );
+    if (!live || live.id !== connection.id) {
+      throw new Error("an exchange run needs a live connection");
+    }
+    return this.driver.transaction(() => {
+      const run = this.runs.create(connection.toAgentId, { input }, connection.id);
+      this.emit(
+        connection.toAgentId,
+        "run.started",
+        { runId: run.id, status: run.status },
+        run.id,
+      );
       return run;
     });
   }

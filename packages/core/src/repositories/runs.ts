@@ -4,14 +4,15 @@ import type { Run, RunStatus } from "../types.js";
 import { RUN_STATUSES, validateEnum } from "../types.js";
 import { requireAgentId } from "./scope.js";
 
+/**
+ * The general run-creation input. Deliberately carries NO exchange stamp: the connection a
+ * run arrived through is a separate argument to {@link RunRepository.create}, reachable only
+ * through `AsterismStore.startExchangeRun`, so an exchange crossing can never be conjured by
+ * adding a field to an ordinary run's input.
+ */
 export interface CreateRunInput {
   input: string;
   status?: RunStatus;
-  /**
-   * The connection this run arrived through, when it is a cross-agent exchange's callee run.
-   * Set ONLY by the kernel's own exchange path — see {@link Run.exchangeConnectionId}.
-   */
-  exchangeConnectionId?: string;
 }
 
 function mapRun(row: SqlRow): Run {
@@ -32,7 +33,17 @@ function mapRun(row: SqlRow): Run {
 export class RunRepository {
   constructor(private readonly driver: SqlDriver) {}
 
-  create(agentId: string, input: CreateRunInput): Run {
+  /**
+   * Record a new run.
+   *
+   * `exchangeConnectionId` is a SEPARATE argument rather than a field on
+   * {@link CreateRunInput}, and that is the whole point: `startRun` — the general entry
+   * point every surface calls — has no way to express it, so a crossing cannot be created by
+   * adding a property to an ordinary run's input. The only caller that passes it is
+   * `AsterismStore.startExchangeRun`, which derives the agent from the connection and
+   * re-asserts that the grant is live.
+   */
+  create(agentId: string, input: CreateRunInput, exchangeConnectionId?: string): Run {
     requireAgentId(agentId);
     const status = input.status ?? "pending";
     validateEnum(status, RUN_STATUSES, "run status");
@@ -52,7 +63,7 @@ export class RunRepository {
         status,
         startedAt,
         null,
-        input.exchangeConnectionId ?? null,
+        exchangeConnectionId ?? null,
       ]);
     if (!row) throw new Error("run insert did not persist");
     return mapRun(row);
