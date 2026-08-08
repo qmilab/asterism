@@ -1060,9 +1060,16 @@ export function declineRun(store: AsterismStore, agent: Agent, runId: string): D
  *                     handoff is refused: default isolation holds (golden rule 5,
  *                     invariant 1). The caller's only recourse is to have the operator
  *                     create the connection (`asterism connect from to --mode handoff`).
+ * - `withdrawn`     — the channel was open when the exchange began and was revoked while the
+ *                     callee ran. The callee's work is NOT undone (it happened in the
+ *                     callee's own workspace, under its own gate) and is not lost — the
+ *                     `runId` names the run its own operator can read. What is withheld is
+ *                     the CROSSING: the callee's text does not come back over a channel that
+ *                     no longer exists. There is nowhere in this variant to put it.
  */
 export type HandoffOutcome =
   | { kind: "ok"; result: ExecuteRunResult }
+  | { kind: "withdrawn"; runId: string; status: RunStatus }
   | { kind: "no_connection" };
 
 /**
@@ -1107,9 +1114,16 @@ export interface ArtifactExchangeResult {
  * means there is no ACTIVE `from → to` connection **in `artifact-only` mode**: a
  * `handoff`-mode connection between the same pair does NOT authorize this exchange, because
  * a connection grants exactly its mode's form and nothing wider.
+ *
+ * `withdrawn` is the mid-run revoke, and it withholds BOTH halves of what this mode crosses:
+ * the manifest is not returned and no `exchanges` row is written, so nothing the callee
+ * produced is either named to the caller or made fetchable later. Suppressing only the record
+ * would be the more tempting half-measure and the wrong one — the manifest is itself a list
+ * of the callee's filenames, which is precisely what `artifact-only` exists to control.
  */
 export type ArtifactExchangeOutcome =
   | { kind: "ok"; result: ArtifactExchangeResult }
+  | { kind: "withdrawn"; runId: string; status: RunStatus }
   | { kind: "no_connection" };
 
 /**
@@ -1149,7 +1163,17 @@ export async function performHandoff(
   options: ExecuteRunOptions,
 ): Promise<HandoffOutcome> {
   const exchanged = await performExchange(store, from, to, input, "handoff", options);
-  if (exchanged === undefined) return { kind: "no_connection" };
+  if (exchanged.kind === "no_connection") return { kind: "no_connection" };
+  // A channel withdrawn mid-run withholds the ONLY thing this mode crosses. `handoff` has no
+  // durable record to suppress instead (see below), so for it the projection IS the crossing:
+  // returning the text anyway would make revoke a no-op for the exchange in flight.
+  if (exchanged.kind === "withdrawn") {
+    return {
+      kind: "withdrawn",
+      runId: exchanged.result.run.id,
+      status: exchanged.result.status,
+    };
+  }
   // `handoff` is the least-curated mode: the callee's full ExecuteRunResult crosses (its
   // final text + references), and nothing behind it (settled decision D2). Nothing is
   // recorded in `exchanges`: what crossed is the callee's TEXT, which is not a durable
@@ -1183,7 +1207,23 @@ export async function performArtifactExchange(
   options: ExecuteRunOptions,
 ): Promise<ArtifactExchangeOutcome> {
   const exchanged = await performExchange(store, from, to, input, "artifact-only", options);
-  if (exchanged === undefined) return { kind: "no_connection" };
+  if (exchanged.kind === "no_connection") return { kind: "no_connection" };
+  // Withdrawn mid-run: neither half of the crossing happens. No manifest is returned (the
+  // filenames are themselves what this mode controls) and no `exchanges` row is written, so
+  // nothing becomes fetchable later either. The `withdrawn` variant has nowhere to put a
+  // manifest, so the type enforces it rather than a caller remembering.
+  //
+  // The grant is re-read in `performExchange` rather than here: a run is the longest window
+  // in the phase, and doing the check once in the shared function is what keeps the two push
+  // modes from drifting — which is exactly what happened when this check lived here and
+  // `handoff` had none. [Codex review R3 P2.]
+  if (exchanged.kind === "withdrawn") {
+    return {
+      kind: "withdrawn",
+      runId: exchanged.result.run.id,
+      status: exchanged.result.status,
+    };
+  }
   const { connection, result } = exchanged;
   // Absent when the run produced nothing; an empty manifest is the honest answer for a run
   // that acted on nothing (or whose every action the callee's gate withheld).
@@ -1195,23 +1235,7 @@ export async function performArtifactExchange(
   // reference that crossed but was never recorded would be un-fetchable for no honest
   // reason. Recording does not move a byte — it only makes an already-crossed reference
   // resolvable, and every byte still waits on the caller's own gate.
-  //
-  // ...but only while the grant still holds. A run is the longest window in the phase, so
-  // the connection is re-read HERE rather than trusted from before it — the same discipline
-  // `resumeRun` and the fetch's post-confirmation re-check use, and the initial path has no
-  // business being laxer than the resumed one.
-  //
-  // Worth being exact about what this does and does not fix, because the two differ. Rows
-  // recorded over a withdrawn channel were already UNRESOLVABLE — `findExchangedArtifact` is
-  // only ever called with an ACTIVE connection, and a reconnect mints a fresh id these rows
-  // are not keyed on (verified: `no_connection`, then `not_exchanged`). So this closes no
-  // leak. What it removes is a row set that is unreachable by virtue of how a DIFFERENT
-  // function happens to be called — which is the shape of thing that stops being unreachable
-  // when someone adds a caller.
-  const stillGranted = store.connections.findActive(from.id, to.id, "artifact-only");
-  if (stillGranted && stillGranted.id === connection.id) {
-    store.recordArtifactExchange(connection, result.run.id, artifacts);
-  }
+  store.recordArtifactExchange(connection, result.run.id, artifacts);
   return {
     kind: "ok",
     result: {
@@ -1758,9 +1782,20 @@ function requireChannel(
 }
 
 /**
- * The shared cross-agent exchange: check the permission, audit, run AS THE CALLEE, audit.
- * Returns the callee's raw {@link ExecuteRunResult}, or `undefined` when no active
- * connection in `mode` authorizes it.
+ * What {@link performExchange} resolves to. A discriminated union rather than an optional
+ * connection, because "the grant held for the whole exchange" and "the grant was withdrawn
+ * while the callee ran" must not be distinguishable by a caller forgetting to check a boolean.
+ * `withdrawn` carries the callee's result so a surface can say the work RAN, while having
+ * nowhere to project it from — the type is what withholds the payload.
+ */
+type ExchangeRun =
+  | { kind: "ok"; connection: Connection; result: ExecuteRunResult }
+  | { kind: "withdrawn"; result: ExecuteRunResult }
+  | { kind: "no_connection" };
+
+/**
+ * The shared cross-agent exchange: check the permission, audit, run AS THE CALLEE, audit,
+ * then RE-CHECK the permission before anything is projected back.
  *
  * Every mode routes through this one function so the invariants cannot drift between modes:
  * the connection check, the both-logs audit, and "the callee drives the whole loop" are
@@ -1774,9 +1809,9 @@ async function performExchange(
   input: string,
   mode: ConnectionMode,
   options: ExecuteRunOptions,
-): Promise<{ connection: Connection; result: ExecuteRunResult } | undefined> {
+): Promise<ExchangeRun> {
   const connection = requireChannel(store, from, to, mode);
-  if (!connection) return undefined;
+  if (!connection) return { kind: "no_connection" };
   // Audit the request on both logs BEFORE the run, so the exchange is recorded even if the
   // callee's run fails (the kernel writes the event log, not this op).
   store.recordHandoffRequested(connection);
@@ -1793,10 +1828,28 @@ async function performExchange(
   // / awaiting_confirmation) so a paused exchange is recorded honestly. The event payload
   // already carries the connection's mode, so both logs distinguish the exchange forms.
   store.recordHandoffCompleted(connection, result.run.id, result.status);
+
+  // THE GRANT IS RE-READ BEFORE ANYTHING IS PROJECTED BACK. A run is the longest window in
+  // the phase — a model loop, possibly minutes — and the crossing does not happen when the
+  // operator types the command, it happens when the callee's work is handed back. So the
+  // check belongs here, at the moment something would cross, exactly as it does before a
+  // fetch materializes bytes and before a resume records a reference. [Codex review R3 P2.]
+  //
+  // The audit above is deliberately emitted FIRST and unconditionally: the exchange really
+  // was requested and the callee really did run, and an operator who revoked must not end up
+  // with less history than one who did not. Revoke withdraws what may cross, never what may
+  // be recorded about the past — the same rule the resume follows.
+  //
+  // Identity, not mere existence: a revoke followed by a reconnect mid-run leaves a different
+  // channel active, and a fresh grant did not ask for this work (D20).
+  const stillGranted = requireChannel(store, from, to, mode);
+  if (!stillGranted || stillGranted.id !== connection.id) {
+    return { kind: "withdrawn", result };
+  }
   // The connection travels back with the result because a mode's projection may need to
   // RECORD what it crossed, not just shape it: `artifact-only` persists its manifest as
   // resolvable `exchanges` rows keyed on this connection. Returning it here keeps that
   // recording in the mode's own entry point (where the projection is decided) rather than
   // making this shared function know which modes have a durable crossing.
-  return { connection, result };
+  return { kind: "ok", connection, result };
 }

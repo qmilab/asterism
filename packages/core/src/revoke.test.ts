@@ -34,6 +34,7 @@ import type { Agent } from "./types.js";
 const ARTIFACT_PATH = "drafts/market.md";
 const ARTIFACT_REF = `file:${ARTIFACT_PATH}`;
 const ARTIFACT_BYTES = 4300;
+const CALLEE_PROSE = "HELPER PROSE — the whole point of the mode, and it must not cross";
 
 let store: AsterismStore;
 let writer: Agent; // the caller
@@ -283,13 +284,77 @@ test("a revoke AND reconnect during the confirmation still stops the bytes", asy
   expect(materialized).toHaveLength(0);
 });
 
-test("a revoke landing DURING the exchange's run records no references", async () => {
+/** An adapter that withdraws the channel MID-RUN, then produces the callee's text. */
+function revokingAdapter(mode: "handoff" | "artifact-only"): RuntimeAdapter {
+  return {
+    run: (request) => {
+      const output = (async () => {
+        const tool = request.tools.list().find((t) => t.name === "write_file");
+        if (tool) await tool.execute({ args: {} }, request.signal);
+        store.revokeConnection(writer.id, helper.id, mode);
+        return { status: "done" as const, text: CALLEE_PROSE };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+}
+
+test("a revoke landing DURING an artifact run withholds BOTH the manifest and the record", async () => {
   const connection = store.createConnection(writer.id, helper.id, "artifact-only");
 
-  // A run is the longest window in the phase, so the grant is re-read at recording time
-  // rather than trusted from before it. The rows were already unresolvable over a withdrawn
-  // channel — this keeps the initial path from being laxer than the resumed one, which does
-  // re-check.
+  // A run is the longest window in the phase, and the crossing happens when the work is
+  // handed back — not when the operator typed the command. So the grant is re-read before
+  // anything is projected, the same as before a fetch moves bytes.
+  const outcome = await performArtifactExchange(store, writer, helper, "draft it", {
+    adapter: revokingAdapter("artifact-only"),
+    capabilities: [writeCapability()],
+  });
+
+  // NOT `ok`: the manifest is a list of the callee's filenames, which is exactly what this
+  // mode exists to control — so it does not come back over a channel that no longer exists.
+  // (An earlier version of this test asserted the manifest still crossed, on the reasoning
+  // that the operator had asked for the work. That preserved the old behaviour rather than
+  // deciding it, and left the returned half laxer than the recorded half. [Codex R3 P2.])
+  expect(outcome.kind).toBe("withdrawn");
+  if (outcome.kind === "withdrawn") {
+    // The work is not lost, and the callee's own operator can still read it.
+    expect(outcome.status).toBe("done");
+    expect(store.runs.get(helper.id, outcome.runId)?.status).toBe("done");
+  }
+  // Nor is anything resolvable later.
+  expect(store.exchanges.listForAgent(writer.id)).toHaveLength(0);
+  expect(store.getConnection(writer.id, connection.id)?.status).toBe("revoked");
+});
+
+test("a revoke landing DURING a handoff run withholds the callee's TEXT", async () => {
+  store.createConnection(writer.id, helper.id, "handoff");
+
+  const outcome = await performHandoff(store, writer, helper, "do it", {
+    adapter: revokingAdapter("handoff"),
+    capabilities: [writeCapability()],
+  });
+
+  // `handoff` has no durable record to suppress instead — its projection IS its crossing, so
+  // returning the text anyway would make a revoke a no-op for the exchange in flight.
+  expect(outcome.kind).toBe("withdrawn");
+  if (outcome.kind === "withdrawn") {
+    expect(JSON.stringify(outcome)).not.toContain(CALLEE_PROSE);
+    expect(store.runs.get(helper.id, outcome.runId)?.status).toBe("done");
+  }
+  // The audit is still honest on both logs: the exchange was requested, and the callee ran.
+  for (const id of [writer.id, helper.id]) {
+    const types = store.events.tail(id).map((e) => e.type);
+    expect(types).toContain("handoff.requested");
+    expect(types).toContain("handoff.completed");
+    expect(types).toContain("connection.revoked");
+    // ...and carries none of the callee's words.
+    expect(JSON.stringify(store.events.tail(id))).not.toContain(CALLEE_PROSE);
+  }
+});
+
+test("a reconnect DURING the run does not stand in for the channel that asked", async () => {
+  store.createConnection(writer.id, helper.id, "artifact-only");
   const outcome = await performArtifactExchange(store, writer, helper, "draft it", {
     adapter: {
       run: (request) => {
@@ -297,7 +362,8 @@ test("a revoke landing DURING the exchange's run records no references", async (
           const tool = request.tools.list().find((t) => t.name === "write_file");
           if (tool) await tool.execute({ args: {} }, request.signal);
           store.revokeConnection(writer.id, helper.id, "artifact-only");
-          return { status: "done" as const, text: "prose" };
+          store.createConnection(writer.id, helper.id, "artifact-only");
+          return { status: "done" as const, text: CALLEE_PROSE };
         })();
         async function* noEvents() {}
         return { events: noEvents(), output };
@@ -306,12 +372,10 @@ test("a revoke landing DURING the exchange's run records no references", async (
     capabilities: [writeCapability()],
   });
 
-  // The manifest still comes back — the operator asked for the work and the callee did it.
-  expect(outcome.kind).toBe("ok");
-  if (outcome.kind === "ok") expect(outcome.result.artifacts).toHaveLength(1);
-  // Nothing was recorded as resolvable over the channel that was withdrawn mid-run.
+  // A channel is active again, so an existence check would pass — but a fresh grant did not
+  // ask for this work and does not inherit its crossing (D20). Identity is what is compared.
+  expect(outcome.kind).toBe("withdrawn");
   expect(store.exchanges.listForAgent(writer.id)).toHaveLength(0);
-  expect(store.getConnection(writer.id, connection.id)?.status).toBe("revoked");
 });
 
 // --- Invariant 2: revoke is exact ------------------------------------------

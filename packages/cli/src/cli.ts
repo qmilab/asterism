@@ -1695,6 +1695,23 @@ function noConnection(io: CliIO, from: string, to: string, mode: ConnectionMode)
 }
 
 /**
+ * The channel was withdrawn while the callee was still working. Both facts have to be said,
+ * because either alone misleads: the work HAPPENED (silently reporting "no connection" would
+ * suggest nothing ran, when the callee acted in its own workspace), and nothing came back
+ * (implying otherwise would make the withdrawal look ineffective). Points at the callee's own
+ * record, since the work is not lost — it simply did not cross.
+ */
+function withdrawnMidRun(io: CliIO, toName: string, runId: string): number {
+  io.err(
+    `The channel to ${toName} was withdrawn while it was working, so nothing came back.`,
+  );
+  io.err(
+    `${toName} finished in its own space — see what it did:  asterism runs ${toName} ${shortId(runId)}`,
+  );
+  return 1;
+}
+
+/**
  * The shared prelude of every cross-agent exchange: resolve both agents, verify an ACTIVE
  * connection in `mode` authorizes it, and build the CALLEE's run options.
  *
@@ -1766,6 +1783,7 @@ async function cmdHandoff(args: string[], io: CliIO): Promise<number> {
 
     const outcome = await performHandoff(store, from, to, task, options);
     if (outcome.kind === "no_connection") return noConnection(io, fromName, toName, "handoff");
+    if (outcome.kind === "withdrawn") return withdrawnMidRun(io, toName, outcome.runId);
 
     const result = outcome.result;
     // The run is the callee's, so what it did (action summary) and what it proposed to note
@@ -1817,6 +1835,7 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
 
     const outcome = await performArtifactExchange(store, from, to, task, options);
     if (outcome.kind === "no_connection") return noConnection(io, fromName, toName, "artifact-only");
+    if (outcome.kind === "withdrawn") return withdrawnMidRun(io, toName, outcome.runId);
 
     const result = outcome.result;
     // The run is the callee's, so its action summary is surfaced for `to`. The callee's

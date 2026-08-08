@@ -3774,6 +3774,38 @@ test("an agent named `disconnect` can still be connected and disconnected", asyn
   expect(h.out.join("\n")).toContain("Disconnected disconnect → b (handoff)");
 });
 
+test("a channel withdrawn mid-run reports BOTH facts: the work ran, nothing came back", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "autonomous"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "handoff"], h.io);
+
+  // The operator withdraws the channel while the callee is still working.
+  const io: CliIO = {
+    ...h.io,
+    makeAdapter: () => ({
+      adapter: {
+        run: (request) => {
+          const output = (async () => {
+            await runCli(["disconnect", "a", "b"], { ...h.io, out: () => {}, err: () => {} });
+            return { status: "done" as const, text: "CALLEE PROSE" };
+          })();
+          async function* noEvents() {}
+          return { events: noEvents(), output };
+        },
+      },
+    }),
+  };
+  expect(await runCli(["handoff", "a", "b", "do it"], io)).toBe(1);
+  const said = [...h.out, ...h.err].join("\n");
+  // Either fact alone would mislead: "no connection" suggests nothing ran; showing the output
+  // would make the withdrawal look ineffective.
+  expect(said).toContain("was withdrawn while it was working");
+  expect(said).toContain("finished in its own space");
+  expect(said).not.toContain("CALLEE PROSE");
+});
+
 test("connect / disconnect / connections / handoff / artifact show help", async () => {
   const h = harness();
   for (const cmd of [
