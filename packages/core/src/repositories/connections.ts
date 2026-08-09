@@ -35,6 +35,14 @@ function mapConnection(row: SqlRow): Connection {
  * agent participates in (`from_agent_id = ? OR to_agent_id = ?`). A connection for the
  * pair (A, B) is therefore reachable through A's id or B's id, but never through a third
  * agent C's — the agent is still the isolation boundary.
+ *
+ * The status lifecycle is `active → revoked`, one way. {@link create} is the only writer of
+ * `active` and {@link revoke} the only writer of `revoked`; nothing here can move a row
+ * back. Reads split on it deliberately: {@link findActive} and {@link listActiveForPair}
+ * enforce the permission (a revoked channel authorizes nothing), while {@link get} and
+ * {@link listForAgent} report HISTORY and return every status — an operator must be able to
+ * see that a channel was withdrawn, and a resume must be able to discover that the grant its
+ * run arrived under no longer holds.
  */
 export class ConnectionRepository {
   constructor(private readonly driver: SqlDriver) {}
@@ -87,6 +95,66 @@ export class ConnectionRepository {
       )
       .get([fromAgentId, toAgentId, mode]);
     return row ? mapConnection(row) : undefined;
+  }
+
+  /**
+   * Revoke the ACTIVE `fromAgentId → toAgentId` connection in `mode`, returning the row as
+   * it now stands, or undefined when there was no active connection to revoke.
+   *
+   * The whole transition, as one atomic compare-and-set: `WHERE … status = 'active'` is the
+   * comparison and `SET status = 'revoked'` is the set, so two concurrent revokes cannot
+   * both report success and cannot both emit an event — exactly one `UPDATE` matches a row
+   * and the loser gets undefined. The same predicate makes a re-revoke a clean no-op rather
+   * than a second withdrawal of something already withdrawn.
+   *
+   * Terminal by design, and by omission: there is no reverse transition here and no way to
+   * write `status = 'active'` onto an existing row anywhere in this repository. Restoring a
+   * revoked connection would resurrect the fetchability of everything exchanged over its id
+   * (`exchanges` authorization is keyed on `connection_id`), so the only way back is
+   * {@link create}, which mints a fresh row that old references do not resolve over.
+   *
+   * Scoped exactly like {@link findActive}, and for the same reason: a revoke names a
+   * DIRECTED pair in one mode, so it can only ever touch the triple it was called for —
+   * never the reverse direction, never another mode between the same two agents, never
+   * another pair.
+   */
+  revoke(
+    fromAgentId: string,
+    toAgentId: string,
+    mode: ConnectionMode,
+  ): Connection | undefined {
+    requireAgentId(fromAgentId);
+    requireAgentId(toAgentId);
+    validateEnum(mode, CONNECTION_MODES, "connection mode");
+    const row = this.driver
+      .prepare(
+        `UPDATE connections SET status = 'revoked'
+           WHERE from_agent_id = ? AND to_agent_id = ? AND mode = ? AND status = 'active'
+         RETURNING *`,
+      )
+      .get([fromAgentId, toAgentId, mode]);
+    return row ? mapConnection(row) : undefined;
+  }
+
+  /**
+   * Every ACTIVE connection from `fromAgentId` to `toAgentId`, in any mode, oldest-first.
+   *
+   * The pair-scoped read behind `disconnect`'s mode inference: a surface can tell "this pair
+   * has exactly one open channel" from "it has several" without guessing which one the
+   * operator meant. Asserts BOTH ids like every other pair read, so it can never enumerate
+   * channels belonging to agents it was not called for.
+   */
+  listActiveForPair(fromAgentId: string, toAgentId: string): Connection[] {
+    requireAgentId(fromAgentId);
+    requireAgentId(toAgentId);
+    return this.driver
+      .prepare(
+        `SELECT * FROM connections
+           WHERE from_agent_id = ? AND to_agent_id = ? AND status = 'active'
+           ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all([fromAgentId, toAgentId])
+      .map(mapConnection);
   }
 
   /**

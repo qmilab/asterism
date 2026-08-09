@@ -36,7 +36,23 @@ CREATE TABLE IF NOT EXISTS runs (
   -- a tick atomically claims a run (NULL -> now) before queueing its proposals, so two
   -- overlapping proposers can't both process the same run and double-queue it. Cleared
   -- back to NULL if the model call for that run fails, so a transient failure is retried.
-  reflected_at TEXT
+  reflected_at TEXT,
+  -- The connection that ASKED for this run, when it arrived through a cross-agent exchange
+  -- (handoff / artifact-only); NULL for an ordinary run. This is what lets a RESUME find its
+  -- way back to the permission: 'asterism confirm' drives resumeRun directly, not the exchange
+  -- op, so without it the kernel cannot tell an exchange-originated run from any other -- and
+  -- can neither re-check that the grant still holds nor record what the resumed run produced.
+  --
+  -- A column on runs rather than a lookup from exchanges by run_id, because a lookup misses
+  -- exactly the cases that need it: handoff writes no exchanges row at all, and an artifact
+  -- exchange that pauses before producing anything writes none either.
+  --
+  -- Deliberately NOT a foreign key into connections(id). It is a HISTORICAL reference to the
+  -- grant a run arrived under, and it must keep naming that connection after the connection is
+  -- revoked -- which is precisely when reading it matters. Every read goes through the scoped
+  -- getConnection, so an id naming a connection this agent is not on resolves to nothing and
+  -- reads as "not from an exchange".
+  exchange_connection_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(agent_id);
 
@@ -181,13 +197,21 @@ CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id);
 -- links -- the agent is still the isolation boundary, a connection just names which two
 -- agents an explicit, operator-granted channel joins.
 --
--- mode is the exchange form ('handoff' in T1); status is 'active' | 'revoked' (only an
--- active connection grants its exchange). The partial unique index keeps at most ONE
--- active connection per (from, to, mode) -- re-running 'connect A B --mode handoff' is
--- idempotent -- while leaving a future 'revoked' row free to coexist (so a later
--- reconnect is a fresh active row, not blocked by history). It is defined here, in the
--- CREATE, because this is a brand-new table: every column it references exists from the
--- start, so unlike the world_facts coexistence indexes it needs no deferral to migrate().
+-- mode is the exchange form ('handoff' | 'artifact-only' | 'read-summary'); status is
+-- 'active' | 'revoked' (only an active connection grants its exchange). The partial unique
+-- index keeps at most ONE active connection per (from, to, mode) -- re-running
+-- 'connect A B --mode handoff' is idempotent -- while leaving a 'revoked' row free to
+-- coexist, so a later reconnect is a fresh active row, not blocked by history. It is
+-- defined here, in the CREATE, because this is a brand-new table: every column it
+-- references exists from the start, so unlike the world_facts coexistence indexes it needs
+-- no deferral to migrate().
+--
+-- The status transition runs ONE WAY: active -> revoked, and never back (design note §15,
+-- D20). Restoring a revoked row would resurrect the fetchability of every artifact ever
+-- exchanged over that connection id, since 'exchanges' authorization is keyed on it -- so
+-- "reopen the channel" would silently mean "reopen a durable read grant over everything
+-- that ever crossed it". Reconnecting is 'connect' again, which mints a fresh row that old
+-- references do not resolve over; that safe path is the only one offered.
 CREATE TABLE IF NOT EXISTS connections (
   id            TEXT PRIMARY KEY,
   from_agent_id TEXT NOT NULL REFERENCES agents(id),

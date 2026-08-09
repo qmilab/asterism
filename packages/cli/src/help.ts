@@ -36,6 +36,7 @@ Commands:
   notes inspect <agent>             See an agent's own working notes (its situation)
   run <agent> "<task>"              Put an agent to work on a task
   connect <from> <to> --mode <m>    Open a permissioned channel between two agents
+  disconnect <from> <to>            Withdraw a channel you opened
   connections <agent>               Show an agent's connections
   handoff <from> <to> "<task>"      Have one agent hand a task to another
   artifact <from> <to> "<task>"     Like handoff, but hand back only the files produced
@@ -236,13 +237,41 @@ re-run the same connect harmlessly — it won't make a duplicate.
                                     (More modes, sharing less, are coming.)
 
 Opening a connection is a deliberate act you take; from then on, either agent's record
-shows the channel exists and each time it is used — never the task text or any result.`,
+shows the channel exists and each time it is used — never the task text or any result.
+
+Close one with \`asterism disconnect\`.`,
+
+  disconnect: `asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary>]
+
+Withdraw a channel you opened. From then on the two agents are as separate as they were
+before you connected them.
+
+What it takes away depends on the channel, and it is more than the ability to ask for
+work. Withdrawing an artifact-only channel also means files the other agent already
+handed over can no longer be fetched — the list you were given stops resolving. And
+withdrawing a read-summary channel means it stops sharing what it knows, including from
+anything it learned while the channel was open.
+
+  --mode <m>       Which channel, when the two agents have more than one open. With a
+                   single open channel you can leave it out; with several, asterism will
+                   ask you to name one rather than guess.
+
+Work already underway is not interrupted. If the other agent is paused waiting for you to
+confirm something, that confirmation still works and it still finishes its task in its own
+space — but nothing it produces afterwards comes back across the withdrawn channel.
+
+This cannot be undone. Connecting the two agents again opens a NEW channel; it does not
+restore the old one, and files handed over on the old one stay unreachable. Both agents'
+records keep showing the channel and the moment it was withdrawn.`,
 
   connections: `asterism connections <agent>
 
 Show the channels one agent is on — the agents it can hand work to (outbound, →) and the
 agents that can hand work to it (inbound, ←), with each channel's mode. Only ever the
-named agent's own connections; it never reveals a channel between two other agents.`,
+named agent's own connections; it never reveals a channel between two other agents.
+
+Channels you have withdrawn stay listed, marked, after the open ones — so you can always
+see what was once open and that it is now closed.`,
 
   handoff: `asterism handoff <from> <to> "<task>"
 
