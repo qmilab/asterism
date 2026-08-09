@@ -23,7 +23,18 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 const SQLITE_HEADER = Buffer.from("SQLite format 3\0", "latin1");
 const WAL_MAGICS = [0x377f0682, 0x377f0683];
 
-/** The first `n` bytes of a file, or an empty buffer if it cannot be read. */
+/** Tracked paths this run could not read, and so could not vouch for. */
+const unchecked = [];
+
+/**
+ * The first `n` bytes of a file. Returns an empty buffer for something that is not a
+ * regular file (a submodule directory, say), and records anything it could not READ.
+ *
+ * The distinction matters: a guard that cannot see a file must not report "all clear" for
+ * it. Silently skipping an unreadable path is how a check like this quietly stops checking.
+ * A fresh checkout has every tracked file readable, so an unreadable one is itself the
+ * anomaly — it is reported and fails the run rather than being waved through.
+ */
 function head(path, n = 16) {
   let fd;
   try {
@@ -32,7 +43,10 @@ function head(path, n = 16) {
     const buf = Buffer.alloc(n);
     const read = readSync(fd, buf, 0, n, 0);
     return buf.subarray(0, read);
-  } catch {
+  } catch (err) {
+    // ENOENT on a tracked path means the working tree is mid-operation, not that the file
+    // is suspicious; anything else (EACCES, EISDIR, EIO) means we genuinely could not look.
+    if (err?.code !== "ENOENT") unchecked.push(`${path} (${err?.code ?? "unreadable"})`);
     return Buffer.alloc(0);
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -59,6 +73,13 @@ const tracked = execFileSync("git", ["ls-files", "-z"], { encoding: "buffer" })
 const offenders = tracked
   .map((path) => ({ path, kind: classify(path) }))
   .filter((f) => f.kind !== undefined);
+
+if (unchecked.length > 0) {
+  console.error(`Could not read ${unchecked.length} tracked file(s), so this run vouches for nothing:\n`);
+  for (const entry of unchecked) console.error(`  ${entry}`);
+  console.error("\nEvery tracked file is readable in a fresh checkout. Fix the permissions,\nor remove the file from the index if it does not belong there.");
+  process.exit(1);
+}
 
 if (offenders.length > 0) {
   console.error(`Refusing ${offenders.length} tracked database artifact(s):\n`);
