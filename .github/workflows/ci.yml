@@ -28,6 +28,16 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # Report both legs. A failure on the floor and a failure on the newest LTS are
+      # different problems, and cancelling one to report the other hides which.
+      fail-fast: false
+      matrix:
+        # The FLOOR and the current Active LTS. Testing only one would make "Node 22+"
+        # a claim about a single version wearing a `+` — see CLAUDE.md, "the floor is a
+        # policy, not a number". Raise both when the floor moves.
+        node: ['22', '24']
+    name: test (node ${{ matrix.node }})
     steps:
       - uses: actions/checkout@v5
 
@@ -41,11 +51,11 @@ jobs:
           bun-version: latest
 
       # Node is the compatibility floor the kernel is written against, and `verify:node`
-      # exercises it. The version matches release.yml so a PR is gated by the same runtime
-      # that gates a publish.
+      # exercises it. `22` is the floor itself and matches release.yml, so a PR is gated by
+      # the same runtime that gates a publish; `24` is the Active LTS most developers have.
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
 
       - uses: denoland/setup-deno@v2
         with:

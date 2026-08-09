@@ -1,5 +1,5 @@
 // Node-floor SqlDriver implementation over `better-sqlite3`.
-// This is the driver `openDatabase` picks off Bun (Node 20+); the Bun path uses
+// This is the driver `openDatabase` picks off Bun (Node 22+); the Bun path uses
 // `bun:sqlite` (see bun-driver.ts). Both are the only modules in core that touch
 // a concrete SQLite binding.
 //

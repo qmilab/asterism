@@ -32,7 +32,7 @@
 // The request handler is written against the web-standard `Request`/`Response`, so
 // it is runtime-agnostic and testable without binding a socket. `serve()` is the
 // only runtime-specific seam: it wraps `handleRequest` in `Bun.serve` under Bun
-// and in `node:http` off Bun (Node 20+) — see `serve-node.ts`.
+// and in `node:http` off Bun (Node 22+) — see `serve-node.ts`.
 
 import {
   bearerToken,
@@ -406,7 +406,7 @@ export interface RunningServer {
 
 /**
  * Bind the HTTP endpoint and start listening. The single runtime seam in the
- * package: under Bun it binds with `Bun.serve`; off Bun (Node 20+) it binds with
+ * package: under Bun it binds with `Bun.serve`; off Bun (Node 22+) it binds with
  * `node:http` via {@link serveNode}. Everything else routes through the
  * runtime-agnostic {@link handleRequest}. Returns a handle with the resolved
  * port/host (useful when binding port 0) and a `stop()`.
