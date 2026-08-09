@@ -158,9 +158,11 @@ asterism serve <agent>                               start the local HTTP endpoi
 ## Coding standards
 
 - **TypeScript, strict.** `tsconfig.base.json` enables `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`. No `any` without a written reason.
-- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node 22+ is a *tested compatibility floor* — no Bun-only API in `core` without a Node fallback. Installing under npm / pnpm / yarn / Bun / Deno is settled and documented (`docs/installation.md`), including pnpm's native-build approval; cross-package `workspace:*` deps resolve to concrete versions at pack time, so a published tarball installs under any of them.
+- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node **22.19+** is the *tested compatibility floor* for the installed CLI — no Bun-only API in `core` without a Node fallback. Installing under npm / pnpm / yarn / Bun / Deno is settled and documented (`docs/installation.md`), including pnpm's native-build approval; cross-package `workspace:*` deps resolve to concrete versions at pack time, so a published tarball installs under any of them.
 
   **The floor is a policy, not a number: it is the oldest Node LTS still in support.** Node lines reach end-of-life each April, so the floor is re-checked then and raised to the next supported LTS — a floor left to expire quietly is how `>=20` came to be documented four months after Node 20 went EOL (2026-04-30). Raise it deliberately, not when something breaks.
+
+  **A dependency can raise the effective minimum WITHIN that line, and the published number must reflect it.** The LTS line says 22; `@earendil-works/pi-*` declares `engines.node >= 22.19.0`, so anything that pulls Pi — `adapter-pi`, and `cli` through it — carries `>=22.19.0`, and that is the number every user-facing doc states, because the CLI is what people install. Packages that do not pull Pi keep the honest `>=22.0.0`: over-declaring is a smaller lie than under-declaring, but it is still one. **When bumping a dependency, re-derive this** rather than assuming the line floor still holds — `npm view <pkg>@<version> engines --json` across every third-party dependency, in every dep kind, is the whole check.
 
   Two things this floor does *not* mean, both worth knowing before leaning on it:
 

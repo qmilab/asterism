@@ -19,7 +19,7 @@ page.
 
 ## Before you start
 
-You need a JavaScript runtime (Node 22+, Bun, or Deno) and, for the parts where
+You need a JavaScript runtime (Node 22.19+, Bun, or Deno) and, for the parts where
 the agent actually does something, a model. If you haven't yet, skim
 [Installation](./installation.md) — it covers all three runtimes and the
 model setup. This page assumes you can run `asterism` (or a runner prefix like

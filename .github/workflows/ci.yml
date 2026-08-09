@@ -33,10 +33,12 @@ jobs:
       # different problems, and cancelling one to report the other hides which.
       fail-fast: false
       matrix:
-        # The FLOOR and the current Active LTS. Testing only one would make "Node 22+"
-        # a claim about a single version wearing a `+` — see CLAUDE.md, "the floor is a
-        # policy, not a number". Raise both when the floor moves.
-        node: ['22', '24']
+        # The FLOOR ITSELF and the current Active LTS. `22.19` is pinned rather than
+        # `22`, which would resolve to the newest 22.x and never exercise the boundary the
+        # manifests actually claim — the floor is 22.19.0 because `@earendil-works/pi-*`
+        # requires it. Testing only one version would make the `+` a claim about nothing.
+        # Raise both when the floor moves; see CLAUDE.md, "the floor is a policy".
+        node: ['22.19', '24']
     name: test (node ${{ matrix.node }})
     steps:
       - uses: actions/checkout@v5
@@ -51,8 +53,8 @@ jobs:
           bun-version: latest
 
       # Node is the compatibility floor the kernel is written against, and `verify:node`
-      # exercises it. `22` is the floor itself and matches release.yml, so a PR is gated by
-      # the same runtime that gates a publish; `24` is the Active LTS most developers have.
+      # exercises it: `22.19` is the exact floor the published CLI declares, and `24` is the
+      # Active LTS most developers actually have.
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
