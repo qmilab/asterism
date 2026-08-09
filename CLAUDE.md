@@ -158,7 +158,7 @@ asterism serve <agent>                               start the local HTTP endpoi
 ## Coding standards
 
 - **TypeScript, strict.** `tsconfig.base.json` enables `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`. No `any` without a written reason.
-- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node 22+ is a *tested compatibility floor* — no Bun-only API in `core` without a Node fallback. **First task before depending on Bun anywhere: run the Pi-on-Bun spike** and record the result. Multi-package-manager install is a later concern.
+- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node 22+ is a *tested compatibility floor* — no Bun-only API in `core` without a Node fallback. Installing under npm / pnpm / yarn / Bun / Deno is settled and documented (`docs/installation.md`), including pnpm's native-build approval; cross-package `workspace:*` deps resolve to concrete versions at pack time, so a published tarball installs under any of them.
 
   **The floor is a policy, not a number: it is the oldest Node LTS still in support.** Node lines reach end-of-life each April, so the floor is re-checked then and raised to the next supported LTS — a floor left to expire quietly is how `>=20` came to be documented four months after Node 20 went EOL (2026-04-30). Raise it deliberately, not when something breaks.
 
