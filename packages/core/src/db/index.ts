@@ -13,7 +13,7 @@ export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./driver.js";
  * - **Deno** → the built-in `node:sqlite`. Deno cannot load `better-sqlite3`
  *   (a legacy V8/nan native addon whose ABI Deno does not expose), so it gets
  *   the runtime's own SQLite instead — no native build, no install-script gate.
- * - **Node 20+** → `better-sqlite3` (a native addon with prebuilt binaries).
+ * - **Node 22+** → `better-sqlite3` (a native addon with prebuilt binaries).
  *
  * All three implement the same `SqlDriver`, so nothing else in core depends on
  * which runtime opened the database. Each concrete binding is loaded lazily

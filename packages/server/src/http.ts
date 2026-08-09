@@ -78,7 +78,7 @@ export function sseFrame(event: string, data: unknown): string {
  * this wraps it in the web-standard `ReadableStream`/`TextEncoder` plumbing,
  * guarantees the stream is closed, and turns any unexpected throw into a generic
  * `error` frame (never leaking an internal message, matching the buffered 500).
- * Runtime-neutral (Bun and Node 20+) like the rest of the surface.
+ * Runtime-neutral (Bun and Node 22+) like the rest of the surface.
  */
 export function sseResponse(
   produce: (send: (event: string, data: unknown) => void) => Promise<void>,

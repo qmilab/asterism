@@ -585,7 +585,7 @@ export interface ServeConsoleOptions extends ConsoleDeps {
 
 /**
  * Bind the console endpoint and start listening. The single runtime seam: under Bun
- * it binds with `Bun.serve`; off Bun (Node 20+) it binds with `node:http` via the
+ * it binds with `Bun.serve`; off Bun (Node 22+) it binds with `node:http` via the
  * same `serveNode` `serve` uses. Everything else routes through the runtime-agnostic
  * {@link handleConsoleRequest}. Returns a handle with the resolved port/host (useful
  * when binding port 0, as the self-hosted dashboard does) and a `stop()`.

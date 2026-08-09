@@ -1,4 +1,4 @@
-// Node-floor HTTP binding for the endpoint (Node 20+).
+// Node-floor HTTP binding for the endpoint (Node 22+).
 //
 // The Bun path binds with `Bun.serve` (see `serve` in index.ts); off Bun this
 // binds with `node:http` instead. Both wrap the SAME runtime-neutral

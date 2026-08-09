@@ -19,7 +19,7 @@ concrete.
 ## Stack and conventions
 
 - **Runtime / package manager**: [Bun](https://bun.sh). Bun is the
-  recommended runtime; Node 20+ is a tested compatibility floor. Don't add a
+  recommended runtime; Node 22.19+ is a tested compatibility floor. Don't add a
   Bun-only API to the kernel without a Node fallback.
 - **Language**: TypeScript, strict mode, with `noUncheckedIndexedAccess` and
   `exactOptionalPropertyTypes` on. No `any` without a written reason.

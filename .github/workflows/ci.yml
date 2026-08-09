@@ -28,6 +28,18 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # Report both legs. A failure on the floor and a failure on the newest LTS are
+      # different problems, and cancelling one to report the other hides which.
+      fail-fast: false
+      matrix:
+        # The FLOOR ITSELF and the current Active LTS. `22.19` is pinned rather than
+        # `22`, which would resolve to the newest 22.x and never exercise the boundary the
+        # manifests actually claim — the floor is 22.19.0 because `@earendil-works/pi-*`
+        # requires it. Testing only one version would make the `+` a claim about nothing.
+        # Raise both when the floor moves; see CLAUDE.md, "the floor is a policy".
+        node: ['22.19', '24']
+    name: test (node ${{ matrix.node }})
     steps:
       - uses: actions/checkout@v5
 
@@ -41,17 +53,37 @@ jobs:
           bun-version: latest
 
       # Node is the compatibility floor the kernel is written against, and `verify:node`
-      # exercises it. The version matches release.yml so a PR is gated by the same runtime
-      # that gates a publish.
+      # exercises it: `22.19` is the exact floor the published CLI declares, and `24` is the
+      # Active LTS most developers actually have.
+      #
+      # THIS STEP MUST STAY BEFORE `bun install`. `better-sqlite3` is a NAN/V8 addon, not
+      # Node-API, so its binary is ABI-specific (`_node_register_module_v<abi>`); its install
+      # script is `prebuild-install || node-gyp rebuild`, and `prebuild-install` resolves the
+      # ABI from the Node that EXECUTES it — the one on PATH. Setting up Node first is
+      # therefore what makes each matrix leg fetch the addon its own runtime can load. Move
+      # this after the install and the floor leg fetches Bun's ABI instead, then fails in
+      # `verify:node` with a NODE_MODULE_VERSION mismatch that looks nothing like its cause.
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
 
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
       - run: bun install --frozen-lockfile
+
+      # Assert the invariant the step order above exists to hold, rather than discovering it
+      # broke three steps later. Loading the addon under the matrix Node is the whole test:
+      # a wrong-ABI binary throws here, named, instead of surfacing inside `verify:node`.
+      - name: Native addon loads under this Node
+        run: |
+          node -e '
+            const { createRequire } = require("node:module");
+            const req = createRequire(process.cwd() + "/packages/core/package.json");
+            req("better-sqlite3");
+            console.log(`better-sqlite3 loaded under Node ${process.version} (ABI ${process.versions.modules})`);
+          '
 
       # Compilation, then the suite. `bun run build` is `tsc -b` across the workspace's
       # project references, so a type error fails here rather than inside a test run.

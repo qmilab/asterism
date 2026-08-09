@@ -7,7 +7,7 @@ Run distinct local AI agents from one install — each with its own **soul, memo
 ## Quickstart
 
 ```bash
-npx @qmilab/asterism init     # Node 20+   (Bun: bunx --bun @qmilab/asterism init)
+npx @qmilab/asterism init     # Node 22.19+   (Bun: bunx --bun @qmilab/asterism init)
 
 # create two agents with distinct souls and autonomy
 asterism new writer  --soul casual-helper       --trust autonomous
@@ -29,7 +29,7 @@ asterism events tail client
 asterism reflect writer --review
 ```
 
-Requires [Node](https://nodejs.org) 20+ or [Bun](https://bun.sh) 1.1+. The
+Requires [Node](https://nodejs.org) 22.19+ or [Bun](https://bun.sh) 1.1+. The
 installed binary runs under Node by default; under Bun, force Bun's runtime with
 `bunx --bun` (see the [installation docs](https://github.com/qmilab/asterism/blob/main/docs/installation.md)).
 

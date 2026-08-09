@@ -45,7 +45,7 @@ export interface HttpEmbedderConfig {
   /** Abort the request after this many milliseconds. Default {@link DEFAULT_TIMEOUT_MS}. */
   timeoutMs?: number;
   /**
-   * The `fetch` to use. Defaults to the global `fetch` (Bun/Node 20+). Injectable so
+   * The `fetch` to use. Defaults to the global `fetch` (Bun/Node 22+). Injectable so
    * a test can drive the client without a real network.
    */
   fetchImpl?: typeof fetch;
