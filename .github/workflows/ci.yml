@@ -1,0 +1,65 @@
+name: ci
+
+# Gates every pull request on what a release is already gated on, plus the checks that
+# only ran locally before: the full test suite, both runtime floors, and a guard against
+# committed database artifacts.
+#
+# Why this exists: until now the only check on a PR was the container image build
+# (docker.yml), which compiles the workspace but never runs `bun test` — that ran solely
+# on a release tag (release.yml). So a red suite could reach `main` and only be caught at
+# publish time, and every "CI green" on a PR meant "it compiles", not "it passes".
+#
+# Cheap checks first, so an obvious problem fails in seconds rather than after the suite.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch supersedes an in-flight run; `main` is never cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # No dependencies needed, and it reads only the first bytes of each tracked file,
+      # so it is the fastest thing here — run it before anything is installed.
+      - name: No committed database artifacts
+        run: node scripts/no-db-artifacts.mjs
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Node is the compatibility floor the kernel is written against, and `verify:node`
+      # exercises it. The version matches release.yml so a PR is gated by the same runtime
+      # that gates a publish.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - run: bun install --frozen-lockfile
+
+      # Compilation, then the suite. `bun run build` is `tsc -b` across the workspace's
+      # project references, so a type error fails here rather than inside a test run.
+      - run: bun run build
+      - run: bun test
+
+      # Both non-Bun runtimes. These re-run `tsc -b` (a no-op after the build above) and
+      # then drive the acceptance script under Node and Deno, which is what keeps
+      # "Bun-first, Node-floor" from quietly becoming Bun-only.
+      - run: bun run verify:node
+      - run: bun run verify:deno

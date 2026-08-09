@@ -14,6 +14,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "test": "bun test",
+    "check:artifacts": "node scripts/no-db-artifacts.mjs",
     "verify:node": "tsc -b && node scripts/node-acceptance.mjs",
     "verify:deno": "tsc -b && deno run -A scripts/deno-acceptance.mjs",
     "asterism": "bun run packages/cli/src/bin.ts"
