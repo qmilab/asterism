@@ -22,6 +22,8 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 const SQLITE_HEADER = Buffer.from("SQLite format 3\0", "latin1");
 const WAL_MAGICS = [0x377f0682, 0x377f0683];
+// A rollback journal's header magic. Present only SOMETIMES — see the note in `classify`.
+const JOURNAL_MAGIC = Buffer.from([0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]);
 
 /** Tracked paths this run could not read, and so could not vouch for. */
 const unchecked = [];
@@ -61,7 +63,23 @@ function classify(path) {
   if (bytes.length >= 4 && WAL_MAGICS.includes(bytes.readUInt32BE(0))) {
     return "a SQLite write-ahead log";
   }
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(JOURNAL_MAGIC)) {
+    return "a SQLite rollback journal";
+  }
+  // Name rules, for the two sidecars whose CONTENT cannot be relied on.
+  //
+  // A shared-memory file has no magic at all. A rollback journal has one — but only
+  // sometimes, which is worth stating because it is not what the file-format docs imply.
+  // Captured from real journals held open mid-transaction:
+  //
+  //     synchronous = OFF    → d9 d5 05 f9 20 a1 63 d7   (the documented magic)
+  //     synchronous = FULL   → 00 00 00 00 00 00 00 00   (zeroed)
+  //
+  // SQLite zeroes the header at points where a journal must not be replayed, so a
+  // content-only check would miss exactly the journals a durable configuration produces.
+  // Both sidecars only ever appear beside a database, which the rules above catch.
   if (/-shm$/.test(path)) return "a SQLite shared-memory file";
+  if (/-journal$/.test(path)) return "a SQLite rollback journal";
   return undefined;
 }
 
