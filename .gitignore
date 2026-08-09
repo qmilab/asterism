@@ -12,6 +12,13 @@ site/
 *.db
 *.db-journal
 *.sqlite
+# SQLite WAL/SHM sidecars — a database opened outside .asterism/ leaves these beside it
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*-wal
+*-shm
 .env
 .env.*
 
