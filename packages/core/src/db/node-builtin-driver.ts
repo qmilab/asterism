@@ -12,9 +12,11 @@
 //
 // The binding is loaded LAZILY (via `createRequire`) for the same reason the
 // other drivers defer theirs: a static `import … from "node:sqlite"` would make
-// the whole module graph fail to load on Node 20 (where the module does not yet
-// exist) even for callers that only want core's pure, importable surface. We
-// resolve it on first use, which `openDatabase` only reaches under Deno.
+// the whole module graph fail to load on a runtime that does not have the module,
+// even for callers that only want core's pure, importable surface. That is not
+// hypothetical at the current floor — `node:sqlite` landed in Node v22.5.0, so
+// Node 22.0–22.4 is inside the supported range and does not have it. We resolve
+// it on first use, which `openDatabase` only reaches under Deno.
 //
 // Types are declared locally rather than pulled from a Deno/Node type package:
 // the surface used is a handful of methods, and a local interface keeps the

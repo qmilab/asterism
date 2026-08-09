@@ -10,7 +10,7 @@
 // transport, validates the token, and runs the loop until stopped.
 //
 // No dependency on a Telegram SDK: the Bot API is a handful of JSON-over-HTTPS
-// calls, made with the global `fetch` (present on Node 20+ and Bun).
+// calls, made with the global `fetch` (present on Node 22+ and Bun).
 
 import { createDispatcher } from "./dispatch.js";
 import type { ChannelDeps, ChannelDispatcher } from "./dispatch.js";

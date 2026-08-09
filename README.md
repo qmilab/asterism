@@ -43,7 +43,7 @@ New here? The **[getting-started tutorial](./docs/getting-started.md)** is a
 deleting one, and remembers what you approve. The short version:
 
 ```bash
-npx @qmilab/asterism init     # Node 20+   (Bun: bunx --bun @qmilab/asterism init · Deno: deno run -A npm:@qmilab/asterism init)
+npx @qmilab/asterism init     # Node 22+   (Bun: bunx --bun @qmilab/asterism init · Deno: deno run -A npm:@qmilab/asterism init)
 
 # the commands below assume a global install — `npm install -g @qmilab/asterism` —
 # or keep prefixing each one with your runner (e.g. `npx @qmilab/asterism new …`)

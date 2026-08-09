@@ -158,7 +158,16 @@ asterism serve <agent>                               start the local HTTP endpoi
 ## Coding standards
 
 - **TypeScript, strict.** `tsconfig.base.json` enables `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`. No `any` without a written reason.
-- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node 20+ is a *tested compatibility floor* — no Bun-only API in `core` without a Node fallback. **First task before depending on Bun anywhere: run the Pi-on-Bun spike** and record the result. Multi-package-manager install is a later concern.
+- **Bun-first, Node-floor.** Develop, test (`bun test`), and build with Bun; Bun is the recommended runtime. Node 22+ is a *tested compatibility floor* — no Bun-only API in `core` without a Node fallback. **First task before depending on Bun anywhere: run the Pi-on-Bun spike** and record the result. Multi-package-manager install is a later concern.
+
+  **The floor is a policy, not a number: it is the oldest Node LTS still in support.** Node lines reach end-of-life each April, so the floor is re-checked then and raised to the next supported LTS — a floor left to expire quietly is how `>=20` came to be documented four months after Node 20 went EOL (2026-04-30). Raise it deliberately, not when something breaks.
+
+  Two things this floor does *not* mean, both worth knowing before leaning on it:
+
+  - **"Tested" means `verify:node`** — the acceptance script — not `bun test`, which runs under Bun's test runner and only there. The floor guarantees the product boots, resolves its drivers, and completes runs on Node; it does not guarantee kernel-level parity.
+  - **The floor is the oldest supported line, not the only tested one.** CI runs the floor *and* the current Active LTS (22 and 24 today), because a floor nothing above it is tested against is a claim about one version wearing a `+`.
+
+  When raising it: the eight package manifests and the root `engines`, `README.md`, `packages/cli/README.md`, `CONTRIBUTING.md`, `docs/installation.md`, `docs/getting-started.md`, the CI matrix, and any `Node <n>+` in source comments. Shipped `CHANGELOG.md` entries are history — never retro-edit them.
 - **ESM only.** `verbatimModuleSyntax`. No CommonJS.
 - **Secrets never in code or logs.** Credentials live in the local secret store, referenced by `valueRef`. The event log stores references, never values.
 - **Adapter boundary is law.** Outside `adapter-pi`, nothing imports Pi. Outside `reflect`, nothing imports a reflection model client.

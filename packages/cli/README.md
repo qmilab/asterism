@@ -7,7 +7,7 @@ Run distinct local AI agents from one install — each with its own **soul, memo
 ## Quickstart
 
 ```bash
-npx @qmilab/asterism init     # Node 20+   (Bun: bunx --bun @qmilab/asterism init)
+npx @qmilab/asterism init     # Node 22+   (Bun: bunx --bun @qmilab/asterism init)
 
 # create two agents with distinct souls and autonomy
 asterism new writer  --soul casual-helper       --trust autonomous
