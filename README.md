@@ -9,7 +9,7 @@
 [![npm](https://img.shields.io/npm/v/@qmilab/asterism?color=3b82f6&label=npm)](https://www.npmjs.com/package/@qmilab/asterism)
 [![Container image](https://github.com/qmilab/asterism/actions/workflows/docker.yml/badge.svg)](https://github.com/qmilab/asterism/actions/workflows/docker.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
-[![Runtime](https://img.shields.io/badge/runtime-Node%2022%2B%20%7C%20Bun%20%7C%20Deno-000000)](#quickstart)
+[![Runtime](https://img.shields.io/badge/runtime-Node%2022.19%2B%20%7C%20Bun%20%7C%20Deno-000000)](#quickstart)
 [![Status](https://img.shields.io/badge/status-Phase%202%20%C2%B7%20Governed%20Learning-6366f1)](#status)
 
 [**Why**](#why) · [**Quickstart**](#quickstart) · [**What you get**](#what-you-get) · [**Docs**](#documentation) · [**Lodestar**](#pairs-with-lodestar)
@@ -43,7 +43,7 @@ New here? The **[getting-started tutorial](./docs/getting-started.md)** is a
 deleting one, and remembers what you approve. The short version:
 
 ```bash
-npx @qmilab/asterism init     # Node 22+   (Bun: bunx --bun @qmilab/asterism init · Deno: deno run -A npm:@qmilab/asterism init)
+npx @qmilab/asterism init     # Node 22.19+   (Bun: bunx --bun @qmilab/asterism init · Deno: deno run -A npm:@qmilab/asterism init)
 
 # the commands below assume a global install — `npm install -g @qmilab/asterism` —
 # or keep prefixing each one with your runner (e.g. `npx @qmilab/asterism new …`)
