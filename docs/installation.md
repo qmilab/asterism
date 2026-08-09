@@ -6,7 +6,7 @@ computer unless you configure a model that does.
 
 ## Prerequisites
 
-- **A JavaScript runtime — [Node](https://nodejs.org) 20 or newer,
+- **A JavaScript runtime — [Node](https://nodejs.org) 22 or newer,
   [Bun](https://bun.sh) 1.1.0 or newer, or [Deno](https://deno.com) 2 or newer.**
   The `asterism` command runs on all three; Node 22+ is the floor every install
   can rely on. To install Bun:

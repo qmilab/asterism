@@ -29,7 +29,7 @@ asterism events tail client
 asterism reflect writer --review
 ```
 
-Requires [Node](https://nodejs.org) 20+ or [Bun](https://bun.sh) 1.1+. The
+Requires [Node](https://nodejs.org) 22+ or [Bun](https://bun.sh) 1.1+. The
 installed binary runs under Node by default; under Bun, force Bun's runtime with
 `bunx --bun` (see the [installation docs](https://github.com/qmilab/asterism/blob/main/docs/installation.md)).
 
