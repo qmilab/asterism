@@ -81,12 +81,28 @@ if (unchecked.length > 0) {
   process.exit(1);
 }
 
+/**
+ * Quote a path for a POSIX shell. Single quotes suppress every expansion, with `'` itself
+ * escaped by closing, emitting a literal, and reopening.
+ *
+ * `JSON.stringify` is NOT good enough here even though it looks like quoting: it produces
+ * DOUBLE quotes, inside which a shell still performs command substitution. A tracked file
+ * named `$(id -u).db` — git permits nearly any byte in a filename — would print as
+ * `git rm --cached "$(id -u).db"`, and a maintainer copying that line out of a CI log would
+ * execute the substitution. The offending paths are untrusted input, and this line exists to
+ * be pasted, so it has to be safe to paste. [Codex review P2.]
+ */
+function shellQuote(path) {
+  return `'${path.replaceAll("'", `'\\''`)}'`;
+}
+
 if (offenders.length > 0) {
   console.error(`Refusing ${offenders.length} tracked database artifact(s):\n`);
   for (const { path, kind } of offenders) console.error(`  ${path} — ${kind}`);
   console.error(
     "\nThese are local runtime state, not source. Remove them from the index:\n" +
-      `  git rm --cached ${offenders.map((f) => JSON.stringify(f.path)).join(" ")}\n` +
+      // `--` ends option parsing, so a path beginning with `-` is treated as a path.
+      `  git rm --cached -- ${offenders.map((f) => shellQuote(f.path)).join(" ")}\n` +
       "\nIf one was created by a script, check what path it was handed — a database named\n" +
       "after a stray argument is the usual cause.",
   );

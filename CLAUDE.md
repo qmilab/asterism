@@ -167,7 +167,9 @@ asterism serve <agent>                               start the local HTTP endpoi
   - **"Tested" means `verify:node`** — the acceptance script — not `bun test`, which runs under Bun's test runner and only there. The floor guarantees the product boots, resolves its drivers, and completes runs on Node; it does not guarantee kernel-level parity.
   - **The floor is the oldest supported line, not the only tested one.** CI runs the floor *and* the current Active LTS (22 and 24 today), because a floor nothing above it is tested against is a claim about one version wearing a `+`.
 
-  When raising it: the eight package manifests and the root `engines`, `README.md`, `packages/cli/README.md`, `CONTRIBUTING.md`, `docs/installation.md`, `docs/getting-started.md`, the CI matrix, and any `Node <n>+` in source comments. Shipped `CHANGELOG.md` entries are history — never retro-edit them.
+  When raising it: the eight package manifests and the root `engines`, `README.md` (prose **and** the URL-encoded shields.io runtime badge), `packages/cli/README.md` (two places), `CONTRIBUTING.md`, `docs/installation.md` (two places), `docs/getting-started.md`, the CI matrix, and any `Node <n>+` in source comments. Shipped `CHANGELOG.md` entries are history — never retro-edit them.
+
+  **Grepping for `Node 20` will not find them all**, which is how a bump missed three places. Two shapes hide from that pattern: a markdown link splits the words (`[Node](https://nodejs.org) 20 or newer` contains no `Node 20`), and the badge is percent-encoded (`Node%2020%2B`). Sweep with something like `grep -rniE "node[^0-9]{0,60}\b(18|19|20|21)\b|Node%2020"` and read the hits.
 - **ESM only.** `verbatimModuleSyntax`. No CommonJS.
 - **Secrets never in code or logs.** Credentials live in the local secret store, referenced by `valueRef`. The event log stores references, never values.
 - **Adapter boundary is law.** Outside `adapter-pi`, nothing imports Pi. Outside `reflect`, nothing imports a reflection model client.

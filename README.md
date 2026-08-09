@@ -9,7 +9,7 @@
 [![npm](https://img.shields.io/npm/v/@qmilab/asterism?color=3b82f6&label=npm)](https://www.npmjs.com/package/@qmilab/asterism)
 [![Container image](https://github.com/qmilab/asterism/actions/workflows/docker.yml/badge.svg)](https://github.com/qmilab/asterism/actions/workflows/docker.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
-[![Runtime](https://img.shields.io/badge/runtime-Node%2020%2B%20%7C%20Bun%20%7C%20Deno-000000)](#quickstart)
+[![Runtime](https://img.shields.io/badge/runtime-Node%2022%2B%20%7C%20Bun%20%7C%20Deno-000000)](#quickstart)
 [![Status](https://img.shields.io/badge/status-Phase%202%20%C2%B7%20Governed%20Learning-6366f1)](#status)
 
 [**Why**](#why) · [**Quickstart**](#quickstart) · [**What you get**](#what-you-get) · [**Docs**](#documentation) · [**Lodestar**](#pairs-with-lodestar)
