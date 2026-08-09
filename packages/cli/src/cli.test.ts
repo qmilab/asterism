@@ -3804,6 +3804,23 @@ test("a channel withdrawn mid-run reports BOTH facts: the work ran, nothing came
   expect(said).toContain("was withdrawn while it was working");
   expect(said).toContain("finished in its own space");
   expect(said).not.toContain("CALLEE PROSE");
+
+  // RUN the command the surface just told the operator to run, rather than matching its text.
+  // A suggestion is a promise, and the only way to know it is kept is to keep it: the previous
+  // wording named `runs <agent> <run>`, which takes only an agent and silently ignored the id,
+  // listing every run instead of the one named. [Codex review R7 P3.]
+  const suggestion = said
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.startsWith("asterism "));
+  expect(suggestion).toBeDefined();
+  const argv = suggestion!.split(/\s+/).slice(1);
+  const [outAt, errAt] = [h.out.length, h.err.length];
+  expect(await runCli(argv, h.io)).toBe(0);
+  const shown = [...h.out.slice(outAt), ...h.err.slice(errAt)].join("\n");
+  // ...and it really is scoped to that run, not a list of everything the agent has ever done.
+  expect(shown).toContain("run=");
+  expect(shown).toMatch(/Activity for b/);
 });
 
 test("a withdrawn channel over a PAUSED callee points at the confirmation, not at 'finished'", async () => {

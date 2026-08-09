@@ -1717,9 +1717,14 @@ function withdrawnMidRun(io: CliIO, toName: string, runId: string, status: RunSt
     io.err(`answer — the withdrawal does not resolve it:  asterism confirm ${toName} ${shortId(runId)}`);
     return 1;
   }
+  // `events tail --run`, not `runs <agent> <run>`: the latter takes only an agent and would
+  // SILENTLY IGNORE the id, listing every run instead of the one named — misleading precisely
+  // when the agent has many. This form actually filters, and shows what the run DID, which is
+  // what the sentence promises. [Codex review R7 P3.]
   io.err(
-    `${toName} ${status === "failed" ? "stopped" : "finished"} in its own space — see what it did:  asterism runs ${toName} ${shortId(runId)}`,
+    `${toName} ${status === "failed" ? "stopped" : "finished"} in its own space — see what it did:`,
   );
+  io.err(`  asterism events tail ${toName} --run ${shortId(runId)}`);
   return 1;
 }
 
