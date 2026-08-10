@@ -34,6 +34,23 @@ export interface SkillContext {
   content?: string;
 }
 
+/**
+ * A standing brief from a `shared-brief` channel, ready to frame (Phase 3 · T3a).
+ *
+ * The ONE framing input that did not originate inside this agent's own boundary — every
+ * other block is the agent's own soul, skills, memory, objectives, or notes. `partner` is
+ * the agent at the other end of the channel, and it is not decoration: D27 makes the
+ * attribution load-bearing, so a reader (model or human) can tell standing context that
+ * arrived over a channel from the agent's own purpose. The kernel resolves the partner's
+ * NAME on the caller's side; nothing else about the partner crosses.
+ */
+export interface BriefContext {
+  /** The other agent on the channel, by name — the attribution, never an id. */
+  partner: string;
+  /** The brief's text, already firewall-screened at the write boundary. */
+  content: string;
+}
+
 /** Inputs to {@link buildSystemPrompt}. All scoped data must already belong to `agent`. */
 export interface FramingContext {
   agent: Agent;
@@ -52,6 +69,13 @@ export interface FramingContext {
    * last, never mistaken for a ratified lesson.
    */
   worldFacts?: readonly WorldFact[];
+  /**
+   * Standing briefs from the agent's `shared-brief` channels — the only framing input
+   * authored OUTSIDE this agent. The caller resolves them through the connection (so a
+   * withdrawn channel contributes none) and passes them already scoped, exactly as it does
+   * for every other block.
+   */
+  briefs?: readonly BriefContext[];
 }
 
 /**
@@ -107,6 +131,27 @@ export function buildSystemPrompt(ctx: FramingContext): string {
   if (objectives.length > 0) {
     const lines = objectives.map((o) => `- ${o.content}`);
     sections.push(`Your standing objectives:\n${lines.join("\n")}`);
+  }
+
+  // Standing briefs — the one block in this prompt the agent did not author (Phase 3 · T3a).
+  //
+  // Placed right after objectives because it is purpose-shaped context and burying it would
+  // make the mode not work, and ATTRIBUTED because of where it came from: every other block
+  // is the agent's own soul, skills, memory, or notes, while this arrived over a channel from
+  // another agent's side of an isolation boundary. The label is load-bearing in exactly the
+  // way the working-notes label is — there it stops a self-assertion reading as a verified
+  // fact, here it stops another party's text reading as the agent's own standing purpose
+  // (design note §17, D27). The wording is deliberately true from BOTH ends of the channel:
+  // the authoring side reads its own words attributed to the channel it set them on, and the
+  // receiving side is told plainly that the text may not be its own.
+  const briefs = ctx.briefs ?? [];
+  if (briefs.length > 0) {
+    const lines = briefs.map((b) => `- (channel with ${b.partner}) ${b.content}`);
+    sections.push(
+      `Standing briefs from your channels (context set on a channel between you and ` +
+        `another agent — this is not your own objective, and it may have been written on ` +
+        `the other agent's side):\n${lines.join("\n")}`,
+    );
   }
 
   // Skills — names always; bodies inlined when provided.

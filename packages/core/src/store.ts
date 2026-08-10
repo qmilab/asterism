@@ -21,12 +21,14 @@ import {
 import { CredentialRepository } from "./repositories/credentials.js";
 import { ConnectionRepository } from "./repositories/connections.js";
 import { ExchangeRepository } from "./repositories/exchanges.js";
+import { BriefRepository, BRIEF_CONNECTION_MODE } from "./repositories/briefs.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
 import { InstallSettingsRepository } from "./repositories/install-settings.js";
 import type {
   Agent,
   AgentSettings,
+  Brief,
   CapabilityGrant,
   CapabilityStanding,
   Connection,
@@ -62,6 +64,17 @@ import { worldFactFramingText } from "./types.js";
  * repository per entity. Every scoped repository asserts an `agentId` before it
  * touches the driver — the agent is the isolation boundary.
  */
+
+/**
+ * Internal rollback signal for {@link AsterismStore.setBrief}: the conditional INSERT
+ * declined because the `shared-brief` grant did not hold at the moment of the write. Thrown
+ * only to abort the surrounding transaction (so a supersede cannot commit without its
+ * replacement) and caught in the same method — it never reaches a caller, which is why it
+ * carries no message worth surfacing. A withdrawn channel is an ordinary outcome, not an
+ * error, and the public method reports it as `undefined`.
+ */
+class BriefGrantWithdrawnError extends Error {}
+
 export class AsterismStore {
   readonly agents: AgentRepository;
   readonly runs: RunRepository;
@@ -76,6 +89,8 @@ export class AsterismStore {
   readonly connections: ConnectionRepository;
   /** What actually crossed a connection, as resolvable references — the record `fetch` reads. */
   readonly exchanges: ExchangeRepository;
+  /** Standing operator-authored briefs on `shared-brief` channels (Phase 3 · T3a). */
+  readonly briefs: BriefRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
   /** Per-agent kernel settings — the operator-configurable tunables (e.g. recall budget). */
@@ -98,6 +113,7 @@ export class AsterismStore {
     this.credentials = new CredentialRepository(driver);
     this.connections = new ConnectionRepository(driver);
     this.exchanges = new ExchangeRepository(driver);
+    this.briefs = new BriefRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
     this.installSettings = new InstallSettingsRepository(driver);
@@ -1669,6 +1685,142 @@ export class AsterismStore {
       });
       return connection;
     });
+  }
+
+  /**
+   * Set (or replace) the standing brief on a `shared-brief` connection, recording
+   * `brief.set` on BOTH agents' logs. Returns the new brief.
+   *
+   * The mirror of {@link createObjective} — a brief is operator-authored free text that
+   * frames runs, so it is screened by the memory firewall on the write path and audited
+   * either way. On a refusal `brief.blocked` is emitted (the findings, never the blocked
+   * text) and the error rethrows, so the refusal stays on the record. The emit happens
+   * AFTER the transaction has rolled back, which is what keeps the audit from being erased
+   * along with the write it describes.
+   *
+   * The difference from an objective is the audience, and it is the whole reason this mode
+   * needed its own decisions: an objective frames the agent that declared it, while a brief
+   * frames ANOTHER agent's runs. So the block is emitted only on the AUTHOR's log — a
+   * refused brief touched the callee not at all, the same rule a withheld fetch follows —
+   * while a successful set is recorded on both, references only (brief id, connection id,
+   * both agent ids, mode). **The brief's text never appears in an event**, for the same
+   * reason a handoff's task input never appears in `handoff.requested`.
+   *
+   * Replacing is a supersede, not an update: the existing active brief is ended and a new
+   * row inserted, both inside one transaction, so a channel never has two active briefs and
+   * the history of what framed runs stays intact (D28). The partial unique index is the
+   * storage-layer backstop.
+   *
+   * Returns `undefined` when the grant does not hold at the moment of the write — the
+   * connection is not a live `shared-brief` channel between these two agents. This method is
+   * PUBLIC, so it cannot lean on a surface having checked: a caller can hold a `Connection`
+   * for another mode, or one that another operator revoked a moment ago, and neither may
+   * leave a persisted brief and a `brief.set` on both logs describing context that will never
+   * frame anything. The test lives inside {@link BriefRepository.create}'s INSERT rather than
+   * as a re-read here, so there is no window between checking and writing at all.
+   * [Codex review R1 P2.]
+   */
+  setBrief(connection: Connection, content: string): Brief | undefined {
+    let brief: Brief;
+    try {
+      brief = this.driver.transaction(() => {
+        // Ended first so the unique index is free for the insert. A firewall refusal throws
+        // inside `create`, which rolls this back — a blocked brief must not end the one that
+        // was already framing runs.
+        this.briefs.endActiveForConnection(connection);
+        const created = this.briefs.create(connection, content);
+        // The conditional INSERT declined: the grant did not hold. Thrown rather than
+        // returned so the supersede above rolls back WITH it — a brief that could not be
+        // written must never have cleared the one that was already there. Caught below and
+        // turned back into an ordinary `undefined`; it never escapes this method.
+        //
+        // HONEST ABOUT COVERAGE: since review round 2 gave `endActiveForConnection` the
+        // identical grant predicate, no in-process caller can reach this branch — the end
+        // and the insert now decline on exactly the same conditions, so an end that succeeds
+        // is followed by an insert that succeeds. Deleting the throw breaks no test, and that
+        // was measured rather than assumed. It is kept for two reasons worth stating rather
+        // than leaving a reader to wonder:
+        //
+        //   1. It is NOT provably unreachable across processes. That would require an
+        //      argument about exactly when SQLite takes the write lock for an UPDATE matching
+        //      zero rows — and review round 5 of the revoke slice established that an argument
+        //      resting on nobody mis-remembering SQLite's isolation rules is the weaker kind.
+        //   2. Its necessity would return the moment the two predicates drift, and a silent
+        //      supersede-without-replacement is the failure it prevents: context stripped from
+        //      both agents on behalf of a write that never landed.
+        if (!created) throw new BriefGrantWithdrawnError();
+        return created;
+      });
+    } catch (err) {
+      if (err instanceof BriefGrantWithdrawnError) return undefined;
+      if (err instanceof MemoryFirewallError) {
+        this.emit(connection.fromAgentId, "brief.blocked", { findings: err.findings });
+      }
+      throw err;
+    }
+    // Every field here is one the grant test VERIFIED against the connection row: the id, and
+    // both participants (the predicate compares them). `mode` is the exception and is
+    // deliberately NOT read off the caller's object — a `Connection` whose id/from/to match a
+    // live row but whose `mode` field was mutated passed the SQL check and then had that field
+    // copied into the audit, so a references-only log could claim a brief was set on `handoff`
+    // while the authorizing row said otherwise. The write only ever succeeds on a
+    // `shared-brief` row, so the verified value is the constant the predicate itself binds.
+    // [Codex review R4 P2.]
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "brief.set", {
+      briefId: brief.id,
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: BRIEF_CONNECTION_MODE,
+    });
+    return brief;
+  }
+
+  /**
+   * End the standing brief on a connection, recording `brief.ended` on BOTH agents' logs.
+   * Returns the ended brief, or undefined when there was none TO end — either because the
+   * channel carries no brief or because it is no longer a live `shared-brief` grant. In
+   * either case NOTHING is emitted, so re-ending is a silent no-op rather than a second
+   * withdrawal in the audit (the same discipline {@link revokeConnection} follows), and a
+   * caller holding a stale `Connection` cannot change another channel's state.
+   *
+   * Terminal: reinstating means calling {@link setBrief} again, which mints a fresh row.
+   */
+  endBrief(connection: Connection): Brief | undefined {
+    return this.driver.transaction(() => {
+      const brief = this.briefs.endActiveForConnection(connection);
+      if (!brief) return undefined;
+      // The verified mode, not the caller's field — see the note on `brief.set` above. The
+      // end path had the identical defect, which is why the fix is stated once and applied to
+      // both rather than to the one a report happened to name.
+      this.emitToBoth(connection.fromAgentId, connection.toAgentId, "brief.ended", {
+        briefId: brief.id,
+        connectionId: connection.id,
+        fromAgentId: connection.fromAgentId,
+        toAgentId: connection.toAgentId,
+        mode: BRIEF_CONNECTION_MODE,
+      });
+      return brief;
+    });
+  }
+
+  /**
+   * The briefs that currently FRAME this agent's runs — active briefs on active
+   * `shared-brief` channels the agent participates in. The read `executeRun` makes at
+   * framing time, so the grant is evaluated when the text is used rather than when it was
+   * written, and a revoked channel yields nothing.
+   */
+  listActiveBriefsForAgent(agentId: string): Brief[] {
+    return this.briefs.listActiveForAgent(agentId);
+  }
+
+  /**
+   * Every brief an agent participates in, in any status, for `briefs <agent>`. History, not
+   * permission — a superseded brief and one whose channel was withdrawn both still show,
+   * exactly as {@link listConnections} keeps revoked rows listed.
+   */
+  listBriefs(agentId: string): Brief[] {
+    return this.briefs.listForAgent(agentId);
   }
 
   /**

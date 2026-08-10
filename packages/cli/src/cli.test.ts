@@ -3621,10 +3621,10 @@ test("connect rejects a self-connection and an unimplemented mode", async () => 
   expect(h.err.join("\n")).toMatch(/can't connect to itself/i);
 
   await runCli(["new", "b", "--trust", "propose"], h.io);
-  // `shared-brief` is the next mode with no implementation (T3) — `artifact-only` became
-  // real in T2a and `read-summary` in T2b, so the "unknown mode" assertion moves rather than
-  // disappearing.
-  expect(await runCli(["connect", "a", "b", "--mode", "shared-brief"], h.io)).toBe(1);
+  // `delegated-tool` is the LAST mode with no implementation — `artifact-only` became real
+  // in T2a, `read-summary` in T2b and `shared-brief` in T3a, so the "unknown mode" assertion
+  // moves rather than disappearing. It retires when #123 unblocks T3b.
+  expect(await runCli(["connect", "a", "b", "--mode", "delegated-tool"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
   // The now-real modes open channels.
   expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(0);
@@ -3741,7 +3741,7 @@ test("disconnect rejects a malformed or unknown --mode rather than falling throu
 
   expect(await runCli(["disconnect", "a", "b", "--mode"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/--mode needs a value/i);
-  expect(await runCli(["disconnect", "a", "b", "--mode", "shared-brief"], h.io)).toBe(1);
+  expect(await runCli(["disconnect", "a", "b", "--mode", "delegated-tool"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
   // Neither malformed invocation withdrew the open channel.
   const conns = await capture(["connections", "a"], h.io);
@@ -3955,6 +3955,115 @@ test("an agent NAMED summary can still be a caller — summary is a top-level ve
   // The R2 rule holds: nothing is dispatched as a sub-verb from a position holding an agent.
   const out = await capture(["summary", "summary", "researcher"], h.io);
   expect(out).toMatch(/researcher/);
+});
+
+test("brief/unbrief/briefs usage errors name the right form", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["brief"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism brief <from> <to> "<brief>"/);
+  expect(await runCli(["brief", "a"], h.io)).toBe(1);
+  // A brief is REQUIRED — unlike `summary`'s optional focus, an empty tail is a usage error.
+  expect(await runCli(["brief", "a", "b"], h.io)).toBe(1);
+  expect(await runCli(["unbrief"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism unbrief <from> <to>/);
+  expect(await runCli(["briefs"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism briefs <agent>/);
+});
+
+test("brief reports an unknown agent rather than opening anything", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["brief", "ghost", "phantom", "text"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/ghost/);
+  expect(await runCli(["unbrief", "ghost", "phantom"], h.io)).toBe(1);
+  expect(await runCli(["briefs", "ghost"], h.io)).toBe(1);
+});
+
+test("a brief beginning with a dash reaches the kernel VERBATIM", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "helper", "--mode", "shared-brief"], h.io);
+  // The shared exchange arg parser takes the tail raw, so a flag-shaped brief is not eaten as
+  // an option. This is exactly why ending a brief is a separate verb rather than a `--end`
+  // flag: the rule that protects this text would swallow the flag (D29).
+  expect(await runCli(["brief", "writer", "helper", "--urgent:", "ship", "Friday"], h.io)).toBe(0);
+  const out = await capture(["briefs", "writer"], h.io);
+  expect(out).toContain("--urgent: ship Friday");
+});
+
+test("an agent NAMED brief can still be a caller — brief is a top-level verb, not a sub-verb", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "brief", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "propose"], h.io);
+  await runCli(["connect", "brief", "helper", "--mode", "shared-brief"], h.io);
+  // `brief brief helper "..."` — the verb, then an agent that happens to share its name. The
+  // R2 rule holds: nothing is dispatched as a sub-verb from a position holding an agent.
+  expect(await runCli(["brief", "brief", "helper", "ship by Friday"], h.io)).toBe(0);
+  const out = await capture(["briefs", "brief"], h.io);
+  expect(out).toContain("ship by Friday");
+  // ...and the same for the verbs that would have been its sub-verbs under the rejected shape.
+  expect(await runCli(["unbrief", "brief", "helper"], h.io)).toBe(0);
+});
+
+test("briefs on an agent with none says so rather than printing an empty list", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  const out = await capture(["briefs", "writer"], h.io);
+  expect(out).toMatch(/no briefs/i);
+  expect(out).toContain("asterism brief writer <other>");
+});
+
+test("briefs explains a non-framing row from the channel's OBSERVED status", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "helper", "--mode", "shared-brief"], h.io);
+  await runCli(["brief", "writer", "helper", "ship by Friday"], h.io);
+  expect(await capture(["briefs", "writer"], h.io)).toContain("framing every run of both agents");
+
+  // Withdraw the channel: the brief row stays `active` and stops framing, and the listing must
+  // say WHY from the connection's real status rather than inferring it from "active but not
+  // framing" — an inference that was wrong for a live channel of another mode, and whose
+  // correctness would otherwise depend on a guarantee living in the kernel.
+  await runCli(["disconnect", "writer", "helper", "--mode", "shared-brief"], h.io);
+  const after = await capture(["briefs", "writer"], h.io);
+  expect(after).toContain("channel withdrawn — no longer framing");
+  expect(after).toContain("ship by Friday");
+});
+
+test("connect names the brief verb for a shared-brief channel", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "propose"], h.io);
+  const out = await capture(["connect", "writer", "helper", "--mode", "shared-brief"], h.io);
+  // Each mode's hint names the verb it actually enables — telling a shared-brief channel's
+  // operator to "hand off" would be wrong, exactly as it would for read-summary.
+  expect(out).toContain("asterism brief writer helper");
+  expect(out).not.toContain("asterism handoff");
+});
+
+test("setting a brief needs no model — it builds no adapter, because nothing runs", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "helper", "--mode", "shared-brief"], h.io);
+  const io = {
+    ...h.io,
+    makeAdapter: () => {
+      throw new Error("brief must not build an adapter");
+    },
+  };
+  expect(await runCli(["brief", "writer", "helper", "ship by Friday"], io)).toBe(0);
+  expect(await runCli(["unbrief", "writer", "helper"], io)).toBe(0);
+  expect(await runCli(["briefs", "writer"], io)).toBe(0);
 });
 
 test("connect names the summary verb for a read-summary channel", async () => {

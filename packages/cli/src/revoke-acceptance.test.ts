@@ -207,7 +207,7 @@ describe("Phase 3 · connection revoke — acceptance", () => {
     ambiguousOut = await run(["disconnect", "writer", "helper"]);
 
     // Malformed invocations, before anything is withdrawn.
-    badModeOut = await run(["disconnect", "writer", "helper", "--mode", "shared-brief"]);
+    badModeOut = await run(["disconnect", "writer", "helper", "--mode", "delegated-tool"]);
     valuelessModeOut = await run(["disconnect", "writer", "helper", "--mode"]);
 
     // (1) Withdraw the artifact-only channel by name.
@@ -309,7 +309,7 @@ describe("Phase 3 · connection revoke — acceptance", () => {
   });
 
   test("a malformed --mode is refused loudly rather than falling through to inference", () => {
-    expect(badModeOut).toContain('Unknown connection mode "shared-brief"');
+    expect(badModeOut).toContain('Unknown connection mode "delegated-tool"');
     expect(valuelessModeOut).toContain("--mode needs a value");
   });
 

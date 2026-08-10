@@ -127,10 +127,11 @@ test("every scoped connection method requires an agentId", () => {
 
 test("an unimplemented mode is refused at the write boundary", () => {
   // The repository validates the mode through the same enum chokepoint the kernel uses,
-  // so a connection in a mode nothing consumes can never be persisted. `shared-brief` is
-  // the next unimplemented mode (T3); `artifact-only` became real in T2a and `read-summary`
-  // in T2b, and both are asserted to persist below.
-  expect(() => store.createConnection(alice.id, bob.id, "shared-brief" as "handoff")).toThrow(
+  // so a connection in a mode nothing consumes can never be persisted. `delegated-tool` is
+  // the LAST unimplemented mode: `artifact-only` became real in T2a, `read-summary` in T2b
+  // and `shared-brief` in T3a, and all three are asserted to persist below. This assertion
+  // retires when the #123 prerequisite lands and T3b makes the fifth mode real (§17, D23).
+  expect(() => store.createConnection(alice.id, bob.id, "delegated-tool" as "handoff")).toThrow(
     /invalid connection mode/,
   );
 });

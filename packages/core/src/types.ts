@@ -115,13 +115,27 @@ export type CapabilityStanding = (typeof CAPABILITY_STANDINGS)[number];
  *   the rows themselves, and only what the operator has already ratified (`active` +
  *   `accepted`). Deterministic and kernel-owned: no model curates it, because nothing could
  *   re-impose the kernel's guarantees on generated text (design note §13, decision D16).
+ * - `shared-brief` — the first crossing that runs the OTHER WAY. Every mode above carries
+ *   the callee's output back to the caller; this one carries operator-authored text from
+ *   the caller's channel INTO the callee's framing, as standing context both participants
+ *   run under (design note §17, decision D24). Nothing of the callee's crosses back at all.
+ *   The text is firewall-screened before it is ever persisted (D26) and framed in its own
+ *   attributed block (D27), because it is the one thing in an agent's prompt that the agent
+ *   did not author.
  *
  * Only the modes with a real implementation are enumerated, so the write boundary
  * ({@link validateEnum}) can never persist a connection in a mode nothing consumes. The
- * remaining modes (`shared-brief`, `delegated-tool`) join this list as their thread (T3)
- * lands — never a half-built mode.
+ * last mode (`delegated-tool`) is deliberately absent: it means "the result of a tool the
+ * callee OWNS", and this product has no per-agent tool ownership and no credential-bearing
+ * capability, so over today's install-wide catalog it could only mean a live read into the
+ * callee's workspace (design note §17, decision D23; prerequisite tracked in #123).
  */
-export const CONNECTION_MODES = ["handoff", "artifact-only", "read-summary"] as const;
+export const CONNECTION_MODES = [
+  "handoff",
+  "artifact-only",
+  "read-summary",
+  "shared-brief",
+] as const;
 export type ConnectionMode = (typeof CONNECTION_MODES)[number];
 
 /**
@@ -185,6 +199,9 @@ export const EVENT_TYPES = [
   "artifact.fetched",
   "summary.requested",
   "summary.provided",
+  "brief.set",
+  "brief.ended",
+  "brief.blocked",
   "credential.added",
   "credential.rotated",
   "credential.removed",
@@ -431,6 +448,57 @@ export interface Connection {
   mode: ConnectionMode;
   status: ConnectionStatus;
   createdAt: string;
+}
+
+/**
+ * A {@link Brief}'s lifecycle. `active` frames runs; `ended` is history.
+ *
+ * Terminal in the same way {@link CONNECTION_STATUSES} is (design note §17, decision D28),
+ * and for the same reason one level down: there is no un-end, because that would quietly
+ * restore text to another agent's prompt. Reinstating a brief mints a fresh row.
+ */
+export const BRIEF_STATUSES = ["active", "ended"] as const;
+export type BriefStatus = (typeof BRIEF_STATUSES)[number];
+
+/**
+ * A standing, operator-authored brief on a `shared-brief` {@link Connection} — the shared
+ * *input* the mode's name refers to (design note §4, §17). While it is `active` and its
+ * connection is `active`, it frames EVERY run of BOTH participants (D24), which is what
+ * makes it standing context rather than a wordier handoff task.
+ *
+ * It is the phase's only A→B crossing of content: every other mode projects the callee's
+ * output back to the caller, while a brief puts caller-side text into the callee's system
+ * prompt. Three things carry that, and none of them lives here — the firewall screens the
+ * content before this row exists (D26), framing attributes it to the channel rather than
+ * merging it into the agent's own voice (D27), and the grant is re-read at every framing so
+ * a revoked channel un-frames the brief without touching it (D28).
+ *
+ * Scoping mirrors {@link Connection} and {@link Exchange}: two agent ids rather than one
+ * `agentId` column, because a brief belongs to a PAIR. Every read asserts a participant, so
+ * a third agent can neither read a brief nor be framed by one.
+ *
+ * Deliberately NO `reviewState`, unlike every other row that shapes a run. Each of those has
+ * one because a NON-HUMAN author can create it (reflection proposes memories and objectives;
+ * the agent self-writes working notes) — an operator-declared objective is already born
+ * `accepted`. Under D4 the only author of a brief is the operator, so the column would hold
+ * exactly one value with no path that writes another. D25 defers it with a named promotion
+ * trigger: **a brief authored by a non-operator** — T5 (an agent composes one mid-run) or
+ * Track B (the caller's human and the callee's human are different people).
+ */
+export interface Brief {
+  id: string;
+  /** The `shared-brief` channel this brief sits on — the permission it is framed under. */
+  connectionId: string;
+  /** The channel's initiating agent (the authoring side). */
+  fromAgentId: string;
+  /** The channel's receiving agent — the one whose framing this text enters. */
+  toAgentId: string;
+  /** The brief's text. Firewall-screened before it was persisted; never appears in an event. */
+  content: string;
+  status: BriefStatus;
+  createdAt: string;
+  /** When the brief stopped framing runs — set on supersede and on an explicit end. */
+  endedAt?: string;
 }
 
 /**

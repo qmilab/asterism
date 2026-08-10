@@ -280,6 +280,35 @@ CREATE INDEX IF NOT EXISTS idx_exchanges_resolve
 CREATE INDEX IF NOT EXISTS idx_exchanges_from ON exchanges(from_agent_id);
 CREATE INDEX IF NOT EXISTS idx_exchanges_to ON exchanges(to_agent_id);
 
+-- Standing operator-authored briefs on a shared-brief connection (Phase 3 T3a). Like
+-- connections and exchanges this row belongs to a PAIR, so it carries two agent ids
+-- rather than one agent_id column and every read asserts a participant. The content is
+-- firewall-screened before the insert (it frames another agent's runs), so no unscreened
+-- text ever reaches this table.
+--
+-- The partial unique index is the connections precedent verbatim: AT MOST ONE active
+-- brief per channel, so "the brief" is a definite noun and framing is deterministic.
+-- Superseding ends the old row and inserts a new one inside one transaction; ended rows
+-- coexist with the active one exactly as revoked connections coexist with a reconnect.
+--
+-- Note what is absent: no review_state. Every other row that frames a run has one because
+-- a non-human can author it; a brief's only author is the operator (design note §17, D25),
+-- and the trigger to promote the column is a non-operator author (T5 / Track B).
+CREATE TABLE IF NOT EXISTS briefs (
+  id            TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES connections(id),
+  from_agent_id TEXT NOT NULL REFERENCES agents(id),
+  to_agent_id   TEXT NOT NULL REFERENCES agents(id),
+  content       TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  ended_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_briefs_active_connection
+  ON briefs(connection_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_briefs_from ON briefs(from_agent_id);
+CREATE INDEX IF NOT EXISTS idx_briefs_to ON briefs(to_agent_id);
+
 -- An agent's earned standing per destructive capability — the "trust contract"
 -- underneath the coarse trust_level. Scoped by agent_id like every other table;
 -- one row per (agent, capability). standing is 'gated' or 'standing-grant'; only

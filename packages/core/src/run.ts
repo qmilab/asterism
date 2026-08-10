@@ -17,7 +17,7 @@
 
 import type { RuntimeAdapter, RunOutput, RunEvent, ToolResult } from "./adapter.js";
 import { frameRun, resolveSoul } from "./framing.js";
-import type { SkillContext } from "./framing.js";
+import type { BriefContext, SkillContext } from "./framing.js";
 import { DEFAULT_RECALL_BUDGET, defaultRecallProvider, enforceRecall } from "./recall.js";
 import type { RecallBudget, RecallProvider } from "./recall.js";
 import { auditTrustHooks } from "./audit.js";
@@ -38,8 +38,9 @@ import { curateMemorySummary } from "./memory-summary.js";
 import type { MemorySummary, MemorySummaryOptions } from "./memory-summary.js";
 import { WorldFactCapError } from "./repositories/world-facts.js";
 import { MemoryFirewallError } from "./firewall.js";
+import type { FirewallFinding } from "./firewall.js";
 import type { AsterismStore } from "./store.js";
-import type { Agent, Connection, ConnectionMode, Run, RunStatus } from "./types.js";
+import type { Agent, Brief, Connection, ConnectionMode, Run, RunStatus } from "./types.js";
 
 /** Host concerns a run needs that the kernel does not own — all injectable. */
 export interface ExecuteRunOptions {
@@ -557,6 +558,27 @@ async function runAndPersist(
   // proposed objective is. Framed LAST and clearly labelled as unverified, so a self-written
   // note is never mistaken for a ratified memory.
   const worldFacts = store.worldFacts.listAccepted(agent.id);
+  // Standing briefs from this agent's `shared-brief` channels (Phase 3 · T3a) — the only
+  // framing input authored outside this agent's own boundary.
+  //
+  // THE GRANT IS READ HERE, at framing time, and this is the phase's longest "checked here,
+  // used there" window: a brief written today frames a run started next week. The read is
+  // what makes it safe — `listActiveBriefsForAgent` joins the connection and requires it
+  // ACTIVE and in `shared-brief` mode, so a withdrawn channel contributes nothing on the very
+  // next run of either agent, without the revoke having to touch a brief row (D28). Nothing
+  // is cached, and a brief is never carried across a run.
+  //
+  // The partner's NAME is resolved for attribution (D27) and is the only thing about the
+  // other agent that is read — a reference, exactly like the ids in a connection event. A
+  // partner whose row is missing degrades to a neutral label rather than dropping the brief:
+  // the text is still framing this run, so hiding its provenance would be the worse failure.
+  const briefs: BriefContext[] = store.listActiveBriefsForAgent(agent.id).map((b) => {
+    const partnerId = b.fromAgentId === agent.id ? b.toAgentId : b.fromAgentId;
+    return {
+      partner: store.agents.get(partnerId)?.name ?? "another agent",
+      content: b.content,
+    };
+  });
   // Everything that can fail while turning the agent's identity + task into an
   // executed outcome — recall, framing, and the substrate run — sits INSIDE one
   // guard, so a throw anywhere drives the run to a terminal state instead of
@@ -626,6 +648,7 @@ async function runAndPersist(
       memories,
       objectives,
       worldFacts,
+      briefs,
       input,
       tools,
       signal: abortController.signal,
@@ -1303,6 +1326,134 @@ export function performSummaryExchange(
   const result = curateMemorySummary(candidates, options);
   store.recordSummaryProvided(connection, result);
   return { kind: "ok", result };
+}
+
+// --- shared-brief ----------------------------------------------------------
+//
+// The phase's only A→B crossing of content. Every mode above carries the CALLEE's output back
+// to the caller and is careful about what may leave the callee; this one carries
+// operator-authored text from the caller's channel INTO the callee's framing, and is careful
+// about what may enter it (design note §17, decisions D24–D30).
+//
+// The mode has no return path at all — nothing of the callee's crosses, at any point, which is
+// why neither outcome below has a field that could hold one. What it has instead is a write
+// into another agent's system prompt, and three things carry that:
+//
+//   1. THE FIREWALL SCREENS THE TEXT BEFORE IT IS PERSISTED. `BriefRepository.create` calls
+//      `assertMemorySafe`, at the write boundary rather than in a caller, so no path can
+//      persist unscreened text. This is the inbound verdict `screenMemory`/`assertMemorySafe`
+//      exist for, and the reason `redactForTrace` is NOT used here: D18 settled that scrubbing
+//      a span is right for an outbound projection and wrong for a block decision — inbound,
+//      neutralising part of a sentence written to steer a reader leaves the rest of it.
+//   2. FRAMING ATTRIBUTES IT. The brief is placed in its own labelled block naming the channel
+//      partner, never merged into the agent's own voice (D27, `buildSystemPrompt`).
+//   3. THE GRANT IS RE-READ AT EVERY FRAMING. Not here — in `executeRun`, through
+//      `listActiveBriefsForAgent`'s join on the ACTIVE connection. Setting a brief is one
+//      moment; framing it happens on every subsequent run of both agents, which is the longest
+//      "checked here, used there" window in the phase (D28).
+//
+// What is deliberately NOT touched: the callee's trust level, its tool registry, and its
+// `autoApprove` set. A brief changes framing and nothing else, so caller-authored text cannot
+// widen what the callee may do — invariant 3 for this mode.
+
+/**
+ * The outcome of {@link performSetBrief} — a discriminated union, like every other mode, so a
+ * surface maps each case without guessing. `no_connection` means there is no ACTIVE `from →
+ * to` connection **in `shared-brief` mode**: no other mode between the same pair authorizes
+ * writing into the callee's framing, and neither does the reverse direction.
+ *
+ * `blocked` is this mode's own case and has no analogue elsewhere in the phase, because no
+ * other crossing is screened by a block/allow verdict. It carries the firewall's findings —
+ * which name the RULES that fired, never the refused text — so a surface can tell the operator
+ * why without echoing what was refused.
+ */
+export type SetBriefOutcome =
+  | { kind: "ok"; brief: Brief; replaced: boolean }
+  | { kind: "blocked"; findings: readonly FirewallFinding[] }
+  | { kind: "no_connection" };
+
+/**
+ * The outcome of {@link performEndBrief}. `not_set` is distinct from `no_connection` on
+ * purpose: "there is no channel" and "the channel is open but carries no brief" are different
+ * facts, and collapsing them would tell an operator their brief is gone when the channel it
+ * lived on was the thing that was missing.
+ */
+export type EndBriefOutcome =
+  | { kind: "ok"; brief: Brief }
+  | { kind: "not_set" }
+  | { kind: "no_connection" };
+
+/**
+ * Set (or replace) the standing brief on a `shared-brief` channel.
+ *
+ * Synchronous for the same reason {@link performSummaryExchange} is: nothing runs. This is a
+ * write to the kernel's own state, not an exchange that executes anything — the crossing
+ * happens later, once per run, when framing reads it.
+ *
+ * `replaced` distinguishes a first brief from a supersede. The store performs both inside one
+ * transaction so a channel never holds two active briefs; the surface uses the flag only to
+ * tell the operator which of the two just happened, since replacing means the previous text
+ * stops framing runs immediately.
+ */
+export function performSetBrief(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  content: string,
+): SetBriefOutcome {
+  const connection = requireChannel(store, from, to, "shared-brief");
+  if (!connection) return { kind: "no_connection" };
+  // Read BEFORE the write, purely to report which of set/replace happened — the supersede
+  // itself is the store's single transaction, so this is not a check the write depends on.
+  const replaced = store.briefs.findActiveForConnection(from.id, connection.id) !== undefined;
+  try {
+    const brief = store.setBrief(connection, content);
+    // The grant did not hold at the moment of the write — another operator's `disconnect`
+    // landing in the window between the read above and the INSERT. An ordinary race in a
+    // flow that models exactly this outcome, so it resolves to the answer re-running the
+    // command would give, rather than to an error: a refusal should not tell the caller WHEN
+    // the permission went away. (The store re-tests the grant inside the INSERT itself, so
+    // this branch is the report of that test, not a second check.) [Codex review R1 P2.]
+    if (!brief) return { kind: "no_connection" };
+    return { kind: "ok", brief, replaced };
+  } catch (err) {
+    // The firewall's refusal is an OUTCOME of this operation, not a kernel failure: the
+    // operator wrote something the screen would not let into another agent's prompt, and the
+    // surface should say so plainly rather than surface a thrown error. The store has already
+    // audited it as `brief.blocked` on the author's log; every other error propagates.
+    if (err instanceof MemoryFirewallError) {
+      return { kind: "blocked", findings: err.findings };
+    }
+    throw err;
+  }
+}
+
+/**
+ * End the standing brief on a `shared-brief` channel, so it stops framing either agent's runs
+ * from the next run onward.
+ *
+ * The channel is still required: ending a brief is an operation ON a channel, and an operator
+ * with no channel has nothing to end. That also means a revoked connection makes `unbrief`
+ * unnecessary rather than unavailable — the revoke already un-framed the brief (D28), and the
+ * row is left as history exactly as a revoked connection is (D22).
+ */
+export function performEndBrief(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+): EndBriefOutcome {
+  const connection = requireChannel(store, from, to, "shared-brief");
+  if (!connection) return { kind: "no_connection" };
+  const brief = store.endBrief(connection);
+  if (brief) return { kind: "ok", brief };
+  // Nothing was ended, and the two reasons are different facts. The store's UPDATE carries
+  // the grant test, so a `disconnect` landing in the window between the read above and the
+  // write declines it exactly as a channel that simply holds no brief does. Re-reading the
+  // channel here decides WHICH to report — for the message only, never for authorization,
+  // which already happened inside the statement.
+  return requireChannel(store, from, to, "shared-brief")
+    ? { kind: "not_set" }
+    : { kind: "no_connection" };
 }
 
 // --- artifact fetch --------------------------------------------------------
