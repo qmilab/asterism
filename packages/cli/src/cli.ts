@@ -2065,7 +2065,14 @@ function cmdBriefs(args: string[], io: CliIO): Promise<number> {
     // Which of them actually frame this agent's runs — resolved by the kernel through the
     // live connection, not re-derived here, so the listing cannot disagree with the prompt.
     const framing = new Set(store.listActiveBriefsForAgent(agent.id).map((b) => b.id));
-    io.out(formatBriefList(briefs, agent, nameById, framing));
+    // The channels those briefs sit on, so a row that is not framing can say WHY from an
+    // observed status rather than from an inference about what "active but not framing" must
+    // mean. Scoped read: `listConnections` returns only channels this agent participates in,
+    // which is exactly the set its briefs can reference.
+    const channelStatusById = new Map(
+      store.listConnections(agent.id).map((c) => [c.id, c.status] as const),
+    );
+    io.out(formatBriefList(briefs, agent, nameById, framing, channelStatusById));
     return 0;
   });
 }

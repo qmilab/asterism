@@ -55,21 +55,41 @@ export class BriefRepository {
    * crossing outward, whereas neutralising a span of an injection-shaped brief would leave
    * the rest of a sentence written to steer a reader. Inbound, *block* is the right verb.
    *
-   * Takes the CONNECTION and DERIVES both participants from it, rather than accepting three
-   * loose ids. Probed before it was written this way, and the loose form was reachable: a row
-   * naming a third agent as `to_agent_id` while sitting on a real A→B channel framed that
-   * third agent, who was on no channel at all. Deriving means a brief cannot be attributed to
-   * a pair the channel does not join — the same correction `startExchangeRun` made for the
-   * run stamp, and for the same reason (an id a caller supplies is a claim; an id read off
-   * the authorizing row is a fact). {@link listActiveForAgent} enforces the same thing again
-   * at the point of USE, so the two halves hold independently.
+   * Returns `undefined` when the grant does not hold — deliberately NOT a throw. A channel
+   * can be withdrawn by another operator at any moment, including between a surface's
+   * permission read and this write, and that is an ordinary event this flow models rather
+   * than an invariant violation. (The lesson of the revoke slice's fourth review round: a
+   * guard written for the adversarial case must not fire as an internal error on the
+   * ordinary one.)
+   *
+   * **THE GRANT TEST LIVES INSIDE THE INSERT**, as a `WHERE EXISTS` over `connections`, so
+   * there is no instant between deciding and writing. That is `runs.createForExchange`'s
+   * shape and it is chosen for the same reason: a read-then-insert closes the window only
+   * within one process, while `disconnect` in another shell is exactly the concurrent writer
+   * this phase invented — and an argument that depends on nobody mis-remembering SQLite's
+   * isolation rules is the weaker kind. One statement needs no such argument.
+   *
+   * The predicate tests four things at once, and each is load-bearing:
+   *
+   *   - `id = ?` — the channel exists;
+   *   - `status = 'active'` — it has not been withdrawn (and keying on the ID means a
+   *     revoke-then-reconnect leaves a different row that still fails to match, per D20);
+   *   - `mode = 'shared-brief'` — no other mode authorizes writing into a prompt;
+   *   - `from_agent_id`/`to_agent_id` MATCH — so a forged or stale `Connection` object
+   *     cannot attribute a brief to a pair the channel does not join. Probed as reachable
+   *     before this existed: a row naming a third agent while sitting on a real A→B channel
+   *     framed that agent, who was on no channel at all. An id a caller supplies is a claim;
+   *     an id read off the authorizing row is a fact.
+   *
+   * {@link listActiveForAgent} enforces the mode and the participant match AGAIN at the
+   * point of USE, so the two halves hold independently and neither stands in for the other.
    *
    * The caller (the store) is responsible for ending any existing active brief in the same
-   * transaction; the partial unique index `(connection_id) WHERE status = 'active'` is the
-   * storage-layer backstop that makes a concurrent double-create fail rather than silently
-   * give one channel two briefs.
+   * transaction, and for rolling that back when this declines; the partial unique index
+   * `(connection_id) WHERE status = 'active'` is the storage-layer backstop that makes a
+   * concurrent double-create fail rather than silently give one channel two briefs.
    */
-  create(connection: Connection, content: string): Brief {
+  create(connection: Connection, content: string): Brief | undefined {
     requireAgentId(connection.fromAgentId);
     requireAgentId(connection.toAgentId);
     assertMemorySafe(content);
@@ -79,7 +99,15 @@ export class BriefRepository {
       .prepare(
         `INSERT INTO briefs
            (id, connection_id, from_agent_id, to_agent_id, content, status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'active', ?)
+         SELECT ?, ?, ?, ?, ?, 'active', ?
+          WHERE EXISTS (
+            SELECT 1 FROM connections
+             WHERE id = ?
+               AND status = 'active'
+               AND mode = 'shared-brief'
+               AND from_agent_id = ?
+               AND to_agent_id = ?
+          )
          RETURNING *`,
       )
       .get([
@@ -89,9 +117,11 @@ export class BriefRepository {
         connection.toAgentId,
         content,
         createdAt,
+        connection.id,
+        connection.fromAgentId,
+        connection.toAgentId,
       ]);
-    if (!row) throw new Error("brief insert did not persist");
-    return mapBrief(row);
+    return row ? mapBrief(row) : undefined;
   }
 
   /**
@@ -106,18 +136,29 @@ export class BriefRepository {
    *
    * Keyed on the connection rather than a brief id because that is how both callers reach
    * it: `unbrief` names a channel, and a supersede ends "whatever is active here" before
-   * inserting. The connection id is itself only obtainable from a scoped read, so this
-   * inherits that scoping.
+   * inserting.
+   *
+   * Carries {@link create}'s grant test, in the same statement and for the same reason.
+   * Ending is not a crossing, so the case for guarding it is narrower — but a connection ID
+   * alone is not authority to change another channel's state, and leaving one write of the
+   * pair unguarded is how the two drift. `from`/`to` are not compared here because there is
+   * nothing to attribute: this ends whatever row the channel already holds, and that row's
+   * participants were fixed by {@link create}'s own check.
    */
   endActiveForConnection(connectionId: string): Brief | undefined {
     const endedAt = new Date().toISOString();
     const row = this.driver
       .prepare(
         `UPDATE briefs SET status = 'ended', ended_at = ?
-           WHERE connection_id = ? AND status = 'active'
+           WHERE connection_id = ?
+             AND status = 'active'
+             AND EXISTS (
+               SELECT 1 FROM connections
+                WHERE id = ? AND status = 'active' AND mode = 'shared-brief'
+             )
          RETURNING *`,
       )
-      .get([endedAt, connectionId]);
+      .get([endedAt, connectionId, connectionId]);
     return row ? mapBrief(row) : undefined;
   }
 

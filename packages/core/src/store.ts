@@ -64,6 +64,17 @@ import { worldFactFramingText } from "./types.js";
  * repository per entity. Every scoped repository asserts an `agentId` before it
  * touches the driver — the agent is the isolation boundary.
  */
+
+/**
+ * Internal rollback signal for {@link AsterismStore.setBrief}: the conditional INSERT
+ * declined because the `shared-brief` grant did not hold at the moment of the write. Thrown
+ * only to abort the surrounding transaction (so a supersede cannot commit without its
+ * replacement) and caught in the same method — it never reaches a caller, which is why it
+ * carries no message worth surfacing. A withdrawn channel is an ordinary outcome, not an
+ * error, and the public method reports it as `undefined`.
+ */
+class BriefGrantWithdrawnError extends Error {}
+
 export class AsterismStore {
   readonly agents: AgentRepository;
   readonly runs: RunRepository;
@@ -1699,8 +1710,17 @@ export class AsterismStore {
    * row inserted, both inside one transaction, so a channel never has two active briefs and
    * the history of what framed runs stays intact (D28). The partial unique index is the
    * storage-layer backstop.
+   *
+   * Returns `undefined` when the grant does not hold at the moment of the write — the
+   * connection is not a live `shared-brief` channel between these two agents. This method is
+   * PUBLIC, so it cannot lean on a surface having checked: a caller can hold a `Connection`
+   * for another mode, or one that another operator revoked a moment ago, and neither may
+   * leave a persisted brief and a `brief.set` on both logs describing context that will never
+   * frame anything. The test lives inside {@link BriefRepository.create}'s INSERT rather than
+   * as a re-read here, so there is no window between checking and writing at all.
+   * [Codex review R1 P2.]
    */
-  setBrief(connection: Connection, content: string): Brief {
+  setBrief(connection: Connection, content: string): Brief | undefined {
     let brief: Brief;
     try {
       brief = this.driver.transaction(() => {
@@ -1708,9 +1728,16 @@ export class AsterismStore {
         // inside `create`, which rolls this back — a blocked brief must not end the one that
         // was already framing runs.
         this.briefs.endActiveForConnection(connection.id);
-        return this.briefs.create(connection, content);
+        const created = this.briefs.create(connection, content);
+        // The conditional INSERT declined: the grant did not hold. Thrown rather than
+        // returned so the supersede above rolls back WITH it — a brief that could not be
+        // written must never have cleared the one that was already there. Caught below and
+        // turned back into an ordinary `undefined`; it never escapes this method.
+        if (!created) throw new BriefGrantWithdrawnError();
+        return created;
       });
     } catch (err) {
+      if (err instanceof BriefGrantWithdrawnError) return undefined;
       if (err instanceof MemoryFirewallError) {
         this.emit(connection.fromAgentId, "brief.blocked", { findings: err.findings });
       }
@@ -1728,9 +1755,11 @@ export class AsterismStore {
 
   /**
    * End the standing brief on a connection, recording `brief.ended` on BOTH agents' logs.
-   * Returns the ended brief, or undefined when there was none — in which case NOTHING is
-   * emitted, so re-ending is a silent no-op rather than a second withdrawal in the audit
-   * (the same discipline {@link revokeConnection} follows).
+   * Returns the ended brief, or undefined when there was none TO end — either because the
+   * channel carries no brief or because it is no longer a live `shared-brief` grant. In
+   * either case NOTHING is emitted, so re-ending is a silent no-op rather than a second
+   * withdrawal in the audit (the same discipline {@link revokeConnection} follows), and a
+   * caller holding a stale `Connection` cannot change another channel's state.
    *
    * Terminal: reinstating means calling {@link setBrief} again, which mints a fresh row.
    */

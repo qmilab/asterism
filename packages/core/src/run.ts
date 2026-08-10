@@ -1408,6 +1408,13 @@ export function performSetBrief(
   const replaced = store.briefs.findActiveForConnection(connection.id) !== undefined;
   try {
     const brief = store.setBrief(connection, content);
+    // The grant did not hold at the moment of the write — another operator's `disconnect`
+    // landing in the window between the read above and the INSERT. An ordinary race in a
+    // flow that models exactly this outcome, so it resolves to the answer re-running the
+    // command would give, rather than to an error: a refusal should not tell the caller WHEN
+    // the permission went away. (The store re-tests the grant inside the INSERT itself, so
+    // this branch is the report of that test, not a second check.) [Codex review R1 P2.]
+    if (!brief) return { kind: "no_connection" };
     return { kind: "ok", brief, replaced };
   } catch (err) {
     // The firewall's refusal is an OUTCOME of this operation, not a kernel failure: the
@@ -1438,7 +1445,15 @@ export function performEndBrief(
   const connection = requireChannel(store, from, to, "shared-brief");
   if (!connection) return { kind: "no_connection" };
   const brief = store.endBrief(connection);
-  return brief ? { kind: "ok", brief } : { kind: "not_set" };
+  if (brief) return { kind: "ok", brief };
+  // Nothing was ended, and the two reasons are different facts. The store's UPDATE carries
+  // the grant test, so a `disconnect` landing in the window between the read above and the
+  // write declines it exactly as a channel that simply holds no brief does. Re-reading the
+  // channel here decides WHICH to report — for the message only, never for authorization,
+  // which already happened inside the statement.
+  return requireChannel(store, from, to, "shared-brief")
+    ? { kind: "not_set" }
+    : { kind: "no_connection" };
 }
 
 // --- artifact fetch --------------------------------------------------------

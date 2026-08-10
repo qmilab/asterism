@@ -4018,6 +4018,25 @@ test("briefs on an agent with none says so rather than printing an empty list", 
   expect(out).toContain("asterism brief writer <other>");
 });
 
+test("briefs explains a non-framing row from the channel's OBSERVED status", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  await runCli(["new", "helper", "--trust", "propose"], h.io);
+  await runCli(["connect", "writer", "helper", "--mode", "shared-brief"], h.io);
+  await runCli(["brief", "writer", "helper", "ship by Friday"], h.io);
+  expect(await capture(["briefs", "writer"], h.io)).toContain("framing every run of both agents");
+
+  // Withdraw the channel: the brief row stays `active` and stops framing, and the listing must
+  // say WHY from the connection's real status rather than inferring it from "active but not
+  // framing" — an inference that was wrong for a live channel of another mode, and whose
+  // correctness would otherwise depend on a guarantee living in the kernel.
+  await runCli(["disconnect", "writer", "helper", "--mode", "shared-brief"], h.io);
+  const after = await capture(["briefs", "writer"], h.io);
+  expect(after).toContain("channel withdrawn — no longer framing");
+  expect(after).toContain("ship by Friday");
+});
+
 test("connect names the brief verb for a shared-brief channel", async () => {
   const h = harness();
   await runCli(["init"], h.io);

@@ -359,42 +359,63 @@ test("REVOKING THE CHANNEL un-frames the brief without touching its row", async 
   expect(store.listActiveBriefsForAgent(helper.id)).toHaveLength(0);
 });
 
-test("a brief on a NON-shared-brief channel frames nothing, even if one exists", async () => {
-  // Reaching PAST the store to build state the write path refuses to create — `performSetBrief`
-  // requires a `shared-brief` channel, so this row cannot arise through the surface today. The
-  // framing read screens on the mode anyway, and the two halves are worth testing independently:
-  // the guard stops being unreachable the moment someone adds a caller, and a defensive scope
-  // that has never been seen to bite is not known to work.
-  //
-  // Found by mutation: deleting `c.mode = 'shared-brief'` from the join left the whole suite
-  // green, which is the definition of a predicate nothing asserts.
-  const handoff = store.createConnection(writer.id, helper.id, "handoff");
-  store.briefs.create(handoff, "smuggled through a handoff channel");
+// --- the write guard and the framing guard, proven INDEPENDENTLY --------------
+//
+// Both halves refuse the same two states (a brief on the wrong mode, a brief naming a pair its
+// channel does not join). Testing them together would let either stand in for the other, so
+// the write side is asserted through the public API and the read side by reaching PAST it —
+// the method the revoke slice's second review round established.
 
-  expect(store.listActiveBriefsForAgent(helper.id)).toHaveLength(0);
-  expect(store.listActiveBriefsForAgent(writer.id)).toHaveLength(0);
-  expect(await promptFor(helper)).not.toContain("smuggled");
-  // It is still HISTORY on both sides — the row exists, it simply never frames.
-  expect(store.listBriefs(helper.id)).toHaveLength(1);
+test("the WRITE side refuses a brief the channel does not authorize", () => {
+  // A live channel of the wrong MODE authorizes nothing: the grant test inside the INSERT
+  // requires `mode = 'shared-brief'`.
+  const handoff = store.createConnection(writer.id, helper.id, "handoff");
+  expect(store.briefs.create(handoff, "smuggled through a handoff channel")).toBeUndefined();
+  expect(store.setBrief(handoff, "smuggled through a handoff channel")).toBeUndefined();
+
+  // A forged/stale connection object naming a pair the real row does not join: the same
+  // statement compares `from`/`to` against the connection row, so an id a caller SUPPLIES
+  // cannot override the ids the authorizing row HOLDS.
+  const real = channel();
+  expect(store.briefs.create({ ...real, toAgentId: stranger.id }, "smuggled")).toBeUndefined();
+
+  // A revoked channel, likewise — including the reconnect case, where a fresh row is active
+  // but is not the one this object names (D20).
+  store.revokeConnection(writer.id, helper.id, "shared-brief");
+  expect(store.setBrief(real, "written after the revoke")).toBeUndefined();
+  store.createConnection(writer.id, helper.id, "shared-brief");
+  expect(store.setBrief(real, "laundered through a reconnect")).toBeUndefined();
+
+  // Nothing above persisted, and nothing above was audited as a set.
+  expect(store.listBriefs(writer.id)).toHaveLength(0);
+  expect(store.events.list(writer.id, {}).filter((e) => e.type === "brief.set")).toHaveLength(0);
 });
 
-test("a brief cannot frame an agent its CONNECTION does not join", async () => {
-  // The other half of the same guard, tested independently — `create` now DERIVES both
-  // participants from the connection, so this row cannot arise through the repository either;
-  // it is built by handing `create` a connection object with a forged participant, which is
-  // the adversarial case the derivation exists for.
-  //
-  // Probed as REACHABLE before either half was written: a brief sitting on a live writer→helper
-  // channel but naming `stranger` as its recipient framed stranger, who was on no channel at
-  // all. A permission read must not trust the row it authorizes to describe its own scope.
-  const real = channel();
-  store.briefs.create({ ...real, toAgentId: stranger.id }, "smuggled onto a stranger");
+test("the FRAMING read refuses the same rows, independently of the write guard", async () => {
+  // Reaching past the write path to construct exactly what it now refuses, so the read side is
+  // proven on its own. Found necessary by mutation: deleting `c.mode = 'shared-brief'` from the
+  // join once left the whole suite green — the definition of a predicate nothing asserts.
+  const conn = channel();
+  store.setBrief(conn, "legitimately set, then undermined");
+  const brief = store.listActiveBriefsForAgent(helper.id)[0]!;
 
-  expect(store.listActiveBriefsForAgent(stranger.id)).toHaveLength(0);
-  expect(await promptFor(stranger)).not.toContain("smuggled");
-  // ...and it does not frame the channel's real participants either — the row is inert, not
-  // redirected, which is the fail-closed reading.
+  // (a) the channel's MODE changes out from under the brief.
+  store.driver.exec(`UPDATE connections SET mode = 'handoff' WHERE id = '${conn.id}'`);
   expect(store.listActiveBriefsForAgent(helper.id)).toHaveLength(0);
+  expect(await promptFor(helper)).not.toContain("undermined");
+  store.driver.exec(`UPDATE connections SET mode = 'shared-brief' WHERE id = '${conn.id}'`);
+  expect(store.listActiveBriefsForAgent(helper.id)).toHaveLength(1);
+
+  // (b) the brief's PARTICIPANTS disagree with its channel's. Probed as reachable before the
+  // guard existed: such a row framed a third agent who was on no channel at all. A permission
+  // read must not trust the row it is authorizing to describe its own scope.
+  store.driver.exec(`UPDATE briefs SET to_agent_id = '${stranger.id}' WHERE id = '${brief.id}'`);
+  expect(store.listActiveBriefsForAgent(stranger.id)).toHaveLength(0);
+  expect(await promptFor(stranger)).not.toContain("undermined");
+  // Inert, not redirected — it frames the channel's real participants no longer either.
+  expect(store.listActiveBriefsForAgent(helper.id)).toHaveLength(0);
+  // Still HISTORY on both sides: the row exists, it simply never frames.
+  expect(store.listBriefs(writer.id)).toHaveLength(1);
 });
 
 test("a reconnect does NOT resurrect the old brief (D20's property, one level down)", async () => {
@@ -419,6 +440,81 @@ test("briefs on OTHER channels of the same agent all frame it", async () => {
   expect(prompt).toContain("from stranger's channel");
   expect(prompt).toContain("channel with writer");
   expect(prompt).toContain("channel with stranger");
+});
+
+// --- the write-path race the review found -----------------------------------
+
+test("a disconnect landing between the permission read and the write is an ordinary refusal", () => {
+  // The window `performSetBrief` opens: `requireChannel` reads the grant, then `store.setBrief`
+  // writes. Another operator's `disconnect` can land in between — reproduced by wrapping the
+  // permission read so it withdraws the channel AFTER returning, which is the only way to be
+  // inside the window rather than in front of it. (The revoke slice's fourth round caught a
+  // race test that revoked BEFORE the call and so never reached the window it named.)
+  const conn = channel();
+  const real = store.connections.findActive.bind(store.connections);
+  let armed = true;
+  store.connections.findActive = ((from: string, to: string, mode: "shared-brief") => {
+    const found = real(from, to, mode);
+    if (armed && found) {
+      armed = false;
+      store.revokeConnection(writer.id, helper.id, "shared-brief");
+    }
+    return found;
+  }) as typeof store.connections.findActive;
+
+  const outcome = performSetBrief(store, writer, helper, "written into a closing window");
+  store.connections.findActive = real;
+
+  // Reported as the answer re-running the command would give, NOT as an internal error: a
+  // withdrawal here is an event this flow models. And nothing was persisted or audited.
+  expect(outcome.kind).toBe("no_connection");
+  expect(store.listBriefs(writer.id)).toHaveLength(0);
+  expect(store.events.list(writer.id, {}).filter((e) => e.type === "brief.set")).toHaveLength(0);
+  expect(conn.status).toBe("active"); // the object the caller held still SAYS active — the point
+});
+
+test("a declined write does not clear the brief that was already framing", () => {
+  // The supersede ends the current brief before inserting the new one, so a write that the
+  // grant test declines must roll BOTH back. Otherwise a revoke landing mid-replace would
+  // silently strip context that the operator never asked to remove.
+  const conn = channel();
+  store.setBrief(conn, "the standing brief");
+  store.driver.exec(`UPDATE connections SET mode = 'handoff' WHERE id = '${conn.id}'`);
+
+  expect(store.setBrief(conn, "the replacement")).toBeUndefined();
+  store.driver.exec(`UPDATE connections SET mode = 'shared-brief' WHERE id = '${conn.id}'`);
+  const framing = store.listActiveBriefsForAgent(helper.id);
+  expect(framing).toHaveLength(1);
+  expect(framing[0]!.content).toBe("the standing brief");
+});
+
+test("a declined write rolls back its supersede even when the END was permitted", () => {
+  // The case that makes the rollback load-bearing, and it is narrow enough that a mutation
+  // found it before a reviewer could: `endActiveForConnection`'s guard tests id + status +
+  // mode, while `create`'s ALSO compares the participants. So a connection object with a real
+  // id, live status and the right mode but a FORGED participant passes the end and fails the
+  // insert — and without the rollback the supersede would commit alone, silently stripping a
+  // brief that was framing both agents on behalf of a write that never landed.
+  const conn = channel();
+  store.setBrief(conn, "the standing brief");
+
+  expect(store.setBrief({ ...conn, toAgentId: stranger.id }, "forged")).toBeUndefined();
+
+  const framing = store.listActiveBriefsForAgent(helper.id);
+  expect(framing).toHaveLength(1);
+  expect(framing[0]!.content).toBe("the standing brief");
+  // Nothing about the failed attempt reached either log.
+  expect(store.events.list(writer.id, {}).filter((e) => e.type === "brief.ended")).toHaveLength(0);
+});
+
+test("ending needs a live grant too — a stale connection object cannot change a channel", () => {
+  const conn = channel();
+  store.setBrief(conn, "the standing brief");
+  store.revokeConnection(writer.id, helper.id, "shared-brief");
+  // The caller still holds a `Connection` that says `active`. A connection ID is not authority.
+  expect(store.endBrief(conn)).toBeUndefined();
+  expect(store.briefs.findActiveForConnection(conn.id)?.content).toBe("the standing brief");
+  expect(store.events.list(writer.id, {}).filter((e) => e.type === "brief.ended")).toHaveLength(0);
 });
 
 // --- determinism ------------------------------------------------------------

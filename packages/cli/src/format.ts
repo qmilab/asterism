@@ -9,6 +9,7 @@ import type {
   Brief,
   CapabilityGrant,
   Connection,
+  ConnectionStatus,
   Event,
   Memory,
   MemorySummary,
@@ -278,12 +279,22 @@ export function formatConnectionList(
  * nothing, and a listing that worked that out for itself could disagree with the prompt. Rows
  * outside the set are labelled with why — superseded, ended, or on a withdrawn channel — so
  * "why isn't my brief showing up in the run" is answerable from this one screen.
+ *
+ * `channelStatusById` is what makes that last label an OBSERVATION rather than a guess. An
+ * earlier version inferred "the channel was withdrawn" from `active`-but-not-framing, which
+ * read as fact and was not: a brief on a live channel of the WRONG MODE printed "channel
+ * withdrawn" beside a channel that was open. The kernel now refuses to create that row at
+ * all, so the inference would happen to be right — which is exactly the kind of label whose
+ * correctness depends on a guarantee somewhere else, and the sort of claim this project keeps
+ * having to walk back. Reading the status costs one map lookup and cannot go stale in the
+ * same way. [Codex review R1 P2, second half.]
  */
 export function formatBriefList(
   briefs: readonly Brief[],
   agent: Agent,
   nameById: ReadonlyMap<string, string>,
   framing: ReadonlySet<string>,
+  channelStatusById: ReadonlyMap<string, ConnectionStatus>,
 ): string {
   if (briefs.length === 0) {
     return (
@@ -303,13 +314,17 @@ export function formatBriefList(
     const otherId = outbound ? b.toAgentId : b.fromAgentId;
     const other = nameById.get(otherId) ?? shortId(otherId);
     const arrow = outbound ? `→ ${other}` : `← ${other}`;
-    // An `active` brief that is not framing can only mean its channel was withdrawn — the
-    // one state an operator would otherwise have to cross-reference `connections` to explain.
+    // Why this row is not framing, stated from what is KNOWN rather than inferred: it was
+    // ended/superseded, or its channel was withdrawn — the one state an operator would
+    // otherwise have to cross-reference `connections` to explain. Anything else falls back to
+    // the bare fact, because a label that guesses is worse than one that admits it.
     const note = framing.has(b.id)
       ? "  (framing every run of both agents)"
       : b.status === "ended"
         ? "  (ended — no longer framing)"
-        : "  (channel withdrawn — no longer framing)";
+        : channelStatusById.get(b.connectionId) === "revoked"
+          ? "  (channel withdrawn — no longer framing)"
+          : "  (not framing)";
     lines.push(`• ${arrow} · ${shortId(b.id)}${note}`);
     lines.push(`  ${b.content}`);
   }
