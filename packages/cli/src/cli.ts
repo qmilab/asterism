@@ -4320,6 +4320,10 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       authToken: consoleToken.token,
       readFile: (p) => readFileSync(p, "utf8"),
       ...(io.capabilities ? { capabilities: io.capabilities } : {}),
+      // The same confined filesystem host `asterism fetch` uses, so an artifact fetched
+      // over the console is read and written through the identical workspace guards — the
+      // surface cannot be the reason a byte lands somewhere the CLI would refuse.
+      ...(io.fetchHost ? { fetchHost: io.fetchHost } : {}),
       // Wrap each opted-in agent's adapter in its cognition provider — the SAME
       // `wrapCognition` the CLI's run/serve/channel paths use — so a run resumed from
       // the dashboard is traced exactly like one started from the CLI (no surface drifts
@@ -4353,6 +4357,8 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       io.out(`  PUT  ${server.url}/agents/<agent>/trust         set autonomy`);
       io.out(`  POST ${server.url}/agents/<agent>/runs/<run>/confirm | /decline`);
       io.out(`  POST ${server.url}/agents/<agent>/reflect       propose memories to review`);
+      io.out(`  GET  ${server.url}/agents/<agent>/connections   the channels this agent is on`);
+      io.out(`  POST ${server.url}/agents/<from>/connections/<to>/handoff | artifact | summary | fetch`);
       reportHttpToken(io, consoleToken);
       // What "attach" means depends on where it bound. On loopback (the default) only
       // THIS machine can reach it; a dashboard elsewhere needs it bound beyond loopback

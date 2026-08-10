@@ -10,6 +10,9 @@
 //      views — exercising the better-sqlite3 driver and the runtime-neutral stdin.
 //   2. the HTTP server under Node: serve() binds via node:http, a canned run is
 //      driven over a real socket (buffered + SSE), then a clean shutdown.
+//   4. the install-wide operator CONSOLE under Node: the cross-agent collaboration
+//      endpoints over a real socket — the console's first runtime-parity coverage
+//      (parts 1-3 exercise `serve`, which is a different surface).
 
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -23,6 +26,7 @@ import { fileURLToPath } from "node:url";
 // (A published install exposes the packages by name; that path is #15's matrix.)
 import { AsterismStore } from "../packages/core/dist/index.js";
 import { serve } from "../packages/server/dist/index.js";
+import { serveConsole } from "../packages/server/dist/console.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BIN = join(ROOT, "packages", "cli", "dist", "bin.js");
@@ -212,7 +216,96 @@ async function part3DrainUnderNode() {
   }
 }
 
+async function part4ConsoleCollaborationUnderNode() {
+  console.log(`\n[4] Collaboration over the operator console under Node — cross-agent, over a socket`);
+  const dir = mkdtempSync(join(tmpdir(), "asterism-node-collab-"));
+  const store = AsterismStore.open(join(dir, "asterism.db")); // file-backed ⇒ real driver I/O
+  const writer = store.createAgent({
+    name: "writer",
+    role: "drafts posts",
+    soulRef: "casual-helper",
+    workspaceDir: join(dir, "writer"),
+    trustLevel: "autonomous",
+  });
+  store.createAgent({
+    name: "helper",
+    role: "researches sections",
+    soulRef: "careful-consultant",
+    workspaceDir: join(dir, "helper"),
+    trustLevel: "autonomous",
+  });
+  store.recordMemory(store.agents.list().find((a) => a.name === "helper").id, {
+    memoryType: "convention",
+    content: "Sections live in drafts/, one file per topic.",
+    reviewState: "accepted",
+    status: "active",
+  });
+
+  const running = await serveConsole({
+    store,
+    authToken: HTTP_TOKEN,
+    port: 0,
+    makeAdapter: () => ({
+      adapter: {
+        run() {
+          async function* noEvents() {}
+          return { events: noEvents(), output: Promise.resolve({ status: "done", text: "helper's answer" }) };
+        },
+      },
+    }),
+  });
+  const call = async (method, path, body) =>
+    fetch(`${running.url}${path}`, {
+      method,
+      headers: authed(body !== undefined ? { "content-type": "application/json" } : {}),
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+
+  try {
+    // Default-deny reaches the collaboration routes too, before any routing.
+    const anon = await fetch(`${running.url}/agents/writer/connections`, { method: "GET" });
+    check("unauthenticated cross-agent GET → 401", anon.status === 401);
+
+    // No channel ⇒ no interaction, over the wire as in the kernel.
+    const unarmed = await call("POST", "/agents/writer/connections/helper/handoff", { task: "summarize" });
+    check("handoff with no channel → 409", unarmed.status === 409);
+
+    const granted = await call("POST", "/agents/writer/connections", { to: "helper", mode: "handoff" });
+    check("connect over the console → 201", granted.status === 201);
+    check("connect body names agents, not ids", (await granted.json()).connection.from === "writer");
+
+    const handed = await call("POST", "/agents/writer/connections/helper/handoff", { task: "summarize" });
+    const handoffBody = await handed.json();
+    check("handoff over the console → 200 with the callee's output", handed.status === 200 && handoffBody.output === "helper's answer");
+    check("handoff body carries a runId and no Run row", typeof handoffBody.runId === "string" && handoffBody.run === undefined);
+
+    // A different mode is a different grant — the handoff channel authorizes no pull.
+    const unauthorizedPull = await call("POST", "/agents/writer/connections/helper/summary", {});
+    check("a handoff channel does not authorize a read-summary pull → 409", unauthorizedPull.status === 409);
+
+    await call("POST", "/agents/writer/connections", { to: "helper", mode: "read-summary" });
+    const pulled = await call("POST", "/agents/writer/connections/helper/summary", {});
+    const summaryBody = await pulled.json();
+    check("read-summary pull → 200 with counts and screened items", pulled.status === 200 && summaryBody.eligible === 1 && summaryBody.items.length === 1);
+    check("no memory id crosses in a summary", !JSON.stringify(summaryBody).includes('"id"'));
+
+    const withdrawn = await call("DELETE", "/agents/writer/connections/helper?mode=handoff");
+    check("disconnect over the console → 200 revoked", withdrawn.status === 200 && (await withdrawn.json()).connection.status === "revoked");
+    const afterRevoke = await call("POST", "/agents/writer/connections/helper/handoff", { task: "again" });
+    check("a withdrawn channel refuses the next handoff → 409", afterRevoke.status === 409);
+
+    // Both participants' logs recorded the exchange, each row agent-scoped.
+    const types = store.events.tail(writer.id, {}).map((e) => e.type);
+    check("the caller's log records connection.created + handoff.completed", types.includes("connection.created") && types.includes("handoff.completed"));
+  } finally {
+    await running.stop();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 await part1CliUnderNode();
 await part2ServerUnderNode();
 await part3DrainUnderNode();
+await part4ConsoleCollaborationUnderNode();
 console.log(`\nPASS — ${passed} checks green on Node ${process.version}.`);
