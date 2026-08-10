@@ -138,14 +138,26 @@ export class BriefRepository {
    * it: `unbrief` names a channel, and a supersede ends "whatever is active here" before
    * inserting.
    *
-   * Carries {@link create}'s grant test, in the same statement and for the same reason.
-   * Ending is not a crossing, so the case for guarding it is narrower — but a connection ID
-   * alone is not authority to change another channel's state, and leaving one write of the
-   * pair unguarded is how the two drift. `from`/`to` are not compared here because there is
-   * nothing to attribute: this ends whatever row the channel already holds, and that row's
-   * participants were fixed by {@link create}'s own check.
+   * Carries {@link create}'s grant test IN FULL — including the participant comparison, and
+   * that last part is the correction of a rationale written here one round earlier.
+   *
+   * The original comment argued `from`/`to` need not be compared "because there is nothing to
+   * attribute: this ends whatever row the channel already holds." That reasoned about the
+   * BRIEF ROW and forgot the two things that actually depend on the ids. Probed, and both are
+   * real: a `Connection` object with a live channel's id and a forged `toAgentId` ended the
+   * genuine brief, and `brief.ended` was emitted to the FORGED pair — so an agent on no
+   * channel received an event about one, while the real participant's log said nothing at all
+   * about a brief that had stopped framing their runs. Misattributed audit is one fault; a
+   * cross-agent log write is a golden-rule-5 fault, and the silence on the real participant's
+   * side is a third.
+   *
+   * Takes the connection rather than an id for exactly that reason — the same shape
+   * {@link create} uses, and now the same predicate, so the two cannot drift apart on the
+   * question of who a channel joins. [Codex review R2 P2.]
    */
-  endActiveForConnection(connectionId: string): Brief | undefined {
+  endActiveForConnection(connection: Connection): Brief | undefined {
+    requireAgentId(connection.fromAgentId);
+    requireAgentId(connection.toAgentId);
     const endedAt = new Date().toISOString();
     const row = this.driver
       .prepare(
@@ -154,11 +166,21 @@ export class BriefRepository {
              AND status = 'active'
              AND EXISTS (
                SELECT 1 FROM connections
-                WHERE id = ? AND status = 'active' AND mode = 'shared-brief'
+                WHERE id = ?
+                  AND status = 'active'
+                  AND mode = 'shared-brief'
+                  AND from_agent_id = ?
+                  AND to_agent_id = ?
              )
          RETURNING *`,
       )
-      .get([endedAt, connectionId, connectionId]);
+      .get([
+        endedAt,
+        connection.id,
+        connection.id,
+        connection.fromAgentId,
+        connection.toAgentId,
+      ]);
     return row ? mapBrief(row) : undefined;
   }
 

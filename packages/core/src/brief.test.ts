@@ -488,13 +488,40 @@ test("a declined write does not clear the brief that was already framing", () =>
   expect(framing[0]!.content).toBe("the standing brief");
 });
 
-test("a declined write rolls back its supersede even when the END was permitted", () => {
-  // The case that makes the rollback load-bearing, and it is narrow enough that a mutation
-  // found it before a reviewer could: `endActiveForConnection`'s guard tests id + status +
-  // mode, while `create`'s ALSO compares the participants. So a connection object with a real
-  // id, live status and the right mode but a FORGED participant passes the end and fails the
-  // insert — and without the rollback the supersede would commit alone, silently stripping a
-  // brief that was framing both agents on behalf of a write that never landed.
+test("a FORGED participant cannot end a real channel's brief, or write to a third agent's log", () => {
+  // The R1 fix guarded `end` on id + status + mode but NOT on the participants, on the written
+  // rationale that "there is nothing to attribute". That reasoned about the brief ROW and
+  // forgot the two things that actually use the ids. Probed, and all three faults were real:
+  //
+  //   1. the genuine brief was ended by a caller holding a forged object;
+  //   2. `brief.ended` was emitted to the FORGED pair — a cross-agent log write, golden rule 5;
+  //   3. the REAL participant's log said nothing at all about a brief that stopped framing it.
+  //
+  // This test asserts all three, because a fix that closed only the state change would leave
+  // the audit faults standing.
+  const conn = channel();
+  store.setBrief(conn, "the standing brief");
+
+  expect(store.endBrief({ ...conn, toAgentId: stranger.id })).toBeUndefined();
+
+  // (1) the brief is untouched and still framing both real participants.
+  const framing = store.listActiveBriefsForAgent(helper.id);
+  expect(framing).toHaveLength(1);
+  expect(framing[0]!.content).toBe("the standing brief");
+  // (2) nothing reached the uninvolved agent's log.
+  expect(store.events.list(stranger.id, {}).filter((e) => e.type === "brief.ended")).toHaveLength(0);
+  expect(store.listActiveBriefsForAgent(stranger.id)).toHaveLength(0);
+  // (3) and no `brief.ended` was written anywhere at all — the operation simply did not happen.
+  for (const agent of [writer, helper]) {
+    expect(store.events.list(agent.id, {}).filter((e) => e.type === "brief.ended")).toHaveLength(0);
+  }
+});
+
+test("a forged SET likewise leaves the standing brief in place", () => {
+  // The set path's own forged-participant case, kept separate from the end path's so neither
+  // stands in for the other. `create`'s guard declines, and the supersede that ran ahead of it
+  // must not commit alone — that is what would silently strip context on behalf of a write
+  // that never landed.
   const conn = channel();
   store.setBrief(conn, "the standing brief");
 
@@ -503,8 +530,7 @@ test("a declined write rolls back its supersede even when the END was permitted"
   const framing = store.listActiveBriefsForAgent(helper.id);
   expect(framing).toHaveLength(1);
   expect(framing[0]!.content).toBe("the standing brief");
-  // Nothing about the failed attempt reached either log.
-  expect(store.events.list(writer.id, {}).filter((e) => e.type === "brief.ended")).toHaveLength(0);
+  expect(store.events.list(writer.id, {}).filter((e) => e.type === "brief.set")).toHaveLength(1);
 });
 
 test("ending needs a live grant too — a stale connection object cannot change a channel", () => {

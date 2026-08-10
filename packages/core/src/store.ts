@@ -1727,12 +1727,27 @@ export class AsterismStore {
         // Ended first so the unique index is free for the insert. A firewall refusal throws
         // inside `create`, which rolls this back — a blocked brief must not end the one that
         // was already framing runs.
-        this.briefs.endActiveForConnection(connection.id);
+        this.briefs.endActiveForConnection(connection);
         const created = this.briefs.create(connection, content);
         // The conditional INSERT declined: the grant did not hold. Thrown rather than
         // returned so the supersede above rolls back WITH it — a brief that could not be
         // written must never have cleared the one that was already there. Caught below and
         // turned back into an ordinary `undefined`; it never escapes this method.
+        //
+        // HONEST ABOUT COVERAGE: since review round 2 gave `endActiveForConnection` the
+        // identical grant predicate, no in-process caller can reach this branch — the end
+        // and the insert now decline on exactly the same conditions, so an end that succeeds
+        // is followed by an insert that succeeds. Deleting the throw breaks no test, and that
+        // was measured rather than assumed. It is kept for two reasons worth stating rather
+        // than leaving a reader to wonder:
+        //
+        //   1. It is NOT provably unreachable across processes. That would require an
+        //      argument about exactly when SQLite takes the write lock for an UPDATE matching
+        //      zero rows — and review round 5 of the revoke slice established that an argument
+        //      resting on nobody mis-remembering SQLite's isolation rules is the weaker kind.
+        //   2. Its necessity would return the moment the two predicates drift, and a silent
+        //      supersede-without-replacement is the failure it prevents: context stripped from
+        //      both agents on behalf of a write that never landed.
         if (!created) throw new BriefGrantWithdrawnError();
         return created;
       });
@@ -1765,7 +1780,7 @@ export class AsterismStore {
    */
   endBrief(connection: Connection): Brief | undefined {
     return this.driver.transaction(() => {
-      const brief = this.briefs.endActiveForConnection(connection.id);
+      const brief = this.briefs.endActiveForConnection(connection);
       if (!brief) return undefined;
       this.emitToBoth(connection.fromAgentId, connection.toAgentId, "brief.ended", {
         briefId: brief.id,
