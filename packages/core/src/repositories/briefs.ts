@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow } from "../db/driver.js";
-import type { Brief, BriefStatus, Connection } from "../types.js";
+import type { Brief, BriefStatus, Connection, ConnectionMode } from "../types.js";
 import { assertMemorySafe } from "../firewall.js";
 import { requireAgentId } from "./scope.js";
+
+/**
+ * The one connection mode a brief may sit on. Exported and bound as a SQL PARAMETER rather
+ * than written as a literal in each statement, so the predicate the grant test enforces and
+ * the mode the audit reports cannot drift apart — review round 4 found the audit trusting a
+ * caller-supplied `connection.mode` while the SQL enforced its own.
+ */
+export const BRIEF_CONNECTION_MODE: ConnectionMode = "shared-brief";
 
 function mapBrief(row: SqlRow): Brief {
   return {
@@ -43,6 +51,38 @@ function mapBrief(row: SqlRow): Brief {
  */
 export class BriefRepository {
   constructor(private readonly driver: SqlDriver) {}
+
+  /**
+   * Does `connection` name a LIVE `shared-brief` grant between the two agents it claims?
+   *
+   * The same predicate the conditional writes carry, as a standalone read — used ONLY to order
+   * two failure modes, never as the authorization. The writes keep their own `WHERE EXISTS`,
+   * so nothing here can be raced into a write that should not have happened; if this returns
+   * true and the channel is withdrawn a microsecond later, the write still declines.
+   *
+   * It exists because the firewall screen must not run before the grant is known. Screening
+   * first meant a forged or wrong-mode connection carrying injection-shaped text threw
+   * `MemoryFirewallError` before the grant predicate was ever evaluated — so a no-grant attempt
+   * was reported as a *blocked brief*, and `brief.blocked` was written to whatever agent the
+   * caller named, including one on no channel at all. That is the cross-agent log write round 2
+   * closed for `brief.ended`, reappearing through the firewall's door. [Codex review R4 P2.]
+   */
+  private grantHolds(connection: Connection): boolean {
+    return (
+      this.driver
+        .prepare(
+          `SELECT 1 FROM connections
+             WHERE id = ? AND status = 'active' AND mode = ?
+               AND from_agent_id = ? AND to_agent_id = ?`,
+        )
+        .get([
+          connection.id,
+          BRIEF_CONNECTION_MODE,
+          connection.fromAgentId,
+          connection.toAgentId,
+        ]) !== undefined
+    );
+  }
 
   /**
    * Create a new `active` brief on a connection.
@@ -92,6 +132,12 @@ export class BriefRepository {
   create(connection: Connection, content: string): Brief | undefined {
     requireAgentId(connection.fromAgentId);
     requireAgentId(connection.toAgentId);
+    // THE GRANT IS ESTABLISHED BEFORE THE CONTENT IS SCREENED. Ordering, not authorization —
+    // the INSERT below still carries the authoritative test. Without it the firewall throws
+    // first for a caller with no grant, turning "there is no channel" into "your brief was
+    // blocked" and emitting that refusal to an agent the caller merely named. There is nothing
+    // to screen text FOR when no channel exists to carry it. [Codex review R4 P2.]
+    if (!this.grantHolds(connection)) return undefined;
     assertMemorySafe(content);
     const id = randomUUID();
     const createdAt = new Date().toISOString();
@@ -104,7 +150,7 @@ export class BriefRepository {
             SELECT 1 FROM connections
              WHERE id = ?
                AND status = 'active'
-               AND mode = 'shared-brief'
+               AND mode = ?
                AND from_agent_id = ?
                AND to_agent_id = ?
           )
@@ -118,6 +164,7 @@ export class BriefRepository {
         content,
         createdAt,
         connection.id,
+        BRIEF_CONNECTION_MODE,
         connection.fromAgentId,
         connection.toAgentId,
       ]);
@@ -168,7 +215,7 @@ export class BriefRepository {
                SELECT 1 FROM connections
                 WHERE id = ?
                   AND status = 'active'
-                  AND mode = 'shared-brief'
+                  AND mode = ?
                   AND from_agent_id = ?
                   AND to_agent_id = ?
              )
@@ -178,6 +225,7 @@ export class BriefRepository {
         endedAt,
         connection.id,
         connection.id,
+        BRIEF_CONNECTION_MODE,
         connection.fromAgentId,
         connection.toAgentId,
       ]);
@@ -251,13 +299,13 @@ export class BriefRepository {
            JOIN connections c ON c.id = b.connection_id
            WHERE b.status = 'active'
              AND c.status = 'active'
-             AND c.mode = 'shared-brief'
+             AND c.mode = ?
              AND b.from_agent_id = c.from_agent_id
              AND b.to_agent_id = c.to_agent_id
              AND (b.from_agent_id = ? OR b.to_agent_id = ?)
            ORDER BY b.created_at ASC, b.rowid ASC`,
       )
-      .all([agentId, agentId])
+      .all([BRIEF_CONNECTION_MODE, agentId, agentId])
       .map(mapBrief);
   }
 

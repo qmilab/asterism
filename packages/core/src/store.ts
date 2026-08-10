@@ -21,7 +21,7 @@ import {
 import { CredentialRepository } from "./repositories/credentials.js";
 import { ConnectionRepository } from "./repositories/connections.js";
 import { ExchangeRepository } from "./repositories/exchanges.js";
-import { BriefRepository } from "./repositories/briefs.js";
+import { BriefRepository, BRIEF_CONNECTION_MODE } from "./repositories/briefs.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
 import { InstallSettingsRepository } from "./repositories/install-settings.js";
@@ -1758,12 +1758,20 @@ export class AsterismStore {
       }
       throw err;
     }
+    // Every field here is one the grant test VERIFIED against the connection row: the id, and
+    // both participants (the predicate compares them). `mode` is the exception and is
+    // deliberately NOT read off the caller's object — a `Connection` whose id/from/to match a
+    // live row but whose `mode` field was mutated passed the SQL check and then had that field
+    // copied into the audit, so a references-only log could claim a brief was set on `handoff`
+    // while the authorizing row said otherwise. The write only ever succeeds on a
+    // `shared-brief` row, so the verified value is the constant the predicate itself binds.
+    // [Codex review R4 P2.]
     this.emitToBoth(connection.fromAgentId, connection.toAgentId, "brief.set", {
       briefId: brief.id,
       connectionId: connection.id,
       fromAgentId: connection.fromAgentId,
       toAgentId: connection.toAgentId,
-      mode: connection.mode,
+      mode: BRIEF_CONNECTION_MODE,
     });
     return brief;
   }
@@ -1782,12 +1790,15 @@ export class AsterismStore {
     return this.driver.transaction(() => {
       const brief = this.briefs.endActiveForConnection(connection);
       if (!brief) return undefined;
+      // The verified mode, not the caller's field — see the note on `brief.set` above. The
+      // end path had the identical defect, which is why the fix is stated once and applied to
+      // both rather than to the one a report happened to name.
       this.emitToBoth(connection.fromAgentId, connection.toAgentId, "brief.ended", {
         briefId: brief.id,
         connectionId: connection.id,
         fromAgentId: connection.fromAgentId,
         toAgentId: connection.toAgentId,
-        mode: connection.mode,
+        mode: BRIEF_CONNECTION_MODE,
       });
       return brief;
     });
