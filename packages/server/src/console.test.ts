@@ -1095,3 +1095,62 @@ test("a wrong overwrite guess is refused and shown the truth — no unacknowledg
   expect((await body(acknowledged)).overwrote).toBe(true);
   expect(log.materialized).toEqual([ARTIFACT_PATH]);
 });
+
+test("a caller-supplied value that must match a kernel record is never normalized", async () => {
+  // ONE test for the whole category, not the one instance a reviewer named. Both values below
+  // are matched against something the KERNEL recorded, and a surface-side trim breaks each in
+  // a different direction: the path REFUSES a real artifact, the agent name silently resolves
+  // to a DIFFERENT agent. Agent names are unvalidated free text, so the neighbour is real.
+  const padded = store.createAgent({
+    name: "work ", // a distinct agent from `work`, one trailing space
+    role: "careful consultant",
+    soulRef: "careful-consultant",
+    workspaceDir: "/tmp/work-padded",
+    trustLevel: "autonomous",
+  });
+
+  // 1. The connect body names `"work "` — it must reach that agent, not `work`.
+  const granted = await handleConsoleRequest(
+    deps(),
+    send("POST", "/agents/personal/connections", { to: "work ", mode: "handoff" }),
+  );
+  expect(granted.status).toBe(201);
+  expect((await body(granted)).connection).toMatchObject({ to: "work " });
+  expect(store.connections.findActive(personal.id, padded.id, "handoff")).toBeDefined();
+  // The neighbour was never touched.
+  expect(store.connections.findActive(personal.id, work.id, "handoff")).toBeUndefined();
+
+  // 2. An artifact recorded at a path with surrounding whitespace stays fetchable.
+  const oddPath = " drafts/spaced.md ";
+  store.setTrust(work.id, "autonomous");
+  store.createConnection(personal.id, work.id, "artifact-only");
+  const exchanged = await handleConsoleRequest(
+    exchangeDeps({ capabilities: () => [writeCapability(oddPath, 99)] }),
+    send("POST", "/agents/personal/connections/work/artifact", { task: "draft" }),
+  );
+  expect((await body(exchanged)).artifacts).toEqual([
+    { path: oddPath, kind: "file", exists: true, sizeBytes: 99 },
+  ]);
+
+  const log: FetchLog = { inspected: [], materialized: [] };
+  const host = {
+    inspect: (r: { path: string }) => {
+      log.inspected.push(r.path);
+      return { ok: true as const, sizeBytes: 99, modifiedAtMs: 0, destExists: false };
+    },
+    materialize: (r: { path: string }) => {
+      log.materialized.push(r.path);
+      return { ok: true as const, bytes: 99 };
+    },
+  };
+  const fetched = await handleConsoleRequest(
+    deps({ fetchHost: host }),
+    send("POST", "/agents/personal/connections/work/fetch", {
+      path: oddPath,
+      confirm: { sizeBytes: 99, overwrites: false },
+    }),
+  );
+  expect(fetched.status).toBe(200);
+  // The path the host was handed is the RECORDED one, byte for byte.
+  expect(log.materialized).toEqual([oddPath]);
+});

@@ -650,8 +650,13 @@ async function connect(deps: ConsoleDeps, agent: Agent, req: Request): Promise<R
   if (typeof mode !== "string" || !(CONNECTION_MODES as readonly string[]).includes(mode)) {
     return fail(400, `"mode" must be one of ${CONNECTION_MODES.join(" | ")}.`);
   }
-  const to = findAgent(deps, toName.trim());
-  if (!to) return fail(404, `No agent named "${toName.trim()}".`);
+  // Looked up VERBATIM. Agent names are unvalidated free text, so `"work "` and `"work"` are
+  // two different agents — trimming here would silently connect to the neighbour rather than
+  // to the agent the caller named, and would disagree with the callee segment in every other
+  // route on this family, which decodes and matches exactly. A name is an identity, and a
+  // surface does not get to normalize one.
+  const to = findAgent(deps, toName);
+  if (!to) return fail(404, `No agent named "${toName}".`);
   // A connection is for CROSS-agent collaboration, and the kernel enforces that by THROWING
   // on a self-connection — which the outer catch would report as a 500, an operator's typo
   // dressed as a server fault. Answered here as the 400 it is.
@@ -986,7 +991,12 @@ async function fetchArtifact(
   if (typeof rawPath !== "string" || rawPath.trim().length === 0) {
     return fail(400, '"path" must be the workspace-relative path shown in the manifest.');
   }
-  const path = rawPath.trim();
+  // Passed through VERBATIM, with the trim above used only to reject a blank. The reference
+  // is matched against what the kernel RECORDED, and the manifest reducer stores a path as
+  // the observation gave it (its own `trim()` is a blank check, not a normalization) — so a
+  // legitimate path with surrounding whitespace would stop matching its own record and a
+  // genuinely exchanged artifact would report `not_exchanged`. [Codex review R2 P3.]
+  const path = rawPath;
 
   let echo: FetchEcho | undefined;
   const rawConfirm = body?.confirm;
