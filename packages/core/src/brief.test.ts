@@ -216,6 +216,28 @@ test("a third agent neither sees the brief nor is framed by it", async () => {
 test("every scoped brief read requires an agent id", () => {
   expect(() => store.listBriefs("")).toThrow(/agentId is required/);
   expect(() => store.listActiveBriefsForAgent("")).toThrow(/agentId is required/);
+  expect(() => store.briefs.findActiveForConnection("", "any-id")).toThrow(/agentId is required/);
+});
+
+test("NO read in this repository returns a brief to a non-participant", () => {
+  // Asserted over EVERY read rather than one, because the fault this pins was a single method
+  // missing the predicate its five siblings had — golden rule 1 is structural precisely so a
+  // reader does not have to check them one at a time. `findActiveForConnection` shipped
+  // unscoped and returned the full brief TEXT to anyone holding a connection id, which no
+  // other read here does.
+  const conn = channel();
+  store.setBrief(conn, "CONFIDENTIAL: the Q3 pricing floor");
+
+  expect(store.listBriefs(stranger.id)).toHaveLength(0);
+  expect(store.listActiveBriefsForAgent(stranger.id)).toHaveLength(0);
+  expect(store.briefs.findActiveForConnection(stranger.id, conn.id)).toBeUndefined();
+
+  // ...and each returns it to a participant, so the scope is what differs and not the query.
+  expect(store.listBriefs(writer.id)).toHaveLength(1);
+  expect(store.listActiveBriefsForAgent(helper.id)).toHaveLength(1);
+  expect(store.briefs.findActiveForConnection(helper.id, conn.id)?.content).toContain(
+    "CONFIDENTIAL",
+  );
 });
 
 test("cross-agent denial still holds across the live channel", () => {
@@ -539,7 +561,7 @@ test("ending needs a live grant too — a stale connection object cannot change 
   store.revokeConnection(writer.id, helper.id, "shared-brief");
   // The caller still holds a `Connection` that says `active`. A connection ID is not authority.
   expect(store.endBrief(conn)).toBeUndefined();
-  expect(store.briefs.findActiveForConnection(conn.id)?.content).toBe("the standing brief");
+  expect(store.briefs.findActiveForConnection(writer.id, conn.id)?.content).toBe("the standing brief");
   expect(store.events.list(writer.id, {}).filter((e) => e.type === "brief.ended")).toHaveLength(0);
 });
 

@@ -1405,7 +1405,7 @@ export function performSetBrief(
   if (!connection) return { kind: "no_connection" };
   // Read BEFORE the write, purely to report which of set/replace happened — the supersede
   // itself is the store's single transaction, so this is not a check the write depends on.
-  const replaced = store.briefs.findActiveForConnection(connection.id) !== undefined;
+  const replaced = store.briefs.findActiveForConnection(from.id, connection.id) !== undefined;
   try {
     const brief = store.setBrief(connection, content);
     // The grant did not hold at the moment of the write — another operator's `disconnect`

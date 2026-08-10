@@ -184,11 +184,36 @@ export class BriefRepository {
     return row ? mapBrief(row) : undefined;
   }
 
-  /** The ACTIVE brief on `connectionId`, or undefined. Reports state, not permission. */
-  findActiveForConnection(connectionId: string): Brief | undefined {
+  /**
+   * The ACTIVE brief on `connectionId`, or undefined — for a caller that PARTICIPATES in the
+   * channel. Reports state, not permission: the connection's status and mode are deliberately
+   * not tested, because the one caller uses this to tell "set" from "replaced" after the grant
+   * has already been checked, and a read that reports history returns every state (the
+   * `get`/`listForAgent` split every other repository makes).
+   *
+   * The participant predicate is NOT optional, and it was missing when this method was first
+   * written — a `connectionId` alone returned the full brief TEXT to anyone holding one, while
+   * every other read in this file refused a non-participant. That is golden rule 1 ("no query
+   * is ever issued without [the scope] in the filter … never rely on application code
+   * remembering to filter") and it is also the rule this class's own header states. A method
+   * whose scoping depends on the id being hard to obtain is exactly what that rule exists to
+   * forbid. [Codex review R3 P2.]
+   *
+   * Scoped through the CONNECTION rather than the brief row's own columns, for the reason
+   * round 2 established: a row's self-declared participants are a claim, and the authorizing
+   * row's are the fact.
+   */
+  findActiveForConnection(agentId: string, connectionId: string): Brief | undefined {
+    requireAgentId(agentId);
     const row = this.driver
-      .prepare(`SELECT * FROM briefs WHERE connection_id = ? AND status = 'active'`)
-      .get([connectionId]);
+      .prepare(
+        `SELECT b.* FROM briefs b
+           JOIN connections c ON c.id = b.connection_id
+           WHERE b.connection_id = ?
+             AND b.status = 'active'
+             AND (c.from_agent_id = ? OR c.to_agent_id = ?)`,
+      )
+      .get([connectionId, agentId, agentId]);
     return row ? mapBrief(row) : undefined;
   }
 
