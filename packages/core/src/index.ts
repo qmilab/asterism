@@ -161,6 +161,7 @@ export {
   BUILTIN_SOULS,
 } from "./framing.js";
 export type {
+  BriefContext,
   SkillContext,
   FramingContext,
   FrameRunInput,
@@ -204,6 +205,8 @@ export {
   performArtifactExchange,
   performArtifactFetch,
   performSummaryExchange,
+  performSetBrief,
+  performEndBrief,
   EXCHANGE_FETCH_KEY,
   resolveRecallBudget,
 } from "./run.js";
@@ -226,6 +229,8 @@ export type {
   ArtifactMaterialization,
   ArtifactMaterializeRequest,
   SummaryExchangeOutcome,
+  SetBriefOutcome,
+  EndBriefOutcome,
 } from "./run.js";
 export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";

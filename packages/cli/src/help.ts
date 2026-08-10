@@ -42,6 +42,9 @@ Commands:
   artifact <from> <to> "<task>"     Like handoff, but hand back only the files produced
   fetch <from> <to> <path>          Copy one of those files into the asking agent's space
   summary <from> <to> ["<focus>"]   Read a curated extract of what another agent knows
+  brief <from> <to> "<brief>"       Set standing context both agents run with
+  unbrief <from> <to>               End that standing context
+  briefs <agent>                    Show the briefs an agent runs with
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
@@ -214,7 +217,7 @@ Choose a model with \`asterism config\` (or the ASTERISM_MODEL_ID environment
 variable), and set an API key in the environment (e.g. OPENAI_API_KEY), before
 running.`,
 
-  connect: `asterism connect <from> <to> --mode <handoff|artifact-only|read-summary>
+  connect: `asterism connect <from> <to> --mode <handoff|artifact-only|read-summary|shared-brief>
 
 Open an explicit channel from one agent to another, so the first can hand it work.
 Agents are separate by default and can't reach each other; a connection is the only
@@ -234,14 +237,16 @@ re-run the same connect harmlessly — it won't make a duplicate.
                      read-summary   The receiving agent does NO work at all. It shares a
                                     short, screened extract of what it has already learned
                                     and you have accepted. Use \`asterism summary\`.
-                                    (More modes, sharing less, are coming.)
+                     shared-brief   The one channel that carries context IN rather than
+                                    results back. You write a brief and BOTH agents run
+                                    with it as standing context. Use \`asterism brief\`.
 
 Opening a connection is a deliberate act you take; from then on, either agent's record
 shows the channel exists and each time it is used — never the task text or any result.
 
 Close one with \`asterism disconnect\`.`,
 
-  disconnect: `asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary>]
+  disconnect: `asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary|shared-brief>]
 
 Withdraw a channel you opened. From then on the two agents are as separate as they were
 before you connected them.
@@ -250,7 +255,8 @@ What it takes away depends on the channel, and it is more than the ability to as
 work. Withdrawing an artifact-only channel also means files the other agent already
 handed over can no longer be fetched — the list you were given stops resolving. And
 withdrawing a read-summary channel means it stops sharing what it knows, including from
-anything it learned while the channel was open.
+anything it learned while the channel was open. Withdrawing a shared-brief channel means
+the brief stops shaping BOTH agents' runs, from their next run onward.
 
   --mode <m>       Which channel, when the two agents have more than one open. With a
                    single open channel you can leave it out; with several, asterism will
@@ -363,6 +369,57 @@ Open the channel first if you haven't:
 
 A channel opened for handoff or artifact-only does not work here — each mode is its own
 permission, so opening one never quietly grants another.`,
+
+  brief: `asterism brief <from> <to> "<brief>"
+
+Set the standing context two connected agents both run with. Unlike every other channel,
+this one carries something IN rather than handing a result back:
+
+  asterism brief writer researcher "Q3 launch: enterprise buyers, ship by Friday"
+
+From then on, BOTH agents run with that brief in front of them — not just the one it was
+written to, and not just when they work together. It shapes their ordinary runs too, until
+you replace it, end it, or withdraw the channel. That is what makes it standing context
+rather than a longer way of writing a task.
+
+An agent has only one brief per channel. Writing a new one replaces the old one, which
+stops shaping runs immediately.
+
+What you write is screened before it goes anywhere. Wording that reads as an attempt to
+steer or manipulate the other agent is refused outright — nothing is saved and nothing
+crosses, and asterism tells you which rule it tripped without repeating what you wrote. It
+is a brief, not a back door into another agent.
+
+Each agent sees the brief clearly marked as coming from the channel, not as its own
+purpose — an agent is never fooled into treating another agent's words as its own.
+
+Open the channel first if you haven't:
+  asterism connect <from> <to> --mode shared-brief
+
+Nothing of the other agent comes back to you here — no result, no files, no memory. This
+channel only carries the brief.`,
+
+  unbrief: `asterism unbrief <from> <to>
+
+End the standing brief on a channel. From their next run onward, neither agent sees it.
+
+The channel itself stays open, so you can set a new brief whenever you like. To close the
+channel too, use \`asterism disconnect\`. (Withdrawing the channel also ends the brief —
+this is for when you want the channel kept.)
+
+A brief that has ended does not come back; set a new one instead.`,
+
+  briefs: `asterism briefs <agent>
+
+Show the briefs an agent is running with, and the ones it used to. Each line says which
+channel carries the brief and whether it is shaping runs right now.
+
+A brief can be listed but no longer shaping runs for two reasons: you replaced or ended
+it, or you withdrew the channel it lived on. Both are marked, so you never have to
+cross-check \`connections\` to work out why a brief stopped applying.
+
+Only ever the named agent's own briefs — it never reveals a brief between two other
+agents.`,
 
   confirm: `asterism confirm [<agent>] <run>
 

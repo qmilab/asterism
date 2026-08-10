@@ -6,6 +6,7 @@ import type {
   ActionRecord,
   Agent,
   ArtifactRef,
+  Brief,
   CapabilityGrant,
   Connection,
   Event,
@@ -252,9 +253,68 @@ export function formatConnectionList(
     lines.push(`• ${arrow} · ${c.mode} · ${c.status} · ${shortId(c.id)}${withdrawn}`);
   }
   lines.push("");
-  // Mode-neutral wording: a channel may carry a handoff or an artifact-only exchange, so the
-  // legend describes the DIRECTION of work, not one mode's verb.
-  lines.push("→ outbound (this agent may send work to the other) · ← inbound (the other may send work to this agent)");
+  // Mode-neutral wording: a channel may carry a handoff, an artifact-only exchange, a
+  // read-summary pull, or a shared brief, so the legend describes WHO INITIATES rather than
+  // one mode's verb. It deliberately does not say "sends work" — `read-summary` runs nothing
+  // and `shared-brief` sends context, so a work-shaped legend would be wrong for half the
+  // modes.
+  lines.push("→ outbound (this agent initiates over the channel) · ← inbound (the other agent initiates)");
+  return lines.join("\n").trimEnd();
+}
+
+/**
+ * Render an agent's briefs for `briefs <agent>` — the standing context set on its
+ * `shared-brief` channels (Phase 3 · T3a).
+ *
+ * Direction is shown the way `formatConnectionList` shows it, and means the same thing: `→
+ * other` is a brief this agent's channel carries OUT to `other`, `← other` one that arrives.
+ * What it does NOT mean is who reads it — a brief frames both participants either way, which
+ * is the mode's whole point, so the footer says so rather than leaving an operator to read
+ * the arrow as "only they see it".
+ *
+ * `framing` is the set of brief ids that actually shape this agent's runs right now, resolved
+ * by the KERNEL through the live connection and passed in rather than re-derived here. That
+ * matters: a brief can be `active` while its channel is withdrawn, in which case it frames
+ * nothing, and a listing that worked that out for itself could disagree with the prompt. Rows
+ * outside the set are labelled with why — superseded, ended, or on a withdrawn channel — so
+ * "why isn't my brief showing up in the run" is answerable from this one screen.
+ */
+export function formatBriefList(
+  briefs: readonly Brief[],
+  agent: Agent,
+  nameById: ReadonlyMap<string, string>,
+  framing: ReadonlySet<string>,
+): string {
+  if (briefs.length === 0) {
+    return (
+      `${agent.name} has no briefs. Set one on a shared-brief channel with: ` +
+      `asterism brief ${agent.name} <other> "<brief>"`
+    );
+  }
+  const lines: string[] = [`Briefs for ${agent.name} (${briefs.length}):`, ""];
+  // Framing rows first, then the rest — the same stable partition `formatConnectionList` uses,
+  // so what is live is never buried under history.
+  const ordered = [
+    ...briefs.filter((b) => framing.has(b.id)),
+    ...briefs.filter((b) => !framing.has(b.id)),
+  ];
+  for (const b of ordered) {
+    const outbound = b.fromAgentId === agent.id;
+    const otherId = outbound ? b.toAgentId : b.fromAgentId;
+    const other = nameById.get(otherId) ?? shortId(otherId);
+    const arrow = outbound ? `→ ${other}` : `← ${other}`;
+    // An `active` brief that is not framing can only mean its channel was withdrawn — the
+    // one state an operator would otherwise have to cross-reference `connections` to explain.
+    const note = framing.has(b.id)
+      ? "  (framing every run of both agents)"
+      : b.status === "ended"
+        ? "  (ended — no longer framing)"
+        : "  (channel withdrawn — no longer framing)";
+    lines.push(`• ${arrow} · ${shortId(b.id)}${note}`);
+    lines.push(`  ${b.content}`);
+  }
+  lines.push("");
+  lines.push("A brief frames BOTH agents' runs while it is live — the arrow shows whose channel carries it.");
   return lines.join("\n").trimEnd();
 }
 

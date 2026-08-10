@@ -38,6 +38,8 @@ import {
   performArtifactFetch,
   performHandoff,
   performSummaryExchange,
+  performSetBrief,
+  performEndBrief,
   proposeObjectiveTransitions,
   proposeReviewableMemories,
   proposeReviewableObjectives,
@@ -102,6 +104,7 @@ import {
   formatAgentList,
   formatArtifactManifest,
   formatBytes,
+  formatBriefList,
   formatConnectionList,
   formatEventLines,
   formatMemorySummary,
@@ -1516,7 +1519,9 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
         ? `asterism summary ${fromName} ${toName} ["<focus>"]`
         : connection.mode === "artifact-only"
           ? `asterism artifact ${fromName} ${toName} "<task>"`
-          : `asterism handoff ${fromName} ${toName} "<task>"`;
+          : connection.mode === "shared-brief"
+            ? `asterism brief ${fromName} ${toName} "<brief>"`
+            : `asterism handoff ${fromName} ${toName} "<task>"`;
     io.out(`Connected ${fromName} → ${toName} (${connection.mode}). Use it with: ${usage}`);
     return 0;
   });
@@ -1599,7 +1604,9 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
         ? `${toName} no longer shares what it has learned with ${fromName}.`
         : revoked.mode === "artifact-only"
           ? `${fromName} can no longer ask ${toName} for work, and files ${toName} already handed over can no longer be fetched.`
-          : `${fromName} can no longer hand work to ${toName}.`;
+          : revoked.mode === "shared-brief"
+            ? `The standing brief stops shaping either agent's next run — neither ${fromName} nor ${toName} sees it again.`
+            : `${fromName} can no longer hand work to ${toName}.`;
     io.out(`Disconnected ${fromName} → ${toName} (${revoked.mode}). ${withdrawn}`);
     io.out(`Reconnecting opens a new channel — it does not bring the old one back.`);
     return 0;
@@ -1660,7 +1667,7 @@ function cmdConnections(args: string[], io: CliIO): Promise<number> {
 function parseExchangeArgs(
   args: string[],
   io: CliIO,
-  verb: "handoff" | "artifact" | "summary",
+  verb: "handoff" | "artifact" | "summary" | "brief",
 ): { fromName: string; toName: string; task: string } | number {
   if (args[0] === "--help" || args[0] === "-h") {
     io.out(COMMAND_HELP[verb]!);
@@ -1679,7 +1686,9 @@ function parseExchangeArgs(
     io.err(
       tailOptional
         ? `Usage: asterism ${verb} <from> <to> ["<focus>"]`
-        : `Usage: asterism ${verb} <from> <to> "<task>"`,
+        : verb === "brief"
+          ? `Usage: asterism ${verb} <from> <to> "<brief>"`
+          : `Usage: asterism ${verb} <from> <to> "<task>"`,
     );
     return 1;
   }
@@ -1931,6 +1940,132 @@ function cmdSummary(args: string[], io: CliIO): Promise<number> {
       return noConnection(io, fromName, toName, "read-summary");
     }
     for (const line of formatMemorySummary(outcome.result, toName)) io.out(line);
+    return 0;
+  });
+}
+
+// --- shared-brief ----------------------------------------------------------
+
+/**
+ * `asterism brief <from> <to> "<brief>"` — set the standing brief on a `shared-brief`
+ * channel (Phase 3 · T3a).
+ *
+ * The only collaboration verb that writes INTO an agent rather than reading out of one.
+ * Every other mode asks the callee to do something and projects what comes back; this one
+ * puts operator-authored text into BOTH participants' framing, where it shapes every
+ * subsequent run until it is replaced, ended, or the channel is withdrawn.
+ *
+ * Like every exchange verb the tail is free-form and taken verbatim, so a dash-leading or
+ * flag-shaped brief survives intact — and, per D29, that is exactly why ending a brief is a
+ * separate top-level verb (`unbrief`) rather than a `--end` flag this rule would swallow or a
+ * sub-verb dispatched from a position that holds an agent name.
+ *
+ * No adapter, no recall, no capabilities: setting a brief runs nothing.
+ */
+function cmdBrief(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseExchangeArgs(args, io, "brief");
+  if (typeof parsed === "number") return Promise.resolve(parsed);
+  const { fromName, toName, task: content } = parsed;
+
+  return withHomeStore(io, (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    const outcome = performSetBrief(store, from, to, content);
+    if (outcome.kind === "no_connection") {
+      return noConnection(io, fromName, toName, "shared-brief");
+    }
+    if (outcome.kind === "blocked") {
+      // Name the RULES that fired, never echo the refused text — the same discipline the
+      // event payload follows. The screen is not a style preference: this text would have
+      // entered another agent's system prompt.
+      io.err(`That brief was refused before it could reach ${toName}.`);
+      for (const f of outcome.findings) io.err(`  - ${f.rule} (${f.category})`);
+      io.err(`Rewrite it as plain instruction and set it again.`);
+      return 1;
+    }
+    io.out(
+      outcome.replaced
+        ? `Replaced the brief on ${fromName} → ${toName}. The previous one stops shaping runs now.`
+        : `Briefed ${fromName} → ${toName}.`,
+    );
+    io.out(`Both agents now run with it as standing context, until: asterism unbrief ${fromName} ${toName}`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism unbrief <from> <to>` — end the standing brief on a channel, so it stops shaping
+ * either agent's runs from their next run onward. Leaves the channel itself open.
+ *
+ * A top-level verb for the reason D29 records: `brief` is agent-first and takes free-form
+ * text, so neither a sub-verb (`brief end …` would shadow an agent named `end`) nor a flag
+ * (the verbatim tail rule would swallow it) is available.
+ */
+function cmdUnbrief(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.unbrief!);
+    return Promise.resolve(0);
+  }
+  const fromName = parsed.positionals[0];
+  const toName = parsed.positionals[1];
+  if (!fromName || !toName) {
+    io.err("Usage: asterism unbrief <from> <to>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    const outcome = performEndBrief(store, from, to);
+    if (outcome.kind === "no_connection") {
+      return noConnection(io, fromName, toName, "shared-brief");
+    }
+    if (outcome.kind === "not_set") {
+      // Deliberately distinct from "no channel": the channel IS open, it simply carries no
+      // brief. Collapsing the two would tell an operator their brief is gone when what was
+      // missing was the channel it would have lived on.
+      io.err(`The shared-brief channel from ${fromName} to ${toName} carries no brief.`);
+      return 1;
+    }
+    io.out(`Ended the brief on ${fromName} → ${toName}. Neither agent sees it from their next run.`);
+    io.out(`The channel is still open — set a new brief with: asterism brief ${fromName} ${toName} "<brief>"`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism briefs <agent>` — the briefs an agent participates in, inbound and outbound.
+ *
+ * History, not permission: superseded briefs and briefs whose channel was later withdrawn
+ * both still show, exactly as `connections` keeps withdrawn channels listed. What FRAMES a
+ * run is the narrower set, and the listing marks it.
+ */
+function cmdBriefs(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.briefs!);
+    return Promise.resolve(0);
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err("Usage: asterism briefs <agent>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const briefs = store.listBriefs(agent.id);
+    const nameById = new Map(store.agents.list().map((a) => [a.id, a.name] as const));
+    // Which of them actually frame this agent's runs — resolved by the kernel through the
+    // live connection, not re-derived here, so the listing cannot disagree with the prompt.
+    const framing = new Set(store.listActiveBriefsForAgent(agent.id).map((b) => b.id));
+    io.out(formatBriefList(briefs, agent, nameById, framing));
     return 0;
   });
 }
@@ -5134,6 +5269,12 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdFetch(rest, io);
     case "summary":
       return cmdSummary(rest, io);
+    case "brief":
+      return cmdBrief(rest, io);
+    case "unbrief":
+      return cmdUnbrief(rest, io);
+    case "briefs":
+      return cmdBriefs(rest, io);
     case "confirm":
       return cmdConfirm(rest, io);
     case "runs":

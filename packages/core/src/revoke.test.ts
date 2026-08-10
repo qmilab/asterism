@@ -472,7 +472,7 @@ test("revoking a channel that is not open is a no-op — no row, no event", () =
 test("an unimplemented mode is refused at the revoke write boundary", () => {
   expect(() =>
     // @ts-expect-error deliberately outside the enum — the storage layer never trusts the type
-    store.revokeConnection(writer.id, helper.id, "shared-brief"),
+    store.revokeConnection(writer.id, helper.id, "delegated-tool"),
   ).toThrow(/invalid connection mode/);
 });
 

@@ -21,12 +21,14 @@ import {
 import { CredentialRepository } from "./repositories/credentials.js";
 import { ConnectionRepository } from "./repositories/connections.js";
 import { ExchangeRepository } from "./repositories/exchanges.js";
+import { BriefRepository } from "./repositories/briefs.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
 import { InstallSettingsRepository } from "./repositories/install-settings.js";
 import type {
   Agent,
   AgentSettings,
+  Brief,
   CapabilityGrant,
   CapabilityStanding,
   Connection,
@@ -76,6 +78,8 @@ export class AsterismStore {
   readonly connections: ConnectionRepository;
   /** What actually crossed a connection, as resolvable references — the record `fetch` reads. */
   readonly exchanges: ExchangeRepository;
+  /** Standing operator-authored briefs on `shared-brief` channels (Phase 3 · T3a). */
+  readonly briefs: BriefRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
   /** Per-agent kernel settings — the operator-configurable tunables (e.g. recall budget). */
@@ -98,6 +102,7 @@ export class AsterismStore {
     this.credentials = new CredentialRepository(driver);
     this.connections = new ConnectionRepository(driver);
     this.exchanges = new ExchangeRepository(driver);
+    this.briefs = new BriefRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
     this.installSettings = new InstallSettingsRepository(driver);
@@ -1669,6 +1674,98 @@ export class AsterismStore {
       });
       return connection;
     });
+  }
+
+  /**
+   * Set (or replace) the standing brief on a `shared-brief` connection, recording
+   * `brief.set` on BOTH agents' logs. Returns the new brief.
+   *
+   * The mirror of {@link createObjective} — a brief is operator-authored free text that
+   * frames runs, so it is screened by the memory firewall on the write path and audited
+   * either way. On a refusal `brief.blocked` is emitted (the findings, never the blocked
+   * text) and the error rethrows, so the refusal stays on the record. The emit happens
+   * AFTER the transaction has rolled back, which is what keeps the audit from being erased
+   * along with the write it describes.
+   *
+   * The difference from an objective is the audience, and it is the whole reason this mode
+   * needed its own decisions: an objective frames the agent that declared it, while a brief
+   * frames ANOTHER agent's runs. So the block is emitted only on the AUTHOR's log — a
+   * refused brief touched the callee not at all, the same rule a withheld fetch follows —
+   * while a successful set is recorded on both, references only (brief id, connection id,
+   * both agent ids, mode). **The brief's text never appears in an event**, for the same
+   * reason a handoff's task input never appears in `handoff.requested`.
+   *
+   * Replacing is a supersede, not an update: the existing active brief is ended and a new
+   * row inserted, both inside one transaction, so a channel never has two active briefs and
+   * the history of what framed runs stays intact (D28). The partial unique index is the
+   * storage-layer backstop.
+   */
+  setBrief(connection: Connection, content: string): Brief {
+    let brief: Brief;
+    try {
+      brief = this.driver.transaction(() => {
+        // Ended first so the unique index is free for the insert. A firewall refusal throws
+        // inside `create`, which rolls this back — a blocked brief must not end the one that
+        // was already framing runs.
+        this.briefs.endActiveForConnection(connection.id);
+        return this.briefs.create(connection, content);
+      });
+    } catch (err) {
+      if (err instanceof MemoryFirewallError) {
+        this.emit(connection.fromAgentId, "brief.blocked", { findings: err.findings });
+      }
+      throw err;
+    }
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "brief.set", {
+      briefId: brief.id,
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: connection.mode,
+    });
+    return brief;
+  }
+
+  /**
+   * End the standing brief on a connection, recording `brief.ended` on BOTH agents' logs.
+   * Returns the ended brief, or undefined when there was none — in which case NOTHING is
+   * emitted, so re-ending is a silent no-op rather than a second withdrawal in the audit
+   * (the same discipline {@link revokeConnection} follows).
+   *
+   * Terminal: reinstating means calling {@link setBrief} again, which mints a fresh row.
+   */
+  endBrief(connection: Connection): Brief | undefined {
+    return this.driver.transaction(() => {
+      const brief = this.briefs.endActiveForConnection(connection.id);
+      if (!brief) return undefined;
+      this.emitToBoth(connection.fromAgentId, connection.toAgentId, "brief.ended", {
+        briefId: brief.id,
+        connectionId: connection.id,
+        fromAgentId: connection.fromAgentId,
+        toAgentId: connection.toAgentId,
+        mode: connection.mode,
+      });
+      return brief;
+    });
+  }
+
+  /**
+   * The briefs that currently FRAME this agent's runs — active briefs on active
+   * `shared-brief` channels the agent participates in. The read `executeRun` makes at
+   * framing time, so the grant is evaluated when the text is used rather than when it was
+   * written, and a revoked channel yields nothing.
+   */
+  listActiveBriefsForAgent(agentId: string): Brief[] {
+    return this.briefs.listActiveForAgent(agentId);
+  }
+
+  /**
+   * Every brief an agent participates in, in any status, for `briefs <agent>`. History, not
+   * permission — a superseded brief and one whose channel was withdrawn both still show,
+   * exactly as {@link listConnections} keeps revoked rows listed.
+   */
+  listBriefs(agentId: string): Brief[] {
+    return this.briefs.listForAgent(agentId);
   }
 
   /**
