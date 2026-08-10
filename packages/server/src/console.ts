@@ -947,12 +947,25 @@ interface FetchEcho {
  *   POST { path }                                  → 409 + plan { path, sizeBytes, overwrites }
  *   POST { path, confirm: { sizeBytes, overwrites } } → 200, the bytes land
  *
- * A blind confirmation is impossible: the caller cannot name the size without having been
- * handed the plan. That is the property the CLI gets for free by printing the path, size and
- * overwrite before it prompts — here it is structural. It is also the idiom the kernel
- * already uses one layer down (`ArtifactMaterializeRequest.expect`), and it is STATELESS: no
- * ticket, no nonce, nothing parked at the surface, because parking a confirmation here would
- * re-create exactly what the kernel refused to park.
+ * BE PRECISE ABOUT WHAT THE ECHO BUYS, because the tempting claim is wrong. It is NOT proof
+ * the caller read a fresh plan: `sizeBytes` is already in the manifest the `artifact`
+ * exchange handed them, so a caller holding that manifest can name it without ever asking
+ * for a plan. What the echo does guarantee is narrower and is the half that matters:
+ *
+ *   - **No unacknowledged overwrite.** `overwrites` is the one fact in the plan the caller
+ *     cannot already know — it describes THEIR OWN workspace at this instant, and it can
+ *     change between two requests. Guess it wrong and the fetch is refused and the true
+ *     plan returned. So no fetch can silently replace a file the operator did not
+ *     acknowledge, which is the risk D12 exists for.
+ *   - **Nothing crosses without an explicit, per-fetch confirmation.** Unconditional: no
+ *     `confirm` field, no bytes. And because nothing is persisted, it can never decay into
+ *     standing — every fetch is confirmed on its own or not at all (D15).
+ *
+ * It is the idiom the kernel already uses one layer down
+ * (`ArtifactMaterializeRequest.expect`), and it is STATELESS: no ticket, no nonce, nothing
+ * parked at the surface, because parking a confirmation here would re-create exactly what
+ * the kernel refused to park. A stronger binding would need surface state, and that trade
+ * was declined deliberately rather than overlooked.
  *
  * Step 1 runs the REAL operation with a confirm callback that records the gate's own
  * invocation and answers no — so the plan describes the fetch step 2 would perform, rather
@@ -1005,10 +1018,12 @@ async function fetchArtifact(
   let seen: FetchEcho | undefined;
   const confirm = (action: Action): boolean => {
     const args = action.args as { bytes?: unknown; overwrites?: unknown } | null;
-    seen = {
-      sizeBytes: typeof args?.bytes === "number" ? args.bytes : -1,
-      overwrites: args?.overwrites === true,
-    };
+    // A gate invocation we cannot read is one we cannot describe to a human, so it can never
+    // be confirmed — and, just as important, it must not resolve to a SENTINEL a caller could
+    // echo back. Fail closed and leave `seen` unset: the refusal below then reports the plan
+    // from the kernel's own outcome and omits an overwrite fact nobody established.
+    if (typeof args?.bytes !== "number" || typeof args.overwrites !== "boolean") return false;
+    seen = { sizeBytes: args.bytes, overwrites: args.overwrites };
     if (!echo) return false;
     return echo.sizeBytes === seen.sizeBytes && echo.overwrites === seen.overwrites;
   };

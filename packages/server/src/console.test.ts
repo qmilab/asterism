@@ -1058,3 +1058,40 @@ test("a callee whose name needs percent-encoding resolves, and a malformed one 4
   );
   expect(malformed.status).toBe(404);
 });
+
+test("a wrong overwrite guess is refused and shown the truth — no unacknowledged replace", async () => {
+  await exchangeAnArtifact();
+  // The caller's workspace ALREADY holds a file at that path, so the real plan overwrites.
+  const log: FetchLog = { inspected: [], materialized: [] };
+  const d = deps({ fetchHost: fakeFetchHost(log, new Set([ARTIFACT_PATH])) });
+
+  // A caller can name `sizeBytes` from the manifest it was handed without ever asking for a
+  // plan — so that half of the echo proves nothing. `overwrites` is the half that does: it
+  // describes the CALLER's own workspace right now, which the manifest never told them.
+  const guessed = await handleConsoleRequest(
+    d,
+    send("POST", "/agents/personal/connections/work/fetch", {
+      path: ARTIFACT_PATH,
+      confirm: { sizeBytes: ARTIFACT_BYTES, overwrites: false },
+    }),
+  );
+  expect(guessed.status).toBe(409);
+  expect(log.materialized).toEqual([]);
+  // Refused AND corrected: the operator now knows a file is about to be replaced.
+  expect((await body(guessed)).plan).toEqual({
+    path: ARTIFACT_PATH,
+    sizeBytes: ARTIFACT_BYTES,
+    overwrites: true,
+  });
+
+  const acknowledged = await handleConsoleRequest(
+    d,
+    send("POST", "/agents/personal/connections/work/fetch", {
+      path: ARTIFACT_PATH,
+      confirm: { sizeBytes: ARTIFACT_BYTES, overwrites: true },
+    }),
+  );
+  expect(acknowledged.status).toBe(200);
+  expect((await body(acknowledged)).overwrote).toBe(true);
+  expect(log.materialized).toEqual([ARTIFACT_PATH]);
+});
