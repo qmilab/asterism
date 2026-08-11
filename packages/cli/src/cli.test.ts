@@ -4684,3 +4684,99 @@ test("every capabilities verb refuses an option it does not define", async () =>
     store.close();
   }
 });
+
+/** A harness whose catalog is a chosen SUBSET of the shipped one. */
+function narrowCatalogHarness(keys: readonly string[]): Harness {
+  const h = harness();
+  return {
+    ...h,
+    io: {
+      ...h.io,
+      capabilities: (workspaceDir: string) =>
+        workspaceCapabilities(workspaceDir).filter((c) => keys.includes(c.key)),
+    },
+  };
+}
+
+test("remove pins only what this install builds — a later catalog addition is not inherited", async () => {
+  // Codex R4 [P2]. On a host whose catalog omits some kernel default keys, `remove`
+  // materialized the FIRST declaration from the whole default set, pinning keys the
+  // operator had never seen here. Enable one of those tools later and an agent that was
+  // explicitly narrowed silently gains it — the exact inheritance a closed default set
+  // exists to prevent.
+  const h = narrowCatalogHarness(["fs.read"]);
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["capabilities", "remove", "personal", "fs.read"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("it now holds 0 capabilities");
+
+  const store = openHomeStore(h);
+  try {
+    // The empty declaration, not the eight default keys this install cannot build.
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
+test("remove keeps a declared key this install cannot build", async () => {
+  // The opposite failure, and why the fix is scoped to materialization only: a declared
+  // key nothing here builds is a deliberate statement (the operator's other host builds
+  // it). Intersecting an EXISTING declaration with the catalog would silently delete it.
+  const h = narrowCatalogHarness(["fs.read", "fs.list"]);
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  const seeded = openHomeStore(h);
+  try {
+    seeded.agentSettings.setCapabilities(agentNamed(seeded, "personal").id, [
+      "fs.read",
+      "fs.list",
+      "vendor.tool",
+    ]);
+  } finally {
+    seeded.close();
+  }
+
+  expect(await runCli(["capabilities", "remove", "personal", "fs.list"], h.io)).toBe(0);
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toEqual([
+      "fs.read",
+      "vendor.tool",
+    ]);
+  } finally {
+    store.close();
+  }
+});
+
+test("remove and show agree on what an agent holds, even on a narrow catalog", async () => {
+  // "Does it hold this?" is the kernel's resolution — the same answer `show` gives.
+  // Answering it from the catalog-intersected set would have `remove` claim "does not
+  // hold" about a key `show` marks held, which is the R1 disagreement all over again.
+  const h = narrowCatalogHarness(["fs.read"]);
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  h.out.length = 0;
+  await runCli(["capabilities", "show", "personal"], h.io);
+  expect(h.out.join("\n")).toContain("✓ fs.delete  (this install builds no such tool)");
+
+  h.out.length = 0;
+  expect(await runCli(["capabilities", "remove", "personal", "fs.delete"], h.io)).toBe(0);
+  expect(h.out.join("\n")).not.toContain("does not hold");
+  expect(h.out.join("\n")).toContain("Removed fs.delete");
+
+  const store = openHomeStore(h);
+  try {
+    // Denying it now sticks: the declaration pins fs.read and nothing else.
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toEqual([
+      "fs.read",
+    ]);
+  } finally {
+    store.close();
+  }
+});

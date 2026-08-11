@@ -1122,7 +1122,30 @@ function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
     // are excluded from the set being rewritten — `remove` cannot reach them, and
     // neither can the declaration it writes.
     const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
+    const declared = store.agentSettings.getCapabilities(agent.id);
+    const catalog = catalogKeys(io, agent.workspaceDir);
+    // Two different questions, answered from two different sets — conflating them is how
+    // this went wrong twice.
+    //
+    // "Does the agent hold this key?" is the KERNEL's resolution, which is what
+    // `capabilities show` reports. Answering it from anything narrower would have
+    // `remove` say "does not hold" about a key `show` marks held, in the same install.
     const held = [...store.resolveOwnedCapabilities(agent.id)].filter((k) => !reserved.has(k));
+    // "What does the rewritten declaration keep?" has two cases:
+    //
+    //   DECLARED — the declaration minus the removed keys, verbatim. A declared key this
+    //     install cannot build is a deliberate statement (the operator's other host
+    //     builds it), and `remove fs.list` must not quietly delete it.
+    //   NOT DECLARED — this call materializes the FIRST declaration, and it must pin only
+    //     what this install can actually build. Materializing the kernel's whole default
+    //     set would pin keys the operator has never seen here, so a tool added to this
+    //     host's catalog later would land on an agent they had explicitly narrowed —
+    //     precisely the inheritance a closed default set exists to prevent.
+    //
+    // A host with NO catalog seam is UNKNOWN, not empty: nothing is intersected away,
+    // because "this install builds nothing" and "this install has not said" are different
+    // claims and only the first would justify discarding the default set.
+    const base = declared ?? (catalog ? held.filter((k) => catalog.includes(k)) : held);
     const naming = keys.filter((k) => reserved.has(k));
     if (naming.length > 0) {
       io.err(
@@ -1134,7 +1157,7 @@ function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
     const absent = keys.filter((k) => !held.includes(k));
     for (const key of absent) io.out(`${agent.name} does not hold '${key}' — nothing to remove.`);
     if (removing.length === 0) return 0;
-    const remaining = held.filter((k) => !removing.includes(k));
+    const remaining = base.filter((k) => !removing.includes(k));
     store.setAgentCapabilities(agent.id, remaining);
     io.out(
       `Removed ${removing.sort().join(", ")} from ${agent.name} — it now holds ${remaining.length} ${remaining.length === 1 ? "capability" : "capabilities"}.`,
