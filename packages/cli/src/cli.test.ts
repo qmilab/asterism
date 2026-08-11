@@ -4780,3 +4780,45 @@ test("remove and show agree on what an agent holds, even on a narrow catalog", a
     store.close();
   }
 });
+
+test("a corrupt declaration is recoverable through the CLI, and does not take config show down", async () => {
+  // Codex R6. `capabilities unset` is what the corrupt-declaration error tells the
+  // operator to run, and it parsed the declaration first — so the advice could not be
+  // followed. `config show` was worse: the parse lived in the row-wide decoder, so one
+  // bad column aborted the whole summary partway through, including other agents' lines.
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["config", "recall-budget", "personal", "7"], h.io);
+  await runCli(["capabilities", "set", "personal", "fs.read"], h.io);
+
+  const seeded = openHomeStore(h);
+  try {
+    seeded.driver
+      .prepare(`UPDATE agent_settings SET capabilities = ? WHERE agent_id = ?`)
+      .run(["not json at all", agentNamed(seeded, "personal").id]);
+  } finally {
+    seeded.close();
+  }
+
+  h.out.length = 0;
+  h.err.length = 0;
+  expect(await runCli(["config"], h.io)).toBe(0);
+  const shown = h.out.join("\n");
+  // The bad row is named with its fix; every other line survives.
+  expect(shown).toContain("personal  →  unreadable  [run: asterism capabilities unset personal]");
+  expect(shown).toContain("work  →  all 9 in the catalog  [not narrowed]");
+  expect(shown).toContain("personal  →  7  [set]");
+
+  // The detail view still refuses — fail-closed is not softened, only narrowed to the
+  // read that actually decides exposure.
+  expect(await runCli(["capabilities", "show", "personal"], h.io)).toBe(1);
+
+  h.out.length = 0;
+  expect(await runCli(["capabilities", "unset", "personal"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("no longer narrowed");
+  h.out.length = 0;
+  expect(await runCli(["capabilities", "show", "personal"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("holds all 9 in the catalog  [not narrowed]");
+});

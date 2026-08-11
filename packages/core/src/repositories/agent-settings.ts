@@ -35,7 +35,15 @@ function mapSettings(row: SqlRow): AgentSettings {
   const recallProvider = textOrUnset(row.recall_provider);
   const cognitionProvider = textOrUnset(row.cognition_provider);
   const cognitionCapture = textOrUnset(row.cognition_capture);
-  const capabilities = capabilitiesOrUnset(row.capabilities, String(row.agent_id));
+  // TOLERANT here, strict in `getCapabilities`. This decoder maps the WHOLE row, and a
+  // throw from one column takes every sibling setting with it — a corrupt capability
+  // declaration would make the agent's recall budget, providers and caps unreadable
+  // everywhere, including on the very commands an operator needs to diagnose it. The
+  // fail-closed guarantee does not live here: EXPOSURE is only ever resolved through
+  // `getCapabilities` / `resolveOwnedCapabilities`, which read raw and throw, so a
+  // corrupt declaration still refuses to run rather than widening. This field is the
+  // row's readable view, and it omits what it cannot read.
+  const capabilities = tolerantCapabilities(row.capabilities, String(row.agent_id));
   return {
     agentId: String(row.agent_id),
     ...(capabilities !== undefined ? { capabilities } : {}),
@@ -95,6 +103,15 @@ function capabilitiesOrUnset(value: unknown, agentId: string): readonly string[]
     return Object.freeze(validateCapabilityKeys(parsed as string[], "stored capability"));
   } catch (err) {
     return corrupt(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** {@link capabilitiesOrUnset}, but omitting a value it cannot read instead of throwing. */
+function tolerantCapabilities(value: unknown, agentId: string): readonly string[] | undefined {
+  try {
+    return capabilitiesOrUnset(value, agentId);
+  } catch {
+    return undefined;
   }
 }
 
@@ -274,13 +291,47 @@ export class AgentSettingsRepository {
 
   /**
    * The capability keys an agent has been DECLARED to hold, or undefined when nothing
-   * is declared (no row, or the column is NULL) — the resolver reads this and falls
+   * is declared (no row, or the column is NULL). **This is the strict read** — the one
+   * that throws on a corrupt value, and therefore the one every exposure decision must go
+   * through. It reads the column directly rather than via {@link get}, whose row-wide
+   * decode is deliberately tolerant so one bad column cannot hide an agent's other
+   * settings — the resolver reads this and falls
    * back to the kernel's named default catalog. An EMPTY array is a real answer
    * ("declared to hold no host tools"), distinct from undefined; callers must not
    * collapse the two with `?.length` or `|| []`. Scoped to `agentId`.
    */
   getCapabilities(agentId: string): readonly string[] | undefined {
-    return this.get(agentId)?.capabilities;
+    const raw = this.getCapabilitiesRaw(agentId);
+    return raw === undefined ? undefined : this.readCapabilityKeys(raw, agentId);
+  }
+
+  /**
+   * Decode a raw stored declaration into its keys, throwing if it is corrupt. The read
+   * path's decoder, exposed so a caller holding a raw value (recovery) can try to name
+   * what it is discarding without a second read.
+   */
+  readCapabilityKeys(raw: string, agentId: string): readonly string[] {
+    return capabilitiesOrUnset(raw, agentId) ?? [];
+  }
+
+  /**
+   * The stored capability declaration EXACTLY as it sits in the column, unparsed, or
+   * undefined when nothing is declared.
+   *
+   * The one read on this column that cannot throw, and it exists for exactly one reason:
+   * a corrupt declaration must still be clearable. {@link getCapabilities} validates on
+   * read and throws (unset is the widest state, so degrading to it would silently restore
+   * everything the operator narrowed away) — which means every caller that parses first is
+   * unavailable precisely when it is needed most. Recovery reads raw, writes NULL, and
+   * never asks what the bad value said.
+   */
+  getCapabilitiesRaw(agentId: string): string | undefined {
+    requireAgentId(agentId);
+    const row = this.driver
+      .prepare(`SELECT capabilities FROM agent_settings WHERE agent_id = ?`)
+      .get([agentId]);
+    const value = row?.capabilities;
+    return value === null || value === undefined ? undefined : String(value);
   }
 
   /**

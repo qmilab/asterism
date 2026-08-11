@@ -1194,7 +1194,9 @@ function cmdCapabilitiesUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    if (store.agentSettings.getCapabilities(agent.id) === undefined) {
+    // Raw, not parsed: `unset` is the documented recovery from a corrupt declaration, so
+    // it must not be the one command that a corrupt declaration stops.
+    if (store.agentSettings.getCapabilitiesRaw(agent.id) === undefined) {
       io.out(`${agent.name} was not narrowed — it already holds everything in the catalog.`);
       return 0;
     }
@@ -3835,7 +3837,18 @@ function cmdConfigShow(io: CliIO): Promise<number> {
       // summary that says otherwise contradicts `capabilities show` in the same install.
       const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
       for (const agent of agents) {
-        const declared = store.agentSettings.getCapabilities(agent.id);
+        // A corrupt declaration throws on read, by design. This is a SUMMARY over every
+        // agent, so letting that abort the whole view takes the operator's map away over
+        // one bad row — and the row is only fixable from a command they can no longer see
+        // the state for. Report it on its own line, loudly, and keep going: the run path
+        // still refuses (fail-closed is preserved), and the fix is named right here.
+        let declared: readonly string[] | undefined;
+        try {
+          declared = store.agentSettings.getCapabilities(agent.id);
+        } catch {
+          io.out(`  ${agent.name}  →  unreadable  [run: asterism capabilities unset ${agent.name}]`);
+          continue;
+        }
         const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
         if (declared === undefined) {
           const held = store.resolveOwnedCapabilities(agent.id);

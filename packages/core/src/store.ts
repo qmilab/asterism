@@ -567,14 +567,24 @@ export class AsterismStore {
    */
   clearAgentCapabilities(agentId: string): AgentSettings | undefined {
     return this.driver.transaction(() => {
-      const from = this.agentSettings.getCapabilities(agentId);
-      if (from === undefined) return this.agentSettings.get(agentId);
+      // Read RAW, not parsed. A corrupt declaration throws on the parsing read by design
+      // (D5: degrading it to unset would silently restore everything the operator
+      // narrowed away) — and clearing is the documented way OUT of that state, so it must
+      // not be the one path that cannot reach it. Parsing here made the error message's
+      // own advice impossible to follow.
+      const raw = this.agentSettings.getCapabilitiesRaw(agentId);
+      if (raw === undefined) return this.agentSettings.get(agentId);
       const settings = this.agentSettings.clearCapabilities(agentId);
-      this.emit(agentId, "agent.setting_changed", {
-        setting: "capabilities",
-        from,
-        to: null,
-      });
+      // `from` names the keys when they can be read, and says plainly that it could not
+      // when they cannot — rather than logging `null` (which would read as "nothing was
+      // declared") or echoing an arbitrary stored string into the audit log.
+      let from: readonly string[] | string;
+      try {
+        from = this.agentSettings.readCapabilityKeys(raw, agentId);
+      } catch {
+        from = "(unreadable declaration)";
+      }
+      this.emit(agentId, "agent.setting_changed", { setting: "capabilities", from, to: null });
       return settings;
     });
   }

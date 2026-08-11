@@ -17,7 +17,7 @@ import {
   resolveOwnedCapabilityKeys,
   validateCapabilityKeys,
 } from "./capabilities.js";
-import { executeRun, performHandoff, resumeRun } from "./run.js";
+import { executeRun, performHandoff, resolveRecallBudget, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import type { RuntimeAdapter, RunOutput } from "./adapter.js";
 import type { Capability } from "./trust.js";
@@ -319,6 +319,55 @@ test("validateCapabilityKeys is the shape check, not a membership check", () => 
 });
 
 // --- A corrupt stored value fails LOUDLY, never widens ------------------------------
+
+test("a corrupt declaration can be CLEARED — the recovery the error advises is reachable", () => {
+  // Codex R6. The error says "clear the declaration"; clearing parsed the declaration
+  // first, so the one documented way out of the state was the one command the state
+  // blocked. The same false-reassurance shape as #119's error copy, inverted: advice that
+  // cannot be followed.
+  store.setAgentCapabilities(personal.id, ["fs.read"]);
+  store.driver
+    .prepare(`UPDATE agent_settings SET capabilities = ? WHERE agent_id = ?`)
+    .run(["not json at all", personal.id]);
+
+  expect(() => store.resolveOwnedCapabilities(personal.id)).toThrow(/corrupt/);
+  expect(() => store.clearAgentCapabilities(personal.id)).not.toThrow();
+
+  expect(store.agentSettings.getCapabilities(personal.id)).toBeUndefined();
+  expect([...store.resolveOwnedCapabilities(personal.id)].sort()).toEqual(
+    [...DEFAULT_CAPABILITY_KEYS, ...RESERVED_CAPABILITY_KEYS].sort(),
+  );
+  // The audit says what happened without pretending it could read what was there, and
+  // without echoing an arbitrary stored string into the log.
+  const settingEvents = store.events
+    .tail(personal.id)
+    .filter((e) => e.type === "agent.setting_changed");
+  expect(settingEvents.at(-1)!.payload).toEqual({
+    setting: "capabilities",
+    from: "(unreadable declaration)",
+    to: null,
+  });
+});
+
+test("a corrupt declaration does not make the agent's OTHER settings unreadable", () => {
+  // The parse used to live in the row-wide decoder, so one bad column threw for every
+  // sibling setting — an agent's recall budget, providers and caps all became unreadable,
+  // on the very commands an operator needs to diagnose it. Strictness belongs on the
+  // exposure read, not on the row.
+  store.setRecallBudget(personal.id, 7);
+  store.setWorldFactCap(personal.id, 3);
+  store.setAgentCapabilities(personal.id, ["fs.read"]);
+  store.driver
+    .prepare(`UPDATE agent_settings SET capabilities = ? WHERE agent_id = ?`)
+    .run(["not json at all", personal.id]);
+
+  expect(store.agentSettings.getRecallBudget(personal.id)).toBe(7);
+  expect(store.agentSettings.getWorldFactCap(personal.id)).toBe(3);
+  expect(resolveRecallBudget(store, personal).maxMemories).toBe(7);
+  expect(() => store.agentSettings.get(personal.id)).not.toThrow();
+  // …and the exposure read is still the strict one, so nothing widened.
+  expect(() => store.resolveOwnedCapabilities(personal.id)).toThrow(/corrupt/);
+});
 
 test("a corrupt stored declaration throws rather than resolving to the full catalog", () => {
   store.setAgentCapabilities(personal.id, ["fs.read"]);
