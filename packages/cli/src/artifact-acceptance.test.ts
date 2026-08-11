@@ -46,7 +46,11 @@ function scriptedAdapter(calls: readonly ScriptedCall[], text: string): RuntimeA
         for (const call of calls) {
           if (request.signal?.aborted) break;
           const tool = request.tools.list().find((t) => t.name === call.tool);
-          if (!tool) continue;
+          // Loud, not `continue`: an absent tool and a withheld one are observationally
+          // identical, so a silent skip lets a demo stop exercising its own claim.
+          if (!tool) {
+            throw new Error(`scripted tool not in the scoped registry: ${call.tool}`);
+          }
           const result = await tool.execute({ args: call.args }, request.signal);
           if (result.isError) break;
         }

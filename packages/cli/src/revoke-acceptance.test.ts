@@ -128,7 +128,11 @@ describe("Phase 3 · connection revoke — acceptance", () => {
           for (const name of tools) {
             if (request.signal?.aborted) break;
             const tool = request.tools.list().find((t) => t.name === name);
-            if (!tool) continue;
+            // Loud, not `continue`: an absent tool and a withheld one are observationally
+            // identical, so a silent skip lets a demo stop exercising its own claim.
+            if (!tool) {
+              throw new Error(`scripted tool not in the scoped registry: ${call.tool}`);
+            }
             const result = await tool.execute({ args: {} }, request.signal);
             if (result.isError) break;
           }
