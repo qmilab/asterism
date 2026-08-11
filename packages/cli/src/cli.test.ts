@@ -4623,3 +4623,64 @@ test("a host that registers no catalog is reported as having none, not as the sh
     "it holds nothing (this install registers no tools)",
   );
 });
+
+test("capabilities unset refuses the arguments it would otherwise ignore", async () => {
+  // Codex R3 [P2]. `unset` is the WIDENING verb. Typed as if it were `remove`, it
+  // silently dropped the key and handed back everything the agent had been narrowed
+  // out of — the exact opposite of what the operator asked for.
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["capabilities", "set", "personal", "fs.read", "fs.list", "fs.delete"], h.io);
+
+  h.out.length = 0;
+  h.err.length = 0;
+  expect(await runCli(["capabilities", "unset", "personal", "fs.delete"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("takes no capability keys");
+  // It points at the verb that does what was meant, rather than guessing.
+  expect(h.err.join("\n")).toContain("asterism capabilities remove personal fs.delete");
+
+  // Nothing was granted: the declaration is exactly as it was.
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toEqual([
+      "fs.delete",
+      "fs.list",
+      "fs.read",
+    ]);
+  } finally {
+    store.close();
+  }
+});
+
+test("every capabilities verb refuses an option it does not define", async () => {
+  // `parseArgs` lets an unrecognized `--flag` CONSUME the next token, so a mistyped
+  // option eats a capability key: on `remove` that leaves held what the operator asked
+  // to take away, and on `set` it narrows further than asked. Checked on all four so the
+  // class is closed, not just the instance the reviewer found.
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  for (const argv of [
+    ["capabilities", "show", "personal", "--verbose"],
+    ["capabilities", "set", "personal", "--dry-run", "fs.read"],
+    ["capabilities", "remove", "personal", "--force", "fs.delete"],
+    ["capabilities", "unset", "personal", "--none"],
+  ]) {
+    h.err.length = 0;
+    expect(await runCli(argv, h.io)).toBe(1);
+    // The unknown option is NAMED. A swallowed key surfaces as a missing agent or a
+    // missing key, so the generic usage line would send the operator hunting the wrong
+    // mistake — the specific diagnosis has to win.
+    expect(h.err.join("\n")).toMatch(/^asterism capabilities \w+ does not take --/m);
+  }
+
+  // No verb wrote anything on the way through.
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});

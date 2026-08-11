@@ -981,13 +981,40 @@ function cmdCapabilities(args: string[], io: CliIO): Promise<number> {
     io.out(COMMAND_HELP.capabilities!);
     return Promise.resolve(0);
   }
-  if (sub === "show") return cmdCapabilitiesShow(parsed.positionals[0], io);
+  if (sub === "show") return cmdCapabilitiesShow(parsed, io);
   if (sub === "set") return cmdCapabilitiesSet(parsed, io);
   if (sub === "remove") return cmdCapabilitiesRemove(parsed, io);
-  if (sub === "unset") return cmdCapabilitiesUnset(parsed.positionals[0], io);
+  if (sub === "unset") return cmdCapabilitiesUnset(parsed, io);
   io.err(`Unknown subcommand: capabilities ${sub}`);
   io.out(COMMAND_HELP.capabilities!);
   return Promise.resolve(1);
+}
+
+/**
+ * Refuse any option this verb does not define, naming it. Returns whether the args are
+ * clean.
+ *
+ * Every verb here is checked, not only the widening one, because `parseArgs` lets an
+ * unrecognized `--flag` CONSUME the next token — so a mistyped option silently eats a
+ * capability key. On `unset` that hands back everything (Codex R3); on `remove` it
+ * leaves held a capability the operator asked to take away; on `set` it narrows further
+ * than asked. Only the first is a grant, but none of the three is what was typed, and a
+ * one-line refusal is cheaper than three different consolation prizes.
+ */
+function rejectUnknownOptions(
+  parsed: ParsedArgs,
+  allowed: readonly string[],
+  verb: string,
+  io: CliIO,
+): boolean {
+  const known = new Set([...allowed, "help", "h"]);
+  const unknown = Object.keys(parsed.flags).filter((f) => !known.has(f));
+  if (unknown.length === 0) return true;
+  io.err(
+    `asterism capabilities ${verb} does not take ${unknown.map((f) => `--${f}`).join(", ")}.`,
+  );
+  io.err(CAPABILITIES_USAGE);
+  return false;
 }
 
 /**
@@ -1006,8 +1033,13 @@ function catalogKeys(io: CliIO, workspaceDir: string): readonly string[] | undef
 }
 
 /** `asterism capabilities show <agent>` — what this agent holds, and whether it was narrowed. */
-function cmdCapabilitiesShow(name: string | undefined, io: CliIO): Promise<number> {
-  if (!name) {
+function cmdCapabilitiesShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  // The option check runs FIRST everywhere here: an unrecognized flag consumes the next
+  // token, so the symptom is a missing agent or a missing key, and the generic usage
+  // line would send the operator looking for the wrong mistake.
+  if (!rejectUnknownOptions(parsed, [], "show", io)) return Promise.resolve(1);
+  const name = parsed.positionals[0];
+  if (!name || parsed.positionals.length > 1) {
     io.err("Usage: asterism capabilities show <agent>");
     return Promise.resolve(1);
   }
@@ -1036,6 +1068,7 @@ function cmdCapabilitiesShow(name: string | undefined, io: CliIO): Promise<numbe
  * expanded to nothing.
  */
 function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownOptions(parsed, ["none"], "set", io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   const keys = parsed.positionals.slice(1);
   const none = parsed.flags.none === true;
@@ -1075,6 +1108,7 @@ function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
  * which also pins it, so a capability added to the catalog later is not inherited.
  */
 function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownOptions(parsed, [], "remove", io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   const keys = parsed.positionals.slice(1);
   if (!name || keys.length === 0) {
@@ -1114,9 +1148,24 @@ function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
  * catalog. The one operation here that widens, which is why it is its own verb and not
  * something `set` with no arguments could be mistaken for.
  */
-function cmdCapabilitiesUnset(name: string | undefined, io: CliIO): Promise<number> {
+function cmdCapabilitiesUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownOptions(parsed, [], "unset", io)) return Promise.resolve(1);
+  const name = parsed.positionals[0];
   if (!name) {
     io.err("Usage: asterism capabilities unset <agent>");
+    return Promise.resolve(1);
+  }
+  // This is the verb that WIDENS, so it refuses anything it would otherwise ignore.
+  // `capabilities unset <agent> fs.delete` reads like "take fs.delete away" and would
+  // instead hand back everything else the agent had been narrowed out of — an operator
+  // confusing it with `remove` gets the exact opposite of what they typed. Silently
+  // dropping an argument is survivable on a narrowing verb; here it is a grant.
+  const extra = parsed.positionals.slice(1);
+  if (extra.length > 0) {
+    io.err(
+      `asterism capabilities unset ${name} takes no capability keys — it clears the whole declaration and restores the full catalog.`,
+    );
+    io.err(`To take ${extra.join(", ")} away instead: asterism capabilities remove ${name} ${extra.join(" ")}`);
     return Promise.resolve(1);
   }
   return withHomeStore(io, (store) => {
