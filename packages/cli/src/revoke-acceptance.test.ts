@@ -121,6 +121,15 @@ describe("Phase 3 · connection revoke — acceptance", () => {
     };
   }
 
+  /**
+   * Scripted tool names the kernel did NOT scope into a run. The throw below fails the run,
+   * but the KERNEL catches an adapter failure and finishes the run `failed`, so the message
+   * never reaches the test output — the demo fails on some downstream assertion instead, and
+   * the reader goes hunting the wrong thing. Recording the name here makes the diagnosis an
+   * assertion rather than a hope that an exception escapes.
+   */
+  const missingTools: string[] = [];
+
   function scriptedAdapter(tools: readonly string[]): RuntimeAdapter {
     return {
       run(request) {
@@ -131,7 +140,8 @@ describe("Phase 3 · connection revoke — acceptance", () => {
             // Loud, not `continue`: an absent tool and a withheld one are observationally
             // identical, so a silent skip lets a demo stop exercising its own claim.
             if (!tool) {
-              throw new Error(`scripted tool not in the scoped registry: ${call.tool}`);
+              missingTools.push(name);
+              throw new Error(`scripted tool not in the scoped registry: ${name}`);
             }
             const result = await tool.execute({ args: {} }, request.signal);
             if (result.isError) break;
@@ -179,6 +189,15 @@ describe("Phase 3 · connection revoke — acceptance", () => {
       const start = transcript.length;
       const code = await runCli(argv, io);
       exitCodes.push([argv.join(" "), code]);
+      // Checked HERE, on the command that hit it. The kernel catches an adapter
+      // failure and finishes the run `failed`, so the throw never surfaces; the demo
+      // then crashes several steps downstream (`pausedRun.id` of a run that never
+      // paused) and names the symptom instead of the cause.
+      if (missingTools.length > 0) {
+        throw new Error(
+          `scripted tool not in the scoped registry: ${missingTools.join(", ")} (during: ${argv.join(" ")})`,
+        );
+      }
       return transcript.slice(start).join("\n");
     }
 
@@ -280,6 +299,13 @@ describe("Phase 3 · connection revoke — acceptance", () => {
   });
 
   // --- Invariant 1: all four capabilities are withdrawn ---------------------
+
+  test("every scripted tool reached the scoped registry", () => {
+    // Without this the demo can only fail on a downstream assertion, which names the
+    // symptom and not the cause: the kernel catches an adapter failure and finishes the
+    // run `failed`, so the missing tool never appears in the output.
+    expect(missingTools).toEqual([]);
+  });
 
   test("the artifact landed while the channel was open", () => {
     expect(fetchedOut).toContain(ARTIFACT_PATH);

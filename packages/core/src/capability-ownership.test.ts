@@ -301,7 +301,7 @@ test("a declaration is canonicalized on write: de-duplicated and sorted", () => 
 });
 
 test("a malformed key is refused at the write boundary", () => {
-  for (const bad of ["", "fs read", "fs.read\n", "fs. read", "a".repeat(129)]) {
+  for (const bad of ["", "fs read", "fs.read\n", "fs.\u0000read", "a".repeat(129)]) {
     expect(() => store.setAgentCapabilities(personal.id, [bad])).toThrow(/invalid/);
   }
   expect(() => store.setAgentCapabilities(personal.id, new Array(257).fill("k").map((k, i) => `${k}${i}`))).toThrow(
