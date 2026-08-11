@@ -45,7 +45,14 @@ function scriptedAdapter(calls: readonly ScriptedCall[], text: string): RuntimeA
         for (const call of calls) {
           if (request.signal?.aborted) break;
           const tool = request.tools.list().find((t) => t.name === call.tool);
-          if (!tool) continue;
+          // Loud, not `continue`. A tool missing from the scoped registry produces exactly
+          // the same observable outcome as one the gate withheld — it never executes — so a
+          // silent skip let "the callee's propose gate withheld the delete" pass while the
+          // delete tool was not in the registry at all (Codex R4). A demo that stops
+          // exercising its own claim has to fail, not shrug.
+          if (!tool) {
+            throw new Error(`scripted tool not in the scoped registry: ${call.tool}`);
+          }
           const result = await tool.execute({ args: call.args }, request.signal);
           if (result.isError) break;
         }
@@ -118,6 +125,12 @@ describe("Phase 3 · T1 — handoff acceptance demo", () => {
     await run(["secrets", "add", "writer", "WRITER_TOKEN", WRITER_SECRET]);
     await run(["secrets", "add", "researcher", "RESEARCHER_TOKEN", RESEARCHER_SECRET]);
 
+    // Harness wiring: the tools above are this file's own spies, not the shipped catalog,
+    // so each agent is declared to hold them — what an install with its own tools does.
+    for (const name of ["writer", "researcher"]) {
+      await run(["capabilities", "set", name, "edit_files", "delete_files"]);
+    }
+
     // (1) Handoff BEFORE any connection — must be refused.
     noConnHandoffOut = await run(["handoff", "writer", "researcher", "summarize the latest notes"]);
 
@@ -174,6 +187,14 @@ describe("Phase 3 · T1 — handoff acceptance demo", () => {
   test("a destructive handoff is withheld by the propose callee, despite the autonomous caller", () => {
     expect(executed).not.toContain("delete_files");
     expect(destructiveHandoffOut).toContain("PLAN: I would delete dist/");
+    // The two assertions above are BOTH satisfied by the tool simply being absent — one
+    // is the spy never firing, the other is the adapter's own canned text. So the claim
+    // this test is named for is made here, on the callee's own log: the gate saw the
+    // destructive action and withheld it. Without this the demo passed for a year of
+    // refactors while proving nothing (Codex R4).
+    const types = store.events.tail(researcher.id).map((e) => e.type);
+    expect(types).toContain("action.withheld");
+    expect(types).not.toContain("action.executed");
   });
 
   // (4) Cross-agent denial across the live connection.

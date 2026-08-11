@@ -25,11 +25,10 @@ import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } 
 import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
 import {
   worldFactCapabilities,
-  WORLD_FACT_RECORD_KEY,
-  WORLD_FACT_FORGET_KEY,
   WORLD_FACT_RECORD_TOOL,
   WORLD_FACT_FORGET_TOOL,
 } from "./world-facts.js";
+import { RESERVED_CAPABILITY_KEYS } from "./capabilities.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
 import { collectArtifactManifest, parseArtifactReference } from "./artifact-manifest.js";
@@ -331,11 +330,57 @@ async function runAndPersist(
     confirmedCount: ReadonlyMap<string, number>;
   },
 ): Promise<ExecuteRunResult> {
+  // TERMINALITY BACKSTOP. The run is already persisted `running` by the time we get here
+  // (both callers mark it before calling), and `driveRun`'s own guard covers recall,
+  // framing and the substrate — but not the prologue BEFORE that guard, which reads the
+  // store several times: the agent's capability declaration, its earned standing, its
+  // action-fingerprint key, its skills, objectives, working notes and briefs. A throw in
+  // any of those left the row stuck `running` for good: non-terminal, so it is neither
+  // resumable (`confirm` wants `awaiting_confirmation`) nor finished, and over HTTP it is
+  // a 500 with a row still claiming to be in flight.
+  //
+  // Found by review when capability resolution joined that prologue and made the window
+  // reachable from ordinary data (a corrupt declaration). The fix is not to move one call
+  // inside the guard but to guarantee the property the file already claims — "a throw
+  // anywhere drives the run to a terminal state" — for the whole window at once.
+  //
+  // The error still propagates: this is for unexpected kernel/data failures, and the
+  // surface should print the real diagnosis (for a corrupt declaration, the one that
+  // names the fix) rather than a generic failed run. Only the ROW is settled here.
+  try {
+    return await driveRun(store, agent, run, input, options, preApproved);
+  } catch (err) {
+    try {
+      // Only a still-`running` row is ours to settle. A run the gate parked at
+      // `awaiting_confirmation` before the throw must keep that status — it is resumable,
+      // and `driveRun`'s catch makes the same distinction.
+      if (store.runs.get(agent.id, run.id)?.status === "running") {
+        store.finishRun(agent.id, run.id, "", "failed");
+      }
+    } catch {
+      // The backstop must never replace the error that caused it.
+    }
+    throw err;
+  }
+}
+
+/** The run itself: trust-resolve + gate → frame → substrate → persist. */
+async function driveRun(
+  store: AsterismStore,
+  agent: Agent,
+  run: Run,
+  input: string,
+  options: ExecuteRunOptions,
+  preApproved: {
+    executedCount: ReadonlyMap<string, number>;
+    confirmedCount: ReadonlyMap<string, number>;
+  },
+): Promise<ExecuteRunResult> {
   // Resolve the agent's trust level into the tool set this run may use, with the
   // destructive-action gate wired into every tool's `execute` closure and each
   // gate decision audited to the event log. Confined by default — the exposure
-  // list is derived from exactly the capabilities the caller handed in (an empty
-  // set if none).
+  // list is the set of capabilities this AGENT holds (its own declaration, or the
+  // kernel's named default catalog), intersected with what the caller handed in.
   const abortController = new AbortController();
   // The kernel-owned world-fact tools (`record_note` / `forget_note`) are injected on
   // EVERY run — they are the agent's own bounded, firewalled, capped, audited,
@@ -356,7 +401,7 @@ async function runAndPersist(
   // capability reusing `record_note`/`forget_note` under a different key would still
   // produce a duplicate name that a tool-calling provider rejects. The kernel's tool over
   // its own state is authoritative for its reserved namespace.
-  const reservedKeys = new Set<string>([WORLD_FACT_RECORD_KEY, WORLD_FACT_FORGET_KEY]);
+  const reservedKeys = new Set<string>(RESERVED_CAPABILITY_KEYS);
   const reservedToolNames = new Set<string>([WORLD_FACT_RECORD_TOOL, WORLD_FACT_FORGET_TOOL]);
   const hostCapabilities = (options.capabilities ?? []).filter(
     (c) => !reservedKeys.has(c.key) && !reservedToolNames.has(c.tool.name),
@@ -366,7 +411,24 @@ async function runAndPersist(
   const capabilities = [...hostCapabilities, ...worldFactCapabilities(store, agent.id, run.id)];
   const profile = trustProfile({
     level: agent.trustLevel,
-    capabilities: capabilities.map((c) => c.key),
+    // EXPOSURE — which tools exist for this run at all. Read from the agent's own
+    // stored declaration, NOT from the candidate list: before ownership, this was
+    // `capabilities.map((c) => c.key)`, which made the exposure allow-list a
+    // restatement of whatever the host handed in and left nothing for an operator to
+    // decide. An agent with nothing declared resolves to the kernel's named default
+    // catalog, so this is byte-for-byte the same registry it had before — the whole
+    // migration, and the reason there is no backfill.
+    //
+    // Resolved kernel-side (like the recall budget and the world-fact cap) so every run
+    // surface — CLI, HTTP, console, channels, resume — reads the same answer and none
+    // can drift. It is re-read on every invocation, so narrowing an agent takes effect
+    // on its next run AND on the resume of one already paused: a pre-approved action
+    // whose capability has since been revoked has no tool left to call.
+    //
+    // `resolveToolRegistry` intersects this with the candidates, so a declared key with
+    // no capability behind it is inert, and a candidate the agent does not hold never
+    // reaches the substrate.
+    capabilities: store.resolveOwnedCapabilities(agent.id),
     // Earned standing is the FIRST real producer of the destructive gate's
     // `autoApprove` allow-list: a destructive capability the agent has EARNED — and a
     // human has RATIFIED — a `standing-grant` on auto-approves, exactly as a

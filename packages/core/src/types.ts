@@ -716,6 +716,20 @@ export interface AgentSettings {
    * agent forgets some — it never deletes existing notes.
    */
   worldFactCap?: number;
+  /**
+   * The capability keys this agent holds — WHICH tools reach its runs at all.
+   * `undefined` ⇒ **nothing declared**, so the kernel resolves the named default
+   * catalog (`DEFAULT_CAPABILITY_KEYS`): exactly the tools the agent had before
+   * ownership existed. An EMPTY array is a real declaration ("no host tools"), which
+   * is why this is an array-or-undefined and not a shape that collapses the two —
+   * narrowing to nothing and never having narrowed are different states.
+   *
+   * Exposure only. Which of the capabilities an agent holds may act WITHOUT PAUSING
+   * is earned standing (`capability_standing`), a separate column and a separate
+   * verb; nothing here grants or revokes that. The kernel's own reserved tools
+   * (`notes.*`) are exposed regardless and cannot be declared.
+   */
+  capabilities?: readonly string[];
   createdAt: string;
   updatedAt: string;
 }

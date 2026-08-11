@@ -152,6 +152,17 @@ export {
   WORLD_FACT_FORGET_TOOL,
 } from "./world-facts.js";
 
+// Capability ownership — WHICH capabilities an agent holds at all. The named, closed
+// default catalog an agent with nothing declared resolves to, the kernel's reserved
+// keys that ride every run regardless, and the pure resolver between them. Exposure
+// only: what an agent may do WITHOUT PAUSING is earned standing, and lives elsewhere.
+export {
+  DEFAULT_CAPABILITY_KEYS,
+  RESERVED_CAPABILITY_KEYS,
+  resolveOwnedCapabilityKeys,
+  validateCapabilityKeys,
+} from "./capabilities.js";
+
 // Run framing — composes soul / role / scoped skills / accepted memories into the
 // RunRequest's system prompt.
 export {

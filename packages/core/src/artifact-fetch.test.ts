@@ -48,6 +48,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/writer",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(writer.id);
   helper = store.createAgent({
     name: "helper",
     role: "researches sections",
@@ -55,6 +56,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
 });
 
 afterEach(() => {
@@ -215,6 +217,21 @@ async function givenExchangedArtifact(): Promise<void> {
 
 // --- Invariant 1: no connection → no fetch ----------------------------------
 
+/**
+ * The capability keys this file's fixtures use. They are NOT the shipped catalog, so an
+ * agent has to be declared to hold them — which is exactly what a host shipping its own
+ * tools does. Each fixture agent is declared to hold precisely the keys these tests
+ * already handed it, so exposure here is what it was before ownership existed: the
+ * candidates the caller passes. No fixture gains a capability it did not have.
+ *
+ * Written through the repository rather than the audited `setAgentCapabilities`, so the
+ * fixture adds no `agent.setting_changed` to event logs these tests assert on in full.
+ */
+const FIXTURE_CAPABILITY_KEYS = ["fs.delete", "fs.mkdir", "fs.touch", "fs.write"];
+function ownsFixtureTools(agentId: string): void {
+  store.agentSettings.setCapabilities(agentId, FIXTURE_CAPABILITY_KEYS);
+}
+
 test("with no active artifact-only connection, a fetch is refused and no byte is read", async () => {
   // Produce the exchange, then fetch over a connection that does not exist: build the
   // recorded artifact through a live channel first, on a SEPARATE store agent pair.
@@ -227,6 +244,7 @@ test("with no active artifact-only connection, a fetch is refused and no byte is
     workspaceDir: "/tmp/outsider",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(outsider.id);
   const log = emptyLog();
   const outcome = await performArtifactFetch(store, outsider, helper, ARTIFACT_REF, {
     host: fakeHost(log),
@@ -249,6 +267,7 @@ test("a handoff-mode connection does not authorize a fetch (modes are distinct p
     workspaceDir: "/tmp/other",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(other.id);
   store.createConnection(other.id, helper.id, "handoff");
   const log = emptyLog();
   const outcome = await performArtifactFetch(store, other, helper, ARTIFACT_REF, {
@@ -317,6 +336,7 @@ test("an artifact exchanged with ANOTHER caller does not resolve for this one", 
     workspaceDir: "/tmp/editor",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(editor.id);
   store.createConnection(editor.id, helper.id, "artifact-only");
   const produced = await performArtifactExchange(store, editor, helper, "draft it", {
     adapter: sequenceAdapter([{ tool: "write_file" }]),
@@ -565,6 +585,7 @@ test("an exchange row is unreachable through a third agent's id", async () => {
     workspaceDir: "/tmp/outsider",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(outsider.id);
   expect(store.exchanges.listForAgent(outsider.id)).toHaveLength(0);
   // Both participants see it; nobody else does.
   expect(store.exchanges.listForAgent(writer.id)).toHaveLength(1);

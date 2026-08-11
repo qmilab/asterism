@@ -22,7 +22,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AsterismStore } from "@qmilab/asterism-core";
+import { AsterismStore, DEFAULT_CAPABILITY_KEYS } from "@qmilab/asterism-core";
 import type { RunOutput, RunRequest, RuntimeAdapter } from "@qmilab/asterism-core";
 
 import { workspaceCapabilities } from "./capabilities.js";
@@ -203,5 +203,92 @@ describe("shipped tool catalog — claims 3 and 4 from the bare CLI", () => {
     // at the gate before its confinement check ran).
     expect(rootWriteOut).toContain("must be a path inside this agent's workspace");
     expect(existsSync(autoWorkspace)).toBe(true);
+  });
+});
+
+// The pin that keeps the kernel's named default catalog honest (#123). The kernel
+// declares WHICH keys an agent holds when the operator has declared nothing; it cannot
+// build those tools, and the CLI cannot see the kernel's list — so the two are tied
+// together here. A tool added to (or renamed in) the shipped catalog fails this test
+// until its author decides, in review, whether an existing agent inherits it. That
+// decision is exactly what "the default is a closed set" is protecting.
+test("the shipped catalog IS the kernel's default capability set", () => {
+  const shipped = workspaceCapabilities("/tmp/pin-check").map((c) => c.key).sort();
+  expect(shipped).toEqual([...DEFAULT_CAPABILITY_KEYS].sort());
+});
+
+describe("capability ownership through the shipped catalog", () => {
+  let dir: string;
+  let scoped: string[] = [];
+  let io: CliIO;
+
+  /** A substrate that records exactly which tools the kernel scoped into the run. */
+  const recordingAdapter: RuntimeAdapter = {
+    run(request: RunRequest) {
+      scoped = request.tools.list().map((t) => t.name).sort();
+      async function* noEvents() {}
+      return { events: noEvents(), output: Promise.resolve({ status: "done" as const, text: "ok" }) };
+    },
+  };
+
+  async function run(argv: string[]): Promise<string> {
+    const lines: string[] = [];
+    await runCli(argv, { ...io, out: (t) => lines.push(t), err: (t) => lines.push(t) });
+    return lines.join("\n");
+  }
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "asterism-ownership-"));
+    io = {
+      cwd: dir,
+      env: {},
+      out: () => {},
+      err: () => {},
+      capabilities: workspaceCapabilities,
+      makeAdapter: () => ({ adapter: recordingAdapter }),
+    };
+    await run(["init"]);
+    await run(["new", "auto", "--trust", "autonomous"]);
+  });
+
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("an agent nobody narrowed gets the whole shipped catalog, plus its own notes tools", async () => {
+    await run(["run", "auto", "do something"]);
+    expect(scoped).toEqual(
+      [
+        "append_file",
+        "delete_file",
+        "find",
+        "forget_note",
+        "list_dir",
+        "mkdir",
+        "move",
+        "read_file",
+        "record_note",
+        "stat",
+        "write_file",
+      ].sort(),
+    );
+  });
+
+  test("narrowing takes tools away from the very next run; unsetting gives them back", async () => {
+    await run(["capabilities", "set", "auto", "fs.read", "fs.list"]);
+    await run(["run", "auto", "do something"]);
+    expect(scoped).toEqual(["forget_note", "list_dir", "read_file", "record_note"].sort());
+
+    await run(["capabilities", "remove", "auto", "fs.list"]);
+    await run(["run", "auto", "do something"]);
+    expect(scoped).toEqual(["forget_note", "read_file", "record_note"].sort());
+
+    await run(["capabilities", "set", "auto", "--none"]);
+    await run(["run", "auto", "do something"]);
+    expect(scoped).toEqual(["forget_note", "record_note"].sort());
+
+    await run(["capabilities", "unset", "auto"]);
+    await run(["run", "auto", "do something"]);
+    expect(scoped).toHaveLength(11);
   });
 });

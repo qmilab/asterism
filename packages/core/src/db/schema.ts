@@ -371,6 +371,18 @@ CREATE TABLE IF NOT EXISTS agent_settings (
   -- cap is rejected loudly (never silently evicted), superseding a tracked one is
   -- free. NULL ⇒ the kernel default, like every other column here.
   world_fact_cap       INTEGER,
+  -- WHICH capabilities this agent holds at all -- a canonical JSON array of capability
+  -- keys, or NULL for "nothing declared", which resolves to the kernel's named default
+  -- catalog (DEFAULT_CAPABILITY_KEYS). Declaring is opt-in NARROWING of the host catalog,
+  -- never widening: the kernel's own reserved tools ride every run either way.
+  --
+  -- A whole-set column rather than a row-per-key table because the EMPTY declaration
+  -- ('[]' -- an agent that holds no host tools) must be distinguishable from NULL. With
+  -- rows, "no rows" collapses the two, and revoking an agent's last capability would
+  -- silently WIDEN it back to the full catalog. NULL is a legitimate permanent state; no
+  -- backfill exists or is wanted. Exposure only -- which destructive capabilities may act
+  -- WITHOUT PAUSING is earned standing, and lives in its own table (capability_standing).
+  capabilities         TEXT,
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL
 );
