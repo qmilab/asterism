@@ -28,7 +28,6 @@ import {
   COGNITION_CAPTURE_MODES,
   COGNITION_PROVIDER_IDS,
   CONNECTION_MODES,
-  DEFAULT_CAPABILITY_KEYS,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
   DEFAULT_WORLD_FACT_CAP,
@@ -107,6 +106,7 @@ import {
   formatArtifactManifest,
   formatBytes,
   formatBriefList,
+  describeCatalogHolding,
   formatCapabilityList,
   formatConnectionList,
   formatEventLines,
@@ -1016,7 +1016,11 @@ function cmdCapabilitiesShow(name: string | undefined, io: CliIO): Promise<numbe
     if (!agent) return noAgent(io, name);
     const declared = store.agentSettings.getCapabilities(agent.id);
     const held = store.resolveOwnedCapabilities(agent.id);
-    const catalog = catalogKeys(io, agent.workspaceDir) ?? [...DEFAULT_CAPABILITY_KEYS];
+    // No fallback to the kernel's default set: a host that registers no tool seam gives
+    // its runs NO host tools, so reporting the shipped nine would name nine tools this
+    // agent will never receive. An empty catalog is the honest answer, and the view
+    // says so in words.
+    const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
     io.out(formatCapabilityList(agent.name, declared, held, catalog));
     return 0;
   });
@@ -1123,17 +1127,15 @@ function cmdCapabilitiesUnset(name: string | undefined, io: CliIO): Promise<numb
       return 0;
     }
     store.clearAgentCapabilities(agent.id);
-    // Counted against the catalog the same way `capabilities show` and `config show`
-    // count it: what the kernel resolves the agent to hold, intersected with what this
-    // install can build. "No longer narrowed" is not the same as "holds everything on
-    // offer" — a host registering a capability outside the kernel's default set has one
-    // the agent still does not hold. Saying "all N" there would be false.
+    // Counted by the one shared helper every view uses. "No longer narrowed" is not the
+    // same as "holds everything on offer": a host registering a capability outside the
+    // kernel's default set has one this agent still does not hold, and a host with no
+    // catalog at all has none to give.
     const held = store.resolveOwnedCapabilities(agent.id);
-    const catalog = catalogKeys(io, agent.workspaceDir) ?? [...DEFAULT_CAPABILITY_KEYS];
-    const inCatalog = catalog.filter((k) => held.has(k)).length;
-    const count =
-      inCatalog === catalog.length ? `all ${catalog.length}` : `${inCatalog} of ${catalog.length}`;
-    io.out(`${agent.name} is no longer narrowed — it holds ${count} capabilities in the catalog.`);
+    const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
+    io.out(
+      `${agent.name} is no longer narrowed — it holds ${describeCatalogHolding(held, catalog)}.`,
+    );
     return 0;
   });
 }
@@ -3762,12 +3764,10 @@ function cmdConfigShow(io: CliIO): Promise<number> {
       const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
       for (const agent of agents) {
         const declared = store.agentSettings.getCapabilities(agent.id);
-        const catalog = catalogKeys(io, agent.workspaceDir) ?? [...DEFAULT_CAPABILITY_KEYS];
+        const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
         if (declared === undefined) {
           const held = store.resolveOwnedCapabilities(agent.id);
-          const inCatalog = catalog.filter((k) => held.has(k)).length;
-          const count = inCatalog === catalog.length ? `all ${catalog.length}` : `${inCatalog} of ${catalog.length}`;
-          io.out(`  ${agent.name}  →  ${count} in the catalog  [not narrowed]`);
+          io.out(`  ${agent.name}  →  ${describeCatalogHolding(held, catalog)}  [not narrowed]`);
           continue;
         }
         const held = declared.filter((k) => !reserved.has(k));

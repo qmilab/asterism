@@ -58,7 +58,7 @@ import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
 import { worldFactFramingText } from "./types.js";
-import { resolveOwnedCapabilityKeys } from "./capabilities.js";
+import { resolveOwnedCapabilityKeys, validateCapabilityKeys } from "./capabilities.js";
 
 /**
  * The kernel's persistence surface. Applies the Phase 0 schema and exposes one
@@ -531,13 +531,25 @@ export class AsterismStore {
   setAgentCapabilities(agentId: string, keys: readonly string[]): AgentSettings {
     return this.driver.transaction(() => {
       const from = this.agentSettings.getCapabilities(agentId);
-      const settings = this.agentSettings.setCapabilities(agentId, keys);
-      const to = settings.capabilities ?? [];
-      if (from !== undefined && sameKeys(from, to)) return settings;
+      // Canonicalized BEFORE the comparison, so an unchanged declaration is a true no-op
+      // — no write, no touched `updated_at`, no phantom event — exactly like every
+      // sibling setter here. Doing it the other way round (write, then decide not to
+      // emit) still advances the row's timestamp, which is a change on the record for
+      // anything that syncs or retries on it.
+      //
+      // Validating here as well as at the repository's write boundary is deliberate, not
+      // duplication: an invalid declaration must throw whether or not it happens to
+      // short-circuit, and the repository stays the chokepoint that no caller can skip.
+      const to = validateCapabilityKeys(keys, "capability declaration");
+      if (from !== undefined && sameKeys(from, to)) {
+        const existing = this.agentSettings.get(agentId);
+        if (existing) return existing;
+      }
+      const settings = this.agentSettings.setCapabilities(agentId, to);
       this.emit(agentId, "agent.setting_changed", {
         setting: "capabilities",
         from: from ?? null,
-        to,
+        to: settings.capabilities ?? [],
       });
       return settings;
     });

@@ -372,3 +372,32 @@ test("in a handoff, the CALLEE's declaration governs — the caller's is irrelev
   expect(scoped).toContain("fs.read");
   expect(scoped).not.toContain("fs.delete");
 });
+
+test("re-declaring the same set touches nothing at all — not even updated_at", async () => {
+  // Codex R2 [P3]. The event was already suppressed, but the row was written first and
+  // its timestamp advanced, so a true no-op still read as a change to anything syncing
+  // or retrying on it. Every sibling setter here compares BEFORE it writes.
+  const first = store.setAgentCapabilities(personal.id, ["fs.read", "fs.write"]);
+  await Bun.sleep(2);
+  const again = store.setAgentCapabilities(personal.id, ["fs.write", "fs.read", "fs.read"]);
+
+  expect(again.updatedAt).toBe(first.updatedAt);
+  expect(again.capabilities).toEqual(["fs.read", "fs.write"]);
+  expect(
+    store.events.tail(personal.id).filter((e) => e.type === "agent.setting_changed"),
+  ).toHaveLength(1);
+
+  // A real change still writes and still advances the timestamp.
+  await Bun.sleep(2);
+  const changed = store.setAgentCapabilities(personal.id, ["fs.read"]);
+  expect(changed.updatedAt).not.toBe(first.updatedAt);
+});
+
+test("an invalid declaration throws even when a short-circuit could have swallowed it", () => {
+  // Validation happens before the unchanged-value comparison, so a bad key cannot slip
+  // through by resembling what is already stored.
+  store.setAgentCapabilities(personal.id, ["fs.read"]);
+  expect(() => store.setAgentCapabilities(personal.id, ["fs.read", "bad key"])).toThrow(/invalid/);
+  expect(() => store.setAgentCapabilities(personal.id, ["notes.record"])).toThrow(/reserved/);
+  expect(store.agentSettings.getCapabilities(personal.id)).toEqual(["fs.read"]);
+});

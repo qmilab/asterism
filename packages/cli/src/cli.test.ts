@@ -4351,7 +4351,7 @@ test("capabilities show: an agent nobody narrowed reads as [not narrowed], not a
 
   expect(await runCli(["capabilities", "show", "personal"], h.io)).toBe(0);
   const out = h.out.join("\n");
-  expect(out).toContain("holds 9 of 9 in the catalog  [not narrowed]");
+  expect(out).toContain("holds all 9 in the catalog  [not narrowed]");
   expect(out).toContain("✓ fs.read");
   expect(out).not.toContain("(withheld)");
   // The copy never suggests the agent was unbounded before someone narrowed it.
@@ -4373,7 +4373,7 @@ test("capabilities set narrows, show marks what is withheld, unset restores", as
 
   h.out.length = 0;
   expect(await runCli(["capabilities", "unset", "personal"], h.io)).toBe(0);
-  expect(h.out.join("\n")).toContain("no longer narrowed — it holds all 9 capabilities");
+  expect(h.out.join("\n")).toContain("no longer narrowed — it holds all 9 in the catalog");
 
   const store = openHomeStore(h);
   try {
@@ -4532,7 +4532,7 @@ test("capabilities show flags a declared key this install builds no tool for", a
   h.out.length = 0;
   expect(await runCli(["capabilities", "show", "personal"], h.io)).toBe(0);
   const out = h.out.join("\n");
-  expect(out).toContain("✓ vendor.tool  (declared — this install builds no such tool)");
+  expect(out).toContain("✓ vendor.tool  (this install builds no such tool)");
   // It is declared but inert, so it does not inflate the count against the catalog —
   // the two numbers are reported separately because they mean different things.
   expect(out).toContain("holds 1 of 9 in the catalog (+1 this install does not build)  [narrowed to 2]");
@@ -4587,5 +4587,39 @@ test("with a custom catalog, every count is what the agent HOLDS — never the c
   // `unset` restores the default set — which is still not "all 10".
   base.out.length = 0;
   await runCli(["capabilities", "unset", "personal"], io);
-  expect(base.out.join("\n")).toContain("it holds 9 of 10 capabilities in the catalog");
+  expect(base.out.join("\n")).toContain("it holds 9 of 10 in the catalog");
+});
+
+test("a host that registers no catalog is reported as having none, not as the shipped nine", async () => {
+  // Codex R2 [P2]. `CliIO.capabilities` is optional, and when it is omitted a run gets
+  // NO host tools at all. The views fell back to the kernel's default set and so named
+  // nine tools the agent will never receive — the same overstatement as R1, one layer up.
+  const h = harness(); // deliberately no `capabilities` seam
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  h.out.length = 0;
+  await runCli(["capabilities", "show", "personal"], h.io);
+  const shown = h.out.join("\n");
+  expect(shown.split("\n")[0]).toBe(
+    "personal · holds nothing (this install registers no tools)  [not narrowed]",
+  );
+  // The kernel still resolves the default set — the agent holds it — but nothing here
+  // builds those tools, and the view says which of the two facts it is reporting.
+  expect(shown).toContain("✓ fs.read  (this install builds no such tool)");
+  expect(shown).not.toContain("holds all 9");
+
+  h.out.length = 0;
+  await runCli(["config"], h.io);
+  expect(h.out.join("\n")).toContain(
+    "personal  →  nothing (this install registers no tools)  [not narrowed]",
+  );
+
+  // …and the same phrase reaches the third view, which is why they share one helper.
+  await runCli(["capabilities", "set", "personal", "fs.read"], h.io);
+  h.out.length = 0;
+  await runCli(["capabilities", "unset", "personal"], h.io);
+  expect(h.out.join("\n")).toContain(
+    "it holds nothing (this install registers no tools)",
+  );
 });

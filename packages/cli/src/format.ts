@@ -539,6 +539,33 @@ export function formatStandingList(
 }
 
 /**
+ * How much of this install's catalog an agent actually holds, phrased to read after
+ * the word "holds". The **one** place that count is computed, for every view that
+ * reports it.
+ *
+ * That it is shared is the point. Three views computed it independently and two of
+ * them reached for `catalog.length` — the size of what the install *offers* — so a
+ * host registering a capability outside the kernel's default set produced a summary
+ * claiming "all 10" while the detail view correctly said "9 of 10", in the same
+ * install. The count is always `held ∩ catalog`: what this agent can actually reach
+ * here, never what exists.
+ *
+ * `catalog` empty means the host registered no tool seam at all — its runs receive no
+ * host tools whatever the agent is declared to hold, and saying "all 0" or naming the
+ * kernel's default set would both be fiction.
+ */
+export function describeCatalogHolding(
+  held: ReadonlySet<string>,
+  catalog: readonly string[],
+): string {
+  if (catalog.length === 0) return "nothing (this install registers no tools)";
+  const inCatalog = catalog.filter((k) => held.has(k)).length;
+  return inCatalog === catalog.length
+    ? `all ${catalog.length} in the catalog`
+    : `${inCatalog} of ${catalog.length} in the catalog`;
+}
+
+/**
  * Render which capabilities an agent holds, for `capabilities show`.
  *
  * `declared` is the agent's own declaration, or undefined for the ordinary,
@@ -560,24 +587,30 @@ export function formatCapabilityList(
 ): string {
   const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
   const listable = [...new Set([...catalog, ...held])].filter((k) => !reserved.has(k)).sort();
-  // Counted against the catalog SEPARATELY from anything declared that this install
-  // cannot build, because "2 of 9 in the catalog" is false when one of the two is not
-  // in the catalog at all. Both numbers are real and they mean different things: what
-  // the agent can actually reach here, and how much the operator declared.
-  const inCatalog = listable.filter((k) => held.has(k) && catalog.includes(k)).length;
+  // Counted against the catalog SEPARATELY from anything held that this install cannot
+  // build, because "2 of 9 in the catalog" is false when one of the two is not in the
+  // catalog at all. Both numbers are real and they mean different things: what the
+  // agent can actually reach here, and how much it holds. The first is
+  // `describeCatalogHolding`'s job — shared, so no view can drift from the others.
   const unbuilt = listable.filter((k) => held.has(k) && !catalog.includes(k)).length;
-  const label = declared === undefined ? "[not narrowed]" : `[narrowed to ${inCatalog + unbuilt}]`;
-  const extra = unbuilt > 0 ? ` (+${unbuilt} this install does not build)` : "";
+  const heldCount = listable.filter((k) => held.has(k)).length;
+  const label = declared === undefined ? "[not narrowed]" : `[narrowed to ${heldCount}]`;
+  // Suppressed when the install builds nothing at all: the phrase already says so, and
+  // "holds nothing … (+9 this install does not build)" contradicts itself.
+  const extra =
+    unbuilt > 0 && catalog.length > 0 ? ` (+${unbuilt} this install does not build)` : "";
   const lines = [
-    `${agentName} · holds ${inCatalog} of ${catalog.length} in the catalog${extra}  ${label}`,
+    `${agentName} · holds ${describeCatalogHolding(held, catalog)}${extra}  ${label}`,
     "",
   ];
   if (listable.length === 0) {
     lines.push("  (this install registers no tools)");
   }
   for (const key of listable) {
-    const inCatalog = catalog.includes(key);
-    const note = !inCatalog ? "  (declared — this install builds no such tool)" : "";
+    // "declared" would be wrong for an agent that never narrowed: with no catalog
+    // registered, the keys it holds are the kernel's default set, not anyone's
+    // declaration. What is true either way is that nothing here builds them.
+    const note = catalog.includes(key) ? "" : "  (this install builds no such tool)";
     lines.push(held.has(key) ? `  ✓ ${key}${note}` : `  · ${key}  (withheld)`);
   }
   lines.push("");

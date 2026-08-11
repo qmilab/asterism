@@ -91,7 +91,7 @@ async function part1CliUnderDeno() {
     const held = asterism(work, ["capabilities", "show", "personal"]);
     check(
       "an un-narrowed agent holds the whole catalog",
-      held.includes("holds 9 of 9 in the catalog  [not narrowed]"),
+      held.includes("holds all 9 in the catalog  [not narrowed]"),
     );
     asterism(work, ["capabilities", "set", "personal", "fs.read", "fs.list"]);
     const narrowed = asterism(work, ["capabilities", "show", "personal"]);
