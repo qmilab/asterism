@@ -4537,3 +4537,55 @@ test("capabilities show flags a declared key this install builds no tool for", a
   // the two numbers are reported separately because they mean different things.
   expect(out).toContain("holds 1 of 9 in the catalog (+1 this install does not build)  [narrowed to 2]");
 });
+
+test("with a custom catalog, every count is what the agent HOLDS — never the catalog's size", async () => {
+  // Codex R1 [P2]. A host may register a capability outside the kernel's default set;
+  // an un-narrowed agent does NOT hold it until it is declared. Three places said or
+  // implied otherwise, and `config show` contradicted `capabilities show` in the very
+  // same install — the summary claimed "all 10", the detail view said "9 of 10".
+  const base = harness();
+  const io: CliIO = {
+    ...base.io,
+    capabilities: (workspaceDir: string) => [
+      ...workspaceCapabilities(workspaceDir),
+      {
+        key: "vendor.tool",
+        effect: "write" as const,
+        tool: {
+          name: "vendor_tool",
+          description: "a tool only this host builds",
+          inputSchema: { type: "object", properties: {} },
+          execute: () => ({ output: "done" }),
+        },
+      },
+    ],
+  };
+  await runCli(["init"], io);
+  await runCli(["new", "personal", "--trust", "autonomous"], io);
+
+  base.out.length = 0;
+  await runCli(["config"], io);
+  expect(base.out.join("\n")).toContain("personal  →  9 of 10 in the catalog  [not narrowed]");
+
+  base.out.length = 0;
+  await runCli(["capabilities", "show", "personal"], io);
+  // The two views of the same fact must agree, and both must mark the tool withheld.
+  expect(base.out.join("\n").split("\n")[0]).toBe(
+    "personal · holds 9 of 10 in the catalog  [not narrowed]",
+  );
+  expect(base.out.join("\n")).toContain("· vendor.tool  (withheld)");
+
+  // …and it becomes held once declared, because the default set is closed, not a
+  // closed vocabulary.
+  await runCli(["capabilities", "set", "personal", "vendor.tool"], io);
+  base.out.length = 0;
+  await runCli(["capabilities", "show", "personal"], io);
+  expect(base.out.join("\n").split("\n")[0]).toBe(
+    "personal · holds 1 of 10 in the catalog  [narrowed to 1]",
+  );
+
+  // `unset` restores the default set — which is still not "all 10".
+  base.out.length = 0;
+  await runCli(["capabilities", "unset", "personal"], io);
+  expect(base.out.join("\n")).toContain("it holds 9 of 10 capabilities in the catalog");
+});

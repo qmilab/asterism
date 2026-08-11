@@ -1123,10 +1123,17 @@ function cmdCapabilitiesUnset(name: string | undefined, io: CliIO): Promise<numb
       return 0;
     }
     store.clearAgentCapabilities(agent.id);
+    // Counted against the catalog the same way `capabilities show` and `config show`
+    // count it: what the kernel resolves the agent to hold, intersected with what this
+    // install can build. "No longer narrowed" is not the same as "holds everything on
+    // offer" — a host registering a capability outside the kernel's default set has one
+    // the agent still does not hold. Saying "all N" there would be false.
     const held = store.resolveOwnedCapabilities(agent.id);
-    const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
-    const count = [...held].filter((k) => !reserved.has(k)).length;
-    io.out(`${agent.name} is no longer narrowed — it holds all ${count} capabilities in the catalog.`);
+    const catalog = catalogKeys(io, agent.workspaceDir) ?? [...DEFAULT_CAPABILITY_KEYS];
+    const inCatalog = catalog.filter((k) => held.has(k)).length;
+    const count =
+      inCatalog === catalog.length ? `all ${catalog.length}` : `${inCatalog} of ${catalog.length}`;
+    io.out(`${agent.name} is no longer narrowed — it holds ${count} capabilities in the catalog.`);
     return 0;
   });
 }
@@ -3742,17 +3749,25 @@ function cmdConfigShow(io: CliIO): Promise<number> {
     if (agents.length === 0) {
       io.out("  (no agents yet)");
     } else {
-      // WHICH tools each agent holds. An agent that has never been narrowed holds the
-      // whole catalog — a permanent, ordinary state, so it is labelled for what it is
-      // ([not narrowed]) rather than as something un-configured. The kernel owns the
-      // resolution (`resolveOwnedCapabilities`); this reads it and names the source.
-      // Full detail, including which keys are withheld, is `capabilities show <agent>`.
+      // WHICH tools each agent holds. An agent that has never been narrowed is labelled
+      // for what it is ([not narrowed]) rather than as something un-configured — a
+      // permanent, ordinary state. Full detail, including which keys are withheld, is
+      // `capabilities show <agent>`.
+      //
+      // The count is what the KERNEL resolves the agent to hold, intersected with the
+      // catalog — never the catalog's own size. "Not narrowed" does not mean "holds
+      // everything on offer": a host that registers a capability outside the kernel's
+      // default set has an agent that does not hold it until it is declared, and the
+      // summary that says otherwise contradicts `capabilities show` in the same install.
       const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
       for (const agent of agents) {
         const declared = store.agentSettings.getCapabilities(agent.id);
         const catalog = catalogKeys(io, agent.workspaceDir) ?? [...DEFAULT_CAPABILITY_KEYS];
         if (declared === undefined) {
-          io.out(`  ${agent.name}  →  all ${catalog.length} in the catalog  [not narrowed]`);
+          const held = store.resolveOwnedCapabilities(agent.id);
+          const inCatalog = catalog.filter((k) => held.has(k)).length;
+          const count = inCatalog === catalog.length ? `all ${catalog.length}` : `${inCatalog} of ${catalog.length}`;
+          io.out(`  ${agent.name}  →  ${count} in the catalog  [not narrowed]`);
           continue;
         }
         const held = declared.filter((k) => !reserved.has(k));

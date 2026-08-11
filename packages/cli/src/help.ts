@@ -144,10 +144,10 @@ asterism capabilities set <agent> <key>...  ·  --none
 asterism capabilities remove <agent> <key>...
 asterism capabilities unset <agent>
 
-Choose which tools an agent has at all. Every agent starts holding everything this
-install offers, and staying that way is perfectly normal — an agent is already kept to
-its own workspace and its own level of autonomy. This narrows it further, for an agent
-you want kept to less.
+Choose which tools an agent has at all. Every agent starts with the standard toolkit,
+and staying that way is perfectly normal — an agent is already kept to its own
+workspace and its own level of autonomy. This narrows it further, for an agent you
+want kept to less. \`capabilities show\` is the exact picture for one agent.
 
   capabilities show <agent>   What this agent holds, and what is being withheld.
   capabilities set <agent> <key>...
