@@ -4822,3 +4822,32 @@ test("a corrupt declaration is recoverable through the CLI, and does not take co
   expect(await runCli(["capabilities", "show", "personal"], h.io)).toBe(0);
   expect(h.out.join("\n")).toContain("holds all 9 in the catalog  [not narrowed]");
 });
+
+test("a repeated key is reported once, and the count matches the list", async () => {
+  // Codex R7 [P3]. The messages echoed raw argv rather than the canonical set, so
+  // `set x fs.read fs.read` said "holds 2 capabilities: fs.read" — contradicting itself
+  // in one sentence. Same class in three siblings, all fixed by de-duplicating the input
+  // once and reporting `set` from what was PERSISTED rather than from the arguments.
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  h.out.length = 0;
+  await runCli(["capabilities", "set", "personal", "fs.read", "fs.read"], h.io);
+  expect(h.out.join("\n")).toContain("personal now holds 1 capability: fs.read.");
+
+  h.out.length = 0;
+  await runCli(["capabilities", "unset", "personal"], h.io);
+  h.out.length = 0;
+  await runCli(["capabilities", "remove", "personal", "fs.read", "fs.read"], h.io);
+  expect(h.out.join("\n")).toContain("Removed fs.read from personal — it now holds 8 capabilities.");
+
+  h.err.length = 0;
+  await runCli(["capabilities", "set", "personal", "nope", "nope"], h.io);
+  expect(h.err.join("\n")).toContain("No such capability: nope");
+  expect(h.err.join("\n")).not.toContain("nope, nope");
+
+  h.out.length = 0;
+  await runCli(["capabilities", "remove", "personal", "ghost", "ghost"], h.io);
+  expect(h.out.filter((l) => l.includes("does not hold 'ghost'"))).toHaveLength(1);
+});

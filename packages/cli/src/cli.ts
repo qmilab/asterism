@@ -1070,7 +1070,11 @@ function cmdCapabilitiesShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
 function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   if (!rejectUnknownOptions(parsed, ["none"], "set", io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
-  const keys = parsed.positionals.slice(1);
+  // De-duplicated once, here, so every message downstream describes the SET the operator
+  // asked for rather than the tokens they typed — `set x fs.read fs.read` reported
+  // "holds 2 capabilities: fs.read", contradicting itself in one sentence, and the
+  // unknown-key refusal listed a typo twice.
+  const keys = [...new Set(parsed.positionals.slice(1))];
   const none = parsed.flags.none === true;
   if (!name || (keys.length === 0 && !none)) {
     io.err("Usage: asterism capabilities set <agent> <key>…   (or --none for no capabilities)");
@@ -1090,11 +1094,13 @@ function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
     if (catalog && !checkKnownKeys(keys, [...catalog, ...store.resolveOwnedCapabilities(agent.id)], io)) {
       return 1;
     }
-    store.setAgentCapabilities(agent.id, keys);
+    // Reported from what was PERSISTED, not from the arguments: the store canonicalizes,
+    // and the operator should be told the state they are now in.
+    const held = store.setAgentCapabilities(agent.id, keys).capabilities ?? [];
     io.out(
-      none
+      held.length === 0
         ? `${agent.name} now holds no capabilities — its runs get no tools from this workspace.`
-        : `${agent.name} now holds ${keys.length} ${keys.length === 1 ? "capability" : "capabilities"}: ${[...new Set(keys)].sort().join(", ")}.`,
+        : `${agent.name} now holds ${held.length} ${held.length === 1 ? "capability" : "capabilities"}: ${held.join(", ")}.`,
     );
     io.out(`Its own working notes stay available. Restore the full set with: asterism capabilities unset ${agent.name}`);
     return 0;
@@ -1110,7 +1116,10 @@ function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
 function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
   if (!rejectUnknownOptions(parsed, [], "remove", io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
-  const keys = parsed.positionals.slice(1);
+  // De-duplicated for the same reason as `set`: `remove x fs.read fs.read` reported
+  // "Removed fs.read, fs.read", and a repeated unknown key printed its "nothing to
+  // remove" line once per mention.
+  const keys = [...new Set(parsed.positionals.slice(1))];
   if (!name || keys.length === 0) {
     io.err("Usage: asterism capabilities remove <agent> <key>…");
     return Promise.resolve(1);
