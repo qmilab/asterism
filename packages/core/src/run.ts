@@ -330,6 +330,52 @@ async function runAndPersist(
     confirmedCount: ReadonlyMap<string, number>;
   },
 ): Promise<ExecuteRunResult> {
+  // TERMINALITY BACKSTOP. The run is already persisted `running` by the time we get here
+  // (both callers mark it before calling), and `driveRun`'s own guard covers recall,
+  // framing and the substrate — but not the prologue BEFORE that guard, which reads the
+  // store several times: the agent's capability declaration, its earned standing, its
+  // action-fingerprint key, its skills, objectives, working notes and briefs. A throw in
+  // any of those left the row stuck `running` for good: non-terminal, so it is neither
+  // resumable (`confirm` wants `awaiting_confirmation`) nor finished, and over HTTP it is
+  // a 500 with a row still claiming to be in flight.
+  //
+  // Found by review when capability resolution joined that prologue and made the window
+  // reachable from ordinary data (a corrupt declaration). The fix is not to move one call
+  // inside the guard but to guarantee the property the file already claims — "a throw
+  // anywhere drives the run to a terminal state" — for the whole window at once.
+  //
+  // The error still propagates: this is for unexpected kernel/data failures, and the
+  // surface should print the real diagnosis (for a corrupt declaration, the one that
+  // names the fix) rather than a generic failed run. Only the ROW is settled here.
+  try {
+    return await driveRun(store, agent, run, input, options, preApproved);
+  } catch (err) {
+    try {
+      // Only a still-`running` row is ours to settle. A run the gate parked at
+      // `awaiting_confirmation` before the throw must keep that status — it is resumable,
+      // and `driveRun`'s catch makes the same distinction.
+      if (store.runs.get(agent.id, run.id)?.status === "running") {
+        store.finishRun(agent.id, run.id, "", "failed");
+      }
+    } catch {
+      // The backstop must never replace the error that caused it.
+    }
+    throw err;
+  }
+}
+
+/** The run itself: trust-resolve + gate → frame → substrate → persist. */
+async function driveRun(
+  store: AsterismStore,
+  agent: Agent,
+  run: Run,
+  input: string,
+  options: ExecuteRunOptions,
+  preApproved: {
+    executedCount: ReadonlyMap<string, number>;
+    confirmedCount: ReadonlyMap<string, number>;
+  },
+): Promise<ExecuteRunResult> {
   // Resolve the agent's trust level into the tool set this run may use, with the
   // destructive-action gate wired into every tool's `execute` closure and each
   // gate decision audited to the event log. Confined by default — the exposure

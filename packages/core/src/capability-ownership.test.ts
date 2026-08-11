@@ -450,3 +450,108 @@ test("an invalid declaration throws even when a short-circuit could have swallow
   expect(() => store.setAgentCapabilities(personal.id, ["notes.record"])).toThrow(/reserved/);
   expect(store.agentSettings.getCapabilities(personal.id)).toEqual(["fs.read"]);
 });
+
+// --- Terminality: a throw must never strand a run -----------------------------------
+
+test("a corrupt declaration fails the run terminally — it is never left `running`", async () => {
+  // Codex R8. Exposure resolution joined the prologue that runs AFTER the row is marked
+  // `running` and BEFORE the guard that finishes a failed run, so a corrupt declaration
+  // stranded the row: not terminal, so not reportable as failed; not
+  // `awaiting_confirmation`, so not resumable either. Over HTTP, a 500 with a row still
+  // claiming to be in flight.
+  store.setAgentCapabilities(personal.id, ["fs.read"]);
+  store.driver
+    .prepare(`UPDATE agent_settings SET capabilities = ? WHERE agent_id = ?`)
+    .run(["not json at all", personal.id]);
+
+  await expect(
+    executeRun(store, personal, "do the thing", { adapter: listingAdapter([]) }),
+  ).rejects.toThrow(/corrupt capability declaration/);
+
+  const runs = store.runs.list(personal.id);
+  expect(runs).toHaveLength(1);
+  expect(runs[0]!.status).toBe("failed");
+  // The error still reaches the operator — the backstop settles the row, it does not
+  // swallow the diagnosis that names the fix.
+});
+
+test("the backstop settles a run stranded by ANY prologue failure, not just a corrupt declaration", async () => {
+  // The window holds several store reads (standing, fingerprint key, skills, objectives,
+  // working notes, briefs). Stand in for a failure in one of them — the property under
+  // test is terminality, not which read broke.
+  const boom = new Error("prologue exploded");
+  const original = store.skills.list.bind(store.skills);
+  store.skills.list = () => {
+    throw boom;
+  };
+  try {
+    await expect(
+      executeRun(store, personal, "do the thing", { adapter: listingAdapter([]) }),
+    ).rejects.toThrow("prologue exploded");
+  } finally {
+    store.skills.list = original;
+  }
+  expect(store.runs.list(personal.id).map((r) => r.status)).toEqual(["failed"]);
+});
+
+test("the backstop leaves a PAUSED run alone", async () => {
+  // A run the gate parked is resumable, so settling it `failed` would destroy a pending
+  // confirmation. Reaching the backstop WITH a paused row takes some doing — an ordinary
+  // pause RETURNS rather than throwing — so this drives the one path that gets there: the
+  // run pauses, and the working-note harvest inside the pause branch then throws.
+  //
+  // Worth spelling out because the obvious version of this test (just pause a run and
+  // check the status) stayed green with the guard condition removed: it never reaches the
+  // backstop at all, and so proves nothing about it.
+  const writeWithObservation: Capability = {
+    key: "fs.write",
+    effect: "write",
+    tool: {
+      name: "fs.write",
+      description: "write (fixture)",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => ({
+        output: "written",
+        observation: {
+          schema: "asterism.fs.write@1",
+          facts: [
+            { subject: "file:notes.md", relation: "exists", object: true },
+            { subject: "file:notes.md", relation: "size_bytes", object: 12 },
+          ],
+        },
+      }),
+    },
+  };
+  const writeThenDelete: RuntimeAdapter = {
+    run(request) {
+      const output = (async (): Promise<RunOutput> => {
+        for (const name of ["fs.write", "fs.delete"]) {
+          const tool = request.tools.list().find((t) => t.name === name);
+          if (!tool) throw new Error(`fixture tool missing from the registry: ${name}`);
+          await tool.execute({ args: { path: "notes.md" } }, request.signal);
+        }
+        return { status: "done", text: "ok" };
+      })();
+      async function* noEvents() {}
+      return { events: noEvents(), output };
+    },
+  };
+
+  const original = store.proposeWorldFact.bind(store);
+  store.proposeWorldFact = () => {
+    throw new Error("harvest exploded after the pause");
+  };
+  try {
+    await expect(
+      executeRun(store, personal, "write then delete", {
+        adapter: writeThenDelete,
+        capabilities: [writeWithObservation, capability("fs.delete", "destructive")],
+      }),
+    ).rejects.toThrow("harvest exploded after the pause");
+  } finally {
+    store.proposeWorldFact = original;
+  }
+
+  // The row kept the status that makes it resumable — the backstop settles only `running`.
+  expect(store.runs.list(personal.id).map((r) => r.status)).toEqual(["awaiting_confirmation"]);
+});
