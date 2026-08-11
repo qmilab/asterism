@@ -187,7 +187,11 @@ export class EventRepository {
     options: TailOptions = {},
   ): { events: Event[]; cursor: string | undefined } {
     requireAgentId(agentId);
-    return this.driver.transaction(() => {
+    // A READ transaction (deferred), not the writer one. Both give the consistent
+    // snapshot this needs, but `transaction()` is IMMEDIATE and would take the
+    // write lock on every poll of a `--follow` loop, starving the writers this is
+    // watching — see the contract on `SqlDriver.readTransaction`.
+    return this.driver.readTransaction(() => {
       const events = this.tail(agentId, options);
       // The newest event matching the type/run filter as of this same snapshot.
       // Deliberately ignores limit/since: the high-water spans the whole matching

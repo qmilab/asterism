@@ -4,6 +4,7 @@ import { NodeSqlDriver } from "./node-driver.js";
 import { NodeBuiltinSqlDriver } from "./node-builtin-driver.js";
 
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./driver.js";
+export { BUSY_TIMEOUT_MS } from "./driver.js";
 
 /**
  * Open a local SQLite database. Defaults to an in-memory database.

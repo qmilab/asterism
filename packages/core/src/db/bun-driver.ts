@@ -12,6 +12,7 @@
 
 import { createRequire } from "node:module";
 import type { Database as BunDatabase, Statement } from "bun:sqlite";
+import { BUSY_TIMEOUT_MS } from "./driver.js";
 import type { SqlDriver, SqlRow, SqlStatement, SqlValue } from "./driver.js";
 
 /** Resolve `bun:sqlite`'s Database constructor once, on first use (Bun only). */
@@ -46,6 +47,10 @@ export class BunSqlDriver implements SqlDriver {
   constructor(path: string) {
     const Database = loadDatabaseCtor();
     this.db = new Database(path);
+    // busy_timeout FIRST: `journal_mode = WAL` takes locks and can itself return
+    // SQLITE_BUSY when another process is opening the same store, so a timeout
+    // set after it would not cover the statement most likely to contend at open.
+    this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -60,8 +65,16 @@ export class BunSqlDriver implements SqlDriver {
 
   transaction<T>(fn: () => T): T {
     // `bun:sqlite` returns a function that runs `fn` wrapped in BEGIN/COMMIT,
-    // rolling back if it throws. Invoke it immediately.
-    return this.db.transaction(fn)();
+    // rolling back if it throws. `.immediate()` runs it as BEGIN IMMEDIATE so the
+    // write lock is taken up front rather than upgraded from a read snapshot —
+    // see the contract on `SqlDriver.transaction`, which the seam requires of
+    // every driver, not just this one.
+    return this.db.transaction(fn).immediate();
+  }
+
+  readTransaction<T>(fn: () => T): T {
+    // Deferred on purpose — a read-only snapshot must not take the write lock.
+    return this.db.transaction(fn).deferred();
   }
 
   close(): void {

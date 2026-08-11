@@ -412,6 +412,50 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Is this SQLite refusing to take a lock because another connection holds it?
+ *
+ * Has to be recognised three ways, because the drivers do not report it alike —
+ * and none of them agree on anything but the message text, which is the weak
+ * kind of check to depend on:
+ *
+ *   - better-sqlite3 and `bun:sqlite` name the extended result code on `.code`:
+ *     `SQLITE_BUSY`, plus the `_SNAPSHOT` / `_RECOVERY` / `_TIMEOUT` variants.
+ *   - `node:sqlite` puts a generic `ERR_SQLITE_ERROR` on `.code` and the numeric
+ *     result code on `.errcode` instead.
+ *
+ * The numeric test masks off the low byte because SQLite builds an extended code
+ * as `primary | (n << 8)` — so every member of the BUSY family (5, 261, 517, 773)
+ * reduces to the primary code 5, and a variant added later is caught too.
+ */
+function isDatabaseLocked(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const { code, errcode } = err as { code?: unknown; errcode?: unknown };
+  if (typeof code === "string" && code.startsWith("SQLITE_BUSY")) return true;
+  return typeof errcode === "number" && (errcode & 0xff) === 5;
+}
+
+/**
+ * The message for a failed command. A lock conflict gets said plainly, because
+ * the raw driver text — `database is locked` — names a condition the operator
+ * cannot act on: it does not say what is holding it, or that retrying is the fix.
+ *
+ * It deliberately does NOT promise that nothing was written. That claim was in an
+ * earlier draft and a concurrent smoke falsified it: a command reported this
+ * failure while its objective was already committed and visible to the next read.
+ * A command can make more than one store call, so an error on the second says
+ * nothing about the first — and "nothing was changed" is exactly the kind of
+ * reassurance an operator would act on. "Did not complete" is true either way.
+ */
+function commandErrorMessage(err: unknown): string {
+  if (!isDatabaseLocked(err)) return errorMessage(err);
+  return (
+    "the local store is in use by another Asterism process — a running `serve`, " +
+    "an open dashboard, or a second command. The command did not complete. This " +
+    "clears on its own: try again, and check the result before assuming it was lost."
+  );
+}
+
 /** Open the install's store, or print a clear pointer to `init` and bail. */
 async function withHomeStore(
   io: CliIO,
@@ -431,7 +475,7 @@ async function withHomeStore(
     store = open(dbPath(home));
     return await fn(store, home);
   } catch (err) {
-    io.err(`error: ${errorMessage(err)}`);
+    io.err(`error: ${commandErrorMessage(err)}`);
     return 1;
   } finally {
     store?.close();
@@ -557,7 +601,7 @@ async function cmdInit(args: string[], io: CliIO): Promise<number> {
     }
     return 0;
   } catch (err) {
-    io.err(`error: ${errorMessage(err)}`);
+    io.err(`error: ${commandErrorMessage(err)}`);
     return 1;
   }
 }
