@@ -60,20 +60,37 @@ if (role === "pragma") {
   store.close();
   out({ held: true });
 } else if (role === "waiter") {
-  while (!existsSync(signal)) { /* wait until the holder actually has the lock */ }
-  // Opening runs SCHEMA + migrate() — writes — so this contends before any
-  // application code runs. It is also why the busy pragma is issued before
-  // journal_mode inside the driver constructor.
-  const t0 = Date.now();
-  let opened = false, wrote = false, error = null;
-  try {
-    const store = AsterismStore.open(dbPath);
-    opened = true;
-    store.events.append(agentId, { type: "waiter.wrote", payload: {} });
-    wrote = true;
-    store.close();
-  } catch (e) { error = String(e && e.code) + ":" + String(e && e.message); }
-  out({ opened, wrote, error, elapsedMs: Date.now() - t0 });
+  // BOUNDED, and it has to be. An unbounded spin here is a trap on every failure
+  // path but the happy one: if the holder dies before signalling, this process
+  // outlives the parent as an orphan pinning a core forever; if the holder exits
+  // CLEANLY without signalling, the parent's Promise.all never settles and the
+  // run hangs until CI kills it — reporting a timeout instead of the regression
+  // that caused it. Sleeping rather than spinning also keeps the wait off the CPU
+  // the contended writer needs.
+  const deadline = Date.now() + 15_000;
+  let signalled = true;
+  while (!existsSync(signal)) {
+    if (Date.now() > deadline) { signalled = false; break; }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  if (!signalled) {
+    out({ opened: false, wrote: false, elapsedMs: 0,
+          error: "the holder never signalled that it had the write lock (15s)" });
+  } else {
+    // Opening runs SCHEMA + migrate() — writes — so this contends before any
+    // application code runs. It is also why the busy pragma is issued before
+    // journal_mode inside the driver constructor.
+    const t0 = Date.now();
+    let opened = false, wrote = false, error = null;
+    try {
+      const store = AsterismStore.open(dbPath);
+      opened = true;
+      store.events.append(agentId, { type: "waiter.wrote", payload: {} });
+      wrote = true;
+      store.close();
+    } catch (e) { error = String(e && e.code) + ":" + String(e && e.message); }
+    out({ opened, wrote, error, elapsedMs: Date.now() - t0 });
+  }
 }
 `;
 }
@@ -89,10 +106,17 @@ export async function concurrencyChecks({ check, spawnArgv, coreDist }) {
   const dbPath = join(dir, "store.db");
   writeFileSync(worker, workerSource(coreDist));
 
+  // Every child spawned, so a failure in one can never leave a sibling running.
+  // `Promise.all` rejects on the FIRST failure and abandons the others, which is
+  // how a worker outlived this script once already.
+  const children = new Set();
+
   const run = (args) =>
     new Promise((resolve, reject) => {
       const [cmd, argv] = spawnArgv(worker, args);
       const child = spawn(cmd, argv, { stdio: ["ignore", "pipe", "pipe"] });
+      children.add(child);
+      child.on("close", () => children.delete(child));
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (d) => (stdout += d));
@@ -163,6 +187,9 @@ export async function concurrencyChecks({ check, spawnArgv, coreDist }) {
     );
     check("the holder's signal file was consumed", existsSync(signal));
   } finally {
+    // Before the temp dir goes away — a worker still running would lose the files
+    // underneath it and, in the waiter's case, wait out its whole bound first.
+    for (const child of children) child.kill("SIGKILL");
     rmSync(dir, { recursive: true, force: true });
   }
 }
