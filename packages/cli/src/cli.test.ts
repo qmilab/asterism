@@ -211,6 +211,52 @@ test("a failure opening the store returns an error code, not a rejection", async
   expect(h.err.join("\n")).toContain("database is locked");
 });
 
+// A lock conflict is the one store failure an operator can actually act on, so it
+// gets said in words instead of the driver's `database is locked`. It has to be
+// recognised three ways, because the drivers do not report it alike — and the only
+// thing they DO agree on is the message text, which is the weak thing to match on.
+const LOCK_SHAPES: Array<[string, Record<string, unknown>]> = [
+  ["better-sqlite3 / bun:sqlite — plain busy", { code: "SQLITE_BUSY" }],
+  ["better-sqlite3 / bun:sqlite — stale snapshot", { code: "SQLITE_BUSY_SNAPSHOT" }],
+  ["better-sqlite3 / bun:sqlite — wal recovery", { code: "SQLITE_BUSY_RECOVERY" }],
+  ["node:sqlite — numeric primary code", { code: "ERR_SQLITE_ERROR", errcode: 5 }],
+  ["node:sqlite — numeric extended code", { code: "ERR_SQLITE_ERROR", errcode: 517 }],
+];
+
+for (const [label, shape] of LOCK_SHAPES) {
+  test(`a locked store is explained, not just reported (${label})`, async () => {
+    const h = harness();
+    await runCli(["init"], h.io);
+    h.io.openStore = () => {
+      throw Object.assign(new Error("database is locked"), shape);
+    };
+    expect(await runCli(["memory", "inspect", "whoever"], h.io)).toBe(1);
+    const err = h.err.join("\n");
+    expect(err).toContain("in use by another Asterism process");
+    expect(err).toContain("try again");
+    // Must NOT promise the command wrote nothing — a concurrent smoke caught a
+    // command reporting this failure with its write already committed.
+    expect(err).not.toContain("nothing was changed");
+    // The raw driver text is REPLACED, not appended — it names a condition the
+    // operator cannot do anything with.
+    expect(err).not.toContain("database is locked");
+  });
+}
+
+test("an ordinary store error is left exactly as it was", async () => {
+  // The translation must not swallow unrelated failures. `errcode` here shares no
+  // low byte with SQLITE_BUSY (5), so it must fall through untouched.
+  const h = harness();
+  await runCli(["init"], h.io);
+  h.io.openStore = () => {
+    throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR", errcode: 10 });
+  };
+  expect(await runCli(["memory", "inspect", "whoever"], h.io)).toBe(1);
+  const err = h.err.join("\n");
+  expect(err).toContain("disk I/O error");
+  expect(err).not.toContain("another Asterism process");
+});
+
 test("new rejects an invalid trust level", async () => {
   const h = harness();
   await runCli(["init"], h.io);

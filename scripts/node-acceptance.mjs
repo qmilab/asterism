@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 // node_modules without this script needing a node_modules/@qmilab of its own.
 // (A published install exposes the packages by name; that path is #15's matrix.)
 import { AsterismStore } from "../packages/core/dist/index.js";
+import { concurrencyChecks } from "./concurrency-check.mjs";
 import { serve } from "../packages/server/dist/index.js";
 import { serveConsole } from "../packages/server/dist/console.js";
 
@@ -304,8 +305,21 @@ async function part4ConsoleCollaborationUnderNode() {
   }
 }
 
+// The cross-process store concurrency contract (#119) on the better-sqlite3
+// driver — the runtime that actually ships it, and the only place a blocked
+// writer can be shown to wait rather than fail.
+async function part5ConcurrencyUnderNode() {
+  console.log(`\n[5] store concurrency under Node (${process.version}) — two processes, one database`);
+  await concurrencyChecks({
+    check,
+    spawnArgv: (worker, args) => [process.execPath, [worker, ...args]],
+    coreDist: join(ROOT, "packages", "core", "dist", "index.js"),
+  });
+}
+
 await part1CliUnderNode();
 await part2ServerUnderNode();
 await part3DrainUnderNode();
 await part4ConsoleCollaborationUnderNode();
+await part5ConcurrencyUnderNode();
 console.log(`\nPASS — ${passed} checks green on Node ${process.version}.`);

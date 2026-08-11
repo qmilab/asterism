@@ -254,7 +254,7 @@ export { auditTrustHooks } from "./audit.js";
 export type { AuditContext } from "./audit.js";
 
 export { AsterismStore } from "./store.js";
-export { openDatabase } from "./db/index.js";
+export { openDatabase, BUSY_TIMEOUT_MS } from "./db/index.js";
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver.js";
 
 export { AgentRepository } from "./repositories/agents.js";

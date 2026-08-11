@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 // Deno this import path is also what makes openDatabase pick the node:sqlite
 // driver — `better-sqlite3` is never required.
 import { AsterismStore } from "../packages/core/dist/index.js";
+import { concurrencyChecks } from "./concurrency-check.mjs";
 import { serve } from "../packages/server/dist/index.js";
 import { serveConsole } from "../packages/server/dist/console.js";
 
@@ -310,8 +311,20 @@ async function part4ConsoleCollaborationUnderDeno() {
   }
 }
 
+// The cross-process store concurrency contract (#119) on the node:sqlite driver
+// — the runtime that actually ships it. bun test never opens this driver.
+async function part5ConcurrencyUnderDeno() {
+  console.log(`\n[5] store concurrency under ${RUNTIME} — two processes, one database`);
+  await concurrencyChecks({
+    check,
+    spawnArgv: (worker, args) => [Deno.execPath(), ["run", "-A", worker, ...args]],
+    coreDist: join(ROOT, "packages", "core", "dist", "index.js"),
+  });
+}
+
 await part1CliUnderDeno();
 await part2ServerUnderDeno();
 await part3DrainUnderDeno();
 await part4ConsoleCollaborationUnderDeno();
+await part5ConcurrencyUnderDeno();
 console.log(`\nPASS — ${passed} checks green on ${RUNTIME}.`);

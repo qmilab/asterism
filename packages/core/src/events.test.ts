@@ -7,7 +7,11 @@
 // REFERENCES ONLY — no secret value or raw tool arg ever reaches the log.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AsterismStore } from "./store";
+import { openDatabase } from "./db/index.js";
 import { auditTrustHooks } from "./audit";
 import { resolveToolRegistry, trustProfile } from "./trust";
 import type { Capability } from "./trust";
@@ -184,6 +188,66 @@ describe("event log — followSnapshot (backlog + race-free cursor)", () => {
     const bobSnap = store.events.followSnapshot(bob.id);
     expect(bobSnap.events.map((e) => e.id)).not.toContain(aliceEvt.id);
     expect(() => store.events.followSnapshot("")).toThrow();
+  });
+
+  test("followSnapshot does not take the write lock — a concurrent writer gets through", () => {
+    // `events tail --follow` polls this in a loop. Its transaction must be the
+    // DEFERRED read one: taking the write lock on every poll lets the follower win
+    // the lock fight and starve the writers it is watching (measured cross-process
+    // at roughly 150x fewer writes, which no correctness assertion would notice —
+    // routing this back onto the write transaction leaves every other test green).
+    //
+    // Needs a real file and two real connections: `:memory:` gives each connection
+    // its own private database, so a lock test against it proves nothing.
+    const dir = mkdtempSync(join(tmpdir(), "asterism-follow-lock-"));
+    const path = join(dir, "store.db");
+    const onDisk = AsterismStore.open(path);
+    const probe = openDatabase(path);
+    // The probe never waits, so a held write lock shows up as an instant failure
+    // rather than deadlocking this single thread against a synchronous binding.
+    probe.exec("PRAGMA busy_timeout = 0");
+    try {
+      const agent = onDisk.createAgent({
+        name: "follower",
+        role: "r",
+        soulRef: "s",
+        workspaceDir: dir,
+        trustLevel: "propose",
+      });
+      onDisk.events.append(agent.id, { type: "seed", payload: {} });
+
+      // Hold the probe's write open across the snapshot by driving it from inside
+      // the read: whatever transaction followSnapshot opens is live at this point.
+      let writerGotThrough = false;
+      const spy = new Proxy(openDatabase(path), {
+        get(target, prop, receiver) {
+          if (prop === "readTransaction" || prop === "transaction") {
+            const inner = Reflect.get(target, prop, receiver) as <T>(fn: () => T) => T;
+            return <T>(fn: () => T): T =>
+              inner.call(target, () => {
+                try {
+                  probe.prepare("INSERT INTO events (id, agent_id, type, payload, created_at) " + "VALUES (?, ?, ?, ?, ?)").run(["probe-evt", agent.id, "probe", "{}", new Date().toISOString()]);
+                  writerGotThrough = true;
+                } catch {
+                  writerGotThrough = false;
+                }
+                return fn();
+              });
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+
+      const spied = new AsterismStore(spy);
+      spied.events.followSnapshot(agent.id);
+      spied.close();
+
+      expect(writerGotThrough).toBe(true);
+    } finally {
+      onDisk.close();
+      probe.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

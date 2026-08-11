@@ -23,6 +23,7 @@
 // dependency footprint to the runtime alone.
 
 import { createRequire } from "node:module";
+import { BUSY_TIMEOUT_MS } from "./driver.js";
 import type { SqlDriver, SqlRow, SqlStatement, SqlValue } from "./driver.js";
 
 /** The slice of the `node:sqlite` surface this driver uses. */
@@ -84,6 +85,10 @@ export class NodeBuiltinSqlDriver implements SqlDriver {
   constructor(path: string) {
     const Database = loadDatabaseCtor();
     this.db = new Database(path);
+    // busy_timeout FIRST: `journal_mode = WAL` takes locks and can itself return
+    // SQLITE_BUSY when another process is opening the same store, so a timeout
+    // set after it would not cover the statement most likely to contend at open.
+    this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -98,21 +103,44 @@ export class NodeBuiltinSqlDriver implements SqlDriver {
 
   // `node:sqlite` exposes no transaction helper (unlike better-sqlite3 and
   // bun:sqlite), so drive BEGIN/COMMIT by hand and roll back on throw. The kernel
-  // never nests `transaction()` calls — store methods wrap repository writes, and
-  // the one repository method that opens its own transaction
+  // never nests these calls — store methods wrap repository writes, and the one
+  // repository method that opens its own transaction
   // (`EventRepository.followSnapshot`, a read for a consistent backlog+cursor) is
   // only ever called on its own — so a flat BEGIN/COMMIT, which cannot nest, is
   // sufficient here.
-  transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN");
+  private run<T>(begin: "BEGIN IMMEDIATE" | "BEGIN", fn: () => T): T {
+    // Outside the try: if BEGIN itself fails (a busy timeout expiring on a
+    // contended write lock) no transaction was opened, so there is nothing to
+    // roll back and the error must propagate untouched.
+    this.db.exec(begin);
     try {
       const result = fn();
       this.db.exec("COMMIT");
       return result;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      // A failing ROLLBACK must not replace the error that caused it — that would
+      // swap a meaningful failure for a confusing one at exactly the moment the
+      // operator needs the real reason.
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* keep the original error */
+      }
       throw error;
     }
+  }
+
+  // BEGIN **IMMEDIATE**, which is what the other two drivers get from their
+  // binding's `.immediate()`: the write lock is taken up front rather than
+  // upgraded from a read snapshot. See the contract on `SqlDriver.transaction`.
+  transaction<T>(fn: () => T): T {
+    return this.run("BEGIN IMMEDIATE", fn);
+  }
+
+  // Plain BEGIN — deferred on purpose, so a read-only snapshot does not take the
+  // write lock. See the contract on `SqlDriver.readTransaction`.
+  readTransaction<T>(fn: () => T): T {
+    return this.run("BEGIN", fn);
   }
 
   close(): void {

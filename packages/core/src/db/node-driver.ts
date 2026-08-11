@@ -17,6 +17,7 @@
 
 import { createRequire } from "node:module";
 import { Buffer } from "node:buffer";
+import { BUSY_TIMEOUT_MS } from "./driver.js";
 import type { SqlDriver, SqlRow, SqlStatement, SqlValue } from "./driver.js";
 
 /** The slice of the better-sqlite3 surface this driver uses. */
@@ -25,11 +26,23 @@ interface NativeStatement {
   get(...params: SqlValue[]): unknown;
   all(...params: SqlValue[]): unknown[];
 }
+/**
+ * better-sqlite3's transaction wrapper: itself callable (a deferred BEGIN), with
+ * the transaction modes attached as methods. Only the two this driver uses are
+ * declared — `immediate` for writes, `deferred` for read-only snapshots; see the
+ * contracts on `SqlDriver.transaction` and `SqlDriver.readTransaction`. (The
+ * binding also offers `exclusive`, which the kernel has no use for.)
+ */
+interface NativeTransaction<T> {
+  (): T;
+  immediate(): T;
+  deferred(): T;
+}
 interface NativeDatabase {
   exec(sql: string): unknown;
   prepare(sql: string): NativeStatement;
   /** Returns a function that runs `fn` wrapped in BEGIN/COMMIT (rolls back on throw). */
-  transaction<T>(fn: () => T): () => T;
+  transaction<T>(fn: () => T): NativeTransaction<T>;
   close(): void;
 }
 interface NativeConstructor {
@@ -113,6 +126,17 @@ export class NodeSqlDriver implements SqlDriver {
     // unchanged rather than be masked as a build problem.
     const Database = loadDatabaseCtor();
     this.db = new Database(path);
+    // Set through the pragma rather than better-sqlite3's `timeout` constructor
+    // option, even though this is the one binding that has such an option: the
+    // pragma is the only mechanism all three drivers share, and using the native
+    // option here would re-create exactly the per-runtime divergence
+    // BUSY_TIMEOUT_MS exists to remove. Issued FIRST for the same reason as the
+    // other drivers — `journal_mode = WAL` can itself return SQLITE_BUSY.
+    //
+    // This is a no-op in value terms on this driver (better-sqlite3 already
+    // defaults to 5000); it is written down so the value is owned by the kernel
+    // and cannot drift if the binding changes its default.
+    this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -127,8 +151,15 @@ export class NodeSqlDriver implements SqlDriver {
 
   transaction<T>(fn: () => T): T {
     // better-sqlite3, like bun:sqlite, returns a function that runs `fn` inside a
-    // BEGIN/COMMIT, rolling back if it throws. Invoke it immediately.
-    return this.db.transaction(fn)();
+    // BEGIN/COMMIT, rolling back if it throws. `.immediate()` runs it as BEGIN
+    // IMMEDIATE so the write lock is taken up front rather than upgraded from a
+    // read snapshot — see the contract on `SqlDriver.transaction`.
+    return this.db.transaction(fn).immediate();
+  }
+
+  readTransaction<T>(fn: () => T): T {
+    // Deferred on purpose — a read-only snapshot must not take the write lock.
+    return this.db.transaction(fn).deferred();
   }
 
   close(): void {
