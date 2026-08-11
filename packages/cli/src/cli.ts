@@ -1102,7 +1102,7 @@ function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
         ? `${agent.name} now holds no capabilities — its runs get no tools from this workspace.`
         : `${agent.name} now holds ${held.length} ${held.length === 1 ? "capability" : "capabilities"}: ${held.join(", ")}.`,
     );
-    io.out(`Its own working notes stay available. Restore the full set with: asterism capabilities unset ${agent.name}`);
+    io.out(`Its own working notes stay available. Stop narrowing it with: asterism capabilities unset ${agent.name}`);
     return 0;
   });
 }
@@ -1195,7 +1195,7 @@ function cmdCapabilitiesUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
   const extra = parsed.positionals.slice(1);
   if (extra.length > 0) {
     io.err(
-      `asterism capabilities unset ${name} takes no capability keys — it clears the whole declaration and restores the full catalog.`,
+      `asterism capabilities unset ${name} takes no capability keys — it clears the whole declaration and puts the agent back on its default capabilities.`,
     );
     io.err(`To take ${extra.join(", ")} away instead: asterism capabilities remove ${name} ${extra.join(" ")}`);
     return Promise.resolve(1);
@@ -1206,7 +1206,13 @@ function cmdCapabilitiesUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
     // Raw, not parsed: `unset` is the documented recovery from a corrupt declaration, so
     // it must not be the one command that a corrupt declaration stops.
     if (store.agentSettings.getCapabilitiesRaw(agent.id) === undefined) {
-      io.out(`${agent.name} was not narrowed — it already holds everything in the catalog.`);
+      // Counted by the shared helper, like the cleared branch below and both other views.
+      // "Not narrowed" is not "holds everything on offer": with a host catalog wider than
+      // the kernel's default set this branch claimed the agent held tools it does not, and
+      // contradicted `capabilities show` in the same install.
+      const held = store.resolveOwnedCapabilities(agent.id);
+      const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
+      io.out(`${agent.name} was not narrowed — it already holds ${describeCatalogHolding(held, catalog)}.`);
       return 0;
     }
     store.clearAgentCapabilities(agent.id);

@@ -4583,11 +4583,39 @@ test("with a custom catalog, every count is what the agent HOLDS — never the c
   expect(base.out.join("\n").split("\n")[0]).toBe(
     "personal · holds 1 of 10 in the catalog  [narrowed to 1]",
   );
+  // The detail view's own hint says what `unset` does, not "restore the full catalog" —
+  // which `unset` cannot do here, since the agent's default set is 9 of this host's 10.
+  expect(base.out.join("\n")).toContain("Stop narrowing it with: asterism capabilities unset personal");
+  expect(base.out.join("\n")).not.toContain("full catalog");
 
   // `unset` restores the default set — which is still not "all 10".
   base.out.length = 0;
   await runCli(["capabilities", "unset", "personal"], io);
   expect(base.out.join("\n")).toContain("it holds 9 of 10 in the catalog");
+
+  // Codex R10: the NO-OP branch of `unset` — nothing was declared, so there is nothing to
+  // clear — had its own hardcoded "already holds everything in the catalog", the one
+  // count in the surface still not going through the shared helper. It contradicted
+  // `capabilities show` in the same install.
+  base.out.length = 0;
+  expect(await runCli(["capabilities", "unset", "personal"], io)).toBe(0);
+  expect(base.out.join("\n")).toContain(
+    "personal was not narrowed — it already holds 9 of 10 in the catalog.",
+  );
+  expect(base.out.join("\n")).not.toContain("everything in the catalog");
+
+  // And the instructions say what `unset` actually does. It restores the agent's DEFAULT
+  // capabilities, which are "the full catalog" only when the host ships exactly the
+  // kernel's default set — not here.
+  base.out.length = 0;
+  await runCli(["capabilities", "set", "personal", "fs.read"], io);
+  expect(base.out.join("\n")).toContain("Stop narrowing it with:");
+  expect(base.out.join("\n")).not.toContain("full set");
+
+  base.err.length = 0;
+  await runCli(["capabilities", "unset", "personal", "fs.read"], io);
+  expect(base.err.join("\n")).toContain("puts the agent back on its default capabilities");
+  expect(base.err.join("\n")).not.toContain("full catalog");
 });
 
 test("a host that registers no catalog is reported as having none, not as the shipped nine", async () => {

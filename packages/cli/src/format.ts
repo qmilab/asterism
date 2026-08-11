@@ -618,7 +618,7 @@ export function formatCapabilityList(
   lines.push(
     declared === undefined
       ? `Narrow it with: asterism capabilities set ${agentName} <key>…`
-      : `Restore the full catalog with: asterism capabilities unset ${agentName}`,
+      : `Stop narrowing it with: asterism capabilities unset ${agentName}`,
   );
   lines.push(`Which of these may act without pausing: asterism trust ${agentName} show`);
   return lines.join("\n");
