@@ -8,6 +8,7 @@ test("usage lists every command in the surface", () => {
     "new",
     "list",
     "trust",
+    "capabilities show",
     "secrets add",
     "skill add",
     "objective add",
@@ -51,4 +52,16 @@ test("public copy carries no internal architecture vocabulary", () => {
   for (const forbidden of [/\bkernel\b/i, /\badapter\b/i, /\bfirewall\b/i, /\bregistry\b/i, /\bsubstrate\b/i]) {
     expect(allCopy).not.toMatch(forbidden);
   }
+});
+
+test("the exposure verb's help keeps it distinct from trust, and never implies agents were unconfined", () => {
+  const copy = COMMAND_HELP.capabilities!;
+  // The two nouns are adjacent and confusable; the help has to say which is which.
+  expect(copy).toContain("This is not the same as trust");
+  expect(copy).toContain("WHICH tools an agent has");
+  // Copy constraint from the decision record: narrowing is something you may do ON TOP
+  // of the workspace boundary and trust level every agent already has. No string here
+  // may suggest an agent was loose before this existed.
+  expect(copy).toContain("perfectly normal");
+  expect(copy).not.toMatch(/unconfined|unrestricted|unlimited|no restrictions|sandbox/i);
 });

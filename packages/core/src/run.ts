@@ -25,11 +25,10 @@ import { actionFingerprint, classifyEffect, resolveToolRegistry, trustProfile } 
 import type { Action, Capability, EffectClass, PreApprovalVerdict, TrustHooks } from "./trust.js";
 import {
   worldFactCapabilities,
-  WORLD_FACT_RECORD_KEY,
-  WORLD_FACT_FORGET_KEY,
   WORLD_FACT_RECORD_TOOL,
   WORLD_FACT_FORGET_TOOL,
 } from "./world-facts.js";
+import { RESERVED_CAPABILITY_KEYS } from "./capabilities.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
 import { collectArtifactManifest, parseArtifactReference } from "./artifact-manifest.js";
@@ -334,8 +333,8 @@ async function runAndPersist(
   // Resolve the agent's trust level into the tool set this run may use, with the
   // destructive-action gate wired into every tool's `execute` closure and each
   // gate decision audited to the event log. Confined by default — the exposure
-  // list is derived from exactly the capabilities the caller handed in (an empty
-  // set if none).
+  // list is the set of capabilities this AGENT holds (its own declaration, or the
+  // kernel's named default catalog), intersected with what the caller handed in.
   const abortController = new AbortController();
   // The kernel-owned world-fact tools (`record_note` / `forget_note`) are injected on
   // EVERY run — they are the agent's own bounded, firewalled, capped, audited,
@@ -356,7 +355,7 @@ async function runAndPersist(
   // capability reusing `record_note`/`forget_note` under a different key would still
   // produce a duplicate name that a tool-calling provider rejects. The kernel's tool over
   // its own state is authoritative for its reserved namespace.
-  const reservedKeys = new Set<string>([WORLD_FACT_RECORD_KEY, WORLD_FACT_FORGET_KEY]);
+  const reservedKeys = new Set<string>(RESERVED_CAPABILITY_KEYS);
   const reservedToolNames = new Set<string>([WORLD_FACT_RECORD_TOOL, WORLD_FACT_FORGET_TOOL]);
   const hostCapabilities = (options.capabilities ?? []).filter(
     (c) => !reservedKeys.has(c.key) && !reservedToolNames.has(c.tool.name),
@@ -366,7 +365,24 @@ async function runAndPersist(
   const capabilities = [...hostCapabilities, ...worldFactCapabilities(store, agent.id, run.id)];
   const profile = trustProfile({
     level: agent.trustLevel,
-    capabilities: capabilities.map((c) => c.key),
+    // EXPOSURE — which tools exist for this run at all. Read from the agent's own
+    // stored declaration, NOT from the candidate list: before ownership, this was
+    // `capabilities.map((c) => c.key)`, which made the exposure allow-list a
+    // restatement of whatever the host handed in and left nothing for an operator to
+    // decide. An agent with nothing declared resolves to the kernel's named default
+    // catalog, so this is byte-for-byte the same registry it had before — the whole
+    // migration, and the reason there is no backfill.
+    //
+    // Resolved kernel-side (like the recall budget and the world-fact cap) so every run
+    // surface — CLI, HTTP, console, channels, resume — reads the same answer and none
+    // can drift. It is re-read on every invocation, so narrowing an agent takes effect
+    // on its next run AND on the resume of one already paused: a pre-approved action
+    // whose capability has since been revoked has no tool left to call.
+    //
+    // `resolveToolRegistry` intersects this with the candidates, so a declared key with
+    // no capability behind it is inert, and a candidate the agent does not hold never
+    // reaches the substrate.
+    capabilities: store.resolveOwnedCapabilities(agent.id),
     // Earned standing is the FIRST real producer of the destructive gate's
     // `autoApprove` allow-list: a destructive capability the agent has EARNED — and a
     // human has RATIFIED — a `standing-grant` on auto-approves, exactly as a

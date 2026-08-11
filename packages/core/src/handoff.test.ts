@@ -32,6 +32,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/writer",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(writer.id);
   researcher = store.createAgent({
     name: "researcher",
     role: "summarizes notes",
@@ -39,6 +40,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/researcher",
     trustLevel: "propose",
   });
+  ownsFixtureTools(researcher.id);
 });
 
 afterEach(() => {
@@ -115,6 +117,21 @@ function writeFileCapability(): Capability {
 }
 
 // --- Invariant 1: no connection → no interaction ---------------------------
+
+/**
+ * The capability keys this file's fixtures use. They are NOT the shipped catalog, so an
+ * agent has to be declared to hold them — which is exactly what a host shipping its own
+ * tools does. Each fixture agent is declared to hold precisely the keys these tests
+ * already handed it, so exposure here is what it was before ownership existed: the
+ * candidates the caller passes. No fixture gains a capability it did not have.
+ *
+ * Written through the repository rather than the audited `setAgentCapabilities`, so the
+ * fixture adds no `agent.setting_changed` to event logs these tests assert on in full.
+ */
+const FIXTURE_CAPABILITY_KEYS = ["delete_files", "write_file"];
+function ownsFixtureTools(agentId: string): void {
+  store.agentSettings.setCapabilities(agentId, FIXTURE_CAPABILITY_KEYS);
+}
 
 test("with no connection, a handoff is refused and nothing runs on the callee", async () => {
   const outcome = await performHandoff(store, writer, researcher, "summarize the notes", {
@@ -207,6 +224,7 @@ test("a destructive action pauses the handoff per the callee's gate, even with a
     workspaceDir: "/tmp/helper",
     trustLevel: "notify",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "handoff");
   const outcome = await performHandoff(store, writer, helper, "delete the dist files", {
     adapter: sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]),
@@ -314,6 +332,7 @@ test("handoff.completed records a paused run honestly (status awaiting_confirmat
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "handoff");
   const outcome = await performHandoff(store, writer, helper, "delete dist", {
     adapter: sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]),

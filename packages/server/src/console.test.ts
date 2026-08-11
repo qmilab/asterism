@@ -33,6 +33,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/personal",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(personal.id);
   work = store.createAgent({
     name: "work",
     role: "careful consultant",
@@ -40,6 +41,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(work.id);
 });
 
 afterEach(() => {
@@ -129,6 +131,21 @@ async function parkRun(agent: Agent): Promise<string> {
 }
 
 // --- auth ------------------------------------------------------------------
+
+/**
+ * The capability keys this file's fixtures use. They are NOT the shipped catalog, so an
+ * agent has to be declared to hold them — which is exactly what a host shipping its own
+ * tools does. Each fixture agent is declared to hold precisely the keys these tests
+ * already handed it, so exposure here is what it was before ownership existed: the
+ * candidates the caller passes. No fixture gains a capability it did not have.
+ *
+ * Written through the repository rather than the audited `setAgentCapabilities`, so the
+ * fixture adds no `agent.setting_changed` to event logs these tests assert on in full.
+ */
+const FIXTURE_CAPABILITY_KEYS = ["delete_files", "fs.write"];
+function ownsFixtureTools(agentId: string): void {
+  store.agentSettings.setCapabilities(agentId, FIXTURE_CAPABILITY_KEYS);
+}
 
 test("every route is default-deny: a missing or wrong token is 401", async () => {
   const noTok = await handleConsoleRequest(deps(), get("/agents", {}));
@@ -1043,6 +1060,7 @@ test("a callee whose name needs percent-encoding resolves, and a malformed one 4
     workspaceDir: "/tmp/odd",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(odd.id);
   store.createConnection(personal.id, odd.id, "read-summary");
 
   const res = await handleConsoleRequest(
@@ -1108,6 +1126,7 @@ test("a caller-supplied value that must match a kernel record is never normalize
     workspaceDir: "/tmp/work-padded",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(padded.id);
 
   // 1. The connect body names `"work "` — it must reach that agent, not `work`.
   const granted = await handleConsoleRequest(

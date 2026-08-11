@@ -4188,6 +4188,17 @@ test("artifact renders the manifest even when the run FAILED after producing a f
   await runCli(["new", "helper", "--trust", "autonomous"], h.io);
   await runCli(["connect", "writer", "helper", "--mode", "artifact-only"], h.io);
 
+  // The tool below is this test's own spy, not the shipped catalog, so the callee is
+  // declared to hold it — what an install with its own tools does. The declaration is
+  // written directly against the store because `h.io`'s catalog seam is overridden per
+  // test, below, and this must not depend on the order of the two.
+  const declared = openHomeStore(h);
+  try {
+    declared.agentSettings.setCapabilities(agentNamed(declared, "helper").id, ["write_file"]);
+  } finally {
+    declared.close();
+  }
+
   // The tool succeeds (its observation is collected), then the run fails. The file exists in
   // the callee's workspace, so reporting "no artifacts" would be wrong.
   const failAfterWriting = {
@@ -4318,4 +4329,211 @@ test("the top-level fetch verb is a fetch, and starts no run for anyone", async 
   } finally {
     store.close();
   }
+});
+
+// --- capabilities: the exposure verb (#123) ---------------------------------
+//
+// Exposure ("which tools does this agent have") is deliberately a different noun from
+// trust ("what may it do with them, and which destructive ones act without pausing").
+// These pin the grammar, the labels an operator reads, and the two places the verb
+// must refuse rather than guess.
+
+/** A harness whose runs get the real shipped catalog, so key checks are real. */
+function catalogHarness(): Harness {
+  const h = harness();
+  return { ...h, io: { ...h.io, capabilities: workspaceCapabilities } };
+}
+
+test("capabilities show: an agent nobody narrowed reads as [not narrowed], not as unconfigured", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["capabilities", "show", "personal"], h.io)).toBe(0);
+  const out = h.out.join("\n");
+  expect(out).toContain("holds 9 of 9 in the catalog  [not narrowed]");
+  expect(out).toContain("✓ fs.read");
+  expect(out).not.toContain("(withheld)");
+  // The copy never suggests the agent was unbounded before someone narrowed it.
+  expect(out).not.toMatch(/unconfined|unrestricted|unlimited|no restrictions/i);
+});
+
+test("capabilities set narrows, show marks what is withheld, unset restores", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["capabilities", "set", "personal", "fs.read", "fs.list"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("personal now holds 2 capabilities: fs.list, fs.read.");
+
+  h.out.length = 0;
+  await runCli(["capabilities", "show", "personal"], h.io);
+  expect(h.out.join("\n")).toContain("holds 2 of 9 in the catalog  [narrowed to 2]");
+  expect(h.out.join("\n")).toContain("· fs.delete  (withheld)");
+
+  h.out.length = 0;
+  expect(await runCli(["capabilities", "unset", "personal"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("no longer narrowed — it holds all 9 capabilities");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("capabilities remove narrows from what the agent holds now, and pins the rest", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // Removing from an agent with nothing declared writes its first declaration: the
+  // catalog minus the named key.
+  expect(await runCli(["capabilities", "remove", "personal", "fs.delete"], h.io)).toBe(0);
+  const store = openHomeStore(h);
+  try {
+    const declared = store.agentSettings.getCapabilities(agentNamed(store, "personal").id);
+    expect(declared).toHaveLength(8);
+    expect(declared).not.toContain("fs.delete");
+  } finally {
+    store.close();
+  }
+
+  // Removing something it does not hold says so and changes nothing.
+  h.out.length = 0;
+  expect(await runCli(["capabilities", "remove", "personal", "fs.delete"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("personal does not hold 'fs.delete' — nothing to remove.");
+});
+
+test("capabilities set --none declares the empty set; bare set refuses", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // An empty declaration must be asked for by name — never reachable from a glob that
+  // expanded to nothing.
+  expect(await runCli(["capabilities", "set", "personal"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("--none");
+
+  expect(await runCli(["capabilities", "set", "personal", "--none"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("personal now holds no capabilities");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
+test("capabilities set refuses a key this install cannot build, and names what it has", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // A typo narrows in a direction the operator did not intend, in silence, unless the
+  // surface that knows the catalog catches it.
+  expect(await runCli(["capabilities", "set", "personal", "fs.reed"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("No such capability: fs.reed");
+  expect(h.err.join("\n")).toContain("fs.read");
+  // The list of what is on offer must not name a key the very next command refuses:
+  // the reserved notes tools are in the agent's RESOLVED set, and leaked into this
+  // line before a bare-install smoke caught it.
+  const offered = h.err.join("\n").split("This install offers: ")[1] ?? "";
+  expect(offered).not.toContain("notes.");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("capabilities refuses to declare or remove the agent's own notes tools", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  expect(await runCli(["capabilities", "set", "personal", "notes.record"], h.io)).toBe(1);
+  expect(await runCli(["capabilities", "remove", "personal", "notes.forget"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("always available");
+
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCapabilities(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("config show labels an un-narrowed agent as such, and a narrowed one by its keys", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  await runCli(["new", "work", "--trust", "propose"], h.io);
+  await runCli(["capabilities", "set", "work", "fs.read"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["config"], h.io)).toBe(0);
+  const out = h.out.join("\n");
+  expect(out).toContain("Per-agent capabilities:");
+  expect(out).toContain("personal  →  all 9 in the catalog  [not narrowed]");
+  expect(out).toContain("work  →  fs.read  [narrowed to 1]");
+});
+
+test("capabilities and trust are separate verbs: narrowing exposure keeps an earned grant", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  const store = openHomeStore(h);
+  try {
+    const personal = agentNamed(store, "personal");
+    store.setCapabilityStanding(personal.id, "fs.delete", "standing-grant", "3 clean executions");
+  } finally {
+    store.close();
+  }
+
+  await runCli(["capabilities", "set", "personal", "fs.read"], h.io);
+
+  h.out.length = 0;
+  await runCli(["trust", "personal", "show"], h.io);
+  // The grant is still on the record — taking a tool away is not how a grant is revoked.
+  expect(h.out.join("\n")).toContain("✓ fs.delete");
+});
+
+test("capabilities: unknown verb and missing agent are refused with usage, not a guess", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  expect(await runCli(["capabilities"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Usage: asterism capabilities show <agent>");
+  expect(await runCli(["capabilities", "grant", "personal", "fs.read"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Unknown subcommand: capabilities grant");
+  expect(await runCli(["capabilities", "show", "nobody"], h.io)).toBe(1);
+});
+
+test("capabilities show flags a declared key this install builds no tool for", async () => {
+  const h = catalogHarness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+
+  // Reachable when a host that shipped its own tool is swapped for one that does not —
+  // the declaration is still valid, the tool simply is not there. Written through the
+  // store because the CLI (rightly) refuses to declare a key it cannot build.
+  const store = openHomeStore(h);
+  try {
+    store.agentSettings.setCapabilities(agentNamed(store, "personal").id, ["fs.read", "vendor.tool"]);
+  } finally {
+    store.close();
+  }
+
+  h.out.length = 0;
+  expect(await runCli(["capabilities", "show", "personal"], h.io)).toBe(0);
+  const out = h.out.join("\n");
+  expect(out).toContain("✓ vendor.tool  (declared — this install builds no such tool)");
+  // It is declared but inert, so it does not inflate the count against the catalog —
+  // the two numbers are reported separately because they mean different things.
+  expect(out).toContain("holds 1 of 9 in the catalog (+1 this install does not build)  [narrowed to 2]");
 });

@@ -31,6 +31,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/writer",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(writer.id);
   researcher = store.createAgent({
     name: "researcher",
     role: "summarizes notes",
@@ -38,6 +39,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/researcher",
     trustLevel: "propose",
   });
+  ownsFixtureTools(researcher.id);
 });
 
 afterEach(() => {
@@ -122,6 +124,27 @@ function wrote(path: string, sizeBytes: number): ToolObservation {
 
 // --- Invariant 1: no connection → no interaction ---------------------------
 
+/**
+ * The capability keys this file's fixtures use. They are NOT the shipped catalog, so an
+ * agent has to be declared to hold them — which is exactly what a host shipping its own
+ * tools does. Each fixture agent is declared to hold precisely the keys these tests
+ * already handed it, so exposure here is what it was before ownership existed: the
+ * candidates the caller passes. No fixture gains a capability it did not have.
+ *
+ * Written through the repository rather than the audited `setAgentCapabilities`, so the
+ * fixture adds no `agent.setting_changed` to event logs these tests assert on in full.
+ */
+const FIXTURE_CAPABILITY_KEYS = [
+  "delete_file",
+  "read_file",
+  "write_file",
+  "write_plain",
+  "write_secret_named",
+];
+function ownsFixtureTools(agentId: string): void {
+  store.agentSettings.setCapabilities(agentId, FIXTURE_CAPABILITY_KEYS);
+}
+
 test("with no connection, an artifact exchange is refused and nothing runs on the callee", async () => {
   const outcome = await performArtifactExchange(store, writer, researcher, "draft the section", {
     adapter: cannedAdapter({ status: "done", text: "summary" }),
@@ -147,6 +170,7 @@ test("a handoff connection does NOT authorize an artifact-only exchange (modes a
     workspaceDir: "/tmp/other",
     trustLevel: "propose",
   });
+  ownsFixtureTools(other.id);
   store.createConnection(writer.id, other.id, "artifact-only");
   const handoff = await performHandoff(store, writer, other, "do it", {
     adapter: cannedAdapter({ status: "done", text: "x" }),
@@ -173,6 +197,7 @@ test("the caller receives the artifact manifest — and NOT the callee's text", 
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "artifact-only");
 
   const outcome = await performArtifactExchange(store, writer, helper, "draft the section", {
@@ -199,6 +224,7 @@ test("the callee's Run row never crosses — only its run id (the row carries it
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "artifact-only");
   const OUTPUT = "SENTINEL_CALLEE_PROSE the market looks strong";
 
@@ -222,6 +248,7 @@ test("a secret VALUE in a file's contents never crosses — and a secret-shaped 
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "artifact-only");
   const SECRET = "sk-live-000011112222333344445555";
 
@@ -259,6 +286,7 @@ test("a pure READ contributes no artifact — the manifest is not a record of wh
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "artifact-only");
 
   const outcome = await performArtifactExchange(store, writer, helper, "look around", {
@@ -314,6 +342,7 @@ test("a destructive action pauses per the callee's gate; the manifest reflects o
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous", // destructive still pauses at EVERY trust level
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "artifact-only");
 
   const outcome = await performArtifactExchange(store, writer, helper, "write then delete", {
@@ -346,6 +375,7 @@ test("a run that produced a file and THEN failed still reports that artifact (Co
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "artifact-only");
 
   // The tool succeeds (so its observation is collected), then the run fails afterwards —
@@ -415,6 +445,7 @@ test("both logs record the exchange as content-free references carrying the mode
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
   store.createConnection(writer.id, helper.id, "artifact-only");
   const SECRET = "super-secret-token-123";
   store.addCredential(helper.id, "HELPER_TOKEN", SECRET);

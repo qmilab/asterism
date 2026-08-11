@@ -28,6 +28,7 @@ import {
   COGNITION_CAPTURE_MODES,
   COGNITION_PROVIDER_IDS,
   CONNECTION_MODES,
+  DEFAULT_CAPABILITY_KEYS,
   DEFAULT_RECALL_BUDGET,
   DEFAULT_STANDING_POLICY,
   DEFAULT_WORLD_FACT_CAP,
@@ -47,6 +48,7 @@ import {
   queueProposals,
   RECALL_PROVIDER_IDS,
   rejectProposedMemory,
+  RESERVED_CAPABILITY_KEYS,
   rejectProposedObjective,
   resolveStandingPolicy,
   resumeRun,
@@ -105,6 +107,7 @@ import {
   formatArtifactManifest,
   formatBytes,
   formatBriefList,
+  formatCapabilityList,
   formatConnectionList,
   formatEventLines,
   formatMemorySummary,
@@ -939,6 +942,218 @@ async function cmdTrustRevoke(
     io.out(`Revoked '${capability}' for ${name} — it pauses for your confirmation again.`);
     return 0;
   });
+}
+
+// --- capabilities ----------------------------------------------------------
+//
+// EXPOSURE: which tools an agent has at all. Deliberately its own top-level noun,
+// not a verb under `trust` and not a knob under `config`:
+//
+//   `capabilities` — WHICH tools reach the agent's runs.
+//   `trust`        — what it may DO with them (level), and which destructive ones
+//                    it has EARNED the right to run without pausing (standing).
+//
+// The two never cascade. Narrowing exposure leaves an earned standing grant exactly
+// where it was — inert, because the tool is no longer in the registry for anything to
+// auto-approve — and restoring exposure restores it. Taking a grant back is
+// `trust <agent> revoke <capability>`.
+//
+// An agent with nothing declared holds the whole catalog, which is the state every
+// agent starts in and a perfectly ordinary place to stay. Declaring narrows.
+
+const CAPABILITIES_USAGE =
+  "Usage: asterism capabilities show <agent>  ·  set <agent> <key>… | --none  ·  remove <agent> <key>…  ·  unset <agent>";
+
+function cmdCapabilities(args: string[], io: CliIO): Promise<number> {
+  const sub = args[0];
+  if (sub === undefined) {
+    io.err(CAPABILITIES_USAGE);
+    return Promise.resolve(1);
+  }
+  if (sub === "--help" || sub === "-h") {
+    io.out(COMMAND_HELP.capabilities!);
+    return Promise.resolve(0);
+  }
+  // `--none` is the ONLY flag on any verb here, and it is boolean so it can never
+  // swallow a following key.
+  const parsed = parseArgs(args.slice(1), ["help", "h", "none"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.capabilities!);
+    return Promise.resolve(0);
+  }
+  if (sub === "show") return cmdCapabilitiesShow(parsed.positionals[0], io);
+  if (sub === "set") return cmdCapabilitiesSet(parsed, io);
+  if (sub === "remove") return cmdCapabilitiesRemove(parsed, io);
+  if (sub === "unset") return cmdCapabilitiesUnset(parsed.positionals[0], io);
+  io.err(`Unknown subcommand: capabilities ${sub}`);
+  io.out(COMMAND_HELP.capabilities!);
+  return Promise.resolve(1);
+}
+
+/**
+ * The capability keys this install can actually build for one agent, from the same
+ * seam a run uses (`io.capabilities`). The membership check for a declaration lives
+ * here rather than in the kernel: the kernel cannot know what a host ships, but the
+ * surface that builds the catalog can, and a typo'd key is exactly the mistake worth
+ * catching before it silently narrows (or fails to widen) an agent.
+ *
+ * Undefined when this host registers no catalog at all — then there is nothing to
+ * check a key against, and any well-formed key is accepted.
+ */
+function catalogKeys(io: CliIO, workspaceDir: string): readonly string[] | undefined {
+  const catalog = io.capabilities?.(workspaceDir);
+  return catalog ? catalog.map((c) => c.key).sort() : undefined;
+}
+
+/** `asterism capabilities show <agent>` — what this agent holds, and whether it was narrowed. */
+function cmdCapabilitiesShow(name: string | undefined, io: CliIO): Promise<number> {
+  if (!name) {
+    io.err("Usage: asterism capabilities show <agent>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const declared = store.agentSettings.getCapabilities(agent.id);
+    const held = store.resolveOwnedCapabilities(agent.id);
+    const catalog = catalogKeys(io, agent.workspaceDir) ?? [...DEFAULT_CAPABILITY_KEYS];
+    io.out(formatCapabilityList(agent.name, declared, held, catalog));
+    return 0;
+  });
+}
+
+/**
+ * `asterism capabilities set <agent> <key>…` — declare exactly which capabilities the
+ * agent holds. Stating the whole resulting set is the point: this is the only verb
+ * that can widen, and it can only do so by naming everything the agent ends up with.
+ *
+ * `--none` declares the empty set. It is a flag rather than "no keys given" because an
+ * empty declaration is drastic and should not be reachable by a shell glob that
+ * expanded to nothing.
+ */
+function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const name = parsed.positionals[0];
+  const keys = parsed.positionals.slice(1);
+  const none = parsed.flags.none === true;
+  if (!name || (keys.length === 0 && !none)) {
+    io.err("Usage: asterism capabilities set <agent> <key>…   (or --none for no capabilities)");
+    return Promise.resolve(1);
+  }
+  if (keys.length > 0 && none) {
+    io.err("Give either capability keys or --none, not both.");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const catalog = catalogKeys(io, agent.workspaceDir);
+    // Checked against the catalog PLUS whatever the agent already holds, so restating
+    // an existing declaration always works even if it names a tool this host no longer
+    // builds — a re-`set` should never be the thing that fails.
+    if (catalog && !checkKnownKeys(keys, [...catalog, ...store.resolveOwnedCapabilities(agent.id)], io)) {
+      return 1;
+    }
+    store.setAgentCapabilities(agent.id, keys);
+    io.out(
+      none
+        ? `${agent.name} now holds no capabilities — its runs get no tools from this workspace.`
+        : `${agent.name} now holds ${keys.length} ${keys.length === 1 ? "capability" : "capabilities"}: ${[...new Set(keys)].sort().join(", ")}.`,
+    );
+    io.out(`Its own working notes stay available. Restore the full set with: asterism capabilities unset ${agent.name}`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism capabilities remove <agent> <key>…` — take capabilities away from whatever
+ * the agent holds now. Only ever narrows. On an agent with nothing declared this
+ * writes the first declaration: the catalog it holds today, minus the named keys —
+ * which also pins it, so a capability added to the catalog later is not inherited.
+ */
+function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  const name = parsed.positionals[0];
+  const keys = parsed.positionals.slice(1);
+  if (!name || keys.length === 0) {
+    io.err("Usage: asterism capabilities remove <agent> <key>…");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    // The reserved kernel tools are in the resolved set but are not declarable, so they
+    // are excluded from the set being rewritten — `remove` cannot reach them, and
+    // neither can the declaration it writes.
+    const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
+    const held = [...store.resolveOwnedCapabilities(agent.id)].filter((k) => !reserved.has(k));
+    const naming = keys.filter((k) => reserved.has(k));
+    if (naming.length > 0) {
+      io.err(
+        `${naming.join(", ")}: reserved for the agent's own working notes — always available, and not something to remove here.`,
+      );
+      return 1;
+    }
+    const removing = keys.filter((k) => held.includes(k));
+    const absent = keys.filter((k) => !held.includes(k));
+    for (const key of absent) io.out(`${agent.name} does not hold '${key}' — nothing to remove.`);
+    if (removing.length === 0) return 0;
+    const remaining = held.filter((k) => !removing.includes(k));
+    store.setAgentCapabilities(agent.id, remaining);
+    io.out(
+      `Removed ${removing.sort().join(", ")} from ${agent.name} — it now holds ${remaining.length} ${remaining.length === 1 ? "capability" : "capabilities"}.`,
+    );
+    return 0;
+  });
+}
+
+/**
+ * `asterism capabilities unset <agent>` — clear the declaration, back to the full
+ * catalog. The one operation here that widens, which is why it is its own verb and not
+ * something `set` with no arguments could be mistaken for.
+ */
+function cmdCapabilitiesUnset(name: string | undefined, io: CliIO): Promise<number> {
+  if (!name) {
+    io.err("Usage: asterism capabilities unset <agent>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    if (store.agentSettings.getCapabilities(agent.id) === undefined) {
+      io.out(`${agent.name} was not narrowed — it already holds everything in the catalog.`);
+      return 0;
+    }
+    store.clearAgentCapabilities(agent.id);
+    const held = store.resolveOwnedCapabilities(agent.id);
+    const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
+    const count = [...held].filter((k) => !reserved.has(k)).length;
+    io.out(`${agent.name} is no longer narrowed — it holds all ${count} capabilities in the catalog.`);
+    return 0;
+  });
+}
+
+/**
+ * Reject a key this install cannot build, printing what it can. Returns whether every
+ * key was known. A reserved key gets its own message: it is not a typo, it is a key
+ * that is always available and never declarable.
+ */
+function checkKnownKeys(keys: readonly string[], known: readonly string[], io: CliIO): boolean {
+  const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
+  const naming = keys.filter((k) => reserved.has(k));
+  if (naming.length > 0) {
+    io.err(
+      `${naming.join(", ")}: reserved for the agent's own working notes — always available, and not something to declare here.`,
+    );
+    return false;
+  }
+  // The reserved keys are in the agent's RESOLVED set, so they arrive in `known` — but
+  // the branch above refuses them, and a list that offers a key the next command rejects
+  // is worse than no list. They are named in their own message, not this one.
+  const knownSet = new Set([...known].filter((k) => !reserved.has(k)));
+  const unknown = keys.filter((k) => !knownSet.has(k));
+  if (unknown.length === 0) return true;
+  io.err(`No such capability: ${unknown.join(", ")}`);
+  io.err(`This install offers: ${[...knownSet].sort().join(", ")}`);
+  return false;
 }
 
 // --- secrets add -----------------------------------------------------------
@@ -3523,6 +3738,30 @@ function cmdConfigShow(io: CliIO): Promise<number> {
     }
 
     io.out("");
+    io.out("Per-agent capabilities:");
+    if (agents.length === 0) {
+      io.out("  (no agents yet)");
+    } else {
+      // WHICH tools each agent holds. An agent that has never been narrowed holds the
+      // whole catalog — a permanent, ordinary state, so it is labelled for what it is
+      // ([not narrowed]) rather than as something un-configured. The kernel owns the
+      // resolution (`resolveOwnedCapabilities`); this reads it and names the source.
+      // Full detail, including which keys are withheld, is `capabilities show <agent>`.
+      const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
+      for (const agent of agents) {
+        const declared = store.agentSettings.getCapabilities(agent.id);
+        const catalog = catalogKeys(io, agent.workspaceDir) ?? [...DEFAULT_CAPABILITY_KEYS];
+        if (declared === undefined) {
+          io.out(`  ${agent.name}  →  all ${catalog.length} in the catalog  [not narrowed]`);
+          continue;
+        }
+        const held = declared.filter((k) => !reserved.has(k));
+        const shown = held.length === 0 ? "none" : held.join(", ");
+        io.out(`  ${agent.name}  →  ${shown}  [narrowed to ${held.length}]`);
+      }
+    }
+
+    io.out("");
     io.out("Per-agent recall provider:");
     if (agents.length === 0) {
       io.out("  (no agents yet)");
@@ -5310,6 +5549,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdNew(rest, io);
     case "trust":
       return cmdTrust(rest, io);
+    case "capabilities":
+      return cmdCapabilities(rest, io);
     case "run":
       return cmdRun(rest, io);
     case "connect":

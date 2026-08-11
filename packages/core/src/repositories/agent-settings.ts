@@ -13,6 +13,7 @@ import {
   validateEnum,
   validatePositiveInt,
 } from "../types.js";
+import { validateCapabilityKeys } from "../capabilities.js";
 import { requireAgentId } from "./scope.js";
 
 /** A NULLable integer column → a number, or undefined when NULL/absent. */
@@ -34,8 +35,10 @@ function mapSettings(row: SqlRow): AgentSettings {
   const recallProvider = textOrUnset(row.recall_provider);
   const cognitionProvider = textOrUnset(row.cognition_provider);
   const cognitionCapture = textOrUnset(row.cognition_capture);
+  const capabilities = capabilitiesOrUnset(row.capabilities, String(row.agent_id));
   return {
     agentId: String(row.agent_id),
+    ...(capabilities !== undefined ? { capabilities } : {}),
     ...(recallBudget !== undefined ? { recallBudget } : {}),
     ...(minCleanExecutions !== undefined ? { minCleanExecutions } : {}),
     ...(minDistinctTargets !== undefined ? { minDistinctTargets } : {}),
@@ -55,6 +58,44 @@ function mapSettings(row: SqlRow): AgentSettings {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+/**
+ * Decode the stored capability declaration: a canonical JSON array of keys, or
+ * undefined when NULL/absent (nothing declared). `'[]'` decodes to an empty array —
+ * a real declaration, never conflated with undefined.
+ *
+ * A value that is neither THROWS, and that is the deliberate difference from every
+ * sibling column here. The siblings coerce an unrecognized value to unset because
+ * unset is their SAFE default; for this column unset is the WIDEST state, so
+ * degrading a corrupt declaration would silently restore every capability the
+ * operator narrowed away. Failing closed (an empty set) would be safe but leaves a
+ * mutely tool-less agent. So it fails loudly, naming the fix — and only a
+ * hand-edited database can reach it, since the setter canonicalizes.
+ */
+function capabilitiesOrUnset(value: unknown, agentId: string): readonly string[] | undefined {
+  if (value === null || value === undefined) return undefined;
+  const raw = String(value);
+  const corrupt = (reason: string): never => {
+    throw new Error(
+      `corrupt capability declaration for agent ${agentId}: ${reason}. ` +
+        `Clear the declaration to restore this agent's default capabilities.`,
+    );
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return corrupt("not valid JSON");
+  }
+  if (!Array.isArray(parsed)) return corrupt("not a JSON array of capability keys");
+  try {
+    // Re-validate on read with the same chokepoint the write used: a stored row is
+    // only trustworthy if it still satisfies what the setter would allow today.
+    return Object.freeze(validateCapabilityKeys(parsed as string[], "stored capability"));
+  } catch (err) {
+    return corrupt(err instanceof Error ? err.message : String(err));
+  }
 }
 
 /** A NULLable text column → a non-empty string, or undefined when NULL/absent/blank. */
@@ -225,6 +266,64 @@ export class AgentSettingsRepository {
     const row = this.driver
       .prepare(
         `UPDATE agent_settings SET world_fact_cap = NULL, updated_at = ?
+           WHERE agent_id = ? RETURNING *`,
+      )
+      .get([now, agentId]);
+    return row ? mapSettings(row) : undefined;
+  }
+
+  /**
+   * The capability keys an agent has been DECLARED to hold, or undefined when nothing
+   * is declared (no row, or the column is NULL) — the resolver reads this and falls
+   * back to the kernel's named default catalog. An EMPTY array is a real answer
+   * ("declared to hold no host tools"), distinct from undefined; callers must not
+   * collapse the two with `?.length` or `|| []`. Scoped to `agentId`.
+   */
+  getCapabilities(agentId: string): readonly string[] | undefined {
+    return this.get(agentId)?.capabilities;
+  }
+
+  /**
+   * Declare exactly which capability keys an agent holds. Validates and canonicalizes
+   * (de-duplicated, sorted, no reserved key) at the write boundary — the kernel never
+   * trusts a surface to have checked — then upserts ONLY the `capabilities` column, so
+   * setting this never clears a sibling knob. An empty array is accepted and stored as
+   * `[]`: declaring "no host tools" is a legitimate narrowing, and it is NOT the same
+   * as clearing the declaration ({@link clearCapabilities}), which restores the default
+   * catalog.
+   */
+  setCapabilities(agentId: string, keys: readonly string[]): AgentSettings {
+    requireAgentId(agentId);
+    const canonical = validateCapabilityKeys(keys, "capability declaration");
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `INSERT INTO agent_settings (agent_id, capabilities, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           capabilities = excluded.capabilities,
+           updated_at = excluded.updated_at
+         RETURNING *`,
+      )
+      .get([agentId, JSON.stringify(canonical), now, now]);
+    if (!row) throw new Error("agent settings upsert did not persist");
+    return mapSettings(row);
+  }
+
+  /**
+   * Clear an agent's capability declaration — back to the kernel's default catalog —
+   * by setting only that column to NULL. Returns the updated row, or undefined when
+   * the agent had no settings row at all. This WIDENS (back to the default), which is
+   * why it is its own verb rather than something `setCapabilities([])` could be
+   * mistaken for: an empty declaration narrows to nothing, clearing restores the
+   * catalog, and the two must never be reachable by the same accident.
+   */
+  clearCapabilities(agentId: string): AgentSettings | undefined {
+    requireAgentId(agentId);
+    const now = new Date().toISOString();
+    const row = this.driver
+      .prepare(
+        `UPDATE agent_settings SET capabilities = NULL, updated_at = ?
            WHERE agent_id = ? RETURNING *`,
       )
       .get([now, agentId]);

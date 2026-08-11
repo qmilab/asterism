@@ -30,6 +30,7 @@ Commands:
   list                              Show every agent and how much it may do
   trust <agent> <level>             Set how much an agent may do on its own
   trust <agent> --review            Grant capabilities an agent has earned to act on
+  capabilities show <agent>         See which tools an agent has — and narrow them
   secrets add <agent> <KEY> [value] Give an agent a private credential
   skill add <agent> <file.md>       Teach an agent a skill from a markdown file
   objective add <agent> "<text>"    Give an agent a standing goal to work toward
@@ -137,6 +138,35 @@ without your yes. Even a granted capability stays inside the agent's own workspa
 never carries to another agent.
 
 ${AUTONOMY_HELP}`,
+
+  capabilities: `asterism capabilities show <agent>
+asterism capabilities set <agent> <key>...  ·  --none
+asterism capabilities remove <agent> <key>...
+asterism capabilities unset <agent>
+
+Choose which tools an agent has at all. Every agent starts holding everything this
+install offers, and staying that way is perfectly normal — an agent is already kept to
+its own workspace and its own level of autonomy. This narrows it further, for an agent
+you want kept to less.
+
+  capabilities show <agent>   What this agent holds, and what is being withheld.
+  capabilities set <agent> <key>...
+                              Declare exactly what it holds from now on. Naming the
+                              whole list is the point: this is the only way to give
+                              something back, and it says plainly where you end up.
+  capabilities set <agent> --none
+                              It gets no tools from this workspace at all.
+  capabilities remove <agent> <key>...
+                              Take one away and leave the rest.
+  capabilities unset <agent>  Stop narrowing — back to everything on offer.
+
+An agent's own working notes are always available and are not listed here.
+
+This is not the same as trust. \`capabilities\` decides WHICH tools an agent has;
+\`trust\` decides what it may do with them — its overall level, and the few destructive
+actions it has earned the right to take without pausing. Taking away a tool leaves any
+grant it earned untouched and unused; give the tool back and the grant applies again.
+Take a grant back with \`asterism trust <agent> revoke <capability>\`.`,
 
   secrets: `asterism secrets add <agent> <KEY> [value]
 

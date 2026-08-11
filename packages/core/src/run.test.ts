@@ -30,7 +30,23 @@ beforeEach(() => {
     workspaceDir: "/tmp/personal",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(agent.id);
 });
+
+/**
+ * The capability keys this file's fixtures use. They are NOT the shipped catalog, so an
+ * agent has to be declared to hold them — which is exactly what a host shipping its own
+ * tools does. Each fixture agent is declared to hold precisely the keys these tests
+ * already handed it, so exposure here is what it was before ownership existed: the
+ * candidates the caller passes. No fixture gains a capability it did not have.
+ */
+const FIXTURE_CAPABILITY_KEYS = ["delete_files", "drop_table", "write_file"];
+function ownsFixtureTools(agentId: string): void {
+  // Written through the repository, not `store.setAgentCapabilities`, so the fixture
+  // adds no `agent.setting_changed` to an event log these tests assert on in full. The
+  // audited setter has its own tests; here this is harness wiring, not an operator act.
+  store.agentSettings.setCapabilities(agentId, FIXTURE_CAPABILITY_KEYS);
+}
 
 afterEach(() => {
   store.close();
@@ -333,6 +349,7 @@ test("summarizes a withheld action under propose", async () => {
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(proposer.id);
   const result = await executeRun(store, proposer, "write a file", {
     adapter: toolCallingAdapter("write_file", { path: "notes.md" }),
     capabilities: [writeFileCapability()],
@@ -1172,6 +1189,7 @@ test("resume never crosses agents: one agent cannot confirm another's parked run
     workspaceDir: "/tmp/work",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(other.id);
   const adapter = sequenceAdapter([{ tool: "delete_files", args: { command: "rm -rf dist" } }]);
   const parked = await executeRun(store, agent, "delete the dist files", {
     adapter,
@@ -1265,6 +1283,7 @@ test("declineRun is agent-scoped: another agent cannot decline this agent's paus
     workspaceDir: "/tmp/work",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(other.id);
   // Naming the run under another agent's scope finds nothing — it is never declined.
   expect(declineRun(store, other, parked.run.id).kind).toBe("not_found");
   expect(store.runs.get(agent.id, parked.run.id)?.status).toBe("awaiting_confirmation");
@@ -1337,6 +1356,7 @@ test("recall frames only the running agent's memories, never another agent's", a
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(work.id);
   store.recordMemory(work.id, { memoryType: "semantic", content: "WORK-ONLY staging deploy runbook" });
   store.recordMemory(work.id, { memoryType: "convention", content: "WORK-ONLY always tag the release first" });
   store.recordMemory(agent.id, { memoryType: "semantic", content: "PERSONAL blog deploy checklist" });
@@ -1385,6 +1405,7 @@ test("resolveRecallBudget returns the agent's own override, scoped per agent", (
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(work.id);
   store.setRecallBudget(agent.id, 3);
   // The override is this agent's; the other agent still resolves to the default.
   expect(resolveRecallBudget(store, agent)).toEqual({ maxMemories: 3 });
@@ -1399,6 +1420,7 @@ test("resolveRecallBudget uses the install-wide default when an agent has no ove
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(work.id);
   store.installSettings.setRecallBudget(7);
   // No per-agent setting on either agent → both resolve to the install-wide default,
   // not the kernel constant. One install setting, every agent.
@@ -1414,6 +1436,7 @@ test("a per-agent override wins over the install-wide default; the constant is t
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(work.id);
   store.installSettings.setRecallBudget(7);
   store.setRecallBudget(agent.id, 3);
   // Precedence: per-agent (3) for `agent`; install-wide (7) for the un-overridden `work`.
@@ -1496,6 +1519,7 @@ test("a recall provider cannot smuggle another agent's memory into a run", async
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(work.id);
   const leaked = store.recordMemory(work.id, { memoryType: "semantic", content: "WORK-SECRET cross-agent leak" });
   store.recordMemory(agent.id, { memoryType: "semantic", content: "PERSONAL note" });
 
@@ -1701,6 +1725,7 @@ test("a standing grant never crosses agents: B's run is unaffected by A's grant"
     workspaceDir: "/tmp/work",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(other.id);
   // `agent` is granted delete_files; `other` is not.
   store.setCapabilityStanding(agent.id, "delete_files", "standing-grant", "earned: x");
 

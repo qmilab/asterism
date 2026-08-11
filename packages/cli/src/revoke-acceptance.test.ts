@@ -181,6 +181,19 @@ describe("Phase 3 · connection revoke — acceptance", () => {
     await run(["init"]);
     await run(["new", "writer", "--soul", "casual-helper", "--trust", "autonomous"]);
     await run(["new", "helper", "--soul", "casual-helper", "--trust", "autonomous"]);
+
+    // Harness wiring: these tools are this file's own spies, not the shipped catalog,
+    // so each agent is declared to hold them — what an install with its own tools does.
+    for (const name of ["writer", "helper"]) {
+      await run([
+        "capabilities",
+        "set",
+        name,
+        `fs.write.${ARTIFACT_PATH}`,
+        `fs.write.${LATE_PATH}`,
+        "fs.delete",
+      ]);
+    }
     await run(["secrets", "add", "writer", "WRITER_TOKEN", WRITER_SECRET]);
     await run(["secrets", "add", "helper", "HELPER_TOKEN", HELPER_SECRET]);
 

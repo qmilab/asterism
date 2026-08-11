@@ -19,6 +19,7 @@ import type {
   TrustLevel,
   WorldFact,
 } from "@qmilab/asterism-core";
+import { RESERVED_CAPABILITY_KEYS } from "@qmilab/asterism-core";
 
 /** First 8 chars of a UUID — enough to recognize, short enough to scan. */
 export function shortId(id: string): string {
@@ -534,6 +535,59 @@ export function formatStandingList(
   for (const g of granted) {
     lines.push(`  ✓ ${g.capability} — ${g.basis} · granted ${g.updatedAt}`);
   }
+  return lines.join("\n");
+}
+
+/**
+ * Render which capabilities an agent holds, for `capabilities show`.
+ *
+ * `declared` is the agent's own declaration, or undefined for the ordinary,
+ * permanent, entirely normal state of never having been narrowed — labelled
+ * `[not narrowed]` rather than anything that reads as unconfigured. An agent is
+ * confined by its workspace and its trust level whether or not it was ever narrowed;
+ * this view is about narrowing further, and the copy must not suggest otherwise.
+ *
+ * `held` is the kernel-resolved answer (declaration or default catalog, plus the
+ * reserved kernel tools); `catalog` is what this install can actually build. Listing
+ * the union of the two shows both what was withheld and — for a declared key nothing
+ * builds — what is inert.
+ */
+export function formatCapabilityList(
+  agentName: string,
+  declared: readonly string[] | undefined,
+  held: ReadonlySet<string>,
+  catalog: readonly string[],
+): string {
+  const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
+  const listable = [...new Set([...catalog, ...held])].filter((k) => !reserved.has(k)).sort();
+  // Counted against the catalog SEPARATELY from anything declared that this install
+  // cannot build, because "2 of 9 in the catalog" is false when one of the two is not
+  // in the catalog at all. Both numbers are real and they mean different things: what
+  // the agent can actually reach here, and how much the operator declared.
+  const inCatalog = listable.filter((k) => held.has(k) && catalog.includes(k)).length;
+  const unbuilt = listable.filter((k) => held.has(k) && !catalog.includes(k)).length;
+  const label = declared === undefined ? "[not narrowed]" : `[narrowed to ${inCatalog + unbuilt}]`;
+  const extra = unbuilt > 0 ? ` (+${unbuilt} this install does not build)` : "";
+  const lines = [
+    `${agentName} · holds ${inCatalog} of ${catalog.length} in the catalog${extra}  ${label}`,
+    "",
+  ];
+  if (listable.length === 0) {
+    lines.push("  (this install registers no tools)");
+  }
+  for (const key of listable) {
+    const inCatalog = catalog.includes(key);
+    const note = !inCatalog ? "  (declared — this install builds no such tool)" : "";
+    lines.push(held.has(key) ? `  ✓ ${key}${note}` : `  · ${key}  (withheld)`);
+  }
+  lines.push("");
+  lines.push("Its own working notes (record_note / forget_note) are always available.");
+  lines.push(
+    declared === undefined
+      ? `Narrow it with: asterism capabilities set ${agentName} <key>…`
+      : `Restore the full catalog with: asterism capabilities unset ${agentName}`,
+  );
+  lines.push(`Which of these may act without pausing: asterism trust ${agentName} show`);
   return lines.join("\n");
 }
 

@@ -129,6 +129,12 @@ describe("Phase 3 · T2a — artifact-only acceptance demo", () => {
     await run(["secrets", "add", "writer", "WRITER_TOKEN", WRITER_SECRET]);
     await run(["secrets", "add", "researcher", "RESEARCHER_TOKEN", RESEARCHER_SECRET]);
 
+    // Harness wiring: the tool above is this file's own spy, not the shipped catalog,
+    // so each agent is declared to hold it — what an install with its own tools does.
+    for (const name of ["researcher", "writer", "helper"]) {
+      await run(["capabilities", "set", name, "edit_files"]);
+    }
+
     // (1) Before any connection — refused.
     noConnOut = await run(["artifact", "writer", "helper", "draft the market section"]);
 

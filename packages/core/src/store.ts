@@ -58,6 +58,7 @@ import { EventRepository } from "./repositories/events.js";
 import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
 import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
 import { worldFactFramingText } from "./types.js";
+import { resolveOwnedCapabilityKeys } from "./capabilities.js";
 
 /**
  * The kernel's persistence surface. Applies the Phase 0 schema and exposes one
@@ -74,6 +75,15 @@ import { worldFactFramingText } from "./types.js";
  * error, and the public method reports it as `undefined`.
  */
 class BriefGrantWithdrawnError extends Error {}
+
+/**
+ * Whether two capability declarations name the same set. Element-wise is enough
+ * because both sides are canonical — the write boundary de-duplicates and sorts — so
+ * this compares sets without allocating one.
+ */
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((key, i) => key === b[i]);
+}
 
 export class AsterismStore {
   readonly agents: AgentRepository;
@@ -185,6 +195,14 @@ export class AsterismStore {
     // DEFAULT_WORLD_FACT_CAP", the correct, unchanged starting state.
     if (!this.columnExists("agent_settings", "world_fact_cap")) {
       this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN world_fact_cap INTEGER`);
+    }
+    // The per-agent capability declaration joined `agent_settings` last (#123: exposure
+    // became operator-declarable instead of "every key the host handed in"). Add it
+    // idempotently; a NULL default means every existing agent reads as "nothing declared",
+    // which resolves to the kernel's default catalog — byte-for-byte the tools it had
+    // before. That is the whole migration: no backfill, no behaviour change.
+    if (!this.columnExists("agent_settings", "capabilities")) {
+      this.driver.exec(`ALTER TABLE agent_settings ADD COLUMN capabilities TEXT`);
     }
     // The install-wide world-fact cap default joined `install_settings` after that table
     // first shipped (with only `recall_budget`), filling the middle tier of
@@ -490,6 +508,75 @@ export class AsterismStore {
       });
       return settings;
     });
+  }
+
+  /**
+   * Declare exactly which capabilities an agent holds, and record the change as
+   * `agent.setting_changed` — the audit trail for an operator narrowing (or restating)
+   * what tools reach an agent's runs at all. References only: capability KEYS, never a
+   * tool's arguments or output. `from` is the prior declaration, or null when there was
+   * none (running on the kernel's default catalog).
+   *
+   * The repository validates and canonicalizes at the write boundary, which is also
+   * what makes the unchanged-value short-circuit safe: two canonical arrays compare
+   * equal element-wise, so a re-declaration of the same set writes nothing and logs
+   * nothing (the same discipline as {@link setRecallBudget}). Any invalid input cannot
+   * equal a stored declaration, so it still reaches validation and throws.
+   *
+   * Exposure only — this never grants or revokes earned standing. A capability an agent
+   * no longer holds keeps whatever standing it earned, inert, because the tool is not in
+   * the registry for anything to auto-approve; restoring exposure restores the grant.
+   * Taking a grant back is `setCapabilityStanding(..., "none")`, a separate verb.
+   */
+  setAgentCapabilities(agentId: string, keys: readonly string[]): AgentSettings {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getCapabilities(agentId);
+      const settings = this.agentSettings.setCapabilities(agentId, keys);
+      const to = settings.capabilities ?? [];
+      if (from !== undefined && sameKeys(from, to)) return settings;
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "capabilities",
+        from: from ?? null,
+        to,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * Clear an agent's capability declaration, returning it to the kernel's default
+   * catalog, and record the change as `agent.setting_changed` (`to: null`). A no-op
+   * when nothing was declared: nothing changes, so nothing is logged — symmetric with
+   * {@link clearRecallBudget}.
+   *
+   * This is the one operation here that WIDENS, so it is deliberately its own verb:
+   * `setAgentCapabilities([])` narrows to nothing, this restores the catalog, and no
+   * single mistake reaches both.
+   */
+  clearAgentCapabilities(agentId: string): AgentSettings | undefined {
+    return this.driver.transaction(() => {
+      const from = this.agentSettings.getCapabilities(agentId);
+      if (from === undefined) return this.agentSettings.get(agentId);
+      const settings = this.agentSettings.clearCapabilities(agentId);
+      this.emit(agentId, "agent.setting_changed", {
+        setting: "capabilities",
+        from,
+        to: null,
+      });
+      return settings;
+    });
+  }
+
+  /**
+   * The capability keys an agent HOLDS — its declaration if it has one, else the
+   * kernel's named default catalog, with the kernel's own reserved tools unioned in
+   * either way. The single source of truth for exposure, resolved kernel-side so every
+   * run surface reads the same answer and none can drift.
+   *
+   * `agentId`-scoped: an agent's exposure is resolved only from its own declaration.
+   */
+  resolveOwnedCapabilities(agentId: string): ReadonlySet<string> {
+    return resolveOwnedCapabilityKeys(this.agentSettings.getCapabilities(agentId));
   }
 
   /**

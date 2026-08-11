@@ -84,6 +84,26 @@ async function part1CliUnderDeno() {
     check("memory inspect runs", typeof mem === "string");
     const events = asterism(work, ["events", "tail", "personal"]);
     check("events tail records agent.created", events.includes("agent.created"));
+
+    // Capability ownership (#123) on the real runtime: an agent nobody narrowed holds
+    // the whole shipped catalog — the migration claim, checked where the store is a
+    // real file opened by this runtime's driver, not an in-memory fixture.
+    const held = asterism(work, ["capabilities", "show", "personal"]);
+    check(
+      "an un-narrowed agent holds the whole catalog",
+      held.includes("holds 9 of 9 in the catalog  [not narrowed]"),
+    );
+    asterism(work, ["capabilities", "set", "personal", "fs.read", "fs.list"]);
+    const narrowed = asterism(work, ["capabilities", "show", "personal"]);
+    check(
+      "narrowing persists and withholds the rest",
+      narrowed.includes("[narrowed to 2]") && narrowed.includes("· fs.delete  (withheld)"),
+    );
+    asterism(work, ["capabilities", "unset", "personal"]);
+    check(
+      "unset restores the catalog",
+      asterism(work, ["capabilities", "show", "personal"]).includes("[not narrowed]"),
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

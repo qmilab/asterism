@@ -188,6 +188,15 @@ describe("canonical demo — Phase 0 acceptance", () => {
     await run(["secrets", "add", "work", "GITHUB_TOKEN", SECRET_VALUE]);
     await run(["skill", "add", "personal", "blog-writer.md"]);
 
+    // Harness wiring, NOT part of the canonical demo: the tools above are this file's
+    // own spies, not the shipped catalog, so each agent is declared to hold them —
+    // exactly what an install shipping its own tools does. A real install runs the
+    // shipped catalog, declares nothing, and holds all of it (see catalog.test.ts,
+    // which drives the same claims through the real `workspaceCapabilities`).
+    const spyKeys = ["edit_files", "tidy_notes", "delete_files"];
+    await run(["capabilities", "set", "personal", ...spyKeys]);
+    await run(["capabilities", "set", "work", ...spyKeys]);
+
     script = [
       { tool: "edit_files", args: { path: "drafts/blog.md", content: "updated draft" } },
       { tool: "delete_files", args: { command: "rm -rf dist" } },
@@ -238,7 +247,7 @@ describe("canonical demo — Phase 0 acceptance", () => {
     // A failing step shows up by name; the count guards against a skipped step
     // (it must equal the number of run() calls in beforeAll).
     expect(exitCodes.filter(([, code]) => code !== 0)).toEqual([]);
-    expect(exitCodes).toHaveLength(13);
+    expect(exitCodes).toHaveLength(15);
     // Both runs were framed and handed to the substrate.
     expect(requests).toHaveLength(2);
   });

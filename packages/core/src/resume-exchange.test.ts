@@ -59,6 +59,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/writer",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(writer.id);
   helper = store.createAgent({
     name: "helper",
     role: "researches",
@@ -66,6 +67,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/helper",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(helper.id);
 });
 
 afterEach(() => {
@@ -208,6 +210,26 @@ const fetched = (ref: string) =>
   performArtifactFetch(store, writer, helper, ref, { host: fetchHost(), confirm: () => true });
 
 // --- The stamp --------------------------------------------------------------
+
+/**
+ * The capability keys this file's fixtures use. They are NOT the shipped catalog, so an
+ * agent has to be declared to hold them — which is exactly what a host shipping its own
+ * tools does. Each fixture agent is declared to hold precisely the keys these tests
+ * already handed it, so exposure here is what it was before ownership existed: the
+ * candidates the caller passes. No fixture gains a capability it did not have.
+ *
+ * Written through the repository rather than the audited `setAgentCapabilities`, so the
+ * fixture adds no `agent.setting_changed` to event logs these tests assert on in full.
+ */
+const FIXTURE_CAPABILITY_KEYS = [
+  "fs.delete",
+  "fs.delete.other",
+  `fs.write.${ARTIFACT_PATH}`,
+  `fs.write.${LATE_PATH}`,
+];
+function ownsFixtureTools(agentId: string): void {
+  store.agentSettings.setCapabilities(agentId, FIXTURE_CAPABILITY_KEYS);
+}
 
 test("an exchange stamps the callee's run with the connection that asked for it", async () => {
   const connection = store.createConnection(writer.id, helper.id, "artifact-only");

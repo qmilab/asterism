@@ -28,6 +28,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/personal",
     trustLevel: "autonomous",
   });
+  ownsFixtureTools(personal.id);
   work = store.createAgent({
     name: "work",
     role: "careful consultant",
@@ -35,6 +36,7 @@ beforeEach(() => {
     workspaceDir: "/tmp/work",
     trustLevel: "propose",
   });
+  ownsFixtureTools(work.id);
 });
 
 afterEach(() => {
@@ -90,6 +92,21 @@ function deps(over: Partial<ChannelDeps> = {}): ChannelDeps {
     allow: new Set(["100"]),
     ...over,
   };
+}
+
+/**
+ * The capability keys this file's fixtures use. They are NOT the shipped catalog, so an
+ * agent has to be declared to hold them — which is exactly what a host shipping its own
+ * tools does. Each fixture agent is declared to hold precisely the keys these tests
+ * already handed it, so exposure here is what it was before ownership existed: the
+ * candidates the caller passes. No fixture gains a capability it did not have.
+ *
+ * Written through the repository rather than the audited `setAgentCapabilities`, so the
+ * fixture adds no `agent.setting_changed` to event logs these tests assert on in full.
+ */
+const FIXTURE_CAPABILITY_KEYS = ["delete_files", "fs.write"];
+function ownsFixtureTools(agentId: string): void {
+  store.agentSettings.setCapabilities(agentId, FIXTURE_CAPABILITY_KEYS);
 }
 
 test("an unauthorized chat is refused with its own id and never reaches the kernel", async () => {

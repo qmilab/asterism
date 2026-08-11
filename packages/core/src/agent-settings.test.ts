@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { AsterismStore } from "./store.js";
+import { DEFAULT_CAPABILITY_KEYS, RESERVED_CAPABILITY_KEYS } from "./capabilities.js";
 import { openDatabase } from "./db/index.js";
 import type { Agent } from "./types.js";
 
@@ -691,6 +692,80 @@ test("opening a pre-existing database without agent_settings.world_fact_cap migr
     // The setter writes world_fact_cap; it would throw "no such column" un-migrated.
     expect(local.setWorldFactCap(agent.id, 7).worldFactCap).toBe(7);
     expect(local.agentSettings.getWorldFactCap(agent.id)).toBe(7);
+  } finally {
+    local.close();
+  }
+});
+
+test("the capability declaration never clobbers the budget, thresholds, or providers", () => {
+  store.setRecallBudget(alpha.id, 40);
+  store.setStandingThresholds(alpha.id, { minCleanExecutions: 5, minDistinctTargets: 4 });
+  store.setRecallProvider(alpha.id, "local");
+  store.setWorldFactCap(alpha.id, 10);
+  store.setAgentCapabilities(alpha.id, ["fs.read"]);
+  // Five tunables coexist on the one row.
+  expect(store.agentSettings.getCapabilities(alpha.id)).toEqual(["fs.read"]);
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBe("local");
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBe(10);
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+  // Clearing the declaration leaves the others intact.
+  store.clearAgentCapabilities(alpha.id);
+  expect(store.agentSettings.getCapabilities(alpha.id)).toBeUndefined();
+  expect(store.agentSettings.getRecallBudget(alpha.id)).toBe(40);
+  expect(store.agentSettings.getRecallProvider(alpha.id)).toBe("local");
+  expect(store.agentSettings.getWorldFactCap(alpha.id)).toBe(10);
+  expect(store.agentSettings.getStandingThresholds(alpha.id)).toEqual({
+    minCleanExecutions: 5,
+    minDistinctTargets: 4,
+  });
+});
+
+test("a capability declaration is scoped to its own agent", () => {
+  store.setAgentCapabilities(alpha.id, ["fs.read"]);
+  expect(store.agentSettings.getCapabilities(beta.id)).toBeUndefined();
+  // And the scope guard is the repository's, not the caller's memory.
+  expect(() => store.agentSettings.getCapabilities("")).toThrow();
+});
+
+test("opening a pre-existing database without agent_settings.capabilities migrates it in", () => {
+  const driver = openDatabase(":memory:");
+  // An older schema: agent_settings created before the capabilities column existed. The
+  // whole migration story for #123 — an existing install reads as "nothing declared",
+  // which resolves to exactly the catalog it already had.
+  driver.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, soul_ref TEXT NOT NULL,
+      workspace_dir TEXT NOT NULL, trust_level TEXT NOT NULL, created_at TEXT NOT NULL,
+      team_id TEXT, owner_principal_id TEXT
+    );
+    CREATE TABLE agent_settings (
+      agent_id TEXT PRIMARY KEY, recall_budget INTEGER,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+  `);
+  const local = new AsterismStore(driver);
+  try {
+    const agent = local.createAgent({
+      name: "personal",
+      role: "",
+      soulRef: "casual-helper",
+      workspaceDir: "/tmp/personal",
+      trustLevel: "autonomous",
+    });
+    // An un-migrated read reads as "nothing declared" only because the column is there.
+    expect(local.agentSettings.getCapabilities(agent.id)).toBeUndefined();
+    expect([...local.resolveOwnedCapabilities(agent.id)].sort()).toEqual(
+      [...DEFAULT_CAPABILITY_KEYS, ...RESERVED_CAPABILITY_KEYS].sort(),
+    );
+    // The setter writes `capabilities`; it would throw "no such column" un-migrated.
+    expect(local.setAgentCapabilities(agent.id, ["fs.read"]).capabilities).toEqual(["fs.read"]);
+    // A pre-existing recall budget on the same row survives the added column.
+    expect(local.setRecallBudget(agent.id, 5).recallBudget).toBe(5);
+    expect(local.agentSettings.getCapabilities(agent.id)).toEqual(["fs.read"]);
   } finally {
     local.close();
   }
