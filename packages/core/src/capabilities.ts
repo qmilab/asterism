@@ -71,6 +71,41 @@ export const RESERVED_CAPABILITY_KEYS: readonly string[] = Object.freeze([
   WORLD_FACT_FORGET_KEY,
 ]);
 
+/**
+ * The reserved namespace for CREDENTIAL-BEARING capabilities — a bound outbound
+ * endpoint (`endpoints.ts`), whose `execute` closure carries one of the agent's own
+ * secrets.
+ *
+ * A namespace rather than a fixed list, because unlike the two world-fact keys these
+ * are named by the operator at bind time (`api.<name>`), one per binding. It is
+ * reserved in both directions, for the same reason the world-fact keys are:
+ *
+ *   - a HOST capability may not take a key in it — the kernel's tool over state only
+ *     the kernel can reach is authoritative for its own namespace, and a host tool
+ *     answering to a credential-bearing key is precisely the confusion to prevent;
+ *   - an operator may not hand-type one into a `capabilities` declaration — the
+ *     BINDING is the grant (design note E3), so a declaration naming a key no binding
+ *     backs would be an exposure with nothing behind it, and one that a binding DOES
+ *     back would be a second writer of the same fact.
+ */
+export const CREDENTIAL_CAPABILITY_PREFIX = "api.";
+
+/**
+ * Whether `key` names a credential-bearing capability.
+ *
+ * ONE predicate, deliberately, because three unrelated places must agree about it and
+ * a drift between any two of them is a security defect rather than an inconsistency:
+ * the exposure filter (`run.ts` drops a colliding host capability), the destructive
+ * gate's `autoApprove` (a credential-bearing capability is never auto-approved), and
+ * the standing evidence reader (`standing.ts` collects no evidence for one, so
+ * `trust --review` can never propose a grant). Those last two are the two independent
+ * locks of design note E9 — they must be independent in MECHANISM, not in the
+ * question they ask.
+ */
+export function isCredentialBearingKey(key: string): boolean {
+  return key.startsWith(CREDENTIAL_CAPABILITY_PREFIX);
+}
+
 /** The longest a single capability key may be. The shipped keys are ~8 characters. */
 const MAX_CAPABILITY_KEY_LENGTH = 128;
 
@@ -131,6 +166,11 @@ export function validateCapabilityKeys(keys: readonly string[], label: string): 
         `invalid ${label}: ${JSON.stringify(key)} is reserved for the kernel and is always available — it cannot be declared`,
       );
     }
+    if (isCredentialBearingKey(key)) {
+      throw new Error(
+        `invalid ${label}: ${JSON.stringify(key)} names a credential-bearing capability — those are granted by binding an endpoint (asterism api add), not by declaring a key`,
+      );
+    }
   }
   return [...new Set(keys)].sort();
 }
@@ -149,13 +189,34 @@ export function validateCapabilityKeys(keys: readonly string[], label: string): 
  * The reserved kernel keys are unioned in either way. Declaring is therefore always
  * a narrowing of the host catalog and never a widening of it.
  *
- * Pure: the caller reads the declaration from the store and passes it in. The
- * returned set is fresh, so a caller may not mutate a shared value through it.
+ * `bound` carries the keys of this agent's CREDENTIAL-BEARING bindings — one per
+ * bound outbound endpoint — and is unioned in the same way, because **the binding is
+ * the grant** (design note E3). Binding is already the explicit, per-agent, audited
+ * operator act that a declaration would otherwise be; requiring a second one would
+ * mean that declaring `api.x` for an agent which had declared nothing SHRANK it from
+ * nine capabilities to one, which is D8's "an add that removes eight" arriving in the
+ * most likely case rather than a corner.
+ *
+ * What keeps that from being a second exposure mechanism is that it resolves THROUGH
+ * here: `TrustProfile.capabilities` remains the one exposure truth, so every view
+ * that reads the resolution reports bindings without being told to — which is the
+ * structural form of the fix for the single most repeated defect of PR 1 (a surface
+ * stating a completeness it has not checked).
+ *
+ * {@link DEFAULT_CAPABILITY_KEYS} is untouched by any of this and stays closed: with
+ * no binding there is no credential-bearing capability, so the class cannot be
+ * inherited, because there is nothing to inherit it from.
+ *
+ * Pure: the caller reads the declaration and the bindings from the store and passes
+ * them in. The returned set is fresh, so a caller may not mutate a shared value
+ * through it.
  */
 export function resolveOwnedCapabilityKeys(
   declared: readonly string[] | undefined,
+  bound: readonly string[] = [],
 ): ReadonlySet<string> {
   const owned = new Set<string>(declared ?? DEFAULT_CAPABILITY_KEYS);
   for (const key of RESERVED_CAPABILITY_KEYS) owned.add(key);
+  for (const key of bound) owned.add(key);
   return owned;
 }

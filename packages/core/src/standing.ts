@@ -21,6 +21,7 @@
 
 import type { AsterismStore } from "./store.js";
 import type { Agent, Event } from "./types.js";
+import { isCredentialBearingKey } from "./capabilities.js";
 
 /**
  * The bar a destructive capability must clear to be PROPOSED for a standing grant.
@@ -223,7 +224,22 @@ export function gatherEvidence(events: readonly Event[]): Map<string, Capability
   }
 
   // Assemble per-capability evidence over the window since each capability's last reset.
-  const capabilities = new Set<string>([...cleanExecs.keys(), ...resets.keys()]);
+  //
+  // LOCK 2 OF 2 for credential-bearing capabilities: no evidence is assembled for one, so
+  // it can never qualify and `trust --review` can never propose a grant. Lock 1 lives in
+  // `run.ts`, which filters the namespace out of `autoApprove` — so even a grant written
+  // straight into the database leaves the gate asking. Two independent mechanisms, in the
+  // same shape `exchange.fetch` uses, because the confusing state "the operator granted
+  // it and it still asks" should be unreachable rather than merely refused.
+  //
+  // The reason is not that outbound calls are the most dangerous thing in the product
+  // (though they are); it is that this evidence would be UNINFORMATIVE about them. A
+  // clean streak measures executions that completed without a slip, and a credential-
+  // bearing call to a benign endpoint and one to an endpoint that was repointed since
+  // complete identically. (Design note E9.)
+  const capabilities = new Set<string>(
+    [...cleanExecs.keys(), ...resets.keys()].filter((key) => !isCredentialBearingKey(key)),
+  );
   const out = new Map<string, CapabilityEvidence>();
   for (const capability of capabilities) {
     const since = Math.max(-1, ...(resets.get(capability) ?? []));

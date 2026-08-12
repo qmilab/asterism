@@ -107,7 +107,7 @@ export interface RedactionResult {
 // runs AFTER the secret scrub) cannot re-match an already-inserted marker — hence
 // `[redacted:value]`, not `[redacted:secret]`. The assignment rule's `(?!\[redacted)`
 // lookahead complements this, refusing to re-scrub any marker in a value position.
-const SECRET_MARK = "[redacted:value]";
+export const SECRET_MARK = "[redacted:value]";
 const INJECTION_MARK = "[redacted:injection]";
 const EXFILTRATION_MARK = "[redacted:exfiltration]";
 // Structural markers for the bounded fact-object walk (redactObservation) — a part of an
@@ -222,6 +222,39 @@ export const SECRET_VALUE_RULES: readonly RedactionRule[] = [
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS =
   /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g;
+
+/**
+ * Remove every character {@link redactForTrace}'s step 2 removes — ANSI/OSC escapes, C0/C1,
+ * DEL, bidi overrides, zero-width marks.
+ *
+ * Exported so a caller that must scrub something BEFORE `redactForTrace` runs can normalize
+ * against the same rule rather than a second copy of it. There is exactly one such caller:
+ * the endpoint response pipeline, which knows the precise credential value it just sent and
+ * removes it by exact match. Without normalizing first, an invisible character inserted into
+ * an echoed value defeats that match and `redactForTrace`'s own strip then REASSEMBLES the
+ * plaintext — the same evasion the zero-width entry in {@link CONTROL_CHARS} was added to
+ * close, one layer further out. Sharing the definition is what keeps the two layers from
+ * drifting into that gap again. [Codex review R1 P1.]
+ */
+export function stripControlCharacters(text: string): string {
+  return text.replace(CONTROL_CHARS, "");
+}
+
+/**
+ * Whether `text` contains any character {@link stripControlCharacters} would remove.
+ *
+ * The REJECTING counterpart, for a write boundary that should refuse such a character
+ * rather than quietly drop it — an operator-declared URL, where an ANSI escape would drive
+ * the terminal of the very person approving a credential-bearing call. Sharing the rule is
+ * the point: a second copy is how the stripping layer and the refusing layer drift apart.
+ *
+ * `CONTROL_CHARS` is global, so `lastIndex` is reset before testing — a stateful regex
+ * silently alternates true/false across calls otherwise.
+ */
+export function hasControlCharacters(text: string): boolean {
+  CONTROL_CHARS.lastIndex = 0;
+  return CONTROL_CHARS.test(text);
+}
 
 /**
  * Truncate `raw` to at most `maxBytes` UTF-8 bytes WITHOUT splitting a multibyte

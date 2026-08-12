@@ -28,7 +28,9 @@ import {
   WORLD_FACT_RECORD_TOOL,
   WORLD_FACT_FORGET_TOOL,
 } from "./world-facts.js";
-import { RESERVED_CAPABILITY_KEYS } from "./capabilities.js";
+import { RESERVED_CAPABILITY_KEYS, isCredentialBearingKey } from "./capabilities.js";
+import { endpointCapabilities } from "./endpoints.js";
+import type { OutboundHost } from "./endpoints.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
 import { collectArtifactManifest, parseArtifactReference } from "./artifact-manifest.js";
@@ -65,6 +67,22 @@ export interface ExecuteRunOptions {
    * handed — it never constructs a tool itself.
    */
   capabilities?: readonly Capability[];
+  /**
+   * How this surface makes an outbound call, for the agent's bound endpoints — its
+   * CREDENTIAL-BEARING capabilities. A host concern for the same reason the tool catalog
+   * is one (`core` speaks no HTTP), and it carries obligations the kernel's guarantee
+   * depends on: no redirects, a timeout, a bounded read, no logging of the request.
+   *
+   * Absent ⇒ the agent's bound endpoints are still EXPOSED but report themselves
+   * unavailable when called. Deliberately not "omitted from the registry": an absent
+   * tool is observationally indistinguishable from a gated one, so a surface that
+   * quietly dropped them would look exactly like one enforcing a refusal.
+   *
+   * Note what is NOT delegated: whether the call may happen at all. The binding lookup,
+   * the credential read, the destructive gate and the response screening are all the
+   * kernel's, before and after this is called.
+   */
+  outboundHost?: OutboundHost;
   /**
    * Selects which of the agent's accepted memories frame this run. Absent ⇒ the
    * default lexical ranker ({@link defaultRecallProvider}). The kernel resolves
@@ -401,14 +419,36 @@ async function driveRun(
   // capability reusing `record_note`/`forget_note` under a different key would still
   // produce a duplicate name that a tool-calling provider rejects. The kernel's tool over
   // its own state is authoritative for its reserved namespace.
+  //
+  // The agent's BOUND ENDPOINTS reserve their namespace the same way, in both arms. The
+  // key check is by PREFIX (`api.`) rather than by membership, because these keys are
+  // named by the operator at bind time, one per binding — a host capability answering to
+  // a credential-bearing key is exactly the confusion the reservation exists to prevent.
+  // The name check is PER-AGENT and dynamic for the same reason the world-fact one is
+  // static: the adapter forwards tools by `tool.name`, so a host tool called
+  // `call_issues` would collide with this agent's `issues` binding and produce a
+  // duplicate name a provider rejects.
+  const endpointTools = endpointCapabilities(store, agent.id, options.outboundHost, run.id);
   const reservedKeys = new Set<string>(RESERVED_CAPABILITY_KEYS);
-  const reservedToolNames = new Set<string>([WORLD_FACT_RECORD_TOOL, WORLD_FACT_FORGET_TOOL]);
+  const reservedToolNames = new Set<string>([
+    WORLD_FACT_RECORD_TOOL,
+    WORLD_FACT_FORGET_TOOL,
+    ...endpointTools.map((c) => c.tool.name),
+  ]);
   const hostCapabilities = (options.capabilities ?? []).filter(
-    (c) => !reservedKeys.has(c.key) && !reservedToolNames.has(c.tool.name),
+    (c) =>
+      !reservedKeys.has(c.key) &&
+      !isCredentialBearingKey(c.key) &&
+      !reservedToolNames.has(c.tool.name),
   );
-  // Pass `run.id` so the tools' `world_fact.*` events are tagged with the originating run
-  // (per-run audit completeness, incl. a firewall-blocked record the gate never logs).
-  const capabilities = [...hostCapabilities, ...worldFactCapabilities(store, agent.id, run.id)];
+  // Pass `run.id` so the tools' `world_fact.*` / `secret.read` events are tagged with the
+  // originating run (per-run audit completeness, incl. a firewall-blocked record the gate
+  // never logs, and every credential disclosure).
+  const capabilities = [
+    ...hostCapabilities,
+    ...worldFactCapabilities(store, agent.id, run.id),
+    ...endpointTools,
+  ];
   const profile = trustProfile({
     level: agent.trustLevel,
     // EXPOSURE — which tools exist for this run at all. Read from the agent's own
@@ -437,7 +477,23 @@ async function driveRun(
     // classification, never crosses capabilities, and — `grantedKeys` is
     // agentId-scoped — never crosses agents. With no grants it is the empty set, so
     // the gate behaves exactly as before.
-    autoApprove: store.capabilityStanding.grantedKeys(agent.id),
+    //
+    // LOCK 1 OF 2 for credential-bearing capabilities: a bound endpoint is filtered out
+    // here and can never auto-approve, at any trust level, ever. Lock 2 lives in
+    // `standing.ts`, which collects no evidence for one, so `trust --review` can never
+    // propose the grant this filter would ignore. Two independent mechanisms, on purpose
+    // and in the same shape `exchange.fetch` uses: even a grant row written straight into
+    // the database leaves this gate asking, so "the operator granted it and it still
+    // asks" is unreachable rather than merely refused.
+    //
+    // Why this class and not others: earned standing infers "safe unattended" from a
+    // track record of clean executions, and for an outbound credential-bearing call the
+    // track record carries no information about the thing you would want to know — a
+    // call to a benign endpoint and a call to one that was repointed or whose token is
+    // scoped wider than the operator believed succeed identically. (Design note E9.)
+    autoApprove: [...store.capabilityStanding.grantedKeys(agent.id)].filter(
+      (key) => !isCredentialBearingKey(key),
+    ),
   });
   // The agent's secret key for fingerprinting a paused action's arguments. The same
   // key feeds the audit (which records the fingerprint on a pause) and the gate

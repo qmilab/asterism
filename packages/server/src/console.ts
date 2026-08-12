@@ -61,6 +61,7 @@ import type {
   Action,
   Agent,
   ArtifactFetchHost,
+  OutboundHost,
   AsterismStore,
   Brief,
   Capability,
@@ -145,6 +146,14 @@ export interface ConsoleDeps {
    * still works.
    */
   fetchHost?: ArtifactFetchHost;
+  /**
+   * How this surface makes an outbound call for an agent's bound endpoints — its
+   * credential-bearing capabilities. Host-supplied for the same reason {@link fetchHost}
+   * is, and forwarded to the kernel untouched, so a run resumed from the dashboard calls
+   * a bound endpoint under the identical rules the CLI applies. Absent ⇒ those tools are
+   * still exposed but report themselves unavailable.
+   */
+  outboundHost?: OutboundHost;
 }
 
 /** Resolve an agent by name within the install, or undefined. Scoped reads follow. */
@@ -432,6 +441,7 @@ function runOptions(
     adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
     ...(capabilities ? { capabilities } : {}),
+    ...(deps.outboundHost ? { outboundHost: deps.outboundHost } : {}),
     ...(recall ? { recall } : {}),
   };
 }

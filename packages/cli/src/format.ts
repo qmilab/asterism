@@ -6,6 +6,7 @@ import type {
   ActionRecord,
   Agent,
   ArtifactRef,
+  BoundEndpoint,
   Brief,
   CapabilityGrant,
   Connection,
@@ -19,7 +20,11 @@ import type {
   TrustLevel,
   WorldFact,
 } from "@qmilab/asterism-core";
-import { RESERVED_CAPABILITY_KEYS } from "@qmilab/asterism-core";
+import {
+  CREDENTIAL_CAPABILITY_PREFIX,
+  RESERVED_CAPABILITY_KEYS,
+  isCredentialBearingKey,
+} from "@qmilab/asterism-core";
 
 /** First 8 chars of a UUID — enough to recognize, short enough to scan. */
 export function shortId(id: string): string {
@@ -584,9 +589,19 @@ export function formatCapabilityList(
   declared: readonly string[] | undefined,
   held: ReadonlySet<string>,
   catalog: readonly string[],
+  endpoints: readonly BoundEndpoint[] = [],
+  missingCredentials: ReadonlySet<string> = new Set(),
 ): string {
   const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
-  const listable = [...new Set([...catalog, ...held])].filter((k) => !reserved.has(k)).sort();
+  // Bound endpoints are held, but they are neither part of the declaration nor part of
+  // the host catalog, so they are pulled out of the main list and given their own block.
+  // Leaving them in would state two false things at once: they would be counted as
+  // "declared" keys the operator narrowed to, and — being absent from the catalog — they
+  // would be labelled "this install builds no such tool", when in fact the KERNEL builds
+  // them and they are the one class this install always can.
+  const listable = [...new Set([...catalog, ...held])]
+    .filter((k) => !reserved.has(k) && !isCredentialBearingKey(k))
+    .sort();
   // Counted against the catalog SEPARATELY from anything held that this install cannot
   // build, because "2 of 9 in the catalog" is false when one of the two is not in the
   // catalog at all. Both numbers are real and they mean different things: what the
@@ -613,6 +628,25 @@ export function formatCapabilityList(
     const note = catalog.includes(key) ? "" : "  (this install builds no such tool)";
     lines.push(held.has(key) ? `  ✓ ${key}${note}` : `  · ${key}  (withheld)`);
   }
+  // The credential-bearing block. Shown whenever the agent has bindings, because THIS is
+  // the view that answers "what can this agent do at all" — and a view that omitted the
+  // one capability class that sends a secret off the machine would be stating a
+  // completeness it had not checked, which is the single defect this surface has produced
+  // most often.
+  if (endpoints.length > 0) {
+    lines.push("");
+    lines.push(`  Credential-bearing (bound by you, never auto-approved):`);
+    for (const e of endpoints) {
+      // The missing-credential flag appears here as well as in `api list`, from the same
+      // computed set, because two views of one fact that disagree inside one install is
+      // this surface's most-repeated defect. A ✓ with no credential behind it reads as
+      // "this works", and it does not.
+      const gap = missingCredentials.has(e.name) ? "  — credential not stored" : "";
+      lines.push(
+        `  ✓ ${CREDENTIAL_CAPABILITY_PREFIX}${e.name}  →  ${e.url}  (sends ${e.credentialKey})${gap}`,
+      );
+    }
+  }
   lines.push("");
   lines.push("Its own working notes (record_note / forget_note) are always available.");
   lines.push(
@@ -620,7 +654,53 @@ export function formatCapabilityList(
       ? `Narrow it with: asterism capabilities set ${agentName} <key>…`
       : `Stop narrowing it with: asterism capabilities unset ${agentName}`,
   );
+  if (endpoints.length > 0) {
+    // Named because `capabilities set/remove/unset` cannot touch these — a binding is
+    // granted and withdrawn by its own verb, and an operator reading this list needs to
+    // know which lever moves which entry.
+    lines.push(`Withdraw a bound endpoint with: asterism api remove ${agentName} <name>`);
+  }
   lines.push(`Which of these may act without pausing: asterism trust ${agentName} show`);
+  return lines.join("\n");
+}
+
+/**
+ * Render an agent's bound outbound endpoints, for `api list`.
+ *
+ * `missingCredentials` names the bindings whose credential is not stored, which is a
+ * legitimate state (binding before `secrets add`) and a broken one (the credential was
+ * removed later) that look identical from here — so it is flagged rather than judged, on
+ * the line it belongs to, with the command that fixes it.
+ */
+export function formatEndpointList(
+  agentName: string,
+  endpoints: readonly BoundEndpoint[],
+  missingCredentials: ReadonlySet<string>,
+): string {
+  if (endpoints.length === 0) {
+    return [
+      `${agentName} has no bound endpoints.`,
+      "",
+      `Bind one with: asterism api add ${agentName} <name> <https-url> --credential <KEY>`,
+    ].join("\n");
+  }
+  const lines = [
+    `${agentName} · ${endpoints.length} bound endpoint${endpoints.length === 1 ? "" : "s"}:`,
+    "",
+  ];
+  for (const e of endpoints) {
+    lines.push(`  ${CREDENTIAL_CAPABILITY_PREFIX}${e.name}`);
+    lines.push(`    calls    ${e.url}`);
+    lines.push(
+      missingCredentials.has(e.name)
+        ? `    sends    ${e.credentialKey}  — NOT STORED, so this call will fail (asterism secrets add ${agentName} ${e.credentialKey})`
+        : `    sends    ${e.credentialKey}`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    "No call happens without you: at notify and autonomous it pauses and asks; a propose agent only ever plans it.",
+  );
   return lines.join("\n");
 }
 

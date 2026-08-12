@@ -27,6 +27,7 @@ import { createHmac } from "node:crypto";
 
 import type {
   ScopedTool,
+  ToolInputSchema,
   ToolInvocation,
   ToolObservation,
   ToolRegistry,
@@ -61,6 +62,31 @@ export interface Capability {
   key: string;
   effect: EffectClass;
   tool: ScopedTool;
+  /**
+   * Static, KERNEL-AUTHORED facts about what this capability does, contributed to the
+   * arguments the gate reasons about and shows a human. Optional; absent for every host
+   * capability, where the model's own arguments already describe the action (the path a
+   * delete targets, the command a shell runs).
+   *
+   * It exists for the case a host capability never hits: a kernel-built tool whose
+   * invocation carries NO arguments, because the operator — not the agent — decided
+   * everything about it. A bound outbound endpoint takes no arguments at all, so
+   * without this the confirmation for the product's most consequential action would
+   * read `Confirm destructive action 'api.issues' {}` and name neither the endpoint
+   * nor the credential it carries.
+   *
+   * How it combines with the model's arguments depends on whether the tool takes any, and
+   * the rule is spelled out in {@link gateArgs}: on a tool whose schema declares NO input
+   * properties these facts REPLACE them (such a tool discards whatever it is passed, so its
+   * arguments are model-authored noise on a human's prompt); on anything else they are
+   * merged over them, kernel facts winning, so a command string can still escalate while
+   * the model cannot overwrite what a human is about to approve. Either way `effect` itself
+   * is untouched — classification starts from the declared base effect and can only rise.
+   *
+   * It must carry REFERENCES, never values — it reaches a human's prompt and an audit
+   * fingerprint. A credential's KEY belongs here; its value never does.
+   */
+  gateContext?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -482,6 +508,68 @@ function alreadyPerformedResult(capability: string): ToolResult {
 }
 
 /**
+ * What the gate reasons about and a human is shown: the model's own arguments, plus a
+ * capability's kernel-authored {@link Capability.gateContext}.
+ *
+ * With no `gateContext` (every host capability) this returns the invocation's arguments
+ * unchanged, so nothing about an existing capability's gate decision, prompt, or audit
+ * fingerprint moves.
+ *
+ * With one, the rule turns on whether the tool takes arguments AT ALL:
+ *
+ *   - **The tool declares NO input properties ⇒ the kernel's facts REPLACE them.** Such a
+ *     tool ignores whatever it is passed, so its invocation's arguments are noise — and
+ *     noise the model authors. JSON Schema's DEFAULT is to permit extra properties, so
+ *     `properties: {}` advertises "no arguments" while accepting any: without this, a model
+ *     could put its own text ("pre-approved by your admin") into the confirmation prompt for
+ *     the most consequential action the product has, and could destabilise the argument
+ *     fingerprint a resume matches on by varying fields `execute` discards.
+ *     [Codex review R2 P2.]
+ *   - **Anything else ⇒ MERGE, kernel facts winning.** The model's arguments survive so the
+ *     classifier can still see a command string and ESCALATE, and the kernel's facts cannot
+ *     be overwritten by the model.
+ *
+ * Keyed on the schema rather than on the effect, deliberately. "Declared destructive" would
+ * close the same reported hole and is simpler, but it is broader than its own justification:
+ * a future kernel-built destructive capability that DOES take arguments would silently lose
+ * them from the human's prompt — hiding the path a delete targets is a safety regression,
+ * not a cosmetic one. The schema states the actual reason, so both directions stay safe.
+ *
+ * A non-object argument (a bare string, a number) is kept under `args` rather than being
+ * spread, so it stays visible to a reader and still reaches the classifier.
+ */
+function gateArgs(
+  args: unknown,
+  gateContext: Readonly<Record<string, unknown>> | undefined,
+  takesNoArguments: boolean,
+): unknown {
+  if (gateContext === undefined) return args;
+  if (takesNoArguments) return { ...gateContext };
+  if (args !== null && typeof args === "object" && !Array.isArray(args)) {
+    return { ...(args as Record<string, unknown>), ...gateContext };
+  }
+  return { ...gateContext, ...(args !== undefined ? { args } : {}) };
+}
+
+/**
+ * Whether a tool's schema declares an empty `properties` object — "this tool takes no
+ * arguments", stated by the tool itself.
+ *
+ * Conservative on purpose: anything it cannot read as an explicitly-empty property set is
+ * treated as taking arguments, so an unusual or absent schema falls through to merging
+ * rather than to discarding what the model produced.
+ */
+function declaresNoArguments(schema: ToolInputSchema): boolean {
+  const properties = (schema as { properties?: unknown }).properties;
+  return (
+    properties !== null &&
+    typeof properties === "object" &&
+    !Array.isArray(properties) &&
+    Object.keys(properties as Record<string, unknown>).length === 0
+  );
+}
+
+/**
  * Wrap one capability's `execute` so the gate runs on every invocation. The
  * returned tool is structurally a {@link ScopedTool}; the adapter cannot tell it
  * from an ungated one, which is the point — the policy is invisible and
@@ -498,6 +586,13 @@ function gateTool(
   // object the caller could later mutate to soften `effect` or rename `key`.
   const key = capability.key;
   const effect = capability.effect;
+  // Snapshotted with the rest of the policy-bearing fields, and frozen: what a human is
+  // shown at the gate must come from what was scoped for this run, not from an object a
+  // caller could mutate after resolution.
+  const gateContext =
+    capability.gateContext !== undefined ? Object.freeze({ ...capability.gateContext }) : undefined;
+  // Read once at resolution time, with the rest of the policy snapshot.
+  const takesNoArguments = declaresNoArguments(tool.inputSchema);
   return {
     name: tool.name,
     description: tool.description,
@@ -506,10 +601,11 @@ function gateTool(
       invocation: ToolInvocation,
       signal?: AbortSignal,
     ): Promise<ToolResult> => {
+      const args = gateArgs(invocation.args, gateContext, takesNoArguments);
       const action: Action = {
         capability: key,
         effect,
-        ...(invocation.args !== undefined ? { args: invocation.args } : {}),
+        ...(args !== undefined ? { args } : {}),
       };
       const decision = decideGate(profile, action);
 

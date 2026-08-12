@@ -36,6 +36,7 @@ import type {
   Capability,
   ExecuteRunOptions,
   ExecuteRunResult,
+  OutboundHost,
   RecallProvider,
   RuntimeAdapter,
 } from "@qmilab/asterism-core";
@@ -93,6 +94,13 @@ export interface ChannelDeps {
    */
   capabilities?: readonly Capability[];
   /**
+   * How this surface makes an outbound call for the agent's bound endpoints — its
+   * credential-bearing capabilities. Forwarded to the kernel untouched, so a bound
+   * endpoint called from a chat goes out under the identical rules the CLI applies.
+   * Absent ⇒ those tools are exposed but report themselves unavailable.
+   */
+  outboundHost?: OutboundHost;
+  /**
    * The chat ids authorized to drive this agent — the channel's access boundary.
    * A message from any chat not in this set is refused before the kernel is
    * touched. Never empty in practice: the surface that wires the dispatcher
@@ -125,6 +133,7 @@ function runOptions(deps: ChannelDeps, adapter: RuntimeAdapter): ExecuteRunOptio
     adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
     ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+    ...(deps.outboundHost ? { outboundHost: deps.outboundHost } : {}),
     ...(deps.recall ? { recall: deps.recall } : {}),
   };
 }

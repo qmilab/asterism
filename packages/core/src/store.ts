@@ -19,6 +19,7 @@ import {
   WorldFactCapError,
 } from "./repositories/world-facts.js";
 import { CredentialRepository } from "./repositories/credentials.js";
+import { EndpointRepository } from "./repositories/endpoints.js";
 import { ConnectionRepository } from "./repositories/connections.js";
 import { ExchangeRepository } from "./repositories/exchanges.js";
 import { BriefRepository, BRIEF_CONNECTION_MODE } from "./repositories/briefs.js";
@@ -28,6 +29,7 @@ import { InstallSettingsRepository } from "./repositories/install-settings.js";
 import type {
   Agent,
   AgentSettings,
+  BoundEndpoint,
   Brief,
   CapabilityGrant,
   CapabilityStanding,
@@ -55,10 +57,17 @@ import type { ArtifactRef } from "./artifact-manifest.js";
 import { artifactReference } from "./artifact-manifest.js";
 import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
-import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
+import { RESERVED_SECRET_PREFIX, SecretStore, isReservedSecretKey } from "./secrets.js";
 import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
 import { worldFactFramingText } from "./types.js";
 import { resolveOwnedCapabilityKeys, validateCapabilityKeys } from "./capabilities.js";
+import {
+  MAX_BOUND_ENDPOINTS,
+  endpointCapabilityKey,
+  endpointLogTarget,
+  validateEndpointName,
+  validateEndpointUrl,
+} from "./endpoints.js";
 
 /**
  * The kernel's persistence surface. Applies the Phase 0 schema and exposes one
@@ -95,6 +104,8 @@ export class AsterismStore {
   /** Per-agent world-facts — the agent's own running record of the current situation ("working notes"). */
   readonly worldFacts: WorldFactRepository;
   readonly credentials: CredentialRepository;
+  /** Bound outbound endpoints — the agent's credential-bearing capabilities (design note E2). */
+  readonly endpoints: EndpointRepository;
   /** Explicit, permissioned channels between agents — the Phase 3 collaboration primitive. */
   readonly connections: ConnectionRepository;
   /** What actually crossed a connection, as resolvable references — the record `fetch` reads. */
@@ -121,6 +132,7 @@ export class AsterismStore {
     this.objectives = new ObjectiveRepository(driver);
     this.worldFacts = new WorldFactRepository(driver);
     this.credentials = new CredentialRepository(driver);
+    this.endpoints = new EndpointRepository(driver);
     this.connections = new ConnectionRepository(driver);
     this.exchanges = new ExchangeRepository(driver);
     this.briefs = new BriefRepository(driver);
@@ -591,14 +603,24 @@ export class AsterismStore {
 
   /**
    * The capability keys an agent HOLDS — its declaration if it has one, else the
-   * kernel's named default catalog, with the kernel's own reserved tools unioned in
-   * either way. The single source of truth for exposure, resolved kernel-side so every
-   * run surface reads the same answer and none can drift.
+   * kernel's named default catalog, with the kernel's own reserved tools AND this
+   * agent's bound outbound endpoints unioned in either way. The single source of truth
+   * for exposure, resolved kernel-side so every run surface reads the same answer and
+   * none can drift.
    *
-   * `agentId`-scoped: an agent's exposure is resolved only from its own declaration.
+   * Bound endpoints resolve THROUGH here rather than around it (design note E3): the
+   * binding is the grant, and routing it through the one resolver is what makes every
+   * view that reads exposure report bindings without being told to. `capabilities set`
+   * refuses a hand-typed `api.*` key, so there is exactly one writer of this fact.
+   *
+   * `agentId`-scoped on both reads: an agent's exposure is resolved only from its own
+   * declaration and its own bindings.
    */
   resolveOwnedCapabilities(agentId: string): ReadonlySet<string> {
-    return resolveOwnedCapabilityKeys(this.agentSettings.getCapabilities(agentId));
+    return resolveOwnedCapabilityKeys(
+      this.agentSettings.getCapabilities(agentId),
+      this.endpoints.list(agentId).map((e) => endpointCapabilityKey(e.name)),
+    );
   }
 
   /**
@@ -2141,24 +2163,49 @@ export class AsterismStore {
   }
 
   /**
-   * Read a credential value for an agent, recording the disclosure as a
+   * Read a CREDENTIAL's value for an agent, recording the disclosure as a
    * `secret.read` event — references only: the key and its `valueRef`, NEVER the
    * value. Reading a value is destructive under the trust model, so every
-   * disclosure goes on the record. Returns undefined and logs nothing when no
-   * secret exists under the key: reading nothing discloses nothing. This is the
-   * audited counterpart to the raw {@link SecretStore.read} primitive — surfaces
-   * and credential-bearing tool closures resolve values through here.
+   * disclosure goes on the record. Returns undefined and logs nothing when the
+   * agent has no credential under that key: reading nothing discloses nothing.
+   * This is the audited counterpart to the raw {@link SecretStore.read}
+   * primitive — surfaces and credential-bearing tool closures resolve values
+   * through here.
+   *
+   * Resolved through the CREDENTIAL ROW, not by secret key, and the distinction is
+   * load-bearing in both directions:
+   *
+   *   - The row's `valueRef` is what {@link removeCredential} already treats as
+   *     authoritative ("identified by the row's stored `valueRef`, not by key"), so
+   *     reading by key would let a credential created with a non-default ref be
+   *     removed correctly but READ wrongly — two halves of one contract disagreeing.
+   *   - "Does the agent have this credential?" then has exactly ONE answer. `api
+   *     list` asks `credentials.getByKey`; before this, a bound endpoint's call asked
+   *     the secret store, so a standalone secret sharing the key would be SENT by a
+   *     call the listing reported as unavailable. Two views of one fact that disagree
+   *     inside one install is the defect this surface has produced most often.
+   *
+   * A standalone secret with no credential row is therefore never disclosed here.
+   * [Codex review R4 P2.]
    */
   readSecret(agentId: string, key: string, runId?: string): string | undefined {
+    // The kernel's own internal secrets are not disclosable through here, ever — the
+    // second and independent lock on the leak above. `bindEndpoint` refuses to STORE such
+    // a binding; this refuses to SERVE one, so a row written by hand into the database
+    // still cannot make the kernel hand out its own key. Nothing legitimate is affected:
+    // the kernel seeds and reads its internal keys through `secrets.ensure`, never through
+    // this audited-disclosure path, which exists precisely for values that leave.
+    if (isReservedSecretKey(key)) {
+      throw new Error(`the secret key "${key}" is reserved for internal use and cannot be read out`);
+    }
     return this.driver.transaction(() => {
-      const value = this.secrets.readByKey(agentId, key);
+      const credential = this.credentials.getByKey(agentId, key);
+      if (!credential) return undefined;
+      const value = this.secrets.read(agentId, credential.valueRef);
       if (value !== undefined) {
-        this.emit(
-          agentId,
-          "secret.read",
-          { key, valueRef: secretValueRef(agentId, key) },
-          runId,
-        );
+        // The ROW's ref, so the audit names the secret actually disclosed rather than
+        // the one a key-derived ref would have implied.
+        this.emit(agentId, "secret.read", { key, valueRef: credential.valueRef }, runId);
       }
       return value;
     });
@@ -2228,6 +2275,98 @@ export class AsterismStore {
       this.emit(agentId, "credential.removed", {
         key,
         valueRef: cred.valueRef,
+      });
+      return true;
+    });
+  }
+
+  /**
+   * Bind an outbound endpoint for an agent — the operator act that GRANTS a
+   * credential-bearing capability (`api.<name>`), the product's first tool that carries
+   * a secret.
+   *
+   * Validation is the write-boundary chokepoint and runs before anything is written: a
+   * name strict enough to be both a capability key and a model-facing tool name, and a
+   * URL that is `https` and carries no userinfo. Re-binding an existing name replaces
+   * its URL and credential in place, the way `secrets add` rotates a key.
+   *
+   * The credential is named by KEY and is not required to exist yet — binding before
+   * `secrets add` is a legitimate order to do things in, and a binding whose credential
+   * is missing fails loudly at call time rather than vanishing (design note E7).
+   *
+   * `endpoint.bound` records references only, and the URL is narrowed to its origin and
+   * path: the query string is the one part of an operator-declared URL that could carry
+   * secret material, and the event log holds references, never values.
+   */
+  bindEndpoint(
+    agentId: string,
+    name: string,
+    url: string,
+    credentialKey: string,
+  ): BoundEndpoint {
+    const validName = validateEndpointName(name);
+    const validUrl = validateEndpointUrl(url);
+    if (typeof credentialKey !== "string" || credentialKey.length === 0) {
+      throw new Error("invalid endpoint credential: expected a non-empty credential key");
+    }
+    // The kernel's own reserved namespace is off-limits here for the same reason it is off
+    // limits to `secrets add` — and for a sharper one. `SecretStore.issue` refuses these
+    // keys so a user write cannot ROTATE a key the kernel depends on; a binding cannot
+    // rotate anything, but it can make the kernel SEND one. The action-fingerprint key is
+    // the live example: it is what makes an event log's argument fingerprints unguessable,
+    // so disclosing it turns every recorded fingerprint into a dictionary oracle over the
+    // arguments it was meant to hide. [Codex review R1 P1.]
+    if (isReservedSecretKey(credentialKey)) {
+      throw new Error(
+        `invalid endpoint credential: "${credentialKey}" is reserved for the kernel's own internal use and cannot be sent anywhere`,
+      );
+    }
+    return this.driver.transaction(() => {
+      // Bound INSIDE the transaction and counted from the rows, so two concurrent binds
+      // cannot both read "one under the cap" and both write.
+      const existing = this.endpoints.list(agentId);
+      if (
+        existing.length >= MAX_BOUND_ENDPOINTS &&
+        !existing.some((e) => e.name === validName)
+      ) {
+        throw new Error(
+          `too many bound endpoints (at most ${MAX_BOUND_ENDPOINTS}) — remove one with \`asterism api remove\` first`,
+        );
+      }
+      const endpoint = this.endpoints.create(agentId, {
+        name: validName,
+        url: validUrl,
+        credentialKey,
+      });
+      this.emit(agentId, "endpoint.bound", {
+        endpoint: endpoint.name,
+        capability: endpointCapabilityKey(endpoint.name),
+        target: endpointLogTarget(endpoint.url),
+        credential: endpoint.credentialKey,
+      });
+      return endpoint;
+    });
+  }
+
+  /**
+   * Remove a binding, and with it the capability it granted. Returns false when no such
+   * binding exists, so a caller can tell "removed" from "was never there".
+   *
+   * Deliberately touches nothing else. The CREDENTIAL is not removed — that is
+   * `secrets`' job, and one verb doing two jobs is how an operator loses a token they
+   * meant to keep. No standing grant can exist to revoke, because a credential-bearing
+   * capability is never auto-approved.
+   */
+  removeEndpoint(agentId: string, name: string): boolean {
+    return this.driver.transaction(() => {
+      const endpoint = this.endpoints.getByName(agentId, name);
+      if (!endpoint) return false;
+      this.endpoints.deleteByName(agentId, name);
+      this.emit(agentId, "endpoint.removed", {
+        endpoint: endpoint.name,
+        capability: endpointCapabilityKey(endpoint.name),
+        target: endpointLogTarget(endpoint.url),
+        credential: endpoint.credentialKey,
       });
       return true;
     });
