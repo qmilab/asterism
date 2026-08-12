@@ -57,7 +57,12 @@ import type { ArtifactRef } from "./artifact-manifest.js";
 import { artifactReference } from "./artifact-manifest.js";
 import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
-import { RESERVED_SECRET_PREFIX, SecretStore, secretValueRef } from "./secrets.js";
+import {
+  RESERVED_SECRET_PREFIX,
+  SecretStore,
+  isReservedSecretKey,
+  secretValueRef,
+} from "./secrets.js";
 import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
 import { worldFactFramingText } from "./types.js";
 import { resolveOwnedCapabilityKeys, validateCapabilityKeys } from "./capabilities.js";
@@ -2172,6 +2177,15 @@ export class AsterismStore {
    * and credential-bearing tool closures resolve values through here.
    */
   readSecret(agentId: string, key: string, runId?: string): string | undefined {
+    // The kernel's own internal secrets are not disclosable through here, ever — the
+    // second and independent lock on the leak above. `bindEndpoint` refuses to STORE such
+    // a binding; this refuses to SERVE one, so a row written by hand into the database
+    // still cannot make the kernel hand out its own key. Nothing legitimate is affected:
+    // the kernel seeds and reads its internal keys through `secrets.ensure`, never through
+    // this audited-disclosure path, which exists precisely for values that leave.
+    if (isReservedSecretKey(key)) {
+      throw new Error(`the secret key "${key}" is reserved for internal use and cannot be read out`);
+    }
     return this.driver.transaction(() => {
       const value = this.secrets.readByKey(agentId, key);
       if (value !== undefined) {
@@ -2283,6 +2297,18 @@ export class AsterismStore {
     const validUrl = validateEndpointUrl(url);
     if (typeof credentialKey !== "string" || credentialKey.length === 0) {
       throw new Error("invalid endpoint credential: expected a non-empty credential key");
+    }
+    // The kernel's own reserved namespace is off-limits here for the same reason it is off
+    // limits to `secrets add` — and for a sharper one. `SecretStore.issue` refuses these
+    // keys so a user write cannot ROTATE a key the kernel depends on; a binding cannot
+    // rotate anything, but it can make the kernel SEND one. The action-fingerprint key is
+    // the live example: it is what makes an event log's argument fingerprints unguessable,
+    // so disclosing it turns every recorded fingerprint into a dictionary oracle over the
+    // arguments it was meant to hide. [Codex review R1 P1.]
+    if (isReservedSecretKey(credentialKey)) {
+      throw new Error(
+        `invalid endpoint credential: "${credentialKey}" is reserved for the kernel's own internal use and cannot be sent anywhere`,
+      );
     }
     return this.driver.transaction(() => {
       // Bound INSIDE the transaction and counted from the rows, so two concurrent binds

@@ -224,6 +224,23 @@ const CONTROL_CHARS =
   /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g;
 
 /**
+ * Remove every character {@link redactForTrace}'s step 2 removes — ANSI/OSC escapes, C0/C1,
+ * DEL, bidi overrides, zero-width marks.
+ *
+ * Exported so a caller that must scrub something BEFORE `redactForTrace` runs can normalize
+ * against the same rule rather than a second copy of it. There is exactly one such caller:
+ * the endpoint response pipeline, which knows the precise credential value it just sent and
+ * removes it by exact match. Without normalizing first, an invisible character inserted into
+ * an echoed value defeats that match and `redactForTrace`'s own strip then REASSEMBLES the
+ * plaintext — the same evasion the zero-width entry in {@link CONTROL_CHARS} was added to
+ * close, one layer further out. Sharing the definition is what keeps the two layers from
+ * drifting into that gap again. [Codex review R1 P1.]
+ */
+export function stripControlCharacters(text: string): string {
+  return text.replace(CONTROL_CHARS, "");
+}
+
+/**
  * Truncate `raw` to at most `maxBytes` UTF-8 bytes WITHOUT splitting a multibyte
  * character: decode the byte slice and drop a trailing replacement char left by an
  * incomplete sequence at the boundary. Returns the (possibly truncated) text, the

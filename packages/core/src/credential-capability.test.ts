@@ -612,7 +612,58 @@ test("a handoff callee calls its OWN endpoint under its own gate", async () => {
   expect(eventsOfType(personal, "secret.read")).toHaveLength(0);
 });
 
-// --- 8. The pure pieces -------------------------------------------------------
+// --- 8. The kernel's own secrets are not sendable [Codex R1 P1] ---------------
+
+test("a reserved kernel secret cannot be BOUND", () => {
+  // `secrets add` already refuses this namespace so a user write cannot ROTATE a key the
+  // kernel depends on. A binding cannot rotate anything — but it can make the kernel SEND
+  // one, which is worse for the specific key involved.
+  store.actionFingerprintKey(personal.id);
+  expect(() =>
+    store.bindEndpoint(
+      personal.id,
+      "leak",
+      "https://api.example.test/collect",
+      "__asterism.action_fingerprint_key",
+    ),
+  ).toThrow(/reserved for the kernel/);
+  expect(store.endpoints.list(personal.id)).toEqual([]);
+});
+
+test("a reserved kernel secret cannot be READ OUT even from a hand-written binding", async () => {
+  // The second, independent lock. The write boundary above refuses to STORE such a binding;
+  // this refuses to SERVE one, so a row inserted straight into the database still cannot
+  // make the kernel disclose its own key. Written through the repository, which is exactly
+  // the bypass being defended against.
+  const internal = store.actionFingerprintKey(personal.id);
+  expect(internal.length).toBeGreaterThan(16);
+  store.endpoints.create(personal.id, {
+    name: "leak",
+    url: "https://api.example.test/collect",
+    credentialKey: "__asterism.action_fingerprint_key",
+  });
+  const host = recordingHost();
+
+  const { tools, results } = await callTool(personal, endpointToolName("leak"), host);
+
+  // Nothing goes out, and the refusal is a tool FAILURE rather than a throw across the
+  // adapter seam — `readSecret` refuses by throwing, and the guard turns that into a result.
+  expect(host.calls).toHaveLength(0);
+  expect(tools).toContain(endpointToolName("leak"));
+  expect(results[0]?.isError).toBe(true);
+  expect(results[0]?.output).toMatch(/could not be called/);
+  expect(JSON.stringify(results)).not.toContain(internal);
+  expect(eventDump(personal)).not.toContain(internal);
+});
+
+test("the disclosure path itself refuses the kernel's namespace", () => {
+  store.actionFingerprintKey(personal.id);
+  expect(() => store.readSecret(personal.id, "__asterism.action_fingerprint_key")).toThrow(
+    /reserved for internal use/,
+  );
+});
+
+// --- 9. The pure pieces -------------------------------------------------------
 
 test("validateEndpointUrl refuses http, userinfo, and a non-URL", () => {
   expect(() => validateEndpointUrl("http://api.example.test/x")).toThrow(/only https/);
@@ -648,6 +699,27 @@ test("screenEndpointResponse removes the disclosed value even when no shape rule
 
   expect(screened).not.toContain(TOKEN);
   expect(screened).toBe("prefix [redacted:value] suffix");
+});
+
+test("an invisible character inside the echoed value does not defeat the scrub", () => {
+  // The evasion: `redactForTrace` STRIPS zero-width characters, so a value echoed with one
+  // wedged inside it fails the exact match and is then reassembled in plaintext by the very
+  // step meant to screen it. Normalizing before matching closes it. [Codex R1 P1.]
+  for (const invisible of ["\u200b", "\u200e", "\ufeff", "\u0000", "\u001b"]) {
+    const split = TOKEN.slice(0, 10) + invisible + TOKEN.slice(10);
+    const screened = screenEndpointResponse(`{"you sent":"${split}"}`, TOKEN);
+    expect(screened).not.toContain(TOKEN);
+    expect(screened).toContain("[redacted:value]");
+  }
+});
+
+test("a disclosed value that itself contains an invisible character still matches", () => {
+  // The symmetric arm: normalization is applied to BOTH sides, so a stored secret carrying
+  // such a character is still removed from a response that echoes it.
+  const weird = TOKEN.slice(0, 8) + "\u200b" + TOKEN.slice(8);
+  const screened = screenEndpointResponse(`echo: ${weird}`, weird);
+
+  expect(screened).toBe("echo: [redacted:value]");
 });
 
 test("screenEndpointResponse scrubs EVERY occurrence, not just the first", () => {

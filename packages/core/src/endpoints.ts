@@ -38,7 +38,7 @@ import type { Capability } from "./trust.js";
 import type { AsterismStore } from "./store.js";
 import type { BoundEndpoint } from "./types.js";
 import { CREDENTIAL_CAPABILITY_PREFIX } from "./capabilities.js";
-import { SECRET_MARK, redactForTrace } from "./redaction.js";
+import { SECRET_MARK, redactForTrace, stripControlCharacters } from "./redaction.js";
 
 /**
  * How much of a response the kernel keeps and hands to the model. Its OWN constant
@@ -255,10 +255,20 @@ export function endpointLogTarget(url: string): string {
  *      memory guard set far above the keep-cap rather than the keep-cap itself.
  */
 export function screenEndpointResponse(body: string, disclosed?: string): string {
+  // NORMALIZE FIRST, against the very rule `redactForTrace` strips by. An exact-match scrub
+  // is only as exact as the text it runs on: an endpoint echoing the value with a zero-width
+  // character wedged into it does not match, and `redactForTrace`'s own strip then REMOVES
+  // that character — reassembling the plaintext in the output that was supposed to screen it.
+  // That is the same evasion the zero-width entry in the control-character rule exists to
+  // close, one layer further out, and sharing `stripControlCharacters` is what keeps the two
+  // layers from drifting back apart. The disclosed value is normalized the same way, so a
+  // secret that itself contains such a character still matches. [Codex review R1 P1.]
+  const text = stripControlCharacters(body);
+  const value = disclosed === undefined ? undefined : stripControlCharacters(disclosed);
   const scrubbed =
-    disclosed !== undefined && disclosed.length >= MIN_SCRUBBABLE_SECRET_LENGTH
-      ? body.split(disclosed).join(SECRET_MARK)
-      : body;
+    value !== undefined && value.length >= MIN_SCRUBBABLE_SECRET_LENGTH
+      ? text.split(value).join(SECRET_MARK)
+      : text;
   return redactForTrace(scrubbed, { maxBytes: DEFAULT_ENDPOINT_RESPONSE_MAX_BYTES }).content;
 }
 
@@ -330,76 +340,110 @@ function endpointCapability(
       // for the agent to choose and nothing it authors leaves the machine.
       inputSchema: { type: "object", properties: {} },
       execute: async (): Promise<ToolResult> => {
-        if (!host) {
-          return failure(
-            `The '${binding.name}' endpoint cannot be called from here — this surface has no outbound support.`,
-          );
-        }
-        // THE BINDING IS RE-READ HERE, after the human's pause and before the credential
-        // is read. A confirmation is human-length, and an operator may `api remove` (or
-        // rebind to a different URL or credential) while the prompt is open. Trusting
-        // the resolution from run start across that pause is what would let a call go
-        // out under a binding that no longer exists — the same failure the artifact-fetch
-        // review found for a revoked connection, and the reason its `execute` re-reads
-        // the channel. Identity is compared, not mere existence: a rebind during the
-        // pause is a DIFFERENT call than the one a human approved.
-        const current = store.endpoints.getByName(binding.agentId, binding.name);
-        if (
-          !current ||
-          current.id !== binding.id ||
-          current.url !== binding.url ||
-          current.credentialKey !== binding.credentialKey
-        ) {
-          return failure(
-            `The '${binding.name}' endpoint changed or was removed before this call could run.`,
-          );
-        }
-        // The one place a credential VALUE enters this module, audited as `secret.read`
-        // (this class is that event type's first producer) and tagged with the
-        // originating run so the per-run audit is complete. `agentId` comes from the
-        // binding row, which is itself agent-scoped, so an agent can only ever reach its
-        // own secrets.
-        const value = store.readSecret(binding.agentId, binding.credentialKey, runId);
-        if (value === undefined) {
-          // Loud, not absent: the tool exists and says exactly what is missing. Reading
-          // nothing discloses nothing, so no `secret.read` was recorded.
-          return failure(
-            `No credential '${binding.credentialKey}' is stored for this agent, so the ` +
-              `'${binding.name}' endpoint cannot be called. Add it with: asterism secrets add ` +
-              `<agent> ${binding.credentialKey}`,
-          );
-        }
-        let response: OutboundResponse;
+        // NOTHING throws across the adapter seam — the invariant this module's header
+        // states, and the same guard `world-facts.ts` puts around its store calls. It
+        // matters more here than there, because the body below touches the store TWICE and
+        // `readSecret` REFUSES the kernel's reserved namespace by throwing: a binding
+        // hand-written into the database under a reserved key would otherwise escape
+        // `execute` — after `onExecute` had already recorded the attempt, leaving the
+        // at-most-once accounting claiming a call that never happened. Guarding the whole
+        // body rather than each store touch is deliberate: the property is "this function
+        // returns a result", not "these two reads are safe".
         try {
-          response = await host.call({
-            url: binding.url,
-            headers: { Authorization: `Bearer ${value}` },
-            timeoutMs: OUTBOUND_TIMEOUT_MS,
-            maxBytes: OUTBOUND_READ_MAX_BYTES,
-          });
+          return await callEndpoint(store, binding, host, runId);
         } catch (err) {
-          // A host that throws must not throw across the adapter seam, and its message
-          // must not be trusted to be value-free — it may quote the request.
+          // Screened, because an error message can quote what it failed on.
           return failure(
-            `The '${binding.name}' endpoint could not be reached: ${screenEndpointResponse(
+            `The '${binding.name}' endpoint could not be called: ${screenEndpointResponse(
               err instanceof Error ? err.message : String(err),
-              value,
             )}`,
           );
         }
-        if (!response.ok) {
-          return failure(
-            `The '${binding.name}' endpoint could not be reached: ${screenEndpointResponse(response.reason, value)}`,
-          );
-        }
-        // The status is safe to report as-is. The body goes through the pipeline whatever
-        // the status — an error body is exactly where a service quotes a request back.
-        const screened = screenEndpointResponse(response.body, value);
-        if (response.status < 200 || response.status >= 300) {
-          return failure(`${binding.name} returned HTTP ${response.status}: ${screened}`);
-        }
-        return { output: screened };
       },
     },
   };
+}
+
+/**
+ * One gated call, from the kernel's side of the boundary.
+ *
+ * Split out of {@link endpointCapability} so the whole sequence — re-read the binding, read
+ * the secret, call the host, screen the response — sits inside that one guard, instead of
+ * depending on every store touch being individually incapable of throwing.
+ */
+async function callEndpoint(
+  store: AsterismStore,
+  binding: BoundEndpoint,
+  host: OutboundHost | undefined,
+  runId: string | undefined,
+): Promise<ToolResult> {
+  if (!host) {
+    return failure(
+      `The '${binding.name}' endpoint cannot be called from here — this surface has no outbound support.`,
+    );
+  }
+  // THE BINDING IS RE-READ HERE, after the human's pause and before the credential
+  // is read. A confirmation is human-length, and an operator may `api remove` (or
+  // rebind to a different URL or credential) while the prompt is open. Trusting
+  // the resolution from run start across that pause is what would let a call go
+  // out under a binding that no longer exists — the same failure the artifact-fetch
+  // review found for a revoked connection, and the reason its `execute` re-reads
+  // the channel. Identity is compared, not mere existence: a rebind during the
+  // pause is a DIFFERENT call than the one a human approved.
+  const current = store.endpoints.getByName(binding.agentId, binding.name);
+  if (
+    !current ||
+    current.id !== binding.id ||
+    current.url !== binding.url ||
+    current.credentialKey !== binding.credentialKey
+  ) {
+    return failure(
+      `The '${binding.name}' endpoint changed or was removed before this call could run.`,
+    );
+  }
+  // The one place a credential VALUE enters this module, audited as `secret.read`
+  // (this class is that event type's first producer) and tagged with the
+  // originating run so the per-run audit is complete. `agentId` comes from the
+  // binding row, which is itself agent-scoped, so an agent can only ever reach its
+  // own secrets.
+  const value = store.readSecret(binding.agentId, binding.credentialKey, runId);
+  if (value === undefined) {
+    // Loud, not absent: the tool exists and says exactly what is missing. Reading
+    // nothing discloses nothing, so no `secret.read` was recorded.
+    return failure(
+      `No credential '${binding.credentialKey}' is stored for this agent, so the ` +
+        `'${binding.name}' endpoint cannot be called. Add it with: asterism secrets add ` +
+        `<agent> ${binding.credentialKey}`,
+    );
+  }
+  let response: OutboundResponse;
+  try {
+    response = await host.call({
+      url: binding.url,
+      headers: { Authorization: `Bearer ${value}` },
+      timeoutMs: OUTBOUND_TIMEOUT_MS,
+      maxBytes: OUTBOUND_READ_MAX_BYTES,
+    });
+  } catch (err) {
+    // A host that throws must not throw across the adapter seam, and its message
+    // must not be trusted to be value-free — it may quote the request.
+    return failure(
+      `The '${binding.name}' endpoint could not be reached: ${screenEndpointResponse(
+        err instanceof Error ? err.message : String(err),
+        value,
+      )}`,
+    );
+  }
+  if (!response.ok) {
+    return failure(
+      `The '${binding.name}' endpoint could not be reached: ${screenEndpointResponse(response.reason, value)}`,
+    );
+  }
+  // The status is safe to report as-is. The body goes through the pipeline whatever
+  // the status — an error body is exactly where a service quotes a request back.
+  const screened = screenEndpointResponse(response.body, value);
+  if (response.status < 200 || response.status >= 300) {
+    return failure(`${binding.name} returned HTTP ${response.status}: ${screened}`);
+  }
+  return { output: screened };
 }

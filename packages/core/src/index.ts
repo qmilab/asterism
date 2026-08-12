@@ -77,6 +77,7 @@ export {
   SECRET_VALUE_RULES,
   SECRET_MARK,
   redactForTrace,
+  stripControlCharacters,
   redactObservation,
 } from "./redaction.js";
 export type {
