@@ -84,6 +84,46 @@ function deleteFilesCapability(): Capability {
 }
 
 /** Deps bound to `personal` with a clean substrate and a one-chat allow-list. */
+
+/**
+ * A bound outbound endpoint for `agent`, plus a host that records what was sent.
+ *
+ * The claim under test is narrow and easy to leave unproven: this surface must FORWARD
+ * the host it was handed to the kernel. A surface that quietly drops it does not throw —
+ * the capability is still exposed and reports itself unavailable, which reads exactly
+ * like a working refusal. So the assertion is that the host was REACHED.
+ */
+function boundEndpoint(agent: Agent): OutboundHost & { calls: OutboundRequest[] } {
+  const calls: OutboundRequest[] = [];
+  store.addCredential(agent.id, "TOK", "tok-value-12345678");
+  store.bindEndpoint(agent.id, "issues", "https://api.example.test/issues", "TOK");
+  return {
+    calls,
+    call(request) {
+      calls.push(request);
+      return Promise.resolve({ ok: true as const, status: 200, body: "{}" });
+    },
+  };
+}
+
+/** A substrate stand-in that calls the bound endpoint's tool, if it was given one. */
+function endpointCallingAdapter(seen: { tools: string[] }): RuntimeAdapter {
+  return {
+    run(request) {
+      seen.tools = request.tools.list().map((t) => t.name);
+      const tool = request.tools.list().find((t) => t.name === "call_issues");
+      async function* noEvents() {}
+      return {
+        events: noEvents(),
+        output: (async (): Promise<RunOutput> => {
+          if (tool) await tool.execute({ args: {} });
+          return { status: "done", text: "ok" };
+        })(),
+      };
+    },
+  };
+}
+
 function deps(over: Partial<ChannelDeps> = {}): ChannelDeps {
   return {
     store,
@@ -431,4 +471,27 @@ test("isControlReply recognizes only the confirm/cancel control replies", () => 
   expect(isControlReply("/help")).toBe(false);
   expect(isControlReply("/giphy cat")).toBe(false);
   expect(isControlReply("do a thing")).toBe(false);
+});
+
+test("the outbound host is forwarded to the kernel, so a chat-driven run can call a bound endpoint", async () => {
+  const host = boundEndpoint(personal);
+  const seen = { tools: [] as string[] };
+  const dispatcher = createDispatcher(
+    deps({ adapter: endpointCallingAdapter(seen), outboundHost: host }),
+  );
+
+  await dispatcher.handle({ chatId: "100", text: "check the issues" });
+
+  // A chat surface has no synchronous human, so the endpoint's gate parks the run —
+  // which is correct, and is why the assertion is on EXPOSURE plus the reply, not on a
+  // completed call. The kernel could only park it if the capability reached the registry.
+  expect(seen.tools).toContain("call_issues");
+  expect(host.calls).toHaveLength(0);
+
+  // Then the out-of-band confirm, which is the path that actually calls out.
+  const replies = await dispatcher.handle({ chatId: "100", text: "/confirm" });
+
+  expect(host.calls).toHaveLength(1);
+  expect(host.calls[0]?.headers.Authorization).toBe("Bearer tok-value-12345678");
+  expect(replies.length).toBeGreaterThan(0);
 });

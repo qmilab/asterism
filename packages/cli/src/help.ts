@@ -32,6 +32,7 @@ Commands:
   trust <agent> --review            Grant capabilities an agent has earned to act on
   capabilities show <agent>         See which tools an agent has — and narrow them
   secrets add <agent> <KEY> [value] Give an agent a private credential
+  api add <agent> <name> <url>      Let an agent call one address with one credential
   skill add <agent> <file.md>       Teach an agent a skill from a markdown file
   objective add <agent> "<text>"    Give an agent a standing goal to work toward
   notes inspect <agent>             See an agent's own working notes (its situation)
@@ -166,7 +167,40 @@ This is not the same as trust. \`capabilities\` decides WHICH tools an agent has
 \`trust\` decides what it may do with them — its overall level, and the few destructive
 actions it has earned the right to take without pausing. Taking away a tool leaves any
 grant it earned untouched and unused; give the tool back and the grant applies again.
-Take a grant back with \`asterism trust <agent> revoke <capability>\`.`,
+Take a grant back with \`asterism trust <agent> revoke <capability>\`.
+
+Endpoints you have bound with \`asterism api add\` are listed separately in
+\`capabilities show\` and are not changed by any verb here — withdraw one with
+\`asterism api remove <agent> <name>\`.`,
+
+  api: `asterism api add    <agent> <name> <https-url> --credential <KEY>
+asterism api list   <agent>
+asterism api remove <agent> <name>
+
+Let one agent call one web address, using one of its own stored credentials — without
+ever seeing that credential. You choose the address and which credential goes with it;
+the agent gets a tool that calls exactly that address and nothing else.
+
+  api add <agent> <name> <url> --credential <KEY>
+                              Bind the credential to the address. The agent gains a
+                              tool named call_<name>. Re-run it to change the address
+                              or the credential.
+  api list <agent>            What this agent can call, and what each call sends.
+  api remove <agent> <name>   Withdraw it. The credential itself is left alone.
+
+Three things are worth knowing before you bind one:
+
+  · The agent supplies nothing. You give the whole address, query string and all, so
+    the agent cannot steer the call or attach anything of its own to it.
+  · No call happens without you. At \`notify\` and \`autonomous\` the run pauses and asks;
+    a \`propose\` agent never calls at all, it just tells you it would. And it cannot
+    earn its way out of asking — sending a credential somewhere is the one thing this
+    product will not learn to do on its own.
+  · The credential never reaches the agent. It is attached on the way out and
+    stripped from anything that comes back.
+
+Addresses must be \`https\`, and cannot carry a username or password — store the
+credential with \`asterism secrets add\` and name it with --credential.`,
 
   secrets: `asterism secrets add <agent> <KEY> [value]
 

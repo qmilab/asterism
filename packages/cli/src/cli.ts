@@ -48,6 +48,8 @@ import {
   RECALL_PROVIDER_IDS,
   rejectProposedMemory,
   RESERVED_CAPABILITY_KEYS,
+  CREDENTIAL_CAPABILITY_PREFIX,
+  isCredentialBearingKey,
   rejectProposedObjective,
   resolveStandingPolicy,
   resumeRun,
@@ -63,6 +65,7 @@ import type {
   Agent,
   ArtifactFetchHost,
   ArtifactRef,
+  BoundEndpoint,
   Capability,
   CognitionCaptureMode,
   CognitionProviderId,
@@ -88,6 +91,7 @@ import type {
   TailOptions,
   TransitionAdvisory,
   TrustLevel,
+  OutboundHost,
 } from "@qmilab/asterism-core";
 import type { RunningServer, ServeConsoleOptions, ServeOptions } from "@qmilab/asterism-server";
 import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
@@ -109,6 +113,7 @@ import {
   describeCatalogHolding,
   formatCapabilityList,
   formatConnectionList,
+  formatEndpointList,
   formatEventLines,
   formatMemorySummary,
   formatEventList,
@@ -221,15 +226,29 @@ export interface CliIO {
    * the run is confined to an empty tool set. This is the host seam `bin.ts` wires
    * the real catalog through (and that the acceptance test fakes); the workspace
    * argument lets a file tool be confined to the agent's directory without the
-   * kernel ever learning a path. Two contract points a host must own: the catalog
-   * is install-wide (every agent's runs receive the same tools — only the workspace
-   * binding, the trust level, and the gate differ; per-agent capability scoping is
-   * a later phase), and each capability's declared `effect` is load-bearing — the
-   * kernel escalates to `destructive` from command-string arguments but cannot
-   * detect a mis-declared destructive tool with structured args, so declare
-   * conservatively.
+   * kernel ever learning a path. Two contract points a host must own: the CATALOG
+   * is install-wide (this factory is asked the same question for every agent and
+   * returns the same tools — only the workspace binding differs), while EXPOSURE is
+   * per-agent and belongs to the kernel (`store.resolveOwnedCapabilities` — the
+   * agent's own declaration, or the kernel's named default set — intersected with
+   * whatever this returns, so a host tool outside the default set needs a per-agent
+   * `capabilities set` before any run receives it); and each capability's declared
+   * `effect` is load-bearing — the kernel escalates to `destructive` from
+   * command-string arguments but cannot detect a mis-declared destructive tool with
+   * structured args, so declare conservatively.
    */
   capabilities?: (workspaceDir: string) => readonly Capability[];
+  /**
+   * How this host makes an outbound call for an agent's bound endpoints — its
+   * credential-bearing capabilities. Absent ⇒ those tools are still exposed but report
+   * themselves unavailable, rather than vanishing: an absent tool is indistinguishable
+   * from a gated one, so dropping them quietly would look exactly like enforcement.
+   *
+   * The kernel keeps every decision (which binding, whether the gate allows it, which
+   * secret, what may come back); this only moves the bytes, and it must not follow
+   * redirects, must time out, must bound its read, and must never log the request.
+   */
+  outboundHost?: OutboundHost;
   /**
    * The filesystem side of `artifact fetch` — reading an exchanged artifact out of the
    * callee's workspace and writing it into the caller's. A host concern for the same reason
@@ -1053,7 +1072,17 @@ function cmdCapabilitiesShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
     // agent will never receive. An empty catalog is the honest answer, and the view
     // says so in words.
     const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
-    io.out(formatCapabilityList(agent.name, declared, held, catalog));
+    const endpoints = store.endpoints.list(agent.id);
+    io.out(
+      formatCapabilityList(
+        agent.name,
+        declared,
+        held,
+        catalog,
+        endpoints,
+        missingCredentialNames(store, agent, endpoints),
+      ),
+    );
     return 0;
   });
 }
@@ -1087,6 +1116,7 @@ function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
+    if (!rejectCredentialKeys(keys, agent.name, io)) return 1;
     const catalog = catalogKeys(io, agent.workspaceDir);
     // Checked against the catalog PLUS whatever the agent already holds, so restating
     // an existing declaration always works even if it names a tool this host no longer
@@ -1103,6 +1133,7 @@ function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
         : `${agent.name} now holds ${held.length} ${held.length === 1 ? "capability" : "capabilities"}: ${held.join(", ")}.`,
     );
     io.out(`Its own working notes stay available. Stop narrowing it with: asterism capabilities unset ${agent.name}`);
+    noteBoundEndpoints(store, agent, io);
     return 0;
   });
 }
@@ -1130,6 +1161,7 @@ function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
     // The reserved kernel tools are in the resolved set but are not declarable, so they
     // are excluded from the set being rewritten — `remove` cannot reach them, and
     // neither can the declaration it writes.
+    if (!rejectCredentialKeys(keys, agent.name, io)) return 1;
     const reserved = new Set<string>(RESERVED_CAPABILITY_KEYS);
     const declared = store.agentSettings.getCapabilities(agent.id);
     const catalog = catalogKeys(io, agent.workspaceDir);
@@ -1171,6 +1203,7 @@ function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
     io.out(
       `Removed ${removing.sort().join(", ")} from ${agent.name} — it now holds ${remaining.length} ${remaining.length === 1 ? "capability" : "capabilities"}.`,
     );
+    noteBoundEndpoints(store, agent, io);
     return 0;
   });
 }
@@ -1213,6 +1246,7 @@ function cmdCapabilitiesUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
       const held = store.resolveOwnedCapabilities(agent.id);
       const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
       io.out(`${agent.name} was not narrowed — it already holds ${describeCatalogHolding(held, catalog)}.`);
+      noteBoundEndpoints(store, agent, io);
       return 0;
     }
     store.clearAgentCapabilities(agent.id);
@@ -1225,6 +1259,7 @@ function cmdCapabilitiesUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
     io.out(
       `${agent.name} is no longer narrowed — it holds ${describeCatalogHolding(held, catalog)}.`,
     );
+    noteBoundEndpoints(store, agent, io);
     return 0;
   });
 }
@@ -1252,6 +1287,250 @@ function checkKnownKeys(keys: readonly string[], known: readonly string[], io: C
   io.err(`No such capability: ${unknown.join(", ")}`);
   io.err(`This install offers: ${[...knownSet].sort().join(", ")}`);
   return false;
+}
+
+/**
+ * Refuse a hand-typed credential-bearing key on a `capabilities` verb, naming the verb
+ * that actually moves it. Returns whether the keys are clean.
+ *
+ * The binding IS the grant, so these keys have exactly one writer. Without this, `set`
+ * would reach the kernel's write-boundary throw (a stack trace where a sentence belongs)
+ * and `remove` would be worse than that: the key IS in the agent's resolved set, so
+ * `remove` would report "Removed api.issues" and change nothing at all — the endpoint
+ * stays bound and stays exposed. A verb that says it revoked a credential-bearing
+ * capability and did not is the most expensive false sentence this surface could print.
+ */
+function rejectCredentialKeys(keys: readonly string[], agentName: string, io: CliIO): boolean {
+  const naming = keys.filter((k) => isCredentialBearingKey(k));
+  if (naming.length === 0) return true;
+  io.err(
+    `${naming.join(", ")}: bound endpoints, which carry a credential — they are granted and withdrawn by their own verb, not declared here.`,
+  );
+  io.err(`See them with: asterism api list ${agentName}`);
+  io.err(
+    `Withdraw one with: asterism api remove ${agentName} ${naming.map((k) => k.slice(CREDENTIAL_CAPABILITY_PREFIX.length)).join(" ")}`,
+  );
+  return false;
+}
+
+/**
+ * Print what a `capabilities` verb's own count does NOT cover: the agent's bound
+ * endpoints. No-op when it has none.
+ *
+ * `set`, `remove` and `unset` all report a number ("now holds N", "holds all 9 in the
+ * catalog"), and every one of those numbers is about the HOST catalog — a bound endpoint
+ * is neither declared nor built by the host, so none of them counts it. Left alone, each
+ * message would state a completeness it had not checked, which is the defect this surface
+ * has produced more than any other. One helper, called from all three, so a fourth caller
+ * cannot drift.
+ */
+function noteBoundEndpoints(store: AsterismStore, agent: Agent, io: CliIO): void {
+  const endpoints = store.endpoints.list(agent.id);
+  if (endpoints.length === 0) return;
+  io.out(
+    `Not counted above: ${endpoints.length} bound endpoint${endpoints.length === 1 ? "" : "s"} ` +
+      `(${endpoints.map((e) => `${CREDENTIAL_CAPABILITY_PREFIX}${e.name}`).join(", ")}) — ` +
+      `asterism api list ${agent.name}`,
+  );
+}
+
+// --- api -------------------------------------------------------------------
+//
+// The agent's CREDENTIAL-BEARING capabilities: an operator-declared URL bound to one of
+// that agent's own credentials. This is the product's first tool that carries a secret,
+// and the noun sits alongside `secrets` and `capabilities` rather than inside either,
+// because it is the thing that JOINS them:
+//
+//   `secrets`      — the value, stored.
+//   `api`          — which URL that value may be sent to, by this agent.
+//   `capabilities` — which of the host's tools the agent holds.
+//
+// "api" and not "endpoint": `endpoint` already means the local HTTP server (`asterism
+// serve`) throughout the README, the help text and docs/http.md, and one word with two
+// meanings in one command list is worse than a slightly less natural noun.
+//
+// `add` widens — it grants a tool that sends a secret off the machine — so the verb's
+// OUTPUT says so plainly rather than relying on the verb's name to carry it.
+
+const API_USAGE =
+  "Usage: asterism api add <agent> <name> <https-url> --credential <KEY>  ·  list <agent>  ·  remove <agent> <name>";
+
+function cmdApi(args: string[], io: CliIO): Promise<number> {
+  const sub = args[0];
+  if (sub === undefined) {
+    io.err(API_USAGE);
+    return Promise.resolve(1);
+  }
+  if (sub === "--help" || sub === "-h") {
+    io.out(COMMAND_HELP.api!);
+    return Promise.resolve(0);
+  }
+  const parsed = parseArgs(args.slice(1), ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP.api!);
+    return Promise.resolve(0);
+  }
+  if (sub === "add") return cmdApiAdd(parsed, io);
+  if (sub === "list") return cmdApiList(parsed, io);
+  if (sub === "remove") return cmdApiRemove(parsed, io);
+  io.err(`Unknown subcommand: api ${sub}`);
+  io.out(COMMAND_HELP.api!);
+  return Promise.resolve(1);
+}
+
+/**
+ * Refuse any option a verb here does not define, naming it — the same guard every
+ * `capabilities` verb carries, and for the same reason: `parseArgs` lets an unrecognized
+ * `--flag` CONSUME the following token, so a mistyped option silently eats a URL or a
+ * name. Here the stakes are higher than there. `--credental https://…` would leave the
+ * URL swallowed and `--credential` unset, so the usage line would send the operator
+ * hunting a missing URL they had typed. It runs BEFORE each verb's usage check for
+ * exactly that reason.
+ */
+function rejectUnknownApiOptions(
+  parsed: ParsedArgs,
+  allowed: readonly string[],
+  verb: string,
+  io: CliIO,
+): boolean {
+  const known = new Set([...allowed, "help", "h"]);
+  const unknown = Object.keys(parsed.flags).filter((f) => !known.has(f));
+  if (unknown.length === 0) return true;
+  io.err(`asterism api ${verb} does not take ${unknown.map((f) => `--${f}`).join(", ")}.`);
+  io.err(API_USAGE);
+  return false;
+}
+
+/**
+ * `asterism api add <agent> <name> <url> --credential <KEY>` — bind a credential to an
+ * endpoint, granting this agent a tool that calls it.
+ *
+ * Re-binding a name replaces it in place, the way `secrets add` rotates a key. The
+ * credential need not exist yet — binding before storing is a legitimate order — but the
+ * output says so, because the alternative is a call that fails much later for a reason
+ * the operator has forgotten they caused.
+ */
+function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownApiOptions(parsed, ["credential"], "add", io)) return Promise.resolve(1);
+  const name = parsed.positionals[0];
+  const endpointName = parsed.positionals[1];
+  const url = parsed.positionals[2];
+  const credential = parsed.flags.credential;
+  if (!name || !endpointName || !url) {
+    io.err("Usage: asterism api add <agent> <name> <https-url> --credential <KEY>");
+    return Promise.resolve(1);
+  }
+  if (parsed.positionals.length > 3) {
+    io.err(
+      `asterism api add takes one URL — got ${parsed.positionals.length - 2}. Quote a URL containing spaces or shell characters.`,
+    );
+    return Promise.resolve(1);
+  }
+  // `--credential` with no value parses to `true`, which must not become the string
+  // "true" and silently bind a credential nobody stored.
+  if (typeof credential !== "string" || credential.length === 0) {
+    io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    let endpoint;
+    try {
+      endpoint = store.bindEndpoint(agent.id, endpointName, url, credential);
+    } catch (err) {
+      io.err(err instanceof Error ? err.message : String(err));
+      return 1;
+    }
+    const target = new URL(endpoint.url).host;
+    // The grant, stated as a grant. `add` is a widening verb, and what it widens by is
+    // the ability to send a secret to another machine — so the confirmation names the
+    // credential, the destination, and the one guarantee that does not depend on the
+    // operator remembering anything: it always asks.
+    io.out(
+      `Bound ${CREDENTIAL_CAPABILITY_PREFIX}${endpoint.name} for ${agent.name} — it may now send credential ${endpoint.credentialKey} to ${target}.`,
+    );
+    io.out(
+      "No call happens without you: at notify and autonomous it pauses and asks; a propose agent only ever plans it.",
+    );
+    if (!store.credentials.getByKey(agent.id, endpoint.credentialKey)) {
+      io.out(
+        `Note: no credential '${endpoint.credentialKey}' is stored for ${agent.name} yet, so calls will fail until you add one: asterism secrets add ${agent.name} ${endpoint.credentialKey}`,
+      );
+    }
+    return 0;
+  });
+}
+
+/**
+ * Which of an agent's bindings name a credential that is not stored. Shared by `api list`
+ * and `capabilities show` so the two views cannot disagree about it inside one install —
+ * the specific way this surface has gone wrong most often.
+ */
+function missingCredentialNames(
+  store: AsterismStore,
+  agent: Agent,
+  endpoints: readonly BoundEndpoint[],
+): ReadonlySet<string> {
+  return new Set(
+    endpoints.filter((e) => !store.credentials.getByKey(agent.id, e.credentialKey)).map((e) => e.name),
+  );
+}
+
+/** `asterism api list <agent>` — the agent's bound endpoints, and what each one sends. */
+function cmdApiList(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownApiOptions(parsed, [], "list", io)) return Promise.resolve(1);
+  const name = parsed.positionals[0];
+  if (!name || parsed.positionals.length > 1) {
+    io.err("Usage: asterism api list <agent>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    const endpoints = store.endpoints.list(agent.id);
+    io.out(formatEndpointList(agent.name, endpoints, missingCredentialNames(store, agent, endpoints)));
+    return 0;
+  });
+}
+
+/**
+ * `asterism api remove <agent> <name>` — withdraw a binding, and with it the capability.
+ *
+ * Deliberately does not touch the credential: that is `secrets`' business, and one verb
+ * doing two jobs is how an operator loses a token they meant to keep.
+ */
+function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownApiOptions(parsed, [], "remove", io)) return Promise.resolve(1);
+  const name = parsed.positionals[0];
+  const endpointName = parsed.positionals[1];
+  if (!name || !endpointName || parsed.positionals.length > 2) {
+    io.err("Usage: asterism api remove <agent> <name>");
+    return Promise.resolve(1);
+  }
+  return withHomeStore(io, (store) => {
+    const agent = findAgentByName(store, name);
+    if (!agent) return noAgent(io, name);
+    // Accept the capability key as well as the bare name: `capabilities show` prints
+    // `api.issues`, and retyping it is the obvious thing to do.
+    const bare = endpointName.startsWith(CREDENTIAL_CAPABILITY_PREFIX)
+      ? endpointName.slice(CREDENTIAL_CAPABILITY_PREFIX.length)
+      : endpointName;
+    const endpoint = store.endpoints.getByName(agent.id, bare);
+    if (!endpoint) {
+      io.err(`${agent.name} has no bound endpoint '${bare}'.`);
+      io.err(`See what it has: asterism api list ${agent.name}`);
+      return 1;
+    }
+    store.removeEndpoint(agent.id, bare);
+    io.out(
+      `Removed ${CREDENTIAL_CAPABILITY_PREFIX}${bare} from ${agent.name} — it can no longer send ${endpoint.credentialKey} anywhere.`,
+    );
+    io.out(
+      `The credential itself is untouched and still stored for ${agent.name}.`,
+    );
+    return 0;
+  });
 }
 
 // --- secrets add -----------------------------------------------------------
@@ -1790,6 +2069,7 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
       },
       ...(io.confirm ? { confirm: io.confirm } : {}),
       ...(capabilities ? { capabilities } : {}),
+      ...(io.outboundHost ? { outboundHost: io.outboundHost } : {}),
       ...(recallMade.provider ? { recall: recallMade.provider } : {}),
     });
 
@@ -2149,6 +2429,7 @@ async function prepareExchange(
       },
       ...(io.confirm ? { confirm: io.confirm } : {}),
       ...(capabilities ? { capabilities } : {}),
+      ...(io.outboundHost ? { outboundHost: io.outboundHost } : {}),
       ...(recallMade.provider ? { recall: recallMade.provider } : {}),
     },
   };
@@ -2679,6 +2960,7 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
         if (line) io.err(line);
       },
       ...(capabilities ? { capabilities } : {}),
+      ...(io.outboundHost ? { outboundHost: io.outboundHost } : {}),
       ...(recallMade.provider ? { recall: recallMade.provider } : {}),
     });
 
@@ -3865,14 +4147,26 @@ function cmdConfigShow(io: CliIO): Promise<number> {
           continue;
         }
         const catalog = catalogKeys(io, agent.workspaceDir) ?? [];
+        // Bound endpoints are held but are neither declared nor part of the host
+        // catalog, so NEITHER branch's count includes them. Named on the line rather
+        // than left out: this is the summary view of what every agent can do, and the
+        // one class it silently omitted would be the one that sends a secret off the
+        // machine. Detail is `asterism api list <agent>`.
+        const bound = store.endpoints.list(agent.id);
+        const boundNote =
+          bound.length === 0
+            ? ""
+            : `  + ${bound.length} bound endpoint${bound.length === 1 ? "" : "s"}`;
         if (declared === undefined) {
           const held = store.resolveOwnedCapabilities(agent.id);
-          io.out(`  ${agent.name}  →  ${describeCatalogHolding(held, catalog)}  [not narrowed]`);
+          io.out(
+            `  ${agent.name}  →  ${describeCatalogHolding(held, catalog)}${boundNote}  [not narrowed]`,
+          );
           continue;
         }
         const held = declared.filter((k) => !reserved.has(k));
         const shown = held.length === 0 ? "none" : held.join(", ");
-        io.out(`  ${agent.name}  →  ${shown}  [narrowed to ${held.length}]`);
+        io.out(`  ${agent.name}  →  ${shown}${boundNote}  [narrowed to ${held.length}]`);
       }
     }
 
@@ -4567,6 +4861,10 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
       ...(recallMade.reason !== undefined ? { recallReason: recallMade.reason } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
+      // The same outbound host `run` uses, so a bound endpoint called over HTTP goes out
+      // under the identical no-redirect / timeout / bounded-read rules. A surface must
+      // never be the reason a credential travels differently.
+      ...(io.outboundHost ? { outboundHost: io.outboundHost } : {}),
       ...(port !== undefined ? { port } : {}),
       ...(host !== undefined ? { hostname: host } : {}),
     });
@@ -4722,6 +5020,9 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       // over the console is read and written through the identical workspace guards — the
       // surface cannot be the reason a byte lands somewhere the CLI would refuse.
       ...(io.fetchHost ? { fetchHost: io.fetchHost } : {}),
+      // And the same outbound host, for the same reason: a run resumed from the dashboard
+      // calls a bound endpoint exactly as the CLI would.
+      ...(io.outboundHost ? { outboundHost: io.outboundHost } : {}),
       // Wrap each opted-in agent's adapter in its cognition provider — the SAME
       // `wrapCognition` the CLI's run/serve/channel paths use — so a run resumed from
       // the dashboard is traced exactly like one started from the CLI (no surface drifts
@@ -4893,6 +5194,9 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
       ...(recallMade.provider ? { recall: recallMade.provider } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
+      // The same outbound host every other surface uses, so a bound endpoint called
+      // from a chat travels under the identical rules.
+      ...(io.outboundHost ? { outboundHost: io.outboundHost } : {}),
       allow,
       token,
     });
@@ -5003,6 +5307,9 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
       ...(recallMade.provider ? { recall: recallMade.provider } : {}),
       readFile: (p) => readFileSync(p, "utf8"),
       ...(capabilities ? { capabilities } : {}),
+      // The same outbound host every other surface uses, so a bound endpoint called
+      // from a chat travels under the identical rules.
+      ...(io.outboundHost ? { outboundHost: io.outboundHost } : {}),
       allow,
       token,
       // A fatal Gateway close (e.g. the MESSAGE CONTENT intent isn't enabled) is
@@ -5664,6 +5971,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdNew(rest, io);
     case "trust":
       return cmdTrust(rest, io);
+    case "api":
+      return cmdApi(rest, io);
     case "capabilities":
       return cmdCapabilities(rest, io);
     case "run":

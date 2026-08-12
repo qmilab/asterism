@@ -107,7 +107,7 @@ export interface RedactionResult {
 // runs AFTER the secret scrub) cannot re-match an already-inserted marker — hence
 // `[redacted:value]`, not `[redacted:secret]`. The assignment rule's `(?!\[redacted)`
 // lookahead complements this, refusing to re-scrub any marker in a value position.
-const SECRET_MARK = "[redacted:value]";
+export const SECRET_MARK = "[redacted:value]";
 const INJECTION_MARK = "[redacted:injection]";
 const EXFILTRATION_MARK = "[redacted:exfiltration]";
 // Structural markers for the bounded fact-object walk (redactObservation) — a part of an

@@ -51,6 +51,7 @@ import type {
   Capability,
   ExecuteRunOptions,
   ExecuteRunResult,
+  OutboundHost,
   RecallProvider,
   ResumeOutcome,
   RuntimeAdapter,
@@ -97,6 +98,15 @@ export interface ServerDeps {
    * triggered by `asterism run` or over HTTP.
    */
   capabilities?: readonly Capability[];
+  /**
+   * How this surface makes an outbound call for the agent's bound endpoints — its
+   * credential-bearing capabilities. Forwarded to `executeRun` untouched, so a bound
+   * endpoint called over HTTP goes out under the identical no-redirect / timeout /
+   * bounded-read rules `asterism run` applies. Absent ⇒ those tools are still exposed
+   * but report themselves unavailable, rather than silently vanishing (an absent tool
+   * is indistinguishable from a gated one).
+   */
+  outboundHost?: OutboundHost;
   /**
    * The recall provider for this agent's runs, when it has opted into one (resolved
    * once at startup, the same way `adapter` is). Absent ⇒ the kernel's built-in
@@ -182,6 +192,7 @@ function runOptions(deps: ServerDeps, adapter: RuntimeAdapter): ExecuteRunOption
     adapter,
     ...(deps.readFile ? { readFile: deps.readFile } : {}),
     ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+    ...(deps.outboundHost ? { outboundHost: deps.outboundHost } : {}),
     ...(deps.recall ? { recall: deps.recall } : {}),
   };
 }

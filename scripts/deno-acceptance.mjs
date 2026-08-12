@@ -104,6 +104,40 @@ async function part1CliUnderDeno() {
       "unset restores the catalog",
       asterism(work, ["capabilities", "show", "personal"]).includes("[not narrowed]"),
     );
+
+    // The first CREDENTIAL-BEARING capability class (#123 PR 2) on the real runtime.
+    // Three claims that only a real install can carry: the binding grants exposure with
+    // no separate declaration, the closed default set is unmoved by it, and the one verb
+    // that could quietly undo it refuses to.
+    asterism(work, ["secrets", "add", "personal", "API_TOKEN"], "tok_deno_endpoint");
+    asterism(work, ["api", "add", "personal", "issues", "https://api.example.test/i?state=open", "--credential", "API_TOKEN"]);
+    const bound = asterism(work, ["capabilities", "show", "personal"]);
+    check(
+      "binding an endpoint grants it, with no separate declaration",
+      bound.includes("api.issues") && bound.includes("(sends API_TOKEN)"),
+    );
+    check(
+      "binding does not move the host-catalog count",
+      bound.includes("holds all 9 in the catalog  [not narrowed]"),
+    );
+    // The exposure has exactly one writer: the `capabilities` verbs cannot reach it, and
+    // `remove` in particular must not report a revoke it did not perform.
+    let refusedHandTyping = false;
+    try {
+      asterism(work, ["capabilities", "remove", "personal", "api.issues"]);
+    } catch {
+      refusedHandTyping = true;
+    }
+    check("a hand-typed api.* key is refused by `capabilities remove`", refusedHandTyping);
+    check(
+      "…and the binding survived that refusal",
+      asterism(work, ["api", "list", "personal"]).includes("api.issues"),
+    );
+    asterism(work, ["api", "remove", "personal", "issues"]);
+    check(
+      "api remove withdraws it",
+      asterism(work, ["api", "list", "personal"]).includes("no bound endpoints"),
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

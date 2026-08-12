@@ -75,6 +75,7 @@ export {
   DEFAULT_TRACE_CONTENT_MAX_BYTES,
   DEFAULT_MAX_OBSERVATION_FACTS,
   SECRET_VALUE_RULES,
+  SECRET_MARK,
   redactForTrace,
   redactObservation,
 } from "./redaction.js";
@@ -159,9 +160,31 @@ export {
 export {
   DEFAULT_CAPABILITY_KEYS,
   RESERVED_CAPABILITY_KEYS,
+  CREDENTIAL_CAPABILITY_PREFIX,
+  isCredentialBearingKey,
   resolveOwnedCapabilityKeys,
   validateCapabilityKeys,
 } from "./capabilities.js";
+
+// Bound outbound endpoints — the FIRST credential-bearing capability class. The kernel
+// closes one of the agent's own secrets into a tool's `execute`, gates the call as
+// destructive at every trust level, screens what comes back, and discards the value; the
+// adapter only ever sees a name, a schema and a function. The call itself is a host
+// obligation (`core` speaks no HTTP), behind `OutboundHost`.
+export {
+  DEFAULT_ENDPOINT_RESPONSE_MAX_BYTES,
+  OUTBOUND_READ_MAX_BYTES,
+  OUTBOUND_TIMEOUT_MS,
+  MAX_BOUND_ENDPOINTS,
+  endpointCapabilities,
+  endpointCapabilityKey,
+  endpointToolName,
+  endpointLogTarget,
+  screenEndpointResponse,
+  validateEndpointName,
+  validateEndpointUrl,
+} from "./endpoints.js";
+export type { OutboundHost, OutboundRequest, OutboundResponse } from "./endpoints.js";
 
 // Run framing — composes soul / role / scoped skills / accepted memories into the
 // RunRequest's system prompt.
@@ -286,6 +309,8 @@ export {
 export type { WorldFactQuery } from "./repositories/world-facts.js";
 export { CredentialRepository } from "./repositories/credentials.js";
 export type { CreateCredentialInput } from "./repositories/credentials.js";
+export { EndpointRepository } from "./repositories/endpoints.js";
+export type { CreateEndpointInput } from "./repositories/endpoints.js";
 export { ConnectionRepository } from "./repositories/connections.js";
 export type { CreateConnectionInput } from "./repositories/connections.js";
 export { ExchangeRepository } from "./repositories/exchanges.js";

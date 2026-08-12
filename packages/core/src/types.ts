@@ -206,6 +206,8 @@ export const EVENT_TYPES = [
   "credential.rotated",
   "credential.removed",
   "secret.read",
+  "endpoint.bound",
+  "endpoint.removed",
   "action.executed",
   "action.succeeded",
   "action.withheld",
@@ -314,6 +316,36 @@ export interface Credential {
   key: string;
   /** Reference into the local secret store — never the plaintext value. */
   valueRef: string;
+  createdAt: string;
+}
+
+/**
+ * A bound outbound endpoint — one of the agent's CREDENTIAL-BEARING capabilities, and
+ * the product's first tool that carries a secret.
+ *
+ * The operator pairs one of this agent's credentials with one complete URL; the kernel
+ * builds a zero-argument tool that calls it with the credential attached, gates the
+ * call as destructive at every trust level, redacts what comes back, and discards the
+ * value. The binding IS the grant: a row here unions `api.<name>` into the agent's
+ * resolved capability set, so no separate declaration exists or is accepted.
+ *
+ * References only, like {@link Credential}: the row names the credential by key and
+ * never holds its value — nor even its `valueRef`, which the credentials table already
+ * owns.
+ */
+export interface BoundEndpoint {
+  id: string;
+  agentId: string;
+  /**
+   * The operator's handle for this binding. A strict lowercase identifier, because it
+   * becomes both a capability key (`api.<name>`) and a tool name the model sees
+   * (`call_<name>`).
+   */
+  name: string;
+  /** The complete `https` URL, verbatim as declared — query string included. */
+  url: string;
+  /** Which of the agent's own credentials the call carries, by key. */
+  credentialKey: string;
   createdAt: string;
 }
 

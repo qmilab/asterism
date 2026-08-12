@@ -63,6 +63,46 @@ function deps(over: Partial<ServerDeps> = {}): ServerDeps {
   };
 }
 
+
+/**
+ * A bound outbound endpoint for `agent`, plus a host that records what was sent.
+ *
+ * The claim under test is narrow and easy to leave unproven: this surface must FORWARD
+ * the host it was handed to the kernel. A surface that quietly drops it does not throw —
+ * the capability is still exposed and reports itself unavailable, which reads exactly
+ * like a working refusal. So the assertion is that the host was REACHED.
+ */
+function boundEndpoint(agent: Agent): OutboundHost & { calls: OutboundRequest[] } {
+  const calls: OutboundRequest[] = [];
+  store.addCredential(agent.id, "TOK", "tok-value-12345678");
+  store.bindEndpoint(agent.id, "issues", "https://api.example.test/issues", "TOK");
+  return {
+    calls,
+    call(request) {
+      calls.push(request);
+      return Promise.resolve({ ok: true as const, status: 200, body: "{}" });
+    },
+  };
+}
+
+/** A substrate stand-in that calls the bound endpoint's tool, if it was given one. */
+function endpointCallingAdapter(seen: { tools: string[] }): RuntimeAdapter {
+  return {
+    run(request) {
+      seen.tools = request.tools.list().map((t) => t.name);
+      const tool = request.tools.list().find((t) => t.name === "call_issues");
+      async function* noEvents() {}
+      return {
+        events: noEvents(),
+        output: (async (): Promise<RunOutput> => {
+          if (tool) await tool.execute({ args: {} });
+          return { status: "done", text: "ok" };
+        })(),
+      };
+    },
+  };
+}
+
 const BASE = "http://127.0.0.1:4831";
 
 /** The valid `Authorization` header for the test token. */
@@ -772,4 +812,30 @@ test("confirm over SSE frames a refusal as an error event, not a result", async 
   expect(body).toContain("event: error");
   expect(body).toContain("No such run");
   expect(body).not.toContain("event: result");
+});
+
+test("the outbound host is forwarded to the kernel, so an HTTP run can call a bound endpoint", async () => {
+  const host = boundEndpoint(personal);
+  const seen = { tools: [] as string[] };
+  const d = deps({ adapter: endpointCallingAdapter(seen), outboundHost: host });
+
+  // A credential-bearing call is destructive at every trust level, and this surface has
+  // no synchronous human — so the run parks, exactly as it should.
+  const started = await handleRequest(d, post("/agents/personal/runs", { input: "check the issues" }));
+  expect(started.status).toBe(201);
+  const body = (await started.json()) as { status: string; run: { id: string } };
+  expect(body.status).toBe("awaiting_confirmation");
+  // Exposure alone proves nothing about forwarding — the capability is built whether or
+  // not a host was supplied — so it is recorded here and the real claim is below.
+  expect(seen.tools).toContain("call_issues");
+  expect(host.calls).toHaveLength(0);
+
+  const confirmed = await handleRequest(
+    d,
+    post(`/agents/personal/runs/${body.run.id}/confirm`, {}),
+  );
+
+  expect(confirmed.status).toBe(200);
+  expect(host.calls).toHaveLength(1);
+  expect(host.calls[0]?.headers.Authorization).toBe("Bearer tok-value-12345678");
 });

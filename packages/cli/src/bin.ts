@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { runCli } from "./cli.js";
 import type { CliIO, ReviewDecision, TransitionDecision } from "./cli.js";
 import { artifactFetchHost, workspaceCapabilities } from "./capabilities.js";
+import { outboundHost } from "./outbound.js";
 import { createNodeTerminal } from "./dashboard/terminal-node.js";
 import { ask, readPipedStdin } from "./runtime.js";
 import type { Action } from "@qmilab/asterism-core";
@@ -39,6 +40,12 @@ const io: CliIO = {
   // tools use, applied to the callee's workspace on the read and the caller's on the
   // write. The kernel decides whether a byte may cross; this only moves it.
   fetchHost: artifactFetchHost(),
+  // The HTTP side of a bound endpoint — the one place this binary speaks to another
+  // machine on an agent's behalf, carrying that agent's credential. The kernel decides
+  // whether the call may happen at all and screens what comes back; this only moves the
+  // bytes, and it must not follow redirects (a 3xx would forward the credential to an
+  // origin the operator never named).
+  outboundHost: outboundHost(),
   out: (text) => {
     process.stdout.write(`${text}\n`);
   },

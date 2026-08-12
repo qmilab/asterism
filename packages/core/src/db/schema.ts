@@ -387,6 +387,56 @@ CREATE TABLE IF NOT EXISTS agent_settings (
   updated_at           TEXT NOT NULL
 );
 
+-- Bound outbound endpoints -- the agent's CREDENTIAL-BEARING capabilities, one row per
+-- binding, agent-scoped like everything else.
+--
+-- A binding pairs one of THIS agent's credentials with one operator-declared URL. It is
+-- the product's first tool that carries a secret, and three properties are load-bearing:
+--
+--   1. THE BINDING IS THE GRANT. A row here unions api.<name> into the agent's resolved
+--      capability set (resolveOwnedCapabilityKeys), so no separate declaration is needed
+--      and none is accepted -- 'capabilities set' refuses a hand-typed api.* key. The
+--      kernel's DEFAULT_CAPABILITY_KEYS is untouched and stays closed: no row, no
+--      capability, so the class can never be inherited by an agent that never asked.
+--   2. THE ROW HOLDS NO SECRET. credential_key names one of the agent's own credentials;
+--      the VALUE is read (and audited as secret.read) only inside the tool's closure, at
+--      the moment of a gated call, and discarded. Not even the valueRef lives here -- the
+--      credentials table already owns that indirection.
+--   3. THE AGENT NEVER CHOOSES THE URL. url is complete and operator-declared, query
+--      string included; the tool takes no arguments at all, so no agent-authored byte
+--      leaves the machine. Userinfo (user:pass@) is refused at the write boundary so the
+--      URL cannot smuggle a credential past the credentials table.
+--
+-- Naming: the entity is an "endpoint" and the CLI noun is 'api', deliberately -- "endpoint"
+-- already means the local HTTP server (asterism serve) throughout the README, CLI help and
+-- docs/http.md, and one word with two meanings in one command list is worse than a mapping
+-- stated once here.
+--
+-- A new TABLE, so it rides this CREATE TABLE IF NOT EXISTS on both a fresh open and an
+-- existing database, and needs no additive ALTER in store.migrate() (the same free ride
+-- install_settings took). UNIQUE(agent_id, name) makes a name the operator's stable handle
+-- and keeps two bindings from resolving to one capability key.
+CREATE TABLE IF NOT EXISTS agent_endpoints (
+  id             TEXT PRIMARY KEY,
+  agent_id       TEXT NOT NULL REFERENCES agents(id),
+  -- The operator's handle. Constrained to a strict lowercase identifier at the write
+  -- boundary because it becomes BOTH a capability key (api.<name>) and a tool name the
+  -- model sees (call_<name>), so it cannot be free text.
+  name           TEXT NOT NULL,
+  -- The complete https URL, verbatim as the operator declared it. Config, not a value:
+  -- displayed as typed, but the event log records only its origin and path -- never the
+  -- query string, which is the one part that could carry secret material.
+  url            TEXT NOT NULL,
+  -- WHICH of this agent's credentials the call carries, by key. A binding may outlive its
+  -- credential (there is no 'secrets rm' verb today, but removeCredential exists), and
+  -- that state fails LOUDLY at call time rather than removing the tool: an absent tool is
+  -- observationally identical to a gated one, which is how a demo passes while proving
+  -- nothing.
+  credential_key TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  UNIQUE (agent_id, name)
+);
+
 -- Install-wide kernel settings: a SINGLE row (enforced by the CHECK) holding defaults
 -- that sit BETWEEN the kernel's built-in constant and a per-agent override. This is the
 -- install's own database, so an install-scoped row is the natural home — and resolving it

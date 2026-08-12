@@ -61,6 +61,33 @@ export interface Capability {
   key: string;
   effect: EffectClass;
   tool: ScopedTool;
+  /**
+   * Static, KERNEL-AUTHORED facts about what this capability does, merged into the
+   * arguments the gate reasons about and shows a human. Optional; absent for every
+   * host capability, where the model's own arguments already describe the action (the
+   * path a delete targets, the command a shell runs).
+   *
+   * It exists for the case a host capability never hits: a kernel-built tool whose
+   * invocation carries NO arguments, because the operator — not the agent — decided
+   * everything about it. A bound outbound endpoint takes no arguments at all, so
+   * without this the confirmation for the product's most consequential action would
+   * read `Confirm destructive action 'api.issues' {}` and name neither the endpoint
+   * nor the credential it carries.
+   *
+   * Two properties keep this from being a way to soften the gate, and both are
+   * directional on purpose:
+   *
+   *   - It MERGES, and the kernel's facts win. The model's arguments are preserved
+   *     (so nothing is hidden from {@link classifyEffect}, which only ever escalates)
+   *     and cannot overwrite a kernel-authored field, so a model cannot rewrite the
+   *     credential name a human is about to approve.
+   *   - It never touches `effect`. Classification still starts from the declared base
+   *     effect and can only rise.
+   *
+   * It must therefore carry REFERENCES, never values — it reaches a human's prompt and
+   * an audit fingerprint. A credential's KEY belongs here; its value never does.
+   */
+  gateContext?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -482,6 +509,31 @@ function alreadyPerformedResult(capability: string): ToolResult {
 }
 
 /**
+ * What the gate reasons about and a human is shown: the model's own arguments, with a
+ * capability's kernel-authored {@link Capability.gateContext} merged OVER them.
+ *
+ * With no `gateContext` (every host capability) this returns the invocation's arguments
+ * unchanged, so nothing about an existing capability's gate decision, prompt, or audit
+ * fingerprint moves.
+ *
+ * The merge direction is the safety property: the model's arguments survive, so a
+ * command string can still escalate the effect, and the kernel's facts win, so a model
+ * cannot rewrite the endpoint or credential name a human is about to approve. A
+ * non-object argument (a bare string, a number) is kept under `args` rather than being
+ * spread, so it is still visible to a reader and still reaches the classifier.
+ */
+function gateArgs(
+  args: unknown,
+  gateContext: Readonly<Record<string, unknown>> | undefined,
+): unknown {
+  if (gateContext === undefined) return args;
+  if (args !== null && typeof args === "object" && !Array.isArray(args)) {
+    return { ...(args as Record<string, unknown>), ...gateContext };
+  }
+  return { ...gateContext, ...(args !== undefined ? { args } : {}) };
+}
+
+/**
  * Wrap one capability's `execute` so the gate runs on every invocation. The
  * returned tool is structurally a {@link ScopedTool}; the adapter cannot tell it
  * from an ungated one, which is the point — the policy is invisible and
@@ -498,6 +550,11 @@ function gateTool(
   // object the caller could later mutate to soften `effect` or rename `key`.
   const key = capability.key;
   const effect = capability.effect;
+  // Snapshotted with the rest of the policy-bearing fields, and frozen: what a human is
+  // shown at the gate must come from what was scoped for this run, not from an object a
+  // caller could mutate after resolution.
+  const gateContext =
+    capability.gateContext !== undefined ? Object.freeze({ ...capability.gateContext }) : undefined;
   return {
     name: tool.name,
     description: tool.description,
@@ -506,10 +563,11 @@ function gateTool(
       invocation: ToolInvocation,
       signal?: AbortSignal,
     ): Promise<ToolResult> => {
+      const args = gateArgs(invocation.args, gateContext);
       const action: Action = {
         capability: key,
         effect,
-        ...(invocation.args !== undefined ? { args: invocation.args } : {}),
+        ...(args !== undefined ? { args } : {}),
       };
       const decision = decideGate(profile, action);
 

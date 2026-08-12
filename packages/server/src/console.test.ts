@@ -104,6 +104,46 @@ function deps(over: Partial<ConsoleDeps> = {}): ConsoleDeps {
   };
 }
 
+
+/**
+ * A bound outbound endpoint for `agent`, plus a host that records what was sent.
+ *
+ * The claim under test is narrow and easy to leave unproven: this surface must FORWARD
+ * the host it was handed to the kernel. A surface that quietly drops it does not throw —
+ * the capability is still exposed and reports itself unavailable, which reads exactly
+ * like a working refusal. So the assertion is that the host was REACHED.
+ */
+function boundEndpoint(agent: Agent): OutboundHost & { calls: OutboundRequest[] } {
+  const calls: OutboundRequest[] = [];
+  store.addCredential(agent.id, "TOK", "tok-value-12345678");
+  store.bindEndpoint(agent.id, "issues", "https://api.example.test/issues", "TOK");
+  return {
+    calls,
+    call(request) {
+      calls.push(request);
+      return Promise.resolve({ ok: true as const, status: 200, body: "{}" });
+    },
+  };
+}
+
+/** A substrate stand-in that calls the bound endpoint's tool, if it was given one. */
+function endpointCallingAdapter(seen: { tools: string[] }): RuntimeAdapter {
+  return {
+    run(request) {
+      seen.tools = request.tools.list().map((t) => t.name);
+      const tool = request.tools.list().find((t) => t.name === "call_issues");
+      async function* noEvents() {}
+      return {
+        events: noEvents(),
+        output: (async (): Promise<RunOutput> => {
+          if (tool) await tool.execute({ args: {} });
+          return { status: "done", text: "ok" };
+        })(),
+      };
+    },
+  };
+}
+
 const BASE = "http://127.0.0.1:4832";
 
 function auth(): Record<string, string> {
@@ -1172,4 +1212,28 @@ test("a caller-supplied value that must match a kernel record is never normalize
   expect(fetched.status).toBe(200);
   // The path the host was handed is the RECORDED one, byte for byte.
   expect(log.materialized).toEqual([oddPath]);
+});
+
+test("the outbound host is forwarded to the kernel, so a console RESUME can call a bound endpoint", async () => {
+  const host = boundEndpoint(personal);
+  const seen = { tools: [] as string[] };
+  // Park the run on the endpoint's own gate: no `confirm`, so it pauses.
+  const parked = await executeRun(store, personal, "check the issues", {
+    adapter: endpointCallingAdapter(seen),
+    outboundHost: host,
+  });
+  expect(parked.status).toBe("awaiting_confirmation");
+  expect(host.calls).toHaveLength(0);
+
+  const res = await handleConsoleRequest(
+    deps({
+      makeAdapter: () => ({ adapter: endpointCallingAdapter(seen) }),
+      outboundHost: host,
+    }),
+    send("POST", `/agents/personal/runs/${parked.run.id}/confirm`),
+  );
+
+  expect(res.status).toBe(200);
+  expect(host.calls).toHaveLength(1);
+  expect(host.calls[0]?.headers.Authorization).toBe("Bearer tok-value-12345678");
 });
