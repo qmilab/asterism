@@ -301,7 +301,7 @@ test("capabilities set and remove refuse a hand-typed api.* key, naming the verb
     expect(await runCli(["capabilities", verb, "work", "api.issues"], h.io)).toBe(1);
     const err = h.err.join("\n");
     expect(err).toContain("bound endpoints, which carry a credential");
-    expect(err).toContain("asterism api remove work issues");
+    expect(err).toContain("Withdraw it with: asterism api remove work issues");
   }
 
   // And the binding is untouched — a refusal that half-applied would be worse than either
@@ -309,6 +309,69 @@ test("capabilities set and remove refuse a hand-typed api.* key, naming the verb
   h.out.length = 0;
   await runCli(["api", "list", "work"], h.io);
   expect(h.out.join("\n")).toContain("api.issues");
+});
+
+test("a no-catalog host can still narrow an agent that has a bound endpoint", async () => {
+  // `io.capabilities` is optional and its absence is a supported embedding. Without a
+  // catalog, `capabilities remove` materializes the agent's FIRST declaration from what the
+  // kernel resolves it to hold — which now includes bound endpoints, and those cannot be
+  // declared. The operator asked to narrow and got a validation error naming a key they
+  // never typed. [Codex R3.]
+  const h = harness();
+  delete h.io.capabilities;
+  await runCli(["init"], h.io);
+  await runCli(["new", "work", "--trust", "autonomous"], h.io);
+  await runCli(["secrets", "add", "work", "TOK", "v"], h.io);
+  await runCli(["api", "add", "work", "issues", URL_A, "--credential", "TOK"], h.io);
+  h.out.length = 0;
+  h.err.length = 0;
+
+  expect(await runCli(["capabilities", "remove", "work", "fs.read"], h.io)).toBe(0);
+  expect(h.err.join("\n")).not.toMatch(/invalid capability declaration/);
+  expect(h.out.join("\n")).toContain("Removed fs.read from work");
+
+  // The declaration that landed holds the other eight host keys and NOT the endpoint…
+  h.out.length = 0;
+  await runCli(["capabilities", "show", "work"], h.io);
+  const shown = h.out.join("\n");
+  expect(shown).toContain("[narrowed to 8]");
+  // …and the binding still grants its capability, because a binding is not a declaration.
+  expect(shown).toContain("✓ api.issues");
+});
+
+test("the offers list never names a key the next command refuses", async () => {
+  // PR 1's first smoke finding, by a new route: bound endpoints are in the agent's resolved
+  // set, so an unknown-key refusal listed `api.issues` among what the install "offers" —
+  // while `capabilities set work api.issues` refuses it by name. [Codex R3.]
+  const h = await install();
+  await runCli(["api", "add", "work", "issues", URL_A, "--credential", "GITHUB_TOKEN"], h.io);
+  h.err.length = 0;
+
+  expect(await runCli(["capabilities", "set", "work", "fs.reed"], h.io)).toBe(1);
+  const offers = h.err.find((l) => l.startsWith("This install offers:"));
+  expect(offers).toBeDefined();
+  expect(offers).not.toContain("api.issues");
+  expect(offers).toContain("fs.read");
+});
+
+test("every command the api.* refusal advertises actually runs", async () => {
+  // `api remove` takes exactly ONE name, so a refusal naming several in one invocation
+  // advertises a command that exits 1 — the fourth time in two PRs that a sentence naming a
+  // command named one the product rejects. [Codex R3.]
+  const h = await install();
+  await runCli(["api", "add", "work", "issues", URL_A, "--credential", "GITHUB_TOKEN"], h.io);
+  await runCli(["api", "add", "work", "orders", "https://o.test/o", "--credential", "GITHUB_TOKEN"], h.io);
+  h.err.length = 0;
+
+  expect(await runCli(["capabilities", "remove", "work", "api.issues", "api.orders"], h.io)).toBe(1);
+  const advised = h.err
+    .filter((l) => l.startsWith("Withdraw it with: asterism "))
+    .map((l) => l.replace("Withdraw it with: asterism ", "").split(" "));
+  expect(advised).toHaveLength(2);
+  for (const argv of advised) {
+    h.err.length = 0;
+    expect({ argv, code: await runCli(argv, h.io) }).toEqual({ argv, code: 0 });
+  }
 });
 
 test("`capabilities set --none` leaves a bound endpoint, and says so", async () => {

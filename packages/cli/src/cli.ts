@@ -1171,7 +1171,18 @@ function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
     // "Does the agent hold this key?" is the KERNEL's resolution, which is what
     // `capabilities show` reports. Answering it from anything narrower would have
     // `remove` say "does not hold" about a key `show` marks held, in the same install.
-    const held = [...store.resolveOwnedCapabilities(agent.id)].filter((k) => !reserved.has(k));
+    // DECLARABLE keys only: the resolution now also carries the agent's bound endpoints,
+    // and those are granted by a binding rather than by a declaration — `setAgentCapabilities`
+    // refuses one outright. Without excluding them here, a host with no catalog seam
+    // (`io.capabilities` absent, an explicitly supported embedding) materializes its first
+    // declaration from this set and hands the kernel an `api.*` key: the operator asked to
+    // narrow and got a validation error naming a key they never typed. [Codex review R3.]
+    //
+    // Safe for the two questions below as well as for the declaration: `keys` cannot contain
+    // a credential-bearing key, because `rejectCredentialKeys` refused above.
+    const held = [...store.resolveOwnedCapabilities(agent.id)].filter(
+      (k) => !reserved.has(k) && !isCredentialBearingKey(k),
+    );
     // "What does the rewritten declaration keep?" has two cases:
     //
     //   DECLARED — the declaration minus the removed keys, verbatim. A declared key this
@@ -1281,7 +1292,14 @@ function checkKnownKeys(keys: readonly string[], known: readonly string[], io: C
   // The reserved keys are in the agent's RESOLVED set, so they arrive in `known` — but
   // the branch above refuses them, and a list that offers a key the next command rejects
   // is worse than no list. They are named in their own message, not this one.
-  const knownSet = new Set([...known].filter((k) => !reserved.has(k)));
+  //
+  // Bound endpoints are in that resolved set too, now, and for exactly the same reason
+  // must not appear here: `rejectCredentialKeys` refuses them by name. Without this the
+  // list read `This install offers: api.issues, fs.append, …` — which is PR 1's very
+  // first smoke finding, reproduced by a new route one slice later. [Codex review R3.]
+  const knownSet = new Set(
+    [...known].filter((k) => !reserved.has(k) && !isCredentialBearingKey(k)),
+  );
   const unknown = keys.filter((k) => !knownSet.has(k));
   if (unknown.length === 0) return true;
   io.err(`No such capability: ${unknown.join(", ")}`);
@@ -1307,9 +1325,13 @@ function rejectCredentialKeys(keys: readonly string[], agentName: string, io: Cl
     `${naming.join(", ")}: bound endpoints, which carry a credential — they are granted and withdrawn by their own verb, not declared here.`,
   );
   io.err(`See them with: asterism api list ${agentName}`);
-  io.err(
-    `Withdraw one with: asterism api remove ${agentName} ${naming.map((k) => k.slice(CREDENTIAL_CAPABILITY_PREFIX.length)).join(" ")}`,
-  );
+  // ONE command per name: `api remove` takes exactly one, so joining several names into a
+  // single invocation advertises a command that exits 1. [Codex review R3.]
+  for (const key of naming) {
+    io.err(
+      `Withdraw it with: asterism api remove ${agentName} ${key.slice(CREDENTIAL_CAPABILITY_PREFIX.length)}`,
+    );
+  }
   return false;
 }
 
