@@ -57,12 +57,7 @@ import type { ArtifactRef } from "./artifact-manifest.js";
 import { artifactReference } from "./artifact-manifest.js";
 import type { ReflectionRunTally } from "./reflection.js";
 import { EventRepository } from "./repositories/events.js";
-import {
-  RESERVED_SECRET_PREFIX,
-  SecretStore,
-  isReservedSecretKey,
-  secretValueRef,
-} from "./secrets.js";
+import { RESERVED_SECRET_PREFIX, SecretStore, isReservedSecretKey } from "./secrets.js";
 import { MemoryFirewallError, assertMemorySafe } from "./firewall.js";
 import { worldFactFramingText } from "./types.js";
 import { resolveOwnedCapabilityKeys, validateCapabilityKeys } from "./capabilities.js";
@@ -2168,13 +2163,30 @@ export class AsterismStore {
   }
 
   /**
-   * Read a credential value for an agent, recording the disclosure as a
+   * Read a CREDENTIAL's value for an agent, recording the disclosure as a
    * `secret.read` event — references only: the key and its `valueRef`, NEVER the
    * value. Reading a value is destructive under the trust model, so every
-   * disclosure goes on the record. Returns undefined and logs nothing when no
-   * secret exists under the key: reading nothing discloses nothing. This is the
-   * audited counterpart to the raw {@link SecretStore.read} primitive — surfaces
-   * and credential-bearing tool closures resolve values through here.
+   * disclosure goes on the record. Returns undefined and logs nothing when the
+   * agent has no credential under that key: reading nothing discloses nothing.
+   * This is the audited counterpart to the raw {@link SecretStore.read}
+   * primitive — surfaces and credential-bearing tool closures resolve values
+   * through here.
+   *
+   * Resolved through the CREDENTIAL ROW, not by secret key, and the distinction is
+   * load-bearing in both directions:
+   *
+   *   - The row's `valueRef` is what {@link removeCredential} already treats as
+   *     authoritative ("identified by the row's stored `valueRef`, not by key"), so
+   *     reading by key would let a credential created with a non-default ref be
+   *     removed correctly but READ wrongly — two halves of one contract disagreeing.
+   *   - "Does the agent have this credential?" then has exactly ONE answer. `api
+   *     list` asks `credentials.getByKey`; before this, a bound endpoint's call asked
+   *     the secret store, so a standalone secret sharing the key would be SENT by a
+   *     call the listing reported as unavailable. Two views of one fact that disagree
+   *     inside one install is the defect this surface has produced most often.
+   *
+   * A standalone secret with no credential row is therefore never disclosed here.
+   * [Codex review R4 P2.]
    */
   readSecret(agentId: string, key: string, runId?: string): string | undefined {
     // The kernel's own internal secrets are not disclosable through here, ever — the
@@ -2187,14 +2199,13 @@ export class AsterismStore {
       throw new Error(`the secret key "${key}" is reserved for internal use and cannot be read out`);
     }
     return this.driver.transaction(() => {
-      const value = this.secrets.readByKey(agentId, key);
+      const credential = this.credentials.getByKey(agentId, key);
+      if (!credential) return undefined;
+      const value = this.secrets.read(agentId, credential.valueRef);
       if (value !== undefined) {
-        this.emit(
-          agentId,
-          "secret.read",
-          { key, valueRef: secretValueRef(agentId, key) },
-          runId,
-        );
+        // The ROW's ref, so the audit names the secret actually disclosed rather than
+        // the one a key-derived ref would have implied.
+        this.emit(agentId, "secret.read", { key, valueRef: credential.valueRef }, runId);
       }
       return value;
     });

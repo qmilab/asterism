@@ -220,17 +220,26 @@ export function validateEndpointUrl(url: string): string {
 }
 
 /**
- * What an event may record about a URL: its origin and path, never its query string.
+ * What an event may record about a URL: its ORIGIN, and nothing else.
  *
- * The event log stores references, never values — and a query string is the one part of
- * an operator-declared URL that can carry secret material in a shape nothing can detect
- * in general. The operator still sees the whole URL wherever they configured it and at
- * the confirmation prompt; only the durable log is narrowed.
+ * The event log stores references, never values. This first dropped only the query
+ * string, on the reasoning that a query string is "the one part of a URL that can carry
+ * secret material" — which is simply false. A webhook URL puts its secret in the PATH
+ * (`https://hooks.slack.com/services/T…/B…/XXXXXXXX`), and a path segment is no more
+ * inherently a reference than a query parameter is. Nothing can tell a secret path
+ * segment from an ordinary one by shape, so the honest boundary is the origin, which is
+ * the part of a URL that names a *party* rather than a *thing*. [Codex review R4 P1.]
+ *
+ * Nothing is lost for a reader: every event carrying this also carries the binding's
+ * `endpoint` name and its `capability` key, which identify precisely WHICH binding
+ * changed. The origin adds the only thing the name does not — who it talks to.
+ *
+ * The operator still sees the whole URL wherever they configured it, in `api list`, and
+ * at the confirmation prompt. Only the durable log is narrowed.
  */
 export function endpointLogTarget(url: string): string {
   try {
-    const parsed = new URL(url);
-    return `${parsed.origin}${parsed.pathname}`;
+    return new URL(url).origin;
   } catch {
     // Unreachable through the validated write path; a stored value that will not parse
     // is reported as such rather than echoed into the log.

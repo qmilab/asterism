@@ -488,20 +488,28 @@ test("a call the human refuses reads no secret at all", async () => {
   expect(eventsOfType(personal, "action.awaiting_confirmation")).toHaveLength(1);
 });
 
-test("the event log records a bound endpoint's origin and path, never its query string", () => {
+test("the event log records a bound endpoint's ORIGIN only — not its path or query", () => {
+  // A webhook URL carries its secret in the PATH, and nothing can tell a secret path
+  // segment from an ordinary one by shape. The origin names a party rather than a thing,
+  // which is the only part of a URL that is inherently a reference. [Codex R4 P1.]
   store.addCredential(personal.id, "GITHUB_TOKEN", TOKEN);
   store.bindEndpoint(
     personal.id,
-    "issues",
-    "https://api.example.test/issues?token=leaky-looking-thing",
+    "hook",
+    "https://hooks.example.test/services/T00/B00/leaky-looking-thing?q=also-leaky",
     "GITHUB_TOKEN",
   );
 
   const bound = eventsOfType(personal, "endpoint.bound");
   expect(bound).toHaveLength(1);
-  expect((bound[0]?.payload as Record<string, unknown>).target).toBe(
-    "https://api.example.test/issues",
-  );
+  expect((bound[0]?.payload as Record<string, unknown>).target).toBe("https://hooks.example.test");
+  expect(eventDump(personal)).not.toContain("leaky-looking-thing");
+  expect(eventDump(personal)).not.toContain("also-leaky");
+  // The binding is still identifiable in the log — by NAME, which is what a reader needs.
+  expect((bound[0]?.payload as Record<string, unknown>).endpoint).toBe("hook");
+
+  // …and removal records the same narrowed target.
+  store.removeEndpoint(personal.id, "hook");
   expect(eventDump(personal)).not.toContain("leaky-looking-thing");
 });
 
@@ -808,6 +816,48 @@ test("a reserved kernel secret cannot be READ OUT even from a hand-written bindi
   expect(eventDump(personal)).not.toContain(internal);
 });
 
+test("a bound endpoint resolves its value through the CREDENTIAL ROW, not by secret key", async () => {
+  // The row's `valueRef` is what `removeCredential` already treats as authoritative
+  // ("identified by the row's stored valueRef, not by key"), so reading by key would let a
+  // credential created with a non-default ref be removed correctly but READ wrongly.
+  // Constructed with two keys: the value lives at OTHER's ref, and the credential row named
+  // TOK points there. Reading by key would find nothing under TOK. [Codex R4 P2.]
+  const ref = store.secrets.issue(personal.id, "OTHER", "the-real-value-123456");
+  store.credentials.create(personal.id, { key: "TOK", valueRef: ref.valueRef });
+  store.bindEndpoint(personal.id, "issues", "https://api.example.test/i", "TOK");
+  const host = recordingHost();
+
+  const { results } = await callTool(personal, endpointToolName("issues"), host);
+
+  expect(results[0]?.isError).toBeUndefined();
+  expect(host.calls[0]?.headers.Authorization).toBe("Bearer the-real-value-123456");
+  // The audit names the ref actually disclosed, not one derived from the key.
+  const read = eventsOfType(personal, "secret.read")[0]?.payload as Record<string, unknown>;
+  expect(read.valueRef).toBe(ref.valueRef);
+  expect(read.key).toBe("TOK");
+});
+
+test("a standalone secret with no credential row is never sent", async () => {
+  // `api list` answers "is it stored?" with `credentials.getByKey`. Reading by secret key
+  // made a bound endpoint's CALL answer it differently, so a standalone secret sharing the
+  // key would be sent by a call the listing reported as unavailable. One question, one
+  // lookup. [Codex R4 P2.]
+  store.secrets.issue(personal.id, "TOK", "orphaned-value-123456");
+  expect(store.credentials.getByKey(personal.id, "TOK")).toBeUndefined();
+  store.bindEndpoint(personal.id, "issues", "https://api.example.test/i", "TOK");
+  const host = recordingHost();
+
+  const { tools, results } = await callTool(personal, endpointToolName("issues"), host);
+
+  expect(host.calls).toHaveLength(0);
+  expect(results[0]?.isError).toBe(true);
+  expect(results[0]?.output).toMatch(/No credential 'TOK'/);
+  expect(eventsOfType(personal, "secret.read")).toHaveLength(0);
+  // Paired positive: the tool was there — this is the credential lookup refusing, not an
+  // absent capability.
+  expect(tools).toContain(endpointToolName("issues"));
+});
+
 test("the disclosure path itself refuses the kernel's namespace", () => {
   store.actionFingerprintKey(personal.id);
   expect(() => store.readSecret(personal.id, "__asterism.action_fingerprint_key")).toThrow(
@@ -841,8 +891,9 @@ test("endpointToolName is injective over the accepted alphabet", () => {
   expect(() => validateEndpointName("a_b")).toThrow();
 });
 
-test("endpointLogTarget drops the query string", () => {
-  expect(endpointLogTarget("https://h.test/a/b?c=d")).toBe("https://h.test/a/b");
+test("endpointLogTarget keeps the origin and drops everything after it", () => {
+  expect(endpointLogTarget("https://h.test/a/b?c=d")).toBe("https://h.test");
+  expect(endpointLogTarget("https://h.test:8443/a/b#f")).toBe("https://h.test:8443");
   expect(endpointLogTarget("nonsense")).toBe("(unparseable URL)");
 });
 
