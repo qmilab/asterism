@@ -27,6 +27,7 @@ import { createHmac } from "node:crypto";
 
 import type {
   ScopedTool,
+  ToolInputSchema,
   ToolInvocation,
   ToolObservation,
   ToolRegistry,
@@ -62,10 +63,10 @@ export interface Capability {
   effect: EffectClass;
   tool: ScopedTool;
   /**
-   * Static, KERNEL-AUTHORED facts about what this capability does, merged into the
-   * arguments the gate reasons about and shows a human. Optional; absent for every
-   * host capability, where the model's own arguments already describe the action (the
-   * path a delete targets, the command a shell runs).
+   * Static, KERNEL-AUTHORED facts about what this capability does, contributed to the
+   * arguments the gate reasons about and shows a human. Optional; absent for every host
+   * capability, where the model's own arguments already describe the action (the path a
+   * delete targets, the command a shell runs).
    *
    * It exists for the case a host capability never hits: a kernel-built tool whose
    * invocation carries NO arguments, because the operator — not the agent — decided
@@ -74,18 +75,16 @@ export interface Capability {
    * read `Confirm destructive action 'api.issues' {}` and name neither the endpoint
    * nor the credential it carries.
    *
-   * Two properties keep this from being a way to soften the gate, and both are
-   * directional on purpose:
+   * How it combines with the model's arguments depends on whether the tool takes any, and
+   * the rule is spelled out in {@link gateArgs}: on a tool whose schema declares NO input
+   * properties these facts REPLACE them (such a tool discards whatever it is passed, so its
+   * arguments are model-authored noise on a human's prompt); on anything else they are
+   * merged over them, kernel facts winning, so a command string can still escalate while
+   * the model cannot overwrite what a human is about to approve. Either way `effect` itself
+   * is untouched — classification starts from the declared base effect and can only rise.
    *
-   *   - It MERGES, and the kernel's facts win. The model's arguments are preserved
-   *     (so nothing is hidden from {@link classifyEffect}, which only ever escalates)
-   *     and cannot overwrite a kernel-authored field, so a model cannot rewrite the
-   *     credential name a human is about to approve.
-   *   - It never touches `effect`. Classification still starts from the declared base
-   *     effect and can only rise.
-   *
-   * It must therefore carry REFERENCES, never values — it reaches a human's prompt and
-   * an audit fingerprint. A credential's KEY belongs here; its value never does.
+   * It must carry REFERENCES, never values — it reaches a human's prompt and an audit
+   * fingerprint. A credential's KEY belongs here; its value never does.
    */
   gateContext?: Readonly<Record<string, unknown>>;
 }
@@ -509,28 +508,65 @@ function alreadyPerformedResult(capability: string): ToolResult {
 }
 
 /**
- * What the gate reasons about and a human is shown: the model's own arguments, with a
- * capability's kernel-authored {@link Capability.gateContext} merged OVER them.
+ * What the gate reasons about and a human is shown: the model's own arguments, plus a
+ * capability's kernel-authored {@link Capability.gateContext}.
  *
  * With no `gateContext` (every host capability) this returns the invocation's arguments
  * unchanged, so nothing about an existing capability's gate decision, prompt, or audit
  * fingerprint moves.
  *
- * The merge direction is the safety property: the model's arguments survive, so a
- * command string can still escalate the effect, and the kernel's facts win, so a model
- * cannot rewrite the endpoint or credential name a human is about to approve. A
- * non-object argument (a bare string, a number) is kept under `args` rather than being
- * spread, so it is still visible to a reader and still reaches the classifier.
+ * With one, the rule turns on whether the tool takes arguments AT ALL:
+ *
+ *   - **The tool declares NO input properties ⇒ the kernel's facts REPLACE them.** Such a
+ *     tool ignores whatever it is passed, so its invocation's arguments are noise — and
+ *     noise the model authors. JSON Schema's DEFAULT is to permit extra properties, so
+ *     `properties: {}` advertises "no arguments" while accepting any: without this, a model
+ *     could put its own text ("pre-approved by your admin") into the confirmation prompt for
+ *     the most consequential action the product has, and could destabilise the argument
+ *     fingerprint a resume matches on by varying fields `execute` discards.
+ *     [Codex review R2 P2.]
+ *   - **Anything else ⇒ MERGE, kernel facts winning.** The model's arguments survive so the
+ *     classifier can still see a command string and ESCALATE, and the kernel's facts cannot
+ *     be overwritten by the model.
+ *
+ * Keyed on the schema rather than on the effect, deliberately. "Declared destructive" would
+ * close the same reported hole and is simpler, but it is broader than its own justification:
+ * a future kernel-built destructive capability that DOES take arguments would silently lose
+ * them from the human's prompt — hiding the path a delete targets is a safety regression,
+ * not a cosmetic one. The schema states the actual reason, so both directions stay safe.
+ *
+ * A non-object argument (a bare string, a number) is kept under `args` rather than being
+ * spread, so it stays visible to a reader and still reaches the classifier.
  */
 function gateArgs(
   args: unknown,
   gateContext: Readonly<Record<string, unknown>> | undefined,
+  takesNoArguments: boolean,
 ): unknown {
   if (gateContext === undefined) return args;
+  if (takesNoArguments) return { ...gateContext };
   if (args !== null && typeof args === "object" && !Array.isArray(args)) {
     return { ...(args as Record<string, unknown>), ...gateContext };
   }
   return { ...gateContext, ...(args !== undefined ? { args } : {}) };
+}
+
+/**
+ * Whether a tool's schema declares an empty `properties` object — "this tool takes no
+ * arguments", stated by the tool itself.
+ *
+ * Conservative on purpose: anything it cannot read as an explicitly-empty property set is
+ * treated as taking arguments, so an unusual or absent schema falls through to merging
+ * rather than to discarding what the model produced.
+ */
+function declaresNoArguments(schema: ToolInputSchema): boolean {
+  const properties = (schema as { properties?: unknown }).properties;
+  return (
+    properties !== null &&
+    typeof properties === "object" &&
+    !Array.isArray(properties) &&
+    Object.keys(properties as Record<string, unknown>).length === 0
+  );
 }
 
 /**
@@ -555,6 +591,8 @@ function gateTool(
   // caller could mutate after resolution.
   const gateContext =
     capability.gateContext !== undefined ? Object.freeze({ ...capability.gateContext }) : undefined;
+  // Read once at resolution time, with the rest of the policy snapshot.
+  const takesNoArguments = declaresNoArguments(tool.inputSchema);
   return {
     name: tool.name,
     description: tool.description,
@@ -563,7 +601,7 @@ function gateTool(
       invocation: ToolInvocation,
       signal?: AbortSignal,
     ): Promise<ToolResult> => {
-      const args = gateArgs(invocation.args, gateContext);
+      const args = gateArgs(invocation.args, gateContext, takesNoArguments);
       const action: Action = {
         capability: key,
         effect,

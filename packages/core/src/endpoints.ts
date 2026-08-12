@@ -64,12 +64,21 @@ export const OUTBOUND_TIMEOUT_MS = 30_000;
 export const MAX_BOUND_ENDPOINTS = 32;
 
 /**
- * Below this length an echoed value is NOT exact-match scrubbed from a response. A
- * short string occurs by coincidence, and scrubbing every occurrence of a four-character
- * value would shred ordinary output while protecting something that is not a credential.
- * The shape rules in {@link redactForTrace} still run over it.
+ * The only value the exact-match scrub skips: the empty string.
+ *
+ * There WAS a length floor here — eight characters, on the reasoning that a short string
+ * occurs by coincidence and scrubbing every occurrence would shred ordinary output. That
+ * reasoning is wrong for this class, and the copy is what makes it wrong: the help text
+ * promises the credential is "stripped from anything that comes back", full stop. A 6-digit
+ * PIN is a credential, `secrets add` accepts one, and no shape rule will ever recognize it —
+ * so the floor turned an absolute promise into one that quietly held for long values only.
+ * Mangling ordinary text is a COST; returning the credential is a DEFECT, and between those
+ * two this boundary picks the cost every time. [Codex review R2 P2.]
+ *
+ * Zero stays excluded for a correctness reason rather than a policy one: `split("")` splits
+ * between every character, so an empty value would replace the entire response with markers.
  */
-const MIN_SCRUBBABLE_SECRET_LENGTH = 8;
+const MIN_SCRUBBABLE_SECRET_LENGTH = 1;
 
 /** Longest accepted endpoint name; it becomes a capability key and a tool name. */
 const MAX_ENDPOINT_NAME_LENGTH = 32;
@@ -338,7 +347,13 @@ function endpointCapability(
         `attached for you and never shown to you. A human has to approve every call.`,
       // NO arguments, ever. The operator declared the whole address, so there is nothing
       // for the agent to choose and nothing it authors leaves the machine.
-      inputSchema: { type: "object", properties: {} },
+      //
+      // `additionalProperties: false` is load-bearing rather than tidy: JSON Schema's
+      // DEFAULT is to permit extra properties, so `properties: {}` alone advertises "no
+      // arguments" while accepting any. The kernel does not rely on a provider honouring
+      // this — `gateArgs` drops them too (see `trust.ts`) — but the contract should say
+      // what it means. [Codex review R2 P2.]
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
       execute: async (): Promise<ToolResult> => {
         // NOTHING throws across the adapter seam — the invariant this module's header
         // states, and the same guard `world-facts.ts` puts around its store calls. It

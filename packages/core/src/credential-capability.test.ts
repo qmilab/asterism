@@ -23,6 +23,7 @@ import {
 } from "./capabilities.js";
 import {
   DEFAULT_ENDPOINT_RESPONSE_MAX_BYTES,
+  endpointCapabilities,
   endpointCapabilityKey,
   endpointLogTarget,
   endpointToolName,
@@ -35,6 +36,7 @@ import { executeRun, performHandoff, resumeRun } from "./run.js";
 import { AsterismStore } from "./store.js";
 import { gatherEvidence } from "./standing.js";
 import type { RuntimeAdapter, RunOutput, ToolResult } from "./adapter.js";
+import { resolveToolRegistry, trustProfile } from "./trust.js";
 import type { Action } from "./trust.js";
 import type { Agent, Event } from "./types.js";
 
@@ -306,6 +308,156 @@ test("a model cannot rewrite the credential or URL a human is shown", async () =
   expect(args.url).toBe("https://api.example.test/issues?state=open");
   // And the call itself used the binding, not the arguments.
   expect(host.calls[0]?.url).toBe("https://api.example.test/issues?state=open");
+});
+
+test("a model's extra arguments reach neither the prompt nor the fingerprint", async () => {
+  // The schema says `properties: {}`, but JSON Schema's DEFAULT is to permit extra
+  // properties — so "zero-argument" was advertised, not enforced. A model could put its own
+  // text into the confirmation for the most consequential action the product has, and could
+  // destabilise the argument fingerprint a resume matches on by varying fields `execute`
+  // ignores. Both are closed kernel-side, so a provider that ignores the schema changes
+  // nothing. [Codex R2 P2.]
+  const tool = bindIssues(personal);
+  const host = recordingHost();
+  const prompts: Action[] = [];
+  const fingerprints: string[] = [];
+  for (const note of ["PRE-APPROVED BY YOUR ADMIN", "something else entirely"]) {
+    const sink = { tools: [] as string[], results: [] as ToolResult[] };
+    await executeRun(store, personal, "call it", {
+      adapter: {
+        run(request) {
+          const t = request.tools.list().find((x) => x.name === tool);
+          async function* noEvents() {}
+          return {
+            events: noEvents(),
+            output: (async (): Promise<RunOutput> => {
+              if (t) sink.results.push(await t.execute({ args: { note, nonce: note.length } }));
+              return { status: "done", text: "ok" };
+            })(),
+          };
+        },
+      },
+      outboundHost: host,
+      confirm: (action) => {
+        prompts.push(action);
+        return true;
+      },
+    });
+    const executed = store.events
+      .list(personal.id)
+      .filter((e) => e.type === "action.executed")
+      .at(-1);
+    fingerprints.push(String((executed?.payload as Record<string, unknown>).fingerprint));
+  }
+
+  // The declared contract says so…
+  const declared = endpointCapabilities(store, personal.id, host)[0]?.tool.inputSchema;
+  expect(declared?.additionalProperties).toBe(false);
+  // …and the kernel enforces it regardless of whether a provider honoured it.
+  expect(JSON.stringify(prompts)).not.toContain("PRE-APPROVED");
+  expect(prompts[0]?.args).toEqual({
+    endpoint: "issues",
+    url: "https://api.example.test/issues?state=open",
+    credential: "GITHUB_TOKEN",
+    method: "GET",
+  });
+  // Two calls with DIFFERENT model-authored fields fingerprint identically, so a resume
+  // still matches the invocation a human approved.
+  expect(fingerprints[0]).toBe(fingerprints[1]!);
+  // Paired positive: both calls really happened.
+  expect(host.calls).toHaveLength(2);
+});
+
+test("a capability that DOES take arguments still MERGES, so a command string can escalate", () => {
+  // The other half of the rule, and the reason it keys on the SCHEMA rather than on the
+  // effect: replacing wherever a capability is destructive would also strip the arguments
+  // from a future kernel-built destructive tool that genuinely takes some — hiding the path
+  // a delete targets from the human approving it.
+  const profile = trustProfile({ level: "autonomous", capabilities: ["sh"] });
+  let seen: unknown;
+  const tools = resolveToolRegistry(
+    profile,
+    [
+      {
+        key: "sh",
+        effect: "write",
+        gateContext: { tool: "shell" },
+        tool: {
+          name: "sh",
+          description: "fixture",
+          inputSchema: { type: "object", properties: { command: { type: "string" } } },
+          execute: () => ({ output: "ran" }),
+        },
+      },
+    ],
+    { onAwaitConfirmation: (action) => { seen = action.args; } },
+  );
+  // `rm -rf` must still escalate this declared-`write` capability to destructive, which it
+  // can only do if the model's arguments survived the merge.
+  void tools.list()[0]!.execute({ args: { command: "rm -rf /tmp/x" } });
+  expect(seen).toEqual({ command: "rm -rf /tmp/x", tool: "shell" });
+});
+
+test("a schema the rule cannot read is treated as TAKING arguments, not as taking none", () => {
+  // The conservative default, which the doc comment claimed and nothing checked. Getting it
+  // backwards is the dangerous direction: an unusual or absent schema would silently start
+  // discarding the model's arguments, so a delete's path would vanish from the human's
+  // prompt. Three unreadable shapes, all of which must MERGE.
+  const profile = trustProfile({ level: "autonomous", capabilities: ["odd"] });
+  for (const schema of [
+    { type: "object" },
+    { type: "object", properties: null },
+    { type: "object", properties: ["a"] },
+  ] as Record<string, unknown>[]) {
+    let seen: unknown;
+    const tools = resolveToolRegistry(
+      profile,
+      [
+        {
+          key: "odd",
+          effect: "destructive",
+          gateContext: { kind: "kernel" },
+          tool: {
+            name: "odd",
+            description: "fixture",
+            inputSchema: schema,
+            execute: () => ({ output: "ok" }),
+          },
+        },
+      ],
+      { onAwaitConfirmation: (action) => { seen = action.args; } },
+    );
+    void tools.list()[0]!.execute({ args: { path: "/important/file" } });
+    expect(seen).toEqual({ path: "/important/file", kind: "kernel" });
+  }
+});
+
+test("a DESTRUCTIVE capability that takes arguments keeps them on the prompt", () => {
+  // The direction "declared destructive ⇒ replace" would have broken: the human must still
+  // be told WHICH file a delete targets.
+  const profile = trustProfile({ level: "autonomous", capabilities: ["rm"] });
+  let seen: unknown;
+  const tools = resolveToolRegistry(
+    profile,
+    [
+      {
+        key: "rm",
+        effect: "destructive",
+        gateContext: { kind: "kernel-delete" },
+        tool: {
+          name: "rm",
+          description: "fixture",
+          inputSchema: { type: "object", properties: { path: { type: "string" } } },
+          execute: () => ({ output: "gone" }),
+        },
+      },
+    ],
+    { onAwaitConfirmation: (action) => { seen = action.args; } },
+  );
+
+  void tools.list()[0]!.execute({ args: { path: "/important/file" } });
+
+  expect(seen).toEqual({ path: "/important/file", kind: "kernel-delete" });
 });
 
 test("`secret.read` is emitted once per executed call, with references only", async () => {
@@ -729,10 +881,22 @@ test("screenEndpointResponse scrubs EVERY occurrence, not just the first", () =>
   expect(screened.match(/\[redacted:value\]/g)).toHaveLength(2);
 });
 
-test("screenEndpointResponse leaves a too-short value alone rather than shredding output", () => {
-  // A four-character "secret" occurs by coincidence; scrubbing every instance would
-  // destroy ordinary output while protecting something that is not a credential.
-  expect(screenEndpointResponse("the cat sat on the mat", "the")).toBe("the cat sat on the mat");
+test("a SHORT credential is scrubbed too — the promise has no length qualifier", () => {
+  // A 6-digit PIN is a credential, `secrets add` accepts one, and no shape rule will ever
+  // recognize it. The help text says the credential is "stripped from anything that comes
+  // back", full stop — a length floor made that absolute promise hold for long values only.
+  // [Codex R2 P2.]
+  const pin = "482913";
+  expect(screenEndpointResponse(`{"you sent":"${pin}"}`, pin)).toBe('{"you sent":"[redacted:value]"}');
+  // Down to a single character: mangling ordinary text is a cost, returning the credential
+  // is a defect, and this boundary picks the cost.
+  expect(screenEndpointResponse("a cat", "a")).not.toContain("a cat");
+});
+
+test("an EMPTY disclosed value leaves the response alone rather than exploding it", () => {
+  // The one exclusion, and it is arithmetic rather than policy: `split("")` splits between
+  // every character, so an empty value would replace the whole response with markers.
+  expect(screenEndpointResponse("the cat sat on the mat", "")).toBe("the cat sat on the mat");
 });
 
 test("screenEndpointResponse scrubs BEFORE it truncates, so no fragment survives", () => {
