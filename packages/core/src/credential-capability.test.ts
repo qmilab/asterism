@@ -394,7 +394,12 @@ test("a capability that DOES take arguments still MERGES, so a command string ca
   );
   // `rm -rf` must still escalate this declared-`write` capability to destructive, which it
   // can only do if the model's arguments survived the merge.
-  void tools.list()[0]!.execute({ args: { command: "rm -rf /tmp/x" } });
+  // A COLLIDING key, not just a distinct one: `toEqual` ignores key order, so merging in
+  // the wrong direction is invisible unless the model and the kernel both write the same
+  // field. R2's restructure moved bound endpoints into the REPLACE branch, which quietly
+  // left this branch's precedence unasserted — a change to a shared function re-scoping the
+  // test that used to cover it.
+  void tools.list()[0]!.execute({ args: { command: "rm -rf /tmp/x", tool: "not-shell" } });
   expect(seen).toEqual({ command: "rm -rf /tmp/x", tool: "shell" });
 });
 
