@@ -91,6 +91,7 @@ Agents (2):
 • writer · autonomous
   role: tightens blog drafts
   last run 2026-06-10T12:01:00.000Z
+
 • work · propose
   role: client-facing consultant
   never run
@@ -154,6 +155,96 @@ anything act without your yes. Granting and revoking are recorded as
 
 ---
 
+## `capabilities`
+
+```
+asterism capabilities show   <agent>
+asterism capabilities set    <agent> <key>...  ·  --none
+asterism capabilities remove <agent> <key>...
+asterism capabilities unset  <agent>
+```
+
+Choose which tools an agent has **at all**. Every agent starts with the standard
+toolkit, and staying that way is perfectly ordinary — an agent is already kept to its
+own workspace and its own autonomy level. This narrows it further, for an agent you
+want kept to less.
+
+```console
+$ asterism capabilities show work
+work · holds all 9 in the catalog  [not narrowed]
+
+  ✓ fs.append
+  ✓ fs.delete
+  ✓ fs.find
+  ✓ fs.list
+  ✓ fs.mkdir
+  ✓ fs.move
+  ✓ fs.read
+  ✓ fs.stat
+  ✓ fs.write
+
+Its own working notes (record_note / forget_note) are always available.
+Narrow it with: asterism capabilities set work <key>…
+Which of these may act without pausing: asterism trust work show
+```
+
+`set` declares exactly what the agent holds from then on — naming the whole list is the
+point, because it is the only way to give something back and it says plainly where you
+end up:
+
+```console
+$ asterism capabilities set work fs.read fs.list fs.write
+work now holds 3 capabilities: fs.list, fs.read, fs.write.
+Its own working notes stay available. Stop narrowing it with: asterism capabilities unset work
+
+$ asterism capabilities show work
+work · holds 3 of 9 in the catalog  [narrowed to 3]
+
+  · fs.append  (withheld)
+  · fs.delete  (withheld)
+  · fs.find  (withheld)
+  ✓ fs.list
+  · fs.mkdir  (withheld)
+  · fs.move  (withheld)
+  ✓ fs.read
+  · fs.stat  (withheld)
+  ✓ fs.write
+
+Its own working notes (record_note / forget_note) are always available.
+Stop narrowing it with: asterism capabilities unset work
+Which of these may act without pausing: asterism trust work show
+```
+
+| Form | What it does |
+|---|---|
+| `capabilities show <agent>` | What this agent holds, and what is being withheld. |
+| `capabilities set <agent> <key>...` | Declare exactly what it holds from now on. |
+| `capabilities set <agent> --none` | It gets no tools from this workspace at all. |
+| `capabilities remove <agent> <key>...` | Take one away and leave the rest. |
+| `capabilities unset <agent>` | Stop narrowing — back to everything on offer. |
+
+An agent's own working notes are always available and are not listed here.
+
+> **This is not the same as [`trust`](#trust).** `capabilities` decides **which** tools
+> an agent has; `trust` decides what it may do with them — its overall level, and the
+> few destructive actions it has [earned](#earned-autonomy--per-capability-grants) the
+> right to take without pausing. They do not cascade: taking a tool away leaves any
+> grant it earned intact and unused, and giving the tool back makes that grant apply
+> again. Take a grant back with `asterism trust <agent> revoke <capability>`.
+
+Endpoints you have bound with [`api add`](#api) are listed separately in
+`capabilities show` and are not changed by any verb here — a hand-typed `api.*` key is
+refused, and names the verb that does own it:
+
+```console
+$ asterism capabilities set work api.issues
+api.issues: bound endpoints, which carry a credential — they are granted and withdrawn by their own verb, not declared here.
+See them with: asterism api list work
+Withdraw it with: asterism api remove work issues
+```
+
+---
+
 ## `secrets add`
 
 ```
@@ -183,6 +274,89 @@ Stored credential GITHUB_TOKEN for agent work.
 # piped (nothing echoed)
 $ cat token.txt | asterism secrets add work GITHUB_TOKEN
 Stored credential GITHUB_TOKEN for agent work.
+```
+
+---
+
+## `api`
+
+```
+asterism api add    <agent> <name> <https-url> --credential <KEY>
+asterism api list   <agent>
+asterism api remove <agent> <name>
+```
+
+Let one agent call **one** web address, using one of its own stored
+[credentials](#secrets-add) — without ever seeing that credential. You choose the
+address and which credential goes with it; the agent gets a tool that calls exactly
+that address and nothing else.
+
+```console
+$ asterism api add work issues "https://api.github.com/repos/acme/site/issues?state=open" --credential GITHUB_TOKEN
+Bound api.issues for work — it may now send credential GITHUB_TOKEN to api.github.com.
+No call happens without you: at notify and autonomous it pauses and asks; a propose agent only ever plans it.
+```
+
+Three things are worth knowing before you bind one. They are the point of the command,
+not implementation detail:
+
+- **The agent supplies nothing.** You give the whole address, query string and all, so
+  the agent cannot steer the call or attach anything of its own to it. Nothing the
+  agent wrote leaves your machine.
+- **No call happens without you, and it cannot earn its way out of asking.** At
+  `notify` and `autonomous` the run pauses and asks; a `propose` agent never calls at
+  all, it only tells you it would. Unlike every other destructive capability, this one
+  can never [earn](#earned-autonomy--per-capability-grants) a standing grant — sending
+  a credential somewhere is the one thing this product will not learn to do on its own.
+- **The credential never reaches the agent.** It is attached on the way out and
+  stripped from anything that comes back.
+
+Addresses must be `https`, and cannot carry a username or password in the URL. A
+credential sent over cleartext `http` is a credential on the wire, so it is refused
+rather than warned about:
+
+```console
+$ asterism api add work bad "http://example.com/x" --credential GITHUB_TOKEN
+invalid endpoint URL: only https is supported (a credential sent over http:// travels in cleartext)
+```
+
+See what an agent can call, and what each call sends:
+
+```console
+$ asterism api list work
+work · 1 bound endpoint:
+
+  api.issues
+    calls    https://api.github.com/repos/acme/site/issues?state=open
+    sends    GITHUB_TOKEN
+
+No call happens without you: at notify and autonomous it pauses and asks; a propose agent only ever plans it.
+```
+
+Binding is what grants it — there is no second step, and the endpoint shows up in
+[`capabilities show`](#capabilities) without being declared there. Withdrawing it
+leaves the credential alone:
+
+```console
+$ asterism api remove work issues
+Removed api.issues from work — it can no longer send GITHUB_TOKEN anywhere.
+The credential itself is untouched and still stored for work.
+```
+
+| Form | What it does |
+|---|---|
+| `api add <agent> <name> <url> --credential <KEY>` | Bind the credential to the address. The agent gains a tool named `call_<name>`. Re-run it to change either. |
+| `api list <agent>` | What this agent can call, and what each call sends. |
+| `api remove <agent> <name>` | Withdraw it. The credential itself is left alone. |
+
+Binding a credential the agent does not have yet is allowed — asterism says so rather
+than failing, so you can bind and store in either order:
+
+```console
+$ asterism api add work reports "https://api.example.com/reports" --credential REPORTS_TOKEN
+Bound api.reports for work — it may now send credential REPORTS_TOKEN to api.example.com.
+No call happens without you: at notify and autonomous it pauses and asks; a propose agent only ever plans it.
+Note: no credential 'REPORTS_TOKEN' is stored for work yet, so calls will fail until you add one: asterism secrets add work REPORTS_TOKEN
 ```
 
 ---
@@ -307,13 +481,14 @@ screen is refused, not stored).
 $ asterism notes inspect writer
 Working notes for writer (2 of 32) — the agent's own unverified record, not facts:
 
-• draft status: intro rewritten, closing still needs a pass
-  updated 2026-06-20T09:14:00.000Z
 • house style: sentence case in headings
   updated 2026-06-20T09:02:00.000Z
+• draft status: intro rewritten, closing still needs a pass
+  ⟳ pending update → ready for review — awaiting your review (accept to apply, reject to keep the current value)
+  updated 2026-06-20T09:14:00.000Z
 
-$ asterism notes set writer "draft status" "ready for review"
-Set working note "draft status" for writer.
+$ asterism notes set writer "house style" "sentence case in headings, serial comma"
+Set working note "house style" for writer.
 
 $ asterism notes clear writer "house style"
 Cleared working note "house style" for writer.
@@ -321,6 +496,10 @@ Cleared working note "house style" for writer.
 $ asterism notes accept writer "draft status"
 Accepted working note "draft status" for writer; it now frames runs.
 ```
+
+`accept` and `reject` act on the **pending update** — the one marked `⟳` above, which the
+agent proposed and you have not ruled on. A note you set yourself is already accepted, so
+there is nothing to review; asterism says so rather than pretending to accept it again.
 
 An agent with no working notes says so, with the command to set one. Clearing a
 subject that has no note, setting one when notes are full, or reviewing a note that is
@@ -375,12 +554,323 @@ response>` lands on stdout.)
 > tools — `read_file`, `list_dir`, `stat`, and `find` to look around, plus
 > `write_file`, `append_file`, `mkdir`, and `move` to change things and
 > `delete_file` to remove them — behind the trust gate. The read-only tools and
-> the write tools are ordinary read/write effects; `delete_file` is destructive
-> and pauses for confirmation at every trust level, while `move` refuses to
+> the write tools are ordinary read/write effects; `delete_file` is destructive,
+> so a `notify` or `autonomous` run stops and asks before it and a `propose` agent
+> never runs it at all, while `move` refuses to
 > overwrite an existing destination (so it never silently destroys anything). Each is confined
 > to the agent's workspace (logical scoping, not an OS-enforced jail — see
 > [what isolation means today](./concepts.md#what-isolation-means-today)). The
 > end-to-end behavior is shown in the [walkthrough](./walkthrough.md).
+
+---
+
+## `connect`
+
+```
+asterism connect <from> <to> --mode <handoff|artifact-only|read-summary|shared-brief>
+```
+
+Open an explicit channel from one agent to another. Agents are separate by default and
+cannot reach each other; a connection is the only thing that opens a path — and even
+then, only what the mode allows ever crosses. Nothing of the other agent's memory,
+secrets, or tools is ever shared.
+
+```console
+$ asterism connect writer researcher --mode handoff
+Connected writer → researcher (handoff). Use it with: asterism handoff writer researcher "<task>"
+```
+
+A connection is **one-way**: this lets `writer` hand off to `researcher`, not the other
+way round. Open a second connection for the reverse. Re-running the same `connect` is
+harmless — it will not make a duplicate.
+
+| `--mode` | What may cross | Used by |
+|---|---|---|
+| `handoff` *(default)* | the receiving agent's final result, and nothing behind it | [`handoff`](#handoff) |
+| `artifact-only` | a list of the files it produced — not its words, not the contents | [`artifact`](#artifact) |
+| `read-summary` | a screened extract of what it has already learned; it does **no** work | [`summary`](#summary) |
+| `shared-brief` | nothing back — this one carries standing context **in** | [`brief`](#brief) |
+
+Each mode is its own permission, so opening one never quietly grants another. Opening a
+connection is a deliberate act you take; from then on either agent's record shows the
+channel exists and each time it is used — never the task text or any result.
+
+The full picture, with a worked two-agent session, is in
+[Working together](./collaboration.md).
+
+---
+
+## `disconnect`
+
+```
+asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary|shared-brief>]
+```
+
+Withdraw a channel you opened. From then on the two agents are as separate as they were
+before you connected them.
+
+```console
+$ asterism disconnect writer researcher --mode handoff
+Disconnected writer → researcher (handoff). writer can no longer hand work to researcher.
+Reconnecting opens a new channel — it does not bring the old one back.
+```
+
+What it takes away is more than the ability to ask for work. Withdrawing an
+`artifact-only` channel also means files already handed over can no longer be
+[fetched](#fetch) — the list you were given stops resolving. Withdrawing a
+`read-summary` channel stops it sharing what it knows, including anything learned while
+the channel was open. Withdrawing a `shared-brief` channel un-frames the brief for
+**both** agents, from their next run.
+
+`--mode` picks the channel when two agents have more than one open. With a single open
+channel you can leave it out; with several, asterism asks you to name one rather than
+guess.
+
+Work already underway is not interrupted. If the other agent is paused waiting for you
+to confirm something, that confirmation still works and it still finishes its task in
+its own space — but nothing it produces afterwards comes back across the withdrawn
+channel.
+
+**This cannot be undone.** Connecting the two agents again opens a *new* channel; it
+does not restore the old one, and files handed over on the old one stay unreachable.
+Both agents' records keep showing the channel and the moment it was withdrawn.
+
+---
+
+## `connections`
+
+```
+asterism connections <agent>
+```
+
+Show the channels one agent is on — the agents it can hand work to (outbound, `→`) and
+the agents that can hand work to it (inbound, `←`), with each channel's mode.
+
+```console
+$ asterism connections writer
+Connections for writer (3):
+
+• → researcher · artifact-only · active · 140f38bd
+• → researcher · shared-brief · active · e2b6e22f
+• → researcher · handoff · revoked · cdeb1026  (withdrawn — nothing crosses it)
+
+→ outbound (this agent initiates over the channel) · ← inbound (the other agent initiates)
+```
+
+Only ever the named agent's own connections; it never reveals a channel between two
+other agents. Channels you have withdrawn stay listed, marked, after the open ones — so
+you can always see what was once open and that it is now closed.
+
+---
+
+## `handoff`
+
+```
+asterism handoff <from> <to> "<task>"
+```
+
+Have one agent hand a task to another over a channel you have already opened.
+
+```console
+$ asterism handoff writer researcher "summarize what the Q3 deck says about pricing"
+The deck holds enterprise pricing flat and moves the team tier up 12%.
+```
+
+The receiving agent does the work in **its own** workspace, at **its own** autonomy
+level, framed by **its own** memory and skills — and hands back only its final result.
+The asking agent never sees the other's memory, secrets, files, or how it got there.
+
+Because the work runs as the receiving agent, that agent's protections apply: a
+destructive action stops for your confirmation according to the **receiving** agent's
+autonomy, no matter how much autonomy the asking agent has. A handoff can never be a
+way around another agent's limits. If it pauses, confirm it on the receiving agent:
+
+```
+asterism confirm <to> <run>
+```
+
+Needs a [configured model](#config) — the receiving agent runs the task.
+
+---
+
+## `artifact`
+
+```
+asterism artifact <from> <to> "<task>"
+```
+
+Like [`handoff`](#handoff), but you get back only the **files** the other agent
+produced — a list of what it made, with sizes — instead of its written answer.
+
+```console
+$ asterism artifact writer researcher "draft the market section"
+Actions (1 executed):
+  ✓ executed fs.write (write)
+researcher produced 1 artifact:
+  drafts/market-section.md   55 B
+
+Only these references crossed — not researcher's words, memory, or the file contents.
+The files are in researcher's own workspace.
+```
+
+Everything true of `handoff` is true here: the receiving agent works in its own space,
+at its own autonomy level, and its protections apply. What comes back is narrower — each
+file's path and size, and whether it still exists. You do **not** get the receiving
+agent's words, its memory, or the contents of those files. The files sit in the
+receiving agent's own workspace, on your machine, where you can read them directly.
+
+To bring one across, use [`fetch`](#fetch). Needs a [configured model](#config).
+
+A channel opened for `handoff` does not work here, and vice versa — each mode is its own
+permission.
+
+---
+
+## `fetch`
+
+```
+asterism fetch <from> <to> <path>
+```
+
+Copy one file the receiving agent produced into the **asking** agent's own workspace.
+This is how a list of files becomes an actual file: run [`artifact`](#artifact) first,
+read the paths it hands back, and fetch the one you want.
+
+```console
+$ asterism fetch writer researcher drafts/market-section.md
+Fetching 'drafts/market-section.md' from researcher into writer's workspace.
+Fetched 'drafts/market-section.md' from researcher into writer's workspace (55 B).
+```
+
+**Nothing is copied without you**, and this can never be earned away. At `notify` and
+`autonomous` you are asked to confirm **every single fetch** — copying a file in is a
+change to the asking agent's own workspace, and if a file is already there it says so
+before replacing it. An agent set to `propose` writes nothing at all; it tells you what
+it would copy and leaves it to you.
+
+Only a file the other agent actually handed over can be fetched. A path it never
+produced is refused, whatever is on disk — this brings across what you were shown; it is
+not a way to read another agent's files.
+
+---
+
+## `summary`
+
+```
+asterism summary <from> <to> ["<focus>"]
+```
+
+Read a short, screened extract of what another agent has learned. This is the one
+command where the other agent does **no work at all** — nothing runs, no model is
+called, and it works with no model configured.
+
+```console
+$ asterism summary writer researcher
+researcher knows 3 of 3 ratified notes:
+
+  semantic    Enterprise buyers weigh seat price over total contract value.
+  semantic    The Q3 deck prices the team tier 12% above Q2.
+  convention  Draft sections in Markdown, never HTML.
+
+Only this extract crossed — not researcher's memory records, its runs, or anything it has not accepted.
+```
+
+Add a focus in quotes to ask about one subject:
+
+```console
+$ asterism summary writer researcher "pricing"
+```
+
+Only what **you have accepted** can cross. Anything still waiting for your review,
+anything you rejected, and anything archived stays where it is, at any size of extract.
+What comes back is the knowledge itself — never the underlying records, when they were
+learned, what run produced them, or how sure the agent is of them.
+
+Anything that looks like a password or key is removed before it crosses, and a note
+whose wording could be an attempt to steer the reading agent is held back whole. The
+extract tells you how many notes were held back, and how many did not fit — ask again
+with a focus to reach those.
+
+---
+
+## `brief`
+
+```
+asterism brief <from> <to> "<brief>"
+```
+
+Set the standing context two connected agents both run with. Unlike every other
+channel, this one carries something **in** rather than handing a result back.
+
+```console
+$ asterism brief writer researcher "Q3 launch: enterprise buyers, ship by Friday"
+Briefed writer → researcher.
+Both agents now run with it as standing context, until: asterism unbrief writer researcher
+```
+
+From then on **both** agents run with that brief in front of them — not just the one it
+was written to, and not just when they work together. It shapes their ordinary runs too,
+until you replace it, end it, or withdraw the channel. That is what makes it standing
+context rather than a longer way of writing a task.
+
+An agent has only one brief per channel. Writing a new one replaces the old one, which
+stops shaping runs immediately.
+
+What you write is screened before it goes anywhere. Wording that reads as an attempt to
+steer or manipulate the other agent is refused outright — nothing is saved and nothing
+crosses, and asterism tells you which rule it tripped without repeating what you wrote.
+Each agent sees the brief clearly marked as coming from the channel, not as its own
+purpose, so an agent is never fooled into treating another agent's words as its own.
+
+Nothing of the other agent comes back to you here — no result, no files, no memory.
+
+---
+
+## `unbrief`
+
+```
+asterism unbrief <from> <to>
+```
+
+End the standing brief on a channel. From their next run onward, neither agent sees it.
+
+```console
+$ asterism unbrief writer researcher
+Ended the brief on writer → researcher. Neither agent sees it from their next run.
+The channel is still open — set a new brief with: asterism brief writer researcher "<brief>"
+```
+
+The channel itself stays open, so you can set a new brief whenever you like. To close
+the channel too, use [`disconnect`](#disconnect) — withdrawing the channel also ends the
+brief. A brief that has ended does not come back; set a new one instead.
+
+---
+
+## `briefs`
+
+```
+asterism briefs <agent>
+```
+
+Show the briefs an agent is running with, and the ones it used to.
+
+```console
+$ asterism briefs writer
+Briefs for writer (1):
+
+• → researcher · 1e572c21  (framing every run of both agents)
+  Q3 launch: enterprise buyers, ship by Friday
+
+A brief frames BOTH agents' runs while it is live — the arrow shows whose channel carries it.
+```
+
+Each line says which channel carries the brief and whether it is shaping runs right now.
+A brief can be listed but no longer shaping runs for two reasons: you replaced or ended
+it, or you withdrew the channel it lived on. Both are marked, so you never have to
+cross-check [`connections`](#connections) to work out why a brief stopped applying.
+
+Only ever the named agent's own briefs — it never reveals a brief between two other
+agents.
 
 ---
 
@@ -445,6 +935,7 @@ Runs for writer (2):
 • a1b2c3d4 · done
   tighten the intro in posts/launch.md
   started 2026-06-10T12:01:00.000Z · finished 2026-06-10T12:01:04.000Z
+
 • e5f6a7b8 · awaiting_confirmation
   delete the generated files in dist/
   started 2026-06-10T12:05:00.000Z
@@ -779,9 +1270,17 @@ Per-agent world-fact cap:
   work  →  32  [default]
   personal  →  32  [default]
 
+Per-agent capabilities:
+  work  →  all 9 in the catalog  [not narrowed]
+  personal  →  all 9 in the catalog  [not narrowed]
+
 Per-agent recall provider:
   work  →  keyword (built-in)  [default]
   personal  →  keyword (built-in)  [default]
+
+Per-agent cognition provider:
+  work  →  none (no trace)  [default]
+  personal  →  none (no trace)  [default]
 
 API keys are never stored here — set them in the environment (e.g. OPENAI_API_KEY).
 ```
@@ -1054,7 +1553,7 @@ limitations.
 ## `service`
 
 ```
-asterism service install   <agent> [--kind serve|telegram|discord] [-- <args>]
+asterism service install   <agent> [--kind serve|telegram|discord] [--capture-env] [-- <args>]
 asterism service status    <agent> [--kind <kind>]
 asterism service uninstall <agent> [--kind <kind>]
 ```

@@ -60,6 +60,14 @@ in every path must match that name; any other name is a `404`. A process serving
 `writer` can never be used to address `work`'s runs or events — the "separate
 lives" guarantee holds at the network edge, not only in storage.
 
+That is also why there are no collaboration routes here. A request that names two
+agents cannot be served by an endpoint bound to one, so opening a channel between
+agents and handing over work live on the install-wide console instead — the same
+surface the [dashboard](./dashboard.md) runs on. See
+[the collaboration endpoints](./dashboard.md#collaboration-between-agents). The two are
+complementary: `serve` exposes **one** agent to something that calls it, the console
+lets **you** operate all of them.
+
 ## Endpoints
 
 All paths are scoped to the served agent. Responses are JSON.
@@ -89,10 +97,12 @@ status, the agent's output, and a reference-only summary of the actions it took:
 
 `status` is one of `done`, `failed`, or `awaiting_confirmation`. Because no one
 is at a keyboard to confirm mid-run, a destructive action does **not** execute
-over HTTP on the initial request — the run comes back `awaiting_confirmation` and
-nothing destructive happened. Clear that pause out of band with the **confirm**
-endpoint below. The destructive-action gate fires here exactly as it does on the
-command line, at every trust level.
+over HTTP on the initial request. For a `notify` or `autonomous` agent the run
+comes back `awaiting_confirmation` and nothing destructive happened; clear that
+pause out of band with the **confirm** endpoint below. A `propose` agent takes no
+side effect at all, so its run finishes with the action `withheld` and there is
+nothing to confirm. The destructive-action gate reaches the same verdict here as
+it does on the command line.
 
 `actions` carries one entry per gate decision — `executed`, `withheld`, or
 `paused` — with the capability key and its classified effect. **References only:**

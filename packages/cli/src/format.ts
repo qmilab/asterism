@@ -528,15 +528,31 @@ export function formatStandingList(
 ): string {
   const header = `${agentName} · autonomy: ${level}`;
   const granted = grants.filter((g) => g.standing === "standing-grant");
+  // What a grant MEANS depends on the level, so the copy has to. At `propose` the gate
+  // withholds every side effect before the destructive flag is even consulted
+  // (`decideGate`), so nothing pauses and no grant can take effect — saying "every
+  // destructive action pauses for your confirmation" to a `propose` agent describes a
+  // run that never happens.
+  const proposing = level === "propose";
   if (granted.length === 0) {
     return [
       header,
       "",
-      "No capabilities have earned a standing grant — every destructive action pauses",
-      "for your confirmation. Earn one with a clean track record, then `trust <agent> --review`.",
+      proposing
+        ? "No capabilities have earned a standing grant. At propose this agent takes no"
+        : "No capabilities have earned a standing grant — every destructive action stops",
+      proposing
+        ? "action of its own anyway; it hands you a plan. Raise its autonomy to let it act."
+        : "for your confirmation. Earn one with a clean track record, then `trust <agent> --review`.",
     ].join("\n");
   }
-  const lines: string[] = [header, "", `Acts without pausing (${granted.length}):`];
+  const lines: string[] = [
+    header,
+    "",
+    proposing
+      ? `Earned, but inert at propose (${granted.length}) — it acts only if you raise its autonomy:`
+      : `Acts without pausing (${granted.length}):`,
+  ];
   for (const g of granted) {
     lines.push(`  ✓ ${g.capability} — ${g.basis} · granted ${g.updatedAt}`);
   }

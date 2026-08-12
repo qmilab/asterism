@@ -65,8 +65,8 @@ them — behind the trust gate. The read-only tools and the write tools
 `delete_file` is declared destructive — and `move` refuses to overwrite an
 existing destination, so it never silently destroys anything. So a bare
 `asterism run` (with a model configured) gives the gate real actions to govern:
-an ordinary write executes under `autonomous`, and a deletion pauses for
-confirmation regardless of trust level.
+an ordinary write executes under `autonomous`, and a deletion stops for
+confirmation even there.
 
 Each tool is confined to the agent's own workspace — a path that climbs out
 (`..`, an absolute path) is refused. That is *logical* scoping, not an

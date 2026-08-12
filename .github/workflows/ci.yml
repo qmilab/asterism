@@ -95,3 +95,10 @@ jobs:
       # "Bun-first, Node-floor" from quietly becoming Bun-only.
       - run: bun run verify:node
       - run: bun run verify:deno
+
+      # Every command the docs advertise, typed at the shipped binary; every internal doc
+      # link; and the command reference's claim to document EVERY command. The self-test
+      # runs first and plants known-bad commands, so a green docs check means the checker
+      # can still tell a broken page from a working one rather than passing vacuously.
+      - run: bun run check:docs:self-test
+      - run: bun run check:docs

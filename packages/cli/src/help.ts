@@ -13,9 +13,10 @@ export const AUTONOMY_HELP = `Autonomy levels (set with \`new --trust\` or \`tru
   autonomous   Acts freely inside its workspace, keeping a reviewable record of
                everything it did.
 
-  At every level, an agent pauses for your explicit confirmation before a
-  destructive action — deleting files, force-pushing, reading out a secret,
-  spending, sending — unless you have allowed that capability for it.`;
+  A destructive action — deleting files, force-pushing, reading out a secret,
+  spending, sending — never happens without you. At 'notify' and 'autonomous'
+  the run stops and asks first, unless you have allowed that capability for it.
+  A 'propose' agent does not take one at all; it hands you the plan instead.`;
 
 export const USAGE = `asterism — run many distinct agents from one place. Each agent has its own
 memory, secrets, skills, workspace, and level of autonomy, and nothing leaks
@@ -264,11 +265,12 @@ exactly like the agent's own.`,
 
 Put an agent to work on a task, framed by its role, character, skills, and the
 memories it has accepted. What it may do on its own depends on its autonomy level;
-destructive actions always pause for your confirmation first.
+a destructive action never happens without you.
 
 The agent can read, write, and delete files in its own workspace. Reading and
-writing run according to its autonomy level; deleting is destructive and pauses
-for your confirmation at every level.
+writing run according to its autonomy level; deleting is destructive, so the run
+stops and asks you first — and a 'propose' agent does not delete at all, it tells
+you what it would have deleted.
 
 Activity streams as it happens, and a run that can act on its own ends with a
 short summary of what it did, withheld, or paused on. (Progress goes to standard
@@ -398,10 +400,11 @@ it hands back, and fetch the one you want.
   asterism artifact writer helper "draft the market section"
   asterism fetch    writer helper drafts/market-section.md
 
-You are asked to confirm every time, at every autonomy level — copying a file in is a
-change to the asking agent's own workspace, and if a file is already there it says so
-before replacing it. An agent set to \`propose\` writes nothing at all; it tells you what it
-would copy and leaves it to you.
+Nothing is copied without you, and this can never be earned away. At \`notify\` and
+\`autonomous\` you are asked to confirm every single fetch — copying a file in is a change
+to the asking agent's own workspace, and if a file is already there it says so before
+replacing it. An agent set to \`propose\` writes nothing at all; it tells you what it would
+copy and leaves it to you.
 
 Only a file the other agent actually handed over can be fetched. A path it never produced
 is refused, whatever is on disk — this brings across what you were shown, it is not a way
