@@ -202,6 +202,53 @@ test("api remove withdraws the binding and leaves the credential alone", async (
   expect(h.out.join("\n")).not.toContain("no credential");
 });
 
+test("api remove does not claim a credential is stored when it is not", async () => {
+  // `api add` deliberately supports binding before the credential exists, so "still stored"
+  // was a completeness this line had never checked — on a normal, supported path.
+  // [Codex R5 P3.]
+  const h = await install();
+  await runCli(["api", "add", "work", "later", "https://o.test/o", "--credential", "NOT_YET"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["api", "remove", "work", "later"], h.io)).toBe(0);
+  const out = h.out.join("\n");
+  expect(out).not.toContain("still stored");
+  expect(out).toContain("No credential 'NOT_YET' is stored for work");
+  expect(out).toContain("did not change that either way");
+});
+
+test("api remove DOES say the credential survives when it really does", async () => {
+  // The paired positive: the branch above must not be reached by simply deleting the claim.
+  const h = await install();
+  await runCli(["api", "add", "work", "issues", URL_A, "--credential", "GITHUB_TOKEN"], h.io);
+
+  h.out.length = 0;
+  expect(await runCli(["api", "remove", "work", "issues"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("untouched and still stored for work");
+});
+
+test("api add refuses a URL carrying a control character", async () => {
+  const h = await install();
+  const ESC = String.fromCharCode(27);
+
+  expect(
+    await runCli(
+      ["api", "add", "work", "bad", `https://api.test/a${ESC}[2Jb`, "--credential", "GITHUB_TOKEN"],
+      h.io,
+    ),
+  ).toBe(1);
+  expect(h.err.join("\n")).toContain("control character");
+});
+
+test("api list shows the URL that will actually be dialed", async () => {
+  const h = await install();
+  await runCli(["api", "add", "work", "issues", "https://api.test:443/a", "--credential", "GITHUB_TOKEN"], h.io);
+
+  h.out.length = 0;
+  await runCli(["api", "list", "work"], h.io);
+  expect(h.out.join("\n")).toContain("calls    https://api.test/a");
+});
+
 test("api remove accepts the capability key `capabilities show` prints", async () => {
   const h = await install();
   await runCli(["api", "add", "work", "issues", URL_A, "--credential", "GITHUB_TOKEN"], h.io);

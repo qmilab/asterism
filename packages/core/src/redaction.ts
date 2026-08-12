@@ -241,6 +241,22 @@ export function stripControlCharacters(text: string): string {
 }
 
 /**
+ * Whether `text` contains any character {@link stripControlCharacters} would remove.
+ *
+ * The REJECTING counterpart, for a write boundary that should refuse such a character
+ * rather than quietly drop it — an operator-declared URL, where an ANSI escape would drive
+ * the terminal of the very person approving a credential-bearing call. Sharing the rule is
+ * the point: a second copy is how the stripping layer and the refusing layer drift apart.
+ *
+ * `CONTROL_CHARS` is global, so `lastIndex` is reset before testing — a stateful regex
+ * silently alternates true/false across calls otherwise.
+ */
+export function hasControlCharacters(text: string): boolean {
+  CONTROL_CHARS.lastIndex = 0;
+  return CONTROL_CHARS.test(text);
+}
+
+/**
  * Truncate `raw` to at most `maxBytes` UTF-8 bytes WITHOUT splitting a multibyte
  * character: decode the byte slice and drop a trailing replacement char left by an
  * incomplete sequence at the boundary. Returns the (possibly truncated) text, the

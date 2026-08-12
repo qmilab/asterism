@@ -38,7 +38,12 @@ import type { Capability } from "./trust.js";
 import type { AsterismStore } from "./store.js";
 import type { BoundEndpoint } from "./types.js";
 import { CREDENTIAL_CAPABILITY_PREFIX } from "./capabilities.js";
-import { SECRET_MARK, redactForTrace, stripControlCharacters } from "./redaction.js";
+import {
+  SECRET_MARK,
+  hasControlCharacters,
+  redactForTrace,
+  stripControlCharacters,
+} from "./redaction.js";
 
 /**
  * How much of a response the kernel keeps and hands to the model. Its OWN constant
@@ -92,7 +97,11 @@ const MAX_ENDPOINT_URL_LENGTH = 2048;
 
 /** One outbound call, fully assembled by the kernel. */
 export interface OutboundRequest {
-  /** The complete URL, exactly as the operator declared it. */
+  /**
+   * The complete URL — the parsed serialization of what the operator declared, which is
+   * also the exact string shown at the confirmation prompt, so what a human approves and
+   * what is dialed cannot diverge.
+   */
   url: string;
   /**
    * The headers to send, credential included. A host must treat this as secret
@@ -177,10 +186,18 @@ export function validateEndpointName(name: string): string {
 }
 
 /**
- * Assert an endpoint URL is usable, and return it verbatim.
+ * Assert an endpoint URL is usable, and return it in its PARSED, SERIALIZED form.
  *
- * Two refusals, and both are about keeping the URL a piece of CONFIG rather than a
- * value the event log must not hold:
+ * Not verbatim, which is what this first did. `new URL()` normalizes — it strips tabs and
+ * newlines, rewrites `\` to `/` in a special scheme, drops a default port, percent-encodes
+ * what must be — and `fetch` re-parses the stored string the same way. Storing what was
+ * typed therefore left the URL an operator READS (in `api list`, in `capabilities show`,
+ * and at the confirmation prompt) able to differ from the URL that actually carries the
+ * credential. Storing the serialization makes those the same string by construction.
+ * [Codex review R5 P2.]
+ *
+ * Three refusals, all about keeping the URL a piece of CONFIG rather than a value the
+ * event log must not hold — or a payload aimed at the person approving the call:
  *
  *   - **`https` only.** A credential sent over cleartext `http` is a credential on the
  *     wire. The natural exception is loopback, which never leaves the box — but that is
@@ -188,7 +205,14 @@ export function validateEndpointName(name: string): string {
  *     question of names that merely RESOLVE to loopback), and a rule that has to be
  *     exactly right is worth more than it buys in a first class. Deferred with a trigger.
  *   - **No userinfo.** `https://user:pass@host` would smuggle a credential past the
- *     credentials table into a column that is displayed and logged.
+ *     credentials table into a column that is displayed and logged. (It also blocks the
+ *     sharpest normalization spoof: `https://good.test<TAB>@evil.test/` parses with
+ *     `good.test` as USERINFO and `evil.test` as the host.)
+ *   - **No control characters.** They are never legitimate in a configured URL, and this
+ *     string is printed to the operator at the moment they approve a credential-bearing
+ *     call — an ANSI escape there drives their terminal. Refused rather than stripped, on
+ *     the same rule `redactForTrace` strips by, because at a write boundary a silent
+ *     rewrite of what someone typed is worse than a refusal.
  */
 export function validateEndpointUrl(url: string): string {
   if (typeof url !== "string" || url.length === 0) {
@@ -196,6 +220,25 @@ export function validateEndpointUrl(url: string): string {
   }
   if (url.length > MAX_ENDPOINT_URL_LENGTH) {
     throw new Error(`invalid endpoint URL: at most ${MAX_ENDPOINT_URL_LENGTH} characters`);
+  }
+  // Two classes, and the second is NOT a subset of the first — which is why the check is
+  // written out rather than delegated wholesale.
+  //
+  //   · `hasControlCharacters` — the rule `redactForTrace` strips by. It deliberately KEEPS
+  //     tab and newline, because stripping those would mangle ordinary multi-line output.
+  //   · `\t\r\n` — exactly the characters the URL parser SILENTLY REMOVES. `https://api\t
+  //     .test/` resolves to `api.test`, so leaving them to normalization means the host an
+  //     operator typed is not the host that gets the credential, with nothing said.
+  //
+  // Refused rather than stripped: at a write boundary a silent rewrite of what someone
+  // typed is worse than a refusal, and this string is what they are shown when they approve
+  // a credential-bearing call. A SPACE is deliberately still allowed — the parser
+  // percent-encodes it rather than dropping it, so it cannot move the host.
+  // [Codex review R5 P2.]
+  if (hasControlCharacters(url) || /[\t\r\n]/.test(url)) {
+    throw new Error(
+      "invalid endpoint URL: it contains a control character — those are never part of a real address, some are silently removed when the address is parsed, and this URL is shown to you when you approve a call",
+    );
   }
   let parsed: URL;
   try {
@@ -216,7 +259,8 @@ export function validateEndpointUrl(url: string): string {
   if (parsed.hostname === "") {
     throw new Error(`invalid endpoint URL: ${JSON.stringify(url)} names no host`);
   }
-  return url;
+  // The SERIALIZATION, so what is stored, displayed, approved and dialed are one string.
+  return parsed.href;
 }
 
 /**

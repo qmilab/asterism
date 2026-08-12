@@ -1548,8 +1548,14 @@ function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
     io.out(
       `Removed ${CREDENTIAL_CAPABILITY_PREFIX}${bare} from ${agent.name} — it can no longer send ${endpoint.credentialKey} anywhere.`,
     );
+    // Only claim what was checked. `api add` deliberately allows binding before the
+    // credential exists, and a credential can be removed afterwards, so "still stored" was
+    // a completeness this line had never verified — on a normal, supported path.
+    // What is true unconditionally is that this verb did not touch it. [Codex review R5 P3.]
     io.out(
-      `The credential itself is untouched and still stored for ${agent.name}.`,
+      store.credentials.getByKey(agent.id, endpoint.credentialKey)
+        ? `The credential itself is untouched and still stored for ${agent.name}.`
+        : `No credential '${endpoint.credentialKey}' is stored for ${agent.name} — this verb did not change that either way.`,
     );
     return 0;
   });

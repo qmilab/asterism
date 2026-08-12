@@ -867,6 +867,62 @@ test("the disclosure path itself refuses the kernel's namespace", () => {
 
 // --- 9. The pure pieces -------------------------------------------------------
 
+test("what is stored is the SERIALIZATION, so display and dial cannot diverge", async () => {
+  // `new URL()` normalizes and `fetch` re-parses the same way, so storing what was typed
+  // let the URL an operator READS differ from the one that carries the credential.
+  // [Codex R5 P2.]
+  expect(validateEndpointUrl("https://api.test:443/a")).toBe("https://api.test/a");
+  expect(validateEndpointUrl("https://example.com\\@evil.com/path")).toBe(
+    "https://example.com/@evil.com/path",
+  );
+  expect(validateEndpointUrl("https://api.test/s?q=a b")).toBe("https://api.test/s?q=a%20b");
+
+  // End to end: the stored URL, the URL the gate shows, and the URL dialed are one string.
+  store.addCredential(personal.id, "TOK", TOKEN);
+  store.bindEndpoint(personal.id, "issues", "https://api.test:443/a", "TOK");
+  const stored = store.endpoints.getByName(personal.id, "issues")!.url;
+  const host = recordingHost();
+  const { prompts } = await callTool(personal, endpointToolName("issues"), host);
+
+  expect(stored).toBe("https://api.test/a");
+  expect((prompts[0]?.args as Record<string, unknown>).url).toBe(stored);
+  expect(host.calls[0]?.url).toBe(stored);
+});
+
+test("a control character in a URL is REFUSED, not silently stripped", () => {
+  // This string is printed to the operator at the moment they approve a credential-bearing
+  // call, so an ANSI escape in it drives their terminal. Refused rather than stripped: at a
+  // write boundary a silent rewrite of what someone typed is worse than a refusal.
+  const ESC = String.fromCharCode(27);
+  for (const bad of [
+    `https://api.test/a${ESC}[2Jb`,
+    "https://api.test/a\u0000b",
+    "https://api.test/a\u200bb",
+    "https://good.test\tevil",
+    "https://api\r.test/x",
+    "https://api\n.test/x",
+  ]) {
+    expect(() => validateEndpointUrl(bad)).toThrow(/control character/);
+  }
+  // The tab-before-@ spoof (`good.test` becomes USERINFO, `evil.test` the host) is caught
+  // by the control-character rule first, and by the userinfo rule regardless.
+  expect(() => validateEndpointUrl("https://good.test\t@evil.test/p")).toThrow();
+  // A SPACE stays legal — the parser percent-encodes it rather than dropping it, so it
+  // cannot move the host, and refusing it would reject an ordinary query value.
+  expect(validateEndpointUrl("https://api.test/s?q=a b")).toBe("https://api.test/s?q=a%20b");
+});
+
+test("hasControlCharacters is not fooled by the shared regex being global", () => {
+  // `CONTROL_CHARS` is a global regex, so `.test()` advances `lastIndex` and alternates
+  // true/false across calls unless it is reset. A validator that says yes-then-no on the
+  // same input would let every second bad URL through.
+  const ESC = String.fromCharCode(27);
+  const bad = `https://api.test/a${ESC}b`;
+  expect(() => validateEndpointUrl(bad)).toThrow(/control character/);
+  expect(() => validateEndpointUrl(bad)).toThrow(/control character/);
+  expect(() => validateEndpointUrl(bad)).toThrow(/control character/);
+});
+
 test("validateEndpointUrl refuses http, userinfo, and a non-URL", () => {
   expect(() => validateEndpointUrl("http://api.example.test/x")).toThrow(/only https/);
   expect(() => validateEndpointUrl("https://user:pass@api.example.test/x")).toThrow(
