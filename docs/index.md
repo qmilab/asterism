@@ -21,6 +21,8 @@ deleting one, and remembers what you approve.
 
 ## Guides
 
+- **[Working together](./collaboration.md)** — open a channel between two agents,
+  choose what it is for, and withdraw it.
 - **[Dashboard](./dashboard.md)** — watch and steer every agent in one live
   terminal view.
 - **[Chat channels](./channels.md)** — reach one agent from a Telegram or Discord
@@ -50,6 +52,9 @@ deleting one, and remembers what you approve.
 | Follow a guided first run | [Tutorial](./getting-started.md) |
 | Point it at OpenAI / Anthropic / another provider | [Configuring a model](./installation.md#configuring-a-model) |
 | Understand trust levels and the destructive-action gate | [Concepts → Trust](./concepts.md#trust-levels) |
+| Have two agents work together | [Working together](./collaboration.md) |
+| Let an agent call an API with a stored credential | [Command reference → `api`](./commands.md#api) |
+| Choose which tools an agent has | [Command reference → `capabilities`](./commands.md#capabilities) |
 | Look up a command | [Command reference](./commands.md) |
 | See the separation guarantees proven | [Walkthrough](./walkthrough.md) |
 | Call an agent over HTTP | [HTTP endpoint](./http.md) |
@@ -69,7 +74,11 @@ earned [per-capability trust](./concepts.md#earned-autonomy), reviewed
 dashboard, a Telegram or Discord chat, an HTTP endpoint, or a background service,
 and run the whole thing in a container.
 
-Agent-to-agent collaboration and stronger execution isolation are still ahead;
-follow along in the repo's [issues](https://github.com/qmilab/asterism/issues). For
-the precise scope of what "separate" guarantees today, see
+Agents can also **work together** without giving up any of that: you open a
+channel between two of them by hand, choose what it is for, and only that ever
+crosses — see [Working together](./collaboration.md).
+
+Stronger execution isolation is still ahead; follow along in the repo's
+[issues](https://github.com/qmilab/asterism/issues). For the precise scope of what
+"separate" guarantees today, see
 [Concepts → What isolation means today](./concepts.md#what-isolation-means-today).

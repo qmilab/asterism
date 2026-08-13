@@ -103,3 +103,51 @@ operator surface over your own install; it complements the single-agent
 The destructive-action gate is unchanged at the network edge: confirm and decline are
 the two ways to clear a pause, and the grant a confirm makes is bounded to that one
 action and recorded on the event log (`run.resumed` / `run.declined`).
+
+## Collaboration between agents
+
+Everything in [Working together](./collaboration.md) is reachable over the console
+endpoint too — opening a channel between two agents, handing over work, and withdrawing
+it. (These are endpoints, not keys: the terminal view above does not drive collaboration
+yet.) They are the only routes that name two agents, and they are all rooted at the
+**asking** agent, matching the command line's `<from> <to>` order.
+
+| Method & path | What it does |
+|---|---|
+| `GET /agents/<a>/connections` | The channels `<a>` is on, both directions, with each mode and whether it is still open. |
+| `POST /agents/<a>/connections` | Open a channel. Body `{ "to": "<agent>", "mode": "handoff" \| "artifact-only" \| "read-summary" \| "shared-brief" }`. |
+| `DELETE /agents/<a>/connections/<b>?mode=<mode>` | Withdraw a channel. `mode` is required — it is never guessed. |
+| `POST /agents/<a>/connections/<b>/handoff` | Hand `<b>` a task; body `{ "task": "…" }`. Returns `<b>`'s final result. |
+| `POST /agents/<a>/connections/<b>/artifact` | Same, but returns only the files `<b>` produced; body `{ "task": "…" }`. |
+| `POST /agents/<a>/connections/<b>/summary` | A screened extract of what `<b>` has accepted; body `{ "focus"?: "…" }`. `<b>` runs nothing. |
+| `POST /agents/<a>/connections/<b>/fetch` | Copy one handed-over file into `<a>`'s workspace; body `{ "path": "…" }`, then again with `confirm` (below). |
+| `PUT /agents/<a>/connections/<b>/brief` | Set the standing context both agents run with; body `{ "content": "…" }`. |
+| `DELETE /agents/<a>/connections/<b>/brief` | End that standing context. The channel stays open. |
+| `GET /agents/<a>/briefs` | The standing briefs on `<a>`'s channels. |
+
+Three things carry over from the command line unchanged, because they are enforced
+before any of this is reached:
+
+- **A mode is always explicit.** It is never defaulted or inferred from the request, so
+  a channel opened for one purpose can never be used for another by omission.
+- **`fetch` asks twice, and the second request must echo the first's answer.** Because
+  no one is at a keyboard, the first request copies nothing: it comes back `409` with the
+  plan — the file's size, and whether a file already there would be replaced. Send it
+  again with those values in `confirm` and the bytes land:
+
+  ```
+  POST { "path": "drafts/market-section.md" }
+    → 409 { "path": …, "sizeBytes": 4300, "overwrites": false }
+  POST { "path": "drafts/market-section.md", "confirm": { "sizeBytes": 4300, "overwrites": false } }
+    → 200
+  ```
+
+  `overwrites` is the point: it describes *your own* workspace at that instant, and it
+  can change between the two requests. Get it wrong and the fetch is refused with the
+  true plan — so nothing can quietly replace a file you did not acknowledge. Nothing is
+  parked between the two requests, and no fetch confirmation is ever remembered: each one
+  is approved on its own or not at all.
+- **Names, not internal ids.** Responses name agents the way you do.
+
+A request over a channel that does not exist, or that exists for a different mode, is
+refused with `409` — the same refusal the command line gives, for the same reason.

@@ -157,9 +157,11 @@ You can also give one agent its own model, so different agents run on different
 models — without touching the others:
 
 ```bash
-asterism config set claude-opus-4-8 --provider anthropic --agent work
-# or pin it when you create the agent:
+# pin it as you create the agent
 asterism new work --model claude-opus-4-8 --provider anthropic
+
+# or set it later, for an agent you already have
+asterism config set claude-opus-4-8 --provider anthropic --agent work
 ```
 
 The config file holds only **which** model to use — never an API key. Keys stay

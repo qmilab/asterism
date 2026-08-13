@@ -258,7 +258,7 @@ function trustBody(state: DashboardState, height: number, w: number): string[] {
   });
   lines.push("");
   lines.push(dim("↑/↓ choose · enter apply · esc cancel"));
-  lines.push(dim("A destructive action still pauses for confirmation at every level."));
+  lines.push(dim("Destructive actions still need your yes; propose never takes one."));
   return fit(lines, height, w);
 }
 

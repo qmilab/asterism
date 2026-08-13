@@ -128,7 +128,7 @@ get on the command line. A `propose` agent replies with its plan and runs nothin
 ## Confirming a destructive action by reply
 
 The [destructive-action gate](./concepts.md) fires over chat exactly as it does at
-the keyboard, **at every trust level**. When a run needs to do something
+the keyboard. When a `notify` or `autonomous` run needs to do something
 destructive — delete a file, force-push, read out a secret, spend, send — it
 pauses and asks:
 

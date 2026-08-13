@@ -34,7 +34,7 @@ Asterism makes a distinct agent a first-class thing you create in one command. *
 
 The name is the idea. The stars in an asterism aren't bound to each other; they can sit light-years apart and only form a pattern from where you're standing. That's the model: agents that are genuinely separate, organized and navigated as one grouping from a single runtime.
 
-Unlike multi-agent *orchestration* frameworks — which coordinate agents to finish a task and share context freely — Asterism starts with **identity and boundaries**. Collaboration is a later, explicit, permissioned connection, not the default and never implicit shared state.
+Unlike multi-agent *orchestration* frameworks — which coordinate agents to finish a task and share context freely — Asterism starts with **identity and boundaries**. Agents can work together, but only over a channel you open by hand, and only what that channel is for ever crosses — not the default, and never implicit shared state.
 
 ## Quickstart
 
@@ -91,6 +91,9 @@ See [Run in a container](./docs/container.md) for the full setup.
 | **Distinct agents & souls** | Many agents from one install, each its own identity with its own character. → [Concepts](./docs/concepts.md) |
 | **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included. → [Trust](./docs/concepts.md#trust-levels) |
 | **Earned trust contracts** | An agent can *earn* the right to take one capability without pausing — always proposed for your approval, and lost the moment something goes wrong. → [Earned autonomy](./docs/concepts.md#earned-autonomy) |
+| **Agents that work together** | Open a one-way channel between two agents and choose what it's for — a result, the files it made, what it knows, or standing context both share. Only that crosses; memory, secrets and tools never do. → [Working together](./docs/collaboration.md) |
+| **Choose which tools an agent has** | Narrow a single agent to less than the standard toolkit, separately from how much it may do with it. → [`capabilities`](./docs/commands.md#capabilities) |
+| **Call one address with one credential** | Bind a stored credential to exactly one `https` address. The agent supplies nothing, never sees the credential, and can never earn its way out of asking you. → [`api`](./docs/commands.md#api) |
 | **Reviewable memory** | Typed, scoped per agent, and written only when you approve it. → [Memory](./docs/concepts.md#memory) |
 | **Structured recall** | Each run is framed by the most relevant memories, ranked under a budget; opt a single agent into local-embedding ranking, off by default. → [Recall](./docs/concepts.md#recall) |
 | **Reviewed reflection, on your schedule** | An agent proposes what to remember; you ratify. Run it by hand or put the proposer on a timer — nothing is written on its own. → [Reflect](./docs/commands.md#reflect) |
@@ -111,7 +114,7 @@ Full docs live in [`docs/`](./docs/) ([browse the site](https://qmilab.com/aster
 
 **Getting started** — [Installation](./docs/installation.md) · [Tutorial](./docs/getting-started.md) · [Concepts](./docs/concepts.md)
 
-**Guides** — [Dashboard](./docs/dashboard.md) · [Chat channels](./docs/channels.md) · [Run as a service](./docs/service.md) · [Run in a container](./docs/container.md) · [Local HTTP endpoint](./docs/http.md)
+**Guides** — [Working together](./docs/collaboration.md) · [Dashboard](./docs/dashboard.md) · [Chat channels](./docs/channels.md) · [Run as a service](./docs/service.md) · [Run in a container](./docs/container.md) · [Local HTTP endpoint](./docs/http.md)
 
 **Reference** — [Command reference](./docs/commands.md)
 
@@ -139,7 +142,9 @@ A lodestar is the single star you steer by. An asterism is the grouping you navi
 
 ## Status
 
-**Phase 2 — Governed Learning (complete)** · latest release **v0.4.0**. On top of the Phase 1 local-first core — distinct agents with per-agent memory, secrets, skills, and workspace; souls and roles; dialable trust with the destructive-action gate; reviewable memory — and its reach (a live terminal **dashboard**, **Telegram and Discord** channels, a background **service**, a token-protected **HTTP endpoint**, and a multi-arch **container image** for Intel/AMD and Apple Silicon), Phase 2 adds the **governed-learning** loop — how an agent improves with you in control: **earned trust contracts** (autonomy earned capability by capability, always proposed for your approval), **structured recall** (the relevant memories ranked into each run, with opt-in local embeddings), **reviewed reflection** you can put on a schedule, **standing objectives**, and the agent's own **working notes**. Memory and objectives are written only when you approve them; the working notes an agent keeps for itself — including ones it now proposes from what it observes as it works — are shown as its *unverified* record and are yours to accept, reject, or clear. This release also wires in [Lodestar](#pairs-with-lodestar) behind the same seams as an opt-in, **observe-only cognition trace** — an auditable, tool-by-tool record of an agent's runs, off by default, that never changes what an agent may do. Further out: agent-to-agent collaboration, deeper belief-grade learning, and stronger execution isolation (today's separation is *logical scoping*, not hardened containment — see [What "separate" means today](#what-you-get)).
+**Phase 2 — Governed Learning (complete)** · latest release **v0.4.0**. On top of the Phase 1 local-first core — distinct agents with per-agent memory, secrets, skills, and workspace; souls and roles; dialable trust with the destructive-action gate; reviewable memory — and its reach (a live terminal **dashboard**, **Telegram and Discord** channels, a background **service**, a token-protected **HTTP endpoint**, and a multi-arch **container image** for Intel/AMD and Apple Silicon), Phase 2 adds the **governed-learning** loop — how an agent improves with you in control: **earned trust contracts** (autonomy earned capability by capability, always proposed for your approval), **structured recall** (the relevant memories ranked into each run, with opt-in local embeddings), **reviewed reflection** you can put on a schedule, **standing objectives**, and the agent's own **working notes**. Memory and objectives are written only when you approve them; the working notes an agent keeps for itself — including ones it now proposes from what it observes as it works — are shown as its *unverified* record and are yours to accept, reject, or clear. This release also wires in [Lodestar](#pairs-with-lodestar) behind the same seams as an opt-in, **observe-only cognition trace** — an auditable, tool-by-tool record of an agent's runs, off by default, that never changes what an agent may do. Since then, agents can also **work together** without giving any of that up: an explicit one-way channel you open between two of them, carrying only what you chose — a result, the files produced, a screened extract of what one knows, or standing context both run with. Memory, secrets and tools stay un-shared, and handed-over work runs under the *receiving* agent's autonomy, so a channel is never a way around another agent's limits. Alongside it you can narrow which tools a single agent has at all, and bind one of its credentials to exactly one `https` address it calls without ever seeing the credential. → [Working together](./docs/collaboration.md)
+
+Further out: deeper belief-grade learning, and stronger execution isolation (today's separation is *logical scoping*, not hardened containment — see [What "separate" means today](#what-you-get)).
 
 ## Contributing & security
 

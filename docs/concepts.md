@@ -39,9 +39,10 @@ An agent is a separate life you create in one command. It has:
 - and its own **memory**, **secrets**, and **event log**.
 
 Two agents created in the same install share none of this. There is no global
-store an agent can reach into; a cross-agent read is a bug, not a feature.
-Collaboration between agents is a later, explicit, permissioned feature — never
-implicit shared state.
+store an agent can reach into; a cross-agent read is a bug, not a feature. Agents
+can work together, but only over a channel you open by hand, and only what that
+channel's mode allows ever crosses — never implicit shared state. See
+[Connections](#connections).
 
 ## Soul and role
 
@@ -78,9 +79,10 @@ ramp — you dial it up as you come to trust an agent's judgment.
 
 There is one rule that overrides trust at every level:
 
-> Before a **destructive** action, an agent pauses for your explicit
-> confirmation — *regardless of its trust level* — unless you have specifically
-> allowed that capability for it.
+> A **destructive** action never happens without you — *whatever the agent's
+> trust level* — unless you have specifically allowed that capability for it.
+> At `notify` and `autonomous` the run stops and asks. A `propose` agent does
+> not take one at all; it hands you the plan instead.
 
 An `autonomous` agent will still stop and ask before doing something
 irreversible. "Destructive" is an explicit, tested classification, not a
@@ -127,6 +129,21 @@ never carries to another agent. And it is **lost the moment something goes wrong
 single declined or failed action on the capability resets it, and it has to be
 re-earned. You can revoke a grant yourself at any time, or tune how much evidence an
 agent must show before one is proposed. See [`asterism trust`](./commands.md#trust).
+
+## Which tools an agent has
+
+Trust decides what an agent may *do* with a tool. A separate question is which tools it
+has **at all** — and you can narrow that per agent with
+[`asterism capabilities`](./commands.md#capabilities).
+
+Every agent starts with the standard toolkit, and staying that way is perfectly
+ordinary: an agent is already kept to its own workspace and its own autonomy level.
+Narrowing is for an agent you want kept to less than that.
+
+The two are deliberately independent and do **not** cascade. Taking a tool away leaves
+any standing grant the agent earned on it intact and unused; give the tool back and the
+grant applies again. One decides *which* tools; the other decides *what may happen*
+with them.
 
 ## Memory
 
@@ -221,10 +238,23 @@ Skills frame the agent's runs alongside its role, soul, and memory.
 A **secret** (credential) is a private value scoped to one agent — an API token,
 a key. It is stored for that agent alone, by reference, and is **never printed
 back, written to the event log, or readable by any other agent.** Reading or
-exporting a secret's value is classified destructive, so any tool that surfaced
-one would first have to clear the
-[destructive-action gate](#the-destructive-action-gate) — but the shipped catalog
-includes no such tool: secrets are stored scoped, not yet surfaced into a run at all.
+exporting a secret's value is classified destructive, so anything that reaches for
+one must first clear the
+[destructive-action gate](#the-destructive-action-gate).
+
+### What an agent can do with a credential
+
+An agent never reads a secret. There is exactly one way a stored credential is
+used, and the agent is not the one holding it: you can bind one to a single web
+address with [`asterism api add`](./commands.md#api), and the agent gets a tool
+that calls **that address and nothing else**. You choose the whole address, so
+the agent cannot steer the call or add anything of its own to it; asterism
+attaches the credential on the way out and strips it from whatever comes back.
+
+No such call ever happens without you — and it is the one capability that can never
+[earn](#earned-autonomy) its way out of asking. At `notify` and `autonomous` the run
+stops and asks every time; a `propose` agent does not make the call at all, and tells
+you it would.
 
 ## Event log
 
@@ -313,6 +343,40 @@ Reflection is model-generated, so the exact proposals and confidence scores
 differ from run to run; the transcripts in these docs are illustrative, not
 output you should expect to reproduce verbatim.
 
+## Connections
+
+Agents cannot reach each other. There is no shared store, no shared memory, and no way
+for one agent to address another — that is the default, and it holds until you change
+it deliberately.
+
+A **connection** is the unit of permission that changes it: a channel you open by hand
+between two agents. It is the only thing that opens a path, and four properties define
+what it is:
+
+- **No connection, no interaction.** Without one, a request between two agents is not
+  filtered or trimmed — there is simply nothing to ask over.
+- **It is one-way.** `writer → researcher` lets `writer` hand work to `researcher`, not
+  the reverse. The other direction is its own connection.
+- **It is for one thing.** Each channel is opened for a specific purpose — hand over a
+  result, hand over files, read what the other agent knows, or share standing context —
+  and only that ever crosses. Opening one never grants another, and asking over the
+  wrong one is refused.
+- **Withdrawing it is final.** Reconnecting opens a new channel; it does not restore the
+  old one or what was reachable through it.
+
+**What never crosses, whatever the channel:** memory records, secrets, tools, working
+notes, and the other agent's transcript. What you get is the one thing the channel is
+for, and nothing behind it.
+
+A handoff is also **not a way around another agent's limits.** The work runs as the
+receiving agent — in its workspace, at its autonomy level — so a destructive action is
+governed by the *receiving* agent's trust, no matter how much autonomy the asking agent
+has. Connecting a `propose` agent to an `autonomous` one does not promote it.
+
+Every use of a channel is recorded on **both** agents' [event logs](#event-log) — that
+it happened, never the task text or the result. The full picture is in
+[Working together](./collaboration.md).
+
 ## What isolation means today
 
 Asterism leans on the word *boundary*, so it is worth being exact about which
@@ -324,6 +388,11 @@ a run are **separate** — scoped to that one agent and enforced everywhere data
 read or written, including over the [local HTTP endpoint](./http.md). One agent
 cannot read another's memory, resolve another's secret, or address another's runs.
 This is real, tested separation.
+
+[Connections](#connections) do not weaken it. A channel narrows what may cross that
+boundary to one named thing you chose; memory, secrets and tools stay un-shared on
+either side of it, and the separation above is enforced the same way whether two agents
+are connected or not.
 
 **What it is not, yet:** this is *logical* separation, not OS-level containment.
 Today's boundary is not a microVM, container, or hardened sandbox, and it does
