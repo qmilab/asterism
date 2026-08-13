@@ -367,6 +367,26 @@ test("a delegated capability never enters the callee's standing evidence", async
   expect([...evidence.keys()]).not.toContain(endpointCapabilityKey("issues"));
 });
 
+test("a standing grant written straight into the store leaves the gate asking", async () => {
+  bindIssues();
+  connectAndDelegate();
+  // E9's first lock, in this op's own words: `autoApprove` is EMPTY by construction here,
+  // so it is not enough that no legitimate path CAN produce this row — the row must be
+  // inert if it exists. Written directly, because `trust --review` is barred from ever
+  // proposing one (the second lock, asserted separately below), which would otherwise make
+  // this claim untestable and therefore unproven.
+  store.setCapabilityStanding(helper.id, endpointCapabilityKey("issues"), "standing-grant", "forced");
+  expect([...store.capabilityStanding.grantedKeys(helper.id)]).toContain(
+    endpointCapabilityKey("issues"),
+  );
+
+  const host = recordingHost();
+  // No confirmation available ⇒ still nothing sent. A grant did not buy the call.
+  const denied = await performDelegatedCall(store, writer, helper, "issues", { host });
+  expect(denied.kind).toBe("not_confirmed");
+  expect(host.calls).toHaveLength(0);
+});
+
 test("the human is told WHO asked, on the prompt they approve", async () => {
   bindIssues();
   connectAndDelegate();
