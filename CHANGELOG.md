@@ -23,6 +23,7 @@ Agents that can work together — without giving up a single thing that kept the
 
 ### Fixed
 
+- **A mistyped option on `connect` silently opened the widest channel.** `asterism connect a b --mdoe artifact-only` opened a **`handoff`** channel — where the other agent's full result crosses — and reported success. An unrecognized option was accepted and swallowed the value after it, leaving `--mode` absent, and an absent `--mode` means `handoff`. `connect`, `disconnect` and `config set` now refuse an option they do not define, naming it, the way `capabilities` and `api` already did. (`config set`'s version of this quietly retuned *every* agent instead of the one named.) Correctly spelled commands are unaffected.
 - **Copy that promised a pause `propose` never performs.** In eleven places — `asterism --help`, `asterism run --help`, `asterism fetch --help`, `asterism trust <agent> show`, the dashboard's autonomy chooser, and six documentation pages — Asterism said a destructive action pauses for your confirmation "at every trust level". It does not: at `propose` the action is *withheld* and you get a plan, so nothing is ever asked. The gate does hold at every level, and nothing destructive happens without you either way; but only `notify` and `autonomous` stop to ask. Every one of those now says which.
 
 ### Documentation
