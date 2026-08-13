@@ -65,6 +65,7 @@ describe("Phase 3 · delegated-tool — acceptance", () => {
   let reverseOut = "";
   let notConfirmedOut = "";
   let proposeOut = "";
+  let proposeGrantOut = "";
   let connectionsOut = "";
   let connectionsEmptyOut = "";
   let laterEndpointOut = "";
@@ -143,6 +144,10 @@ describe("Phase 3 · delegated-tool — acceptance", () => {
     approving = true;
     await run(["trust", "helper", "propose"]);
     proposeOut = await run(["call", "writer", "helper", "issues"], "propose");
+    // Granting against a `propose` callee has to SAY the grant will never fire — a channel
+    // that opens, a grant that holds, and a call that is silently never made is the worst
+    // of the three. Re-granting is a supersede, so this exercises that path too.
+    proposeGrantOut = await run(["delegate", "writer", "helper", "issues"], "proposeGrant");
     await run(["trust", "helper", "notify"]);
 
     // (5a) An endpoint bound LATER is not reachable through the open channel.
@@ -244,6 +249,15 @@ describe("Phase 3 · delegated-tool — acceptance", () => {
     expect(proposeOut).toMatch(/helper is at trust level propose/i);
     expect(codes.propose).toBe(0);
     expect(dialed.propose).toBe(dialed.call);
+  });
+
+  test("handing a tool to a propose agent says the call will never actually happen", () => {
+    expect(proposeGrantOut).toMatch(/helper is at trust level propose/i);
+    expect(proposeGrantOut).toMatch(/never actually make the call/i);
+    // And it names the fix, rather than leaving the operator to work out that this is about
+    // trust rather than about the grant.
+    expect(proposeGrantOut).toContain("asterism trust helper notify");
+    expect(codes.proposeGrant).toBe(0);
   });
 
   test("re-pointing the endpoint ends the grant, and says whose it was", () => {
