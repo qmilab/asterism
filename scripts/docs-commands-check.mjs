@@ -417,6 +417,58 @@ function concretize(command) {
 }
 
 /**
+ * Is this the binary refusing the SHAPE of a command, rather than refusing its meaning?
+ *
+ * The distinction is the whole synopsis check: a shape rejection means the page promised
+ * a grammar the binary does not have, while a semantic refusal ("No agent named …") is
+ * the checker's substituted value being unrealistic, which is not the page's fault.
+ *
+ * This list was wrong three times, each time by being SHORT — `takes no …`, then
+ * `does not take …`, then `Unknown subcommand:`, which meant an invented subcommand
+ * under a real verb (`asterism api bogus <agent>`) sailed through the gate built to
+ * catch exactly that. Enumerating message prefixes by hand does not converge, so
+ * `--self-test` no longer trusts this list: it derives the verbs that HAVE subcommands
+ * from the docs' own synopses, types an invented one at each, and fails unless every
+ * refusal lands here. See `probeSubcommandRejections`.
+ */
+function isShapeRejection(line) {
+  return (
+    /^(Usage:|Unknown (command|subcommand):)/.test(line) ||
+    /\bdoes not take\b/.test(line) ||
+    /\btakes no\b/.test(line)
+  );
+}
+
+/**
+ * Every verb the docs show with subcommands must reject an invented one, AND that
+ * rejection must be recognised by `isShapeRejection`. Derived from the binary's actual
+ * answers rather than from a list in this file, so the detector cannot quietly fall
+ * behind the CLI's wording again.
+ */
+function probeSubcommandRejections(work) {
+  // From the binary's own `Commands:` block, where a bare second word IS a subcommand by
+  // construction (`capabilities show <agent>`), and a placeholder is not
+  // (`run <agent> "<task>"`, `confirm [<agent>] <run>`). Deriving this from the DOCS
+  // instead read the agent name in `asterism confirm researcher <run>` as a subcommand
+  // and reported a rejection that was never a rejection.
+  const block = helpFor(work, "").split(/^Commands:$/m)[1]?.split(/^\S/m)[0] ?? "";
+  const verbs = new Set();
+  for (const line of block.split("\n")) {
+    const m = line.match(/^\s{2}([a-z][\w-]*)\s+([a-z][\w-]*)/);
+    if (m) verbs.add(m[1]);
+  }
+  const missed = [];
+  for (const verb of [...verbs].sort()) {
+    const result = runCommand(work, `asterism ${verb} __nosuch_subcommand__`);
+    const first = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
+    if (result.code === 0 || !isShapeRejection(first)) {
+      missed.push(`  asterism ${verb} __nosuch_subcommand__\n    → ${first || "(no output)"}`);
+    }
+  }
+  return missed;
+}
+
+/**
  * A synopsis claims a grammar. Three things in it are checkable without demanding it be
  * byte-identical to `--help` (the docs legitimately specialize — the reference page
  * gives `channel telegram` its own line where the binary prints one for both):
@@ -467,14 +519,7 @@ function checkSynopsis(work, scratch, command) {
   if (!UNRUNNABLE.some(([re]) => re.test(text))) {
     const result = runCommand(scratch, text);
     const first = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
-    // Grammar rejections do not all start with "Usage:". `capabilities unset` answers a
-    // stray argument with "…takes no capability keys", which is every bit as much the
-    // binary refusing the SHAPE the page promised.
-    if (
-      /^(Usage:|Unknown command:)/.test(first) ||
-      /\bdoes not take\b/.test(first) ||
-      /\btakes no\b/.test(first)
-    ) {
+    if (isShapeRejection(first)) {
       return { ok: false, why: `typed as \`${text}\`, the binary rejected its shape`, detail: first };
     }
   }
@@ -806,6 +851,19 @@ function report(total, tally, groups, coverageWork) {
       process.exit(1);
     }
     console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
+
+    // Derived from the binary, not from a list here: every verb the docs give
+    // subcommands must reject an invented one in a way `isShapeRejection` recognises.
+    const missedRejections = probeSubcommandRejections(coverageWork);
+    if (missedRejections.length) {
+      console.log(
+        `\nSELF-TEST FAILED: ${missedRejections.length} subcommand rejection(s) the shape` +
+          ` check would not notice:`,
+      );
+      for (const m of missedRejections) console.log(m);
+      process.exit(1);
+    }
+    console.log("Every verb with subcommands rejects an invented one, recognisably.");
 
     // The planted lines are the point: every one must be reported as a failure. If
     // the harness excuses or skips any of them, its zero is worth nothing.
