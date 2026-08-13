@@ -3693,6 +3693,54 @@ test("connect rejects --mode with no value rather than opening a default connect
   expect(conns).toMatch(/no connections yet/i);
 });
 
+test("a mistyped option on connect is refused, not defaulted to the broadest mode (#139)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  // `parseArgs` accepts any `--flag` and lets it CONSUME the next token, so `--mdoe
+  // artifact-only` left `--mode` absent — and an absent `--mode` means `handoff`, the
+  // broadest channel. The operator asked for the narrowest and would have been told they
+  // got what they typed. This is the one flag in the CLI whose default widens a
+  // permission, so it is refused rather than defaulted.
+  expect(await runCli(["connect", "a", "b", "--mdoe", "artifact-only"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/connect does not take --mdoe/i);
+  // The refusal is worth nothing if a channel was opened anyway.
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).toMatch(/no connections yet/i);
+  // And the correctly-spelled form is untouched.
+  expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(0);
+  expect(await capture(["connections", "a"], h.io)).toMatch(/artifact-only/);
+});
+
+test("a mistyped option on disconnect is refused rather than eating the mode (#139)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "autonomous"], h.io);
+  await runCli(["new", "b", "--trust", "propose"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "handoff"], h.io);
+  await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io);
+  expect(await runCli(["disconnect", "a", "b", "--mdoe", "artifact-only"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/disconnect does not take --mdoe/i);
+  // Both channels are still open — the refusal withdrew nothing.
+  const conns = await capture(["connections", "a"], h.io);
+  expect(conns).toMatch(/handoff · active/);
+  expect(conns).toMatch(/artifact-only · active/);
+});
+
+test("a mistyped --agent on `config set` is refused, not applied install-wide (#139)", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "a", "--trust", "propose"], h.io);
+  await runCli(["config", "set", "gpt-4o-mini", "--provider", "openai"], h.io);
+  // An absent `--agent` means the install-wide default, so a typo silently retuned every
+  // agent instead of the one named.
+  expect(await runCli(["config", "set", "claude-opus-4-8", "--agnet", "a"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toMatch(/config set does not take --agnet/i);
+  // The install default is untouched.
+  expect(await capture(["config"], h.io)).toMatch(/Install default model: gpt-4o-mini/);
+});
+
 test("connect reports an unknown agent", async () => {
   const h = harness();
   await runCli(["init"], h.io);

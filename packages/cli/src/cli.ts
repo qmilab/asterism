@@ -1020,19 +1020,18 @@ function cmdCapabilities(args: string[], io: CliIO): Promise<number> {
  * than asked. Only the first is a grant, but none of the three is what was typed, and a
  * one-line refusal is cheaper than three different consolation prizes.
  */
-function rejectUnknownOptions(
+function rejectUnknownFlags(
   parsed: ParsedArgs,
   allowed: readonly string[],
-  verb: string,
+  label: string,
+  usage: string,
   io: CliIO,
 ): boolean {
   const known = new Set([...allowed, "help", "h"]);
   const unknown = Object.keys(parsed.flags).filter((f) => !known.has(f));
   if (unknown.length === 0) return true;
-  io.err(
-    `asterism capabilities ${verb} does not take ${unknown.map((f) => `--${f}`).join(", ")}.`,
-  );
-  io.err(CAPABILITIES_USAGE);
+  io.err(`asterism ${label} does not take ${unknown.map((f) => `--${f}`).join(", ")}.`);
+  io.err(usage);
   return false;
 }
 
@@ -1056,7 +1055,7 @@ function cmdCapabilitiesShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // The option check runs FIRST everywhere here: an unrecognized flag consumes the next
   // token, so the symptom is a missing agent or a missing key, and the generic usage
   // line would send the operator looking for the wrong mistake.
-  if (!rejectUnknownOptions(parsed, [], "show", io)) return Promise.resolve(1);
+  if (!rejectUnknownFlags(parsed, [], "capabilities show", CAPABILITIES_USAGE, io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   if (!name || parsed.positionals.length > 1) {
     io.err("Usage: asterism capabilities show <agent>");
@@ -1097,7 +1096,7 @@ function cmdCapabilitiesShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
  * expanded to nothing.
  */
 function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
-  if (!rejectUnknownOptions(parsed, ["none"], "set", io)) return Promise.resolve(1);
+  if (!rejectUnknownFlags(parsed, ["none"], "capabilities set", CAPABILITIES_USAGE, io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   // De-duplicated once, here, so every message downstream describes the SET the operator
   // asked for rather than the tokens they typed — `set x fs.read fs.read` reported
@@ -1145,7 +1144,7 @@ function cmdCapabilitiesSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
  * which also pins it, so a capability added to the catalog later is not inherited.
  */
 function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
-  if (!rejectUnknownOptions(parsed, [], "remove", io)) return Promise.resolve(1);
+  if (!rejectUnknownFlags(parsed, [], "capabilities remove", CAPABILITIES_USAGE, io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   // De-duplicated for the same reason as `set`: `remove x fs.read fs.read` reported
   // "Removed fs.read, fs.read", and a repeated unknown key printed its "nothing to
@@ -1225,7 +1224,7 @@ function cmdCapabilitiesRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
  * something `set` with no arguments could be mistaken for.
  */
 function cmdCapabilitiesUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
-  if (!rejectUnknownOptions(parsed, [], "unset", io)) return Promise.resolve(1);
+  if (!rejectUnknownFlags(parsed, [], "capabilities unset", CAPABILITIES_USAGE, io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   if (!name) {
     io.err("Usage: asterism capabilities unset <agent>");
@@ -1415,12 +1414,7 @@ function rejectUnknownApiOptions(
   verb: string,
   io: CliIO,
 ): boolean {
-  const known = new Set([...allowed, "help", "h"]);
-  const unknown = Object.keys(parsed.flags).filter((f) => !known.has(f));
-  if (unknown.length === 0) return true;
-  io.err(`asterism api ${verb} does not take ${unknown.map((f) => `--${f}`).join(", ")}.`);
-  io.err(API_USAGE);
-  return false;
+  return rejectUnknownFlags(parsed, allowed, `api ${verb}`, API_USAGE, io);
 }
 
 /**
@@ -2129,6 +2123,10 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
 
 // --- collaboration (connect / connections / handoff) -----------------------
 
+/** One usage line per verb, so the refusal and the arity error cannot drift apart. */
+const CONNECT_USAGE = `Usage: asterism connect <from> <to> --mode <${CONNECTION_MODES.join("|")}>`;
+const DISCONNECT_USAGE = `Usage: asterism disconnect <from> <to> [--mode <${CONNECTION_MODES.join("|")}>]`;
+
 /**
  * `asterism connect <from> <to> --mode handoff` — open the explicit, permissioned channel
  * that lets `from` hand a task to `to`. Directional (A→B only); idempotent (re-running is
@@ -2141,10 +2139,21 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
     io.out(COMMAND_HELP.connect!);
     return Promise.resolve(0);
   }
+  // An unrecognized option is refused BEFORE anything is opened. `parseArgs` accepts any
+  // `--flag` and lets it consume the next token, so `--mdoe artifact-only` swallowed the
+  // mode and left `--mode` absent — which defaults to `handoff`, the BROADEST channel. A
+  // typo therefore granted more than was asked for and reported success (#139). Of every
+  // flag in this CLI, this was the one whose default widened a permission; the rest fall
+  // back to the narrow side (`--trust` to propose, `--allow` to a bot that answers nobody).
+  if (
+    !rejectUnknownFlags(parsed, ["mode"], "connect", CONNECT_USAGE, io)
+  ) {
+    return Promise.resolve(1);
+  }
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
   if (!fromName || !toName) {
-    io.err("Usage: asterism connect <from> <to> --mode handoff");
+    io.err(CONNECT_USAGE);
     return Promise.resolve(1);
   }
   // The only mode in T1 is handoff; an ABSENT `--mode` defaults to it so the common case
@@ -2211,10 +2220,16 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
     io.out(COMMAND_HELP.disconnect!);
     return Promise.resolve(0);
   }
+  // Same refusal as `connect`. Withdrawing fails safe on its own (an ignored `--mode`
+  // reads as "not named", which asks rather than guesses), but a mistyped option still
+  // eats the value the operator typed, so the two verbs answer identically.
+  if (!rejectUnknownFlags(parsed, ["mode"], "disconnect", DISCONNECT_USAGE, io)) {
+    return Promise.resolve(1);
+  }
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
   if (!fromName || !toName) {
-    io.err("Usage: asterism disconnect <from> <to> [--mode <mode>]");
+    io.err(DISCONNECT_USAGE);
     return Promise.resolve(1);
   }
   // `--mode` with no value parses as boolean `true` (`--mode`, or `--mode --foo` where the
@@ -4735,6 +4750,20 @@ function cmdConfigCognitionCapture(parsed: ParsedArgs, io: CliIO): Promise<numbe
 
 /** `asterism config set <id> [flags] [--agent <name>]` — write a default or override. */
 function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  // A mistyped `--agent` does not fail closed: it leaves `--agent` absent, and an absent
+  // `--agent` means the INSTALL-WIDE default. So `config set <model> --agnet work` retuned
+  // every agent rather than the one named, and said it had succeeded (#139).
+  if (
+    !rejectUnknownFlags(
+      parsed,
+      ["agent", ...MODEL_FLAGS],
+      "config set",
+      "Usage: asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]",
+      io,
+    )
+  ) {
+    return Promise.resolve(1);
+  }
   for (const flag of ["agent", ...MODEL_FLAGS] as const) {
     if (parsed.flags[flag] === true) {
       io.err(`The --${flag} option needs a value.`);
