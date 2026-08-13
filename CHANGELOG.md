@@ -2,7 +2,9 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## 0.5.0 — 2026-08-12
+## 0.5.0 — unreleased
+
+> These notes are written and reviewed ahead of the release. Every `@qmilab/asterism*` package is still at `0.4.0`, which remains the latest published version; this heading gets its date when the version bump and the `v0.5.0` tag land.
 
 Agents that can work together — without giving up a single thing that kept them apart. Until now an agent was reachable only by you. This release adds an explicit channel you open by hand between two agents, and lets you choose what that channel is for: hand over a result, hand over files, read what the other agent knows, or share standing context. Only that ever crosses. Alongside it, two ways to draw an agent's boundary more finely: choose which tools it has at all, and let it call exactly one web address with one of its stored credentials — without ever seeing that credential.
 

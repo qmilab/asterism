@@ -384,12 +384,31 @@ const PLACEHOLDERS = {
 };
 
 /**
+ * A SECOND witness for a variadic placeholder (`<key>...`). A variadic synopsis claims
+ * the verb takes MANY, so typing one value would not exercise the claim — and leaving
+ * the literal `...` attached does not even type a valid one: `capabilities set writer
+ * fs.read...` was rejected as an unknown capability, a SEMANTIC refusal that the shape
+ * check correctly ignores, so every variadic form silently skipped its own check.
+ */
+const VARIADIC_SECOND = {
+  "<key>": "fs.list",
+};
+
+/**
  * Turn a synopsis into something typable: drop the ` · ` alternatives and the `[...]`
  * optionals (a synopsis's required core is the arity claim worth checking), then swap
  * each `<placeholder>` for a real value.
  */
 function concretize(command) {
   let s = command.split(" · ")[0].replace(/\[[^\]]*\]/g, " ");
+  // Variadic first, so the `...` never survives into a typed argument. Expanded to two
+  // distinct values where one exists, so the command actually exercises "takes many".
+  s = s.replace(/(<[^<>]+>)\.\.\./g, (_m, ph) => {
+    const first = PLACEHOLDERS[ph];
+    if (first === undefined) return ph;
+    const second = VARIADIC_SECOND[ph];
+    return second === undefined ? first : `${first} ${second}`;
+  });
   for (const [ph, value] of Object.entries(PLACEHOLDERS)) s = s.split(ph).join(value);
   // `<a|b|c>` enumerates the accepted values; the first is as good a witness as any.
   s = s.replace(/<([^<>|]+\|[^<>]*)>/g, (_m, alts) => alts.split("|")[0]);
@@ -448,7 +467,14 @@ function checkSynopsis(work, scratch, command) {
   if (!UNRUNNABLE.some(([re]) => re.test(text))) {
     const result = runCommand(scratch, text);
     const first = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
-    if (/^(Usage:|Unknown command:)/.test(first) || /does not take --/.test(first)) {
+    // Grammar rejections do not all start with "Usage:". `capabilities unset` answers a
+    // stray argument with "…takes no capability keys", which is every bit as much the
+    // binary refusing the SHAPE the page promised.
+    if (
+      /^(Usage:|Unknown command:)/.test(first) ||
+      /\bdoes not take\b/.test(first) ||
+      /\btakes no\b/.test(first)
+    ) {
       return { ok: false, why: `typed as \`${text}\`, the binary rejected its shape`, detail: first };
     }
   }
@@ -830,6 +856,14 @@ function plantedFailures() {
     { file: "<planted>", line: 3, command: "asterism connections nosuchagent" },
     { file: "<planted>", line: 4, command: "asterism capabilities show writer --nosuchflag" },
     { file: "<planted>", line: 5, command: "asterism api remove <agent> <name> <name>..." },
+    {
+      file: "<planted>",
+      line: 7,
+      // A variadic synopsis for a verb that accepts no list. Typed with real witnesses
+      // this is refused; typed with the literal `...` left on, it used to slip through
+      // as a merely-semantic error.
+      command: "asterism capabilities unset <agent> <key>...",
+    },
     {
       file: "<planted>",
       line: 6,
