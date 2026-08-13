@@ -3680,6 +3680,39 @@ test("connect rejects a self-connection and an unimplemented mode", async () => 
   }
 });
 
+test("connect and disconnect describe each mode in its OWN words — no two alike", async () => {
+  // The defect this pins shipped: both messages were a chain of comparisons ending in a
+  // default, so a `delegated-tool` channel was announced with `asterism handoff` as its
+  // next step and withdrawn with "can no longer hand work to". Asserting a per-mode TABLE
+  // here would just restate the one in `cli.ts` and pass whatever it said, so what is
+  // asserted instead is INJECTIVITY: a fall-through makes two modes share a sentence, and
+  // that is observable without knowing which sentence either should be.
+  const connectLines = new Map<string, string>();
+  const disconnectLines = new Map<string, string>();
+  for (const mode of CONNECTION_MODES) {
+    const h = harness();
+    await runCli(["init"], h.io);
+    await runCli(["new", "a", "--trust", "autonomous"], h.io);
+    await runCli(["new", "b", "--trust", "autonomous"], h.io);
+
+    h.out.length = 0;
+    expect(await runCli(["connect", "a", "b", "--mode", mode], h.io)).toBe(0);
+    const connected = h.out.join("\n");
+    expect(connected).toContain("Use it with:");
+    connectLines.set(mode, connected.slice(connected.indexOf("Use it with:")));
+
+    h.out.length = 0;
+    expect(await runCli(["disconnect", "a", "b", "--mode", mode], h.io)).toBe(0);
+    disconnectLines.set(mode, h.out.join("\n").split("\n")[0] ?? "");
+  }
+  // Derived over the enum, so a sixth mode joins this test by existing.
+  expect(new Set(connectLines.values()).size).toBe(CONNECTION_MODES.length);
+  expect(new Set(disconnectLines.values()).size).toBe(CONNECTION_MODES.length);
+  // And one anchored fact, so injectivity alone cannot be satisfied by five wrong lines:
+  // the mode whose channel grants nothing until a tool is named points at the grant.
+  expect(connectLines.get("delegated-tool")).toContain("asterism delegate a b <endpoint>");
+});
+
 test("connect rejects --mode with no value rather than opening a default connection (Codex P2)", async () => {
   const h = harness();
   await runCli(["init"], h.io);
