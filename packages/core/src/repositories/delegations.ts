@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow } from "../db/driver.js";
 import type { BoundEndpoint, Connection, ConnectionMode, Delegation, DelegationStatus } from "../types.js";
+import { isDelegableCapabilityKey } from "../capabilities.js";
 import { requireAgentId } from "./scope.js";
 
 /**
@@ -71,6 +72,18 @@ export class DelegationRepository {
   create(connection: Connection, endpoint: BoundEndpoint, capability: string): Delegation | undefined {
     requireAgentId(connection.fromAgentId);
     requireAgentId(connection.toAgentId);
+    // The delegable set is a NAMED classification, enforced where it is written rather than
+    // where it is read. Nothing that reaches here through a surface can fail this — the key
+    // is derived from a binding — which is exactly why it is asserted: a rule kept only by
+    // the callers that happen to respect it is not a rule, and this is the chokepoint every
+    // other write boundary in this kernel uses (`validateEnum`, `validateCapabilityKeys`).
+    // A throw, not `undefined`: a withdrawn channel is an ordinary outcome, an undelegable
+    // capability is a programming error.
+    if (!isDelegableCapabilityKey(capability)) {
+      throw new Error(
+        `capability ${JSON.stringify(capability)} is not delegable — only a bound endpoint is, because it is the one capability that takes no arguments from the agent asking for it`,
+      );
+    }
     // The binding must belong to the CALLEE. Asserted here rather than trusted from the
     // caller because this is the one place the two facts meet: `endpoint` was read from some
     // agent's scoped repository, and only the connection knows which agent is supposed to own

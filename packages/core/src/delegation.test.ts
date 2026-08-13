@@ -10,7 +10,11 @@
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { isDelegableCapabilityKey } from "./capabilities.js";
+import {
+  DEFAULT_CAPABILITY_KEYS,
+  RESERVED_CAPABILITY_KEYS,
+  isDelegableCapabilityKey,
+} from "./capabilities.js";
 import { endpointCapabilities, endpointCapabilityKey } from "./endpoints.js";
 import type { OutboundHost, OutboundRequest } from "./endpoints.js";
 import { performDelegatedCall } from "./run.js";
@@ -448,6 +452,37 @@ test("the caller supplies nothing that leaves the machine", async () => {
   expect(request.url).toBe(URL_A);
   expect(Object.keys(request.headers)).toEqual(["Authorization"]);
   expect(JSON.stringify(request)).not.toContain("writer");
+});
+
+test("the delegable set is NAMED and narrow — not every capability an agent owns", () => {
+  // A classification the kernel states out loud deserves a direct test, the way
+  // `classifyEffect` has one: "never a vibe". Every shipped capability outside the
+  // credential-bearing namespace is undelegable, including the ones an agent holds by
+  // default — a delegated `fs.read` is the durable, re-pollable read into the callee's
+  // workspace the artifact-fetch review killed.
+  for (const key of DEFAULT_CAPABILITY_KEYS) {
+    expect(isDelegableCapabilityKey(key)).toBe(false);
+  }
+  for (const key of RESERVED_CAPABILITY_KEYS) {
+    expect(isDelegableCapabilityKey(key)).toBe(false);
+  }
+  expect(isDelegableCapabilityKey("shell")).toBe(false);
+  expect(isDelegableCapabilityKey("")).toBe(false);
+  // …and the one class that is.
+  expect(isDelegableCapabilityKey(endpointCapabilityKey("issues"))).toBe(true);
+});
+
+test("a grant for an undelegable capability is refused at the write boundary", () => {
+  bindIssues();
+  const connection = store.createConnection(writer.id, helper.id, "delegated-tool");
+  // Reached only by a caller that hand-builds a row — no surface can produce one, because
+  // the key is derived from a binding. The write refuses it anyway, on the chokepoint rule
+  // every other write boundary here follows: a classification enforced only by the callers
+  // that happen to respect it is not enforced.
+  const notAnEndpoint = { ...store.endpoints.getByName(helper.id, "issues")!, name: "read" };
+  expect(() => store.delegations.create(connection, notAnEndpoint, "fs.read")).toThrow(
+    /not delegable/i,
+  );
 });
 
 test("every delegable capability accepts no arguments — the property D38 rests on", () => {

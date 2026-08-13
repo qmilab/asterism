@@ -3703,7 +3703,12 @@ test("connect and disconnect describe each mode in its OWN words — no two alik
 
     h.out.length = 0;
     expect(await runCli(["disconnect", "a", "b", "--mode", mode], h.io)).toBe(0);
-    disconnectLines.set(mode, h.out.join("\n").split("\n")[0] ?? "");
+    // The consequence sentence ALONE. The full line begins "Disconnected a → b (<mode>).",
+    // which differs per mode for free — so comparing it would let every mode share one
+    // consequence and still look injective. That is not hypothetical: it is what the first
+    // version of this test did, and the `handoff` fall-through survived it.
+    const line = h.out.join("\n").split("\n")[0] ?? "";
+    disconnectLines.set(mode, line.slice(line.indexOf(").") + 2).trim());
   }
   // Derived over the enum, so a sixth mode joins this test by existing.
   expect(new Set(connectLines.values()).size).toBe(CONNECTION_MODES.length);
