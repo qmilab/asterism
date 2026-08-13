@@ -39,6 +39,7 @@ import {
   performHandoff,
   performSummaryExchange,
   performSetBrief,
+  performDelegatedCall,
   performEndBrief,
   proposeObjectiveTransitions,
   proposeReviewableMemories,
@@ -50,6 +51,7 @@ import {
   RESERVED_CAPABILITY_KEYS,
   CREDENTIAL_CAPABILITY_PREFIX,
   isCredentialBearingKey,
+  endpointCapabilityKey,
   rejectProposedObjective,
   resolveStandingPolicy,
   resumeRun,
@@ -71,6 +73,7 @@ import type {
   CognitionProviderId,
   Connection,
   ConnectionMode,
+  Delegation,
   RunStatus,
   ExecuteRunOptions,
   FirewallFinding,
@@ -1451,13 +1454,14 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    let endpoint;
+    let bound;
     try {
-      endpoint = store.bindEndpoint(agent.id, endpointName, url, credential);
+      bound = store.bindEndpoint(agent.id, endpointName, url, credential);
     } catch (err) {
       io.err(err instanceof Error ? err.message : String(err));
       return 1;
     }
+    const { endpoint, endedDelegations } = bound;
     const target = new URL(endpoint.url).host;
     // The grant, stated as a grant. `add` is a widening verb, and what it widens by is
     // the ability to send a secret to another machine — so the confirmation names the
@@ -1474,8 +1478,52 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
         `Note: no credential '${endpoint.credentialKey}' is stored for ${agent.name} yet, so calls will fail until you add one: asterism secrets add ${agent.name} ${endpoint.credentialKey}`,
       );
     }
+    reportEndedDelegations(io, store, agent, endpoint.name, endedDelegations, "changed");
     return 0;
   });
+}
+
+/**
+ * Say whose channel just narrowed, when a binding change withdrew a delegation.
+ *
+ * Printed from the rows the KERNEL ended, never from a set this function re-derives — the
+ * defect five of the #123 findings shared was a surface stating a completeness it had not
+ * checked, and the structural fix is to have nothing left to re-derive. Silent when nothing
+ * was delegated, which is the ordinary case.
+ *
+ * The other agent is named, and that is deliberate rather than a leak: the operator running
+ * this command is the one who granted the delegation, on an install where every agent is
+ * theirs. What is never printed is anything about the other agent beyond the name they chose.
+ */
+function reportEndedDelegations(
+  io: CliIO,
+  store: AsterismStore,
+  owner: Agent,
+  endpointName: string,
+  ended: readonly Delegation[],
+  cause: "changed" | "removed",
+): void {
+  if (ended.length === 0) return;
+  const askers = ended
+    .map((d) => store.agents.get(d.fromAgentId)?.name ?? "another agent")
+    .sort((a, b) => a.localeCompare(b));
+  const subject = askers.length === 1 ? askers[0]! : `${askers.slice(0, -1).join(", ")} and ${askers.at(-1)!}`;
+  io.out(
+    cause === "changed"
+      ? `This changed what the call sends, so ${subject} can no longer ask ${owner.name} to make it.`
+      : `${subject} can no longer ask ${owner.name} to call it either.`,
+  );
+  // The advice has to name a command that WOULD WORK. After a re-point the binding still
+  // exists, so handing it over again is one step; after a removal there is nothing left to
+  // hand over, and `delegate` would refuse with "has no endpoint '<name>'" — advice for a
+  // recovery the code refuses, which is a defect this project has shipped before. So the
+  // removal path names the bind first.
+  if (cause === "removed") {
+    io.out(`  To hand it over again, bind it first: asterism api add ${owner.name} ${endpointName} <https-url> --credential <KEY>`);
+  }
+  for (const asker of askers) {
+    io.out(`  ${cause === "removed" ? "then" : "Grant it again with:"} asterism delegate ${asker} ${owner.name} ${endpointName}`);
+  }
 }
 
 /**
@@ -1538,7 +1586,7 @@ function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
       io.err(`See what it has: asterism api list ${agent.name}`);
       return 1;
     }
-    store.removeEndpoint(agent.id, bare);
+    const { endedDelegations } = store.removeEndpoint(agent.id, bare);
     io.out(
       `Removed ${CREDENTIAL_CAPABILITY_PREFIX}${bare} from ${agent.name} — it can no longer send ${endpoint.credentialKey} anywhere.`,
     );
@@ -1551,6 +1599,9 @@ function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
         ? `The credential itself is untouched and still stored for ${agent.name}.`
         : `No credential '${endpoint.credentialKey}' is stored for ${agent.name} — this verb did not change that either way.`,
     );
+    // Last, so the two facts about the ENDPOINT and the one about the CREDENTIAL do not
+    // interleave: what this verb removed, what it left alone, then who else is affected.
+    reportEndedDelegations(io, store, agent, bare, endedDelegations, "removed");
     return 0;
   });
 }
@@ -2188,15 +2239,25 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
     // exchange form, so telling an artifact-only channel's operator to "hand off" would be
     // wrong, and telling a read-summary one to pass a task would be wrong twice over: that
     // mode runs nothing, so it takes a focus, not work.
-    const usage =
-      connection.mode === "read-summary"
-        ? `asterism summary ${fromName} ${toName} ["<focus>"]`
-        : connection.mode === "artifact-only"
-          ? `asterism artifact ${fromName} ${toName} "<task>"`
-          : connection.mode === "shared-brief"
-            ? `asterism brief ${fromName} ${toName} "<brief>"`
-            : `asterism handoff ${fromName} ${toName} "<task>"`;
-    io.out(`Connected ${fromName} → ${toName} (${connection.mode}). Use it with: ${usage}`);
+    //
+    // A TOTAL record over `ConnectionMode`, not a conditional chain ending in a default.
+    // The chain shipped a defect the moment a fifth mode existed: `delegated-tool` fell
+    // through to the `handoff` branch and the confirmation for a brand-new channel named a
+    // verb that channel does not authorize. A record makes the next mode a COMPILE error
+    // instead of wrong copy nobody grepped for — which is the whole lesson of deriving a
+    // list rather than asserting one, applied where the compiler can enforce it.
+    const usageByMode: Record<ConnectionMode, string> = {
+      handoff: `asterism handoff ${fromName} ${toName} "<task>"`,
+      "artifact-only": `asterism artifact ${fromName} ${toName} "<task>"`,
+      "read-summary": `asterism summary ${fromName} ${toName} ["<focus>"]`,
+      "shared-brief": `asterism brief ${fromName} ${toName} "<brief>"`,
+      // The channel alone reaches nothing until a tool is named on it, so the next step is
+      // the grant, never the call.
+      "delegated-tool": `asterism delegate ${fromName} ${toName} <endpoint>`,
+    };
+    io.out(
+      `Connected ${fromName} → ${toName} (${connection.mode}). Use it with: ${usageByMode[connection.mode]}`,
+    );
     return 0;
   });
 }
@@ -2279,15 +2340,20 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
     }
     // Say what was taken away in terms of what the agent can no longer do — the behavioral
     // outcome, per mode, mirroring how `connect` names what its channel enables.
-    const withdrawn =
-      revoked.mode === "read-summary"
-        ? `${toName} no longer shares what it has learned with ${fromName}.`
-        : revoked.mode === "artifact-only"
-          ? `${fromName} can no longer ask ${toName} for work, and files ${toName} already handed over can no longer be fetched.`
-          : revoked.mode === "shared-brief"
-            ? `The standing brief stops shaping either agent's next run — neither ${fromName} nor ${toName} sees it again.`
-            : `${fromName} can no longer hand work to ${toName}.`;
-    io.out(`Disconnected ${fromName} → ${toName} (${revoked.mode}). ${withdrawn}`);
+    //
+    // A TOTAL record for the reason `connect`'s is one: written as a chain with a default,
+    // this told the operator of a withdrawn `delegated-tool` channel that "writer can no
+    // longer hand work to helper" — a true-sounding sentence about a different mode, on the
+    // one screen whose job is to say exactly what was just taken away. Found by auditing the
+    // category after the same fault was found in `connect`, not by a test.
+    const withdrawnByMode: Record<ConnectionMode, string> = {
+      handoff: `${fromName} can no longer hand work to ${toName}.`,
+      "artifact-only": `${fromName} can no longer ask ${toName} for work, and files ${toName} already handed over can no longer be fetched.`,
+      "read-summary": `${toName} no longer shares what it has learned with ${fromName}.`,
+      "shared-brief": `The standing brief stops shaping either agent's next run — neither ${fromName} nor ${toName} sees it again.`,
+      "delegated-tool": `${fromName} can no longer ask ${toName} to call anything — every tool handed over on this channel goes with it.`,
+    };
+    io.out(`Disconnected ${fromName} → ${toName} (${revoked.mode}). ${withdrawnByMode[revoked.mode]}`);
     io.out(`Reconnecting opens a new channel — it does not bring the old one back.`);
     return 0;
   });
@@ -2314,7 +2380,19 @@ function cmdConnections(args: string[], io: CliIO): Promise<number> {
     if (!agent) return noAgent(io, name);
     const connections = store.listConnections(agent.id);
     const nameById = new Map(store.agents.list().map((a) => [a.id, a.name] as const));
-    io.out(formatConnectionList(connections, agent, nameById));
+    // What each delegated-tool channel actually reaches, resolved by the KERNEL through the
+    // live connection — the same query a call is authorized against. Derived from the rows
+    // rather than from the mode, so a channel of another mode contributes nothing and there
+    // is no second list to keep true.
+    const delegatedByConnectionId = new Map(
+      connections
+        .filter((c) => c.mode === "delegated-tool")
+        .map(
+          (c) =>
+            [c.id, store.listActiveDelegations(agent.id, c.id).map((d) => d.capability)] as const,
+        ),
+    );
+    io.out(formatConnectionList(connections, agent, nameById, delegatedByConnectionId));
     return 0;
   });
 }
@@ -2755,6 +2833,203 @@ function cmdBriefs(args: string[], io: CliIO): Promise<number> {
     );
     io.out(formatBriefList(briefs, agent, nameById, framing, channelStatusById));
     return 0;
+  });
+}
+
+// --- delegated-tool --------------------------------------------------------
+
+/**
+ * Parse `<from> <to> <endpoint>` for the three delegation verbs, resolving both agents.
+ *
+ * The endpoint is accepted either bare (`issues`) or as the capability key
+ * (`api.issues`), because `capabilities show` and `api list` both print the key and
+ * retyping what is on screen is the obvious thing to do — the same courtesy `api remove`
+ * already extends. Shared so the three verbs cannot come to disagree about which spellings
+ * they accept, which is precisely how one of them ends up refusing what another suggested.
+ */
+function parseDelegationArgs(
+  args: string[],
+  io: CliIO,
+  verb: "delegate" | "undelegate" | "call",
+): { parsedHelp: true } | number | { fromName: string; toName: string; endpoint: string } {
+  const parsed = parseArgs(args, ["help", "h"]);
+  if (helpRequested(parsed)) {
+    io.out(COMMAND_HELP[verb]!);
+    return { parsedHelp: true };
+  }
+  const [fromName, toName, endpointArg] = parsed.positionals;
+  if (!fromName || !toName || !endpointArg || parsed.positionals.length > 3) {
+    io.err(`Usage: asterism ${verb} <from> <to> <endpoint>`);
+    return 1;
+  }
+  const endpoint = endpointArg.startsWith(CREDENTIAL_CAPABILITY_PREFIX)
+    ? endpointArg.slice(CREDENTIAL_CAPABILITY_PREFIX.length)
+    : endpointArg;
+  return { fromName, toName, endpoint };
+}
+
+/**
+ * `asterism delegate <from> <to> <endpoint>` — let one agent ask another to use one
+ * specific tool of the other's (Phase 3 · T3b).
+ *
+ * The channel is not the grant. Opening a `delegated-tool` connection says the caller may
+ * ask for tool results at all; this names WHICH one, and without it the channel reaches
+ * nothing. That split is the whole reason the mode is safe to ship: an endpoint bound to
+ * the callee tomorrow is not reachable through a channel opened today, so `api add` — a
+ * command about one agent — can never widen what another agent may do.
+ */
+function cmdDelegate(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseDelegationArgs(args, io, "delegate");
+  if (typeof parsed === "number") return Promise.resolve(parsed);
+  if ("parsedHelp" in parsed) return Promise.resolve(0);
+  const { fromName, toName, endpoint: endpointName } = parsed;
+
+  return withHomeStore(io, (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    const connection = store.connections.findActive(from.id, to.id, "delegated-tool");
+    if (!connection) return noConnection(io, fromName, toName, "delegated-tool");
+
+    // The binding must exist NOW. A grant for a name the callee has not bound would sit
+    // dormant and start granting the moment it was bound — which is exactly the widening
+    // this second lock exists to prevent, arriving by the back door.
+    const endpoint = store.endpoints.getByName(to.id, endpointName);
+    if (!endpoint) {
+      io.err(`${toName} has no endpoint '${endpointName}' to hand over.`);
+      io.err(`See what it has: asterism api list ${toName}`);
+      return 1;
+    }
+    const granted = store.grantDelegation(connection, endpoint);
+    if (!granted) return noConnection(io, fromName, toName, "delegated-tool");
+
+    io.out(
+      `${fromName} may now ask ${toName} to call '${endpointName}' — and only that. ` +
+        `${toName}'s credential stays with ${toName}.`,
+    );
+    // The two facts an operator will otherwise discover by being surprised. Both are
+    // properties of the mode rather than of this install, and both belong here, at the
+    // moment the grant is made, rather than at the first call.
+    io.out(
+      to.trustLevel === "propose"
+        ? `${toName} is at trust level propose, so it will never actually make the call — it only ever tells you it would. Raise it with: asterism trust ${toName} notify`
+        : `Every call stops for you first: ${toName} asks before it sends anything, at any trust level.`,
+    );
+    io.out(`Use it with: asterism call ${fromName} ${toName} ${endpointName}`);
+    return 0;
+  });
+}
+
+/**
+ * `asterism undelegate <from> <to> <endpoint>` — withdraw one delegated tool, leaving the
+ * channel open and the binding untouched.
+ *
+ * Its own verb rather than a flag, for D29's reason and one of its own: withdrawing a single
+ * grant must not require withdrawing the channel, which `disconnect` would do irreversibly
+ * and to every other grant on it. That is the granularity `api remove` already settled for
+ * bindings — revoking one says nothing about another.
+ */
+function cmdUndelegate(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseDelegationArgs(args, io, "undelegate");
+  if (typeof parsed === "number") return Promise.resolve(parsed);
+  if ("parsedHelp" in parsed) return Promise.resolve(0);
+  const { fromName, toName, endpoint: endpointName } = parsed;
+
+  return withHomeStore(io, (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    const connection = store.connections.findActive(from.id, to.id, "delegated-tool");
+    if (!connection) return noConnection(io, fromName, toName, "delegated-tool");
+
+    const ended = store.endDelegation(connection, endpointCapabilityKey(endpointName));
+    if (!ended) {
+      // Distinct from "no channel", exactly as `unbrief` distinguishes them: the channel is
+      // open and simply does not carry this grant.
+      io.err(`${fromName} was not able to ask ${toName} to call '${endpointName}'.`);
+      io.err(`See what it can ask for: asterism connections ${fromName}`);
+      return 1;
+    }
+    io.out(`${fromName} can no longer ask ${toName} to call '${endpointName}'.`);
+    io.out(
+      `The channel is still open and ${toName} still has the endpoint — hand it back with: ` +
+        `asterism delegate ${fromName} ${toName} ${endpointName}`,
+    );
+    return 0;
+  });
+}
+
+/**
+ * `asterism call <caller> <callee> <endpoint>` — ask the callee to use one of its own tools
+ * and hand back what came out.
+ *
+ * The caller supplies nothing but the choice. The address, the credential and the request
+ * are all the callee's, the call runs under the callee's gate, and what crosses is the
+ * screened response — never the credential, and never anything else of the callee's.
+ */
+function cmdCall(args: string[], io: CliIO): Promise<number> {
+  const parsed = parseDelegationArgs(args, io, "call");
+  if (typeof parsed === "number") return Promise.resolve(parsed);
+  if ("parsedHelp" in parsed) return Promise.resolve(0);
+  const { fromName, toName, endpoint: endpointName } = parsed;
+
+  return withHomeStore(io, async (store) => {
+    const from = findAgentByName(store, fromName);
+    if (!from) return noAgent(io, fromName);
+    const to = findAgentByName(store, toName);
+    if (!to) return noAgent(io, toName);
+
+    // Frame the confirmation before it is asked. The prompt itself stays the same generic
+    // destructive-action prompt every other capability gets; this only says in words what
+    // the gate context already carries — that another agent asked for this one.
+    const confirm = io.confirm;
+    const framedConfirm = confirm
+      ? (action: Action): boolean | Promise<boolean> => {
+          io.err(`${fromName} is asking ${toName} to call '${endpointName}' with ${toName}'s credential.`);
+          return confirm(action);
+        }
+      : undefined;
+    const outcome = await performDelegatedCall(store, from, to, endpointName, {
+      ...(io.outboundHost ? { host: io.outboundHost } : {}),
+      ...(framedConfirm ? { confirm: framedConfirm } : {}),
+    });
+
+    switch (outcome.kind) {
+      case "no_connection":
+        return noConnection(io, fromName, toName, "delegated-tool");
+      case "not_delegated":
+        // Deliberately says nothing about whether the callee HAS such an endpoint. An
+        // ungranted capability must read exactly like one that does not exist, or the
+        // refusal becomes a way for one operator to enumerate another agent's tools.
+        io.err(`${fromName} cannot ask ${toName} to call '${endpointName}'.`);
+        io.err(`Hand it over first:  asterism delegate ${fromName} ${toName} ${endpointName}`);
+        return 1;
+      case "changed":
+        io.err(
+          `'${endpointName}' is not the endpoint that was handed to ${fromName} — it has been changed or removed since.`,
+        );
+        io.err(`Hand it over again:  asterism delegate ${fromName} ${toName} ${endpointName}`);
+        return 1;
+      case "withheld":
+        // `propose` never performs a side effect — report the plan step, exactly as a
+        // withheld tool call inside a run is reported.
+        io.out(`[proposed] would ask ${toName} to call '${endpointName}'. Nothing was sent.`);
+        io.out(`${toName} is at trust level propose, so it does not act on its own.`);
+        return 0;
+      case "not_confirmed":
+        io.err(`Not called: '${endpointName}' needs your explicit confirmation.`);
+        return 1;
+      case "failed":
+        io.err(`${toName} could not call '${endpointName}': ${outcome.reason}`);
+        return 1;
+      case "ok":
+        io.out(outcome.output);
+        return 0;
+    }
   });
 }
 
@@ -6054,6 +6329,12 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return cmdUnbrief(rest, io);
     case "briefs":
       return cmdBriefs(rest, io);
+    case "delegate":
+      return cmdDelegate(rest, io);
+    case "undelegate":
+      return cmdUndelegate(rest, io);
+    case "call":
+      return cmdCall(rest, io);
     case "confirm":
       return cmdConfirm(rest, io);
     case "runs":

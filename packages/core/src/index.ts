@@ -164,6 +164,7 @@ export {
   RESERVED_CAPABILITY_KEYS,
   CREDENTIAL_CAPABILITY_PREFIX,
   isCredentialBearingKey,
+  isDelegableCapabilityKey,
   resolveOwnedCapabilityKeys,
   validateCapabilityKeys,
 } from "./capabilities.js";
@@ -243,6 +244,7 @@ export {
   performSummaryExchange,
   performSetBrief,
   performEndBrief,
+  performDelegatedCall,
   EXCHANGE_FETCH_KEY,
   resolveRecallBudget,
 } from "./run.js";
@@ -267,6 +269,8 @@ export type {
   SummaryExchangeOutcome,
   SetBriefOutcome,
   EndBriefOutcome,
+  DelegatedCallOptions,
+  DelegatedCallOutcome,
 } from "./run.js";
 export { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 export type { ObservedEffect, WorldFactCandidate } from "./world-fact-harvest.js";
@@ -290,6 +294,7 @@ export { auditTrustHooks } from "./audit.js";
 export type { AuditContext } from "./audit.js";
 
 export { AsterismStore } from "./store.js";
+export type { BindEndpointOutcome, RemoveEndpointOutcome } from "./store.js";
 export { openDatabase, BUSY_TIMEOUT_MS } from "./db/index.js";
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver.js";
 
@@ -316,6 +321,10 @@ export type { CreateEndpointInput } from "./repositories/endpoints.js";
 export { ConnectionRepository } from "./repositories/connections.js";
 export type { CreateConnectionInput } from "./repositories/connections.js";
 export { ExchangeRepository } from "./repositories/exchanges.js";
+export {
+  DelegationRepository,
+  DELEGATION_CONNECTION_MODE,
+} from "./repositories/delegations.js";
 export type { RecordExchangeInput } from "./repositories/exchanges.js";
 export { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 export { AgentSettingsRepository } from "./repositories/agent-settings.js";

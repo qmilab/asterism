@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AsterismStore, DEFAULT_WORLD_FACT_CAP } from "@qmilab/asterism-core";
+import { AsterismStore, CONNECTION_MODES, DEFAULT_WORLD_FACT_CAP } from "@qmilab/asterism-core";
 import type {
   Capability,
   ProposedMemory,
@@ -3667,14 +3667,17 @@ test("connect rejects a self-connection and an unimplemented mode", async () => 
   expect(h.err.join("\n")).toMatch(/can't connect to itself/i);
 
   await runCli(["new", "b", "--trust", "propose"], h.io);
-  // `delegated-tool` is the LAST mode with no implementation — `artifact-only` became real
-  // in T2a, `read-summary` in T2b and `shared-brief` in T3a, so the "unknown mode" assertion
-  // moves rather than disappearing. It retires when #123 unblocks T3b.
-  expect(await runCli(["connect", "a", "b", "--mode", "delegated-tool"], h.io)).toBe(1);
+  // This assertion used to name `delegated-tool`, the last mode the design described and
+  // the code did not implement. All five are real now, so it names a near-miss SPELLING
+  // instead — the property being pinned is that the surface refuses anything outside the
+  // enum, which is what protected the unimplemented mode and is what protects a typo.
+  expect(await runCli(["connect", "a", "b", "--mode", "delegated_tool"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
-  // The now-real modes open channels.
-  expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(0);
-  expect(await runCli(["connect", "a", "b", "--mode", "read-summary"], h.io)).toBe(0);
+  // Every mode in the enum opens a channel — derived, so a sixth mode joins by existing
+  // rather than by someone remembering to add a line here.
+  for (const mode of CONNECTION_MODES) {
+    expect(await runCli(["connect", "a", "b", "--mode", mode], h.io)).toBe(0);
+  }
 });
 
 test("connect rejects --mode with no value rather than opening a default connection (Codex P2)", async () => {
@@ -3835,7 +3838,7 @@ test("disconnect rejects a malformed or unknown --mode rather than falling throu
 
   expect(await runCli(["disconnect", "a", "b", "--mode"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/--mode needs a value/i);
-  expect(await runCli(["disconnect", "a", "b", "--mode", "delegated-tool"], h.io)).toBe(1);
+  expect(await runCli(["disconnect", "a", "b", "--mode", "delegated_tool"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
   // Neither malformed invocation withdrew the open channel.
   const conns = await capture(["connections", "a"], h.io);

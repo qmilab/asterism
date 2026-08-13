@@ -106,6 +106,33 @@ export function isCredentialBearingKey(key: string): boolean {
   return key.startsWith(CREDENTIAL_CAPABILITY_PREFIX);
 }
 
+/**
+ * Whether `key` names a capability one agent may DELEGATE to another over a
+ * `delegated-tool` connection (design note §21, decision D38).
+ *
+ * Its own predicate rather than a second call to {@link isCredentialBearingKey}, even
+ * though the two pick out the same set today, because they ask different questions and
+ * are expected to come apart:
+ *
+ *   - `isCredentialBearingKey` asks **what the capability carries** — a secret, so it
+ *     is destructive and can never auto-approve (E9).
+ *   - This asks **what the CALLER can author**. Delegation is safe here for one reason
+ *     only: a bound endpoint takes no arguments, so the caller chooses WHICH tool runs
+ *     and never a byte of what it sends. An argument-taking capability delegated across
+ *     a channel would be a caller-supplied selector with no record behind it — exactly
+ *     what `artifact fetch` refused, and it would need a cross-agent outbound content
+ *     screen this product does not have (#132).
+ *
+ * The sets separate the moment #132 lands, which adds agent-supplied query parameters to
+ * `api.*`. Written as "credential-bearing", this rule would then widen the delegated-tool
+ * mode as a side effect of an unrelated change — E9's own "a rule that holds only until
+ * someone changes an unrelated threshold is not a rule". The zero-input property is
+ * therefore asserted against the built tool schemas by test, not restated here.
+ */
+export function isDelegableCapabilityKey(key: string): boolean {
+  return isCredentialBearingKey(key);
+}
+
 /** The longest a single capability key may be. The shipped keys are ~8 characters. */
 const MAX_CAPABILITY_KEY_LENGTH = 128;
 

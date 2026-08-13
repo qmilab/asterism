@@ -60,6 +60,8 @@ const CORE = join(ROOT, "packages", "core", "dist", "index.js");
  * reads like a regression and is not one.
  */
 let AsterismStore;
+/** The kernel's own connection-mode enum, so the fixture cannot fall behind it. */
+let CONNECTION_MODES;
 
 function preflight() {
   const missing = [
@@ -160,6 +162,10 @@ const UNRUNNABLE = [
   [/^asterism dashboard\b/, "takes over the terminal, or binds a port and blocks"],
   [/^asterism channel (telegram|discord)\b/, "connects to a third-party chat service"],
   [/^asterism service (install|uninstall)\b/, "writes a launchd/systemd unit to the host"],
+  [
+    /^asterism call\b/,
+    "would send one agent's credential to a real third-party address",
+  ],
 ];
 
 /**
@@ -306,13 +312,38 @@ function seedRecords(work, name, present, skipConnections = false) {
   // when the section opens its own — a page that teaches `connect` must be able to show
   // the refusal that precedes it, and one that teaches `disconnect` must not have a
   // later example silently rescued by a channel the checker re-opened.
+  // The one thing a delegated-tool example cannot create for itself: an endpoint on the
+  // CALLEE. A grant may only name a tool the callee already holds, so without this the
+  // page's own `delegate` line fails on the checker's setup rather than on anything the
+  // page got wrong. The channel and the grant are deliberately NOT seeded — each page
+  // opens its own, and a page that teaches `delegate` must be able to show the refusal
+  // that precedes it. The address is a `.test` name (RFC 6761: guaranteed not to resolve),
+  // and `asterism call` is unrunnable here, so this checker never opens a socket.
+  if (name === "helper" || name === "researcher") {
+    q(["secrets", "add", name, "GITHUB_TOKEN"], "ghp_fixture_token");
+    q(["api", "add", name, "issues", "https://api.example.test/issues?state=open", "--credential", "GITHUB_TOKEN"]);
+  }
+
   if (skipConnections) return;
   if ((name === "writer" || name === "researcher") && present.includes("writer") && present.includes("researcher")) {
-    for (const mode of ["handoff", "artifact-only", "read-summary", "shared-brief"]) {
+    // DERIVED from the kernel's enum, not listed. Listed, this fell one mode behind the
+    // moment `delegated-tool` shipped — and the failure would have been a docs page whose
+    // examples fail on the CHECKER's setup rather than on anything the page got wrong,
+    // which is the least useful kind of red. A sixth mode joins the fixture by existing.
+    for (const mode of CONNECTION_MODES) {
       q(["connect", "writer", "researcher", "--mode", mode]);
     }
     // A standing brief, so `unbrief` and `briefs` meet the state their examples describe.
     q(["brief", "writer", "researcher", "Q3 launch: enterprise buyers, ship by Friday"]);
+  }
+  // A delegated-tool channel with a tool ALREADY handed over — the state `## undelegate`
+  // acts on without opening it. Sections get their own install (see `byFile`), so a
+  // section that names a grant but does not make one has to meet it here; `## delegate`
+  // opens its own and is skipped by the `skipConnections` guard above, exactly as
+  // `## connect` is.
+  if (name === "helper" && present.includes("writer") && present.includes("helper")) {
+    q(["connect", "writer", "helper", "--mode", "delegated-tool"]);
+    q(["delegate", "writer", "helper", "issues"]);
   }
 }
 
@@ -962,7 +993,7 @@ function plantedFailures() {
 
 preflight();
 try {
-  ({ AsterismStore } = await import(CORE));
+  ({ AsterismStore, CONNECTION_MODES } = await import(CORE));
 } catch (err) {
   // Present but unloadable — the classic case is a `better-sqlite3` built for a different
   // Node ABI. Name the cause; the raw error alone sends people hunting a code regression.

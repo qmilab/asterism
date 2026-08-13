@@ -534,6 +534,7 @@ function connectionBody(
   connection: Connection,
   viewer: Agent,
   names: ReadonlyMap<string, string>,
+  delegated?: readonly string[],
 ): Record<string, unknown> {
   const outbound = connection.fromAgentId === viewer.id;
   return {
@@ -544,6 +545,13 @@ function connectionBody(
     mode: connection.mode,
     status: connection.status,
     createdAt: connection.createdAt,
+    // Only on the one mode where the channel does not say what it reaches. A
+    // `delegated-tool` channel grants nothing until a capability is named on it, so a body
+    // carrying mode and status alone would describe an open channel that can do nothing —
+    // the same defect the CLI listing avoids, and the same resolver behind both. Absent on
+    // every other mode rather than an empty array, so a client cannot read "reaches
+    // nothing" into a channel where the question does not arise.
+    ...(delegated ? { delegated: [...delegated] } : {}),
   };
 }
 
@@ -637,7 +645,18 @@ function listConnectionsEndpoint(deps: ConsoleDeps, agent: Agent): Response {
   // agent is on.
   const names = agentNames(deps);
   return json(200, {
-    connections: deps.store.listConnections(agent.id).map((c) => connectionBody(c, agent, names)),
+    connections: deps.store.listConnections(agent.id).map((c) =>
+      connectionBody(
+        c,
+        agent,
+        names,
+        // Resolved through the kernel — the same query a delegated call is authorized
+        // against — so this list cannot claim a reach the gate does not honour.
+        c.mode === "delegated-tool"
+          ? deps.store.listActiveDelegations(agent.id, c.id).map((d) => d.capability)
+          : undefined,
+      ),
+    ),
   });
 }
 

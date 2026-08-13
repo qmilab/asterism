@@ -469,10 +469,12 @@ test("revoking a channel that is not open is a no-op — no row, no event", () =
   }
 });
 
-test("an unimplemented mode is refused at the revoke write boundary", () => {
+test("a mode outside the enum is refused at the revoke write boundary", () => {
+  // Named `delegated-tool` until T3b made that mode real. The property is the enum's, not
+  // any particular absent mode's — see the twin assertion in `connections.test.ts`.
   expect(() =>
     // @ts-expect-error deliberately outside the enum — the storage layer never trusts the type
-    store.revokeConnection(writer.id, helper.id, "delegated-tool"),
+    store.revokeConnection(writer.id, helper.id, "delegated_tool"),
   ).toThrow(/invalid connection mode/);
 });
 

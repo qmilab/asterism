@@ -26,7 +26,7 @@ two agents you have already connected.
 two agents again opens a *new* channel; it does not restore the old one, and anything
 handed over on the old one stays out of reach.
 
-## The four modes
+## The five modes
 
 A mode answers one question: *how much of the other agent comes back?*
 
@@ -36,6 +36,7 @@ A mode answers one question: *how much of the other agent comes back?*
 | `artifact-only` | a list of the files it made — not its words, not the contents | [`asterism artifact`](#artifact-only-get-the-files-not-the-words) |
 | `read-summary` | a short, screened extract of what it has learned | [`asterism summary`](#read-summary-read-what-it-knows) |
 | `shared-brief` | nothing comes back — this one carries context **in** | [`asterism brief`](#shared-brief-context-both-agents-run-with) |
+| `delegated-tool` | the answer from one tool it owns, run by it, credentials and all | [`asterism call`](#delegated-tool-borrow-one-tool-not-the-credential) |
 
 Whatever the mode, these never cross: the other agent's **memory records**, its
 **secrets**, its **tools**, its **working notes**, and its **transcript** — how it got
@@ -220,21 +221,76 @@ Ended the brief on writer → researcher. Neither agent sees it from their next 
 The channel is still open — set a new brief with: asterism brief writer researcher "<brief>"
 ```
 
+### `delegated-tool` — borrow one tool, not the credential
+
+The other four modes are about work the other agent does with its own head. This one is
+about a tool it holds — an [address it can call](./commands.md#api) using a credential of
+its own — and it is the only mode where the asking agent gets the use of something
+without ever getting the thing itself.
+
+Two grants, not one, and the second is the point:
+
+```console
+$ asterism connect writer researcher --mode delegated-tool
+Connected writer → researcher (delegated-tool). Use it with: asterism delegate writer researcher <endpoint>
+
+$ asterism delegate writer researcher issues
+writer may now ask researcher to call 'issues' — and only that. researcher's credential stays with researcher.
+Every call stops for you first: researcher asks before it sends anything, at any trust level.
+Use it with: asterism call writer researcher issues
+```
+
+The channel says `writer` may ask for tool results at all; the second command says
+**which** tool. So a tool you give `researcher` next month is not something `writer` can
+reach through the channel you opened today — you name each one, and you can take one back
+without disturbing the rest.
+
+Asking is one command, and it stops for you every time:
+
+```console
+$ asterism call writer researcher issues
+writer is asking researcher to call 'issues' with researcher's credential.
+Approve this destructive action? [y/N] y
+```
+
+What comes back is the tool's own answer — whatever that address returns, screened. The
+credential goes out with the call and comes back into nothing: not the answer you see, not
+either agent's record, not its memory.
+
+That confirmation is not a setting you can turn off. A call that carries a credential
+always asks, at every autonomy level, and it can never earn its way out of asking the way
+other actions can — sending a credential somewhere is the one thing asterism will not
+learn to do on its own. If the agent that owns the tool is at `propose`, nothing is sent
+at all; it tells you what it would have done.
+
+Changing the tool takes the grant back, because what was handed over is no longer what
+would be sent:
+
+```console
+$ asterism api add researcher issues "https://api.github.com/repos/acme/site/pulls" --credential GITHUB_TOKEN
+Bound api.issues for researcher — it may now send credential GITHUB_TOKEN to api.github.com.
+No call happens without you: at notify and autonomous it pauses and asks; a propose agent only ever plans it.
+This changed what the call sends, so writer can no longer ask researcher to make it.
+  Grant it again with: asterism delegate writer researcher issues
+```
+
 ## Seeing what is open
 
 ```console
 $ asterism connections writer
-Connections for writer (4):
+Connections for writer (5):
 
 • → researcher · handoff · active · d0277553
 • → researcher · artifact-only · active · 23487a14
 • → researcher · read-summary · active · 1fcbb509
 • → researcher · shared-brief · active · c3c463a4
+• → researcher · delegated-tool · active · ba00a306
+    may call api.issues
 
 → outbound (this agent initiates over the channel) · ← inbound (the other agent initiates)
 ```
 
-All four channels from the walkthrough, each still its own permission. `→` is outbound
+All five channels from the walkthrough, each still its own permission. `→` is outbound
 (this agent initiates); `←` is inbound (the other agent does). You only
 ever see the named agent's own channels — it never reveals a channel between two other
 agents.
@@ -254,7 +310,10 @@ What that takes away is more than the ability to ask for work:
 - withdrawing a **read-summary** channel stops it sharing what it knows, including
   anything learned while the channel was open;
 - withdrawing a **shared-brief** channel un-frames the brief for both agents, from
-  their next run.
+  their next run;
+- withdrawing a **delegated-tool** channel takes back every tool handed over on it at
+  once — which is why taking back a single tool has its own command,
+  [`undelegate`](./commands.md#undelegate).
 
 Work already underway is not interrupted. If the other agent is paused waiting for you
 to confirm something, that confirmation still works and it still finishes in its own
@@ -265,11 +324,13 @@ was once open and that it is now closed:
 
 ```console
 $ asterism connections writer
-Connections for writer (4):
+Connections for writer (5):
 
 • → researcher · artifact-only · active · 23487a14
 • → researcher · read-summary · active · 1fcbb509
 • → researcher · shared-brief · active · c3c463a4
+• → researcher · delegated-tool · active · ba00a306
+    may call api.issues
 • → researcher · handoff · revoked · d0277553  (withdrawn — nothing crosses it)
 
 → outbound (this agent initiates over the channel) · ← inbound (the other agent initiates)

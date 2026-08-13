@@ -567,7 +567,7 @@ response>` lands on stdout.)
 ## `connect`
 
 ```
-asterism connect <from> <to> --mode <handoff|artifact-only|read-summary|shared-brief>
+asterism connect <from> <to> --mode <handoff|artifact-only|read-summary|shared-brief|delegated-tool>
 ```
 
 Open an explicit channel from one agent to another. Agents are separate by default and
@@ -590,6 +590,7 @@ harmless — it will not make a duplicate.
 | `artifact-only` | a list of the files it produced — not its words, not the contents | [`artifact`](#artifact) |
 | `read-summary` | a screened extract of what it has already learned; it does **no** work | [`summary`](#summary) |
 | `shared-brief` | nothing back — this one carries standing context **in** | [`brief`](#brief) |
+| `delegated-tool` | the answer from one tool the receiving agent owns — its credentials stay with it | [`delegate`](#delegate) · [`call`](#call) |
 
 Each mode is its own permission, so opening one never quietly grants another. Opening a
 connection is a deliberate act you take; from then on either agent's record shows the
@@ -603,7 +604,7 @@ The full picture, with a worked two-agent session, is in
 ## `disconnect`
 
 ```
-asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary|shared-brief>]
+asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary|shared-brief|delegated-tool>]
 ```
 
 Withdraw a channel you opened. From then on the two agents are as separate as they were
@@ -620,7 +621,9 @@ What it takes away is more than the ability to ask for work. Withdrawing an
 [fetched](#fetch) — the list you were given stops resolving. Withdrawing a
 `read-summary` channel stops it sharing what it knows, including anything learned while
 the channel was open. Withdrawing a `shared-brief` channel un-frames the brief for
-**both** agents, from their next run.
+**both** agents, from their next run. Withdrawing a `delegated-tool` channel takes back
+every tool [handed over](#delegate) on it at once — to take back just one, use
+[`undelegate`](#undelegate).
 
 `--mode` picks the channel when two agents have more than one open. With a single open
 channel you can leave it out; with several, asterism asks you to name one rather than
@@ -871,6 +874,139 @@ cross-check [`connections`](#connections) to work out why a brief stopped applyi
 
 Only ever the named agent's own briefs — it never reveals a brief between two other
 agents.
+
+---
+
+## `delegate`
+
+```
+asterism delegate <from> <to> <endpoint>
+```
+
+Let one agent ask another to use **one** of its tools — and only that one. The tool is an
+[endpoint](#api) the other agent has bound; what crosses is the answer, never the
+credential.
+
+Opening the channel is not enough on its own, and that is deliberate:
+
+```console
+$ asterism connect writer helper --mode delegated-tool
+Connected writer → helper (delegated-tool). Use it with: asterism delegate writer helper <endpoint>
+
+$ asterism delegate writer helper issues
+writer may now ask helper to call 'issues' — and only that. helper's credential stays with helper.
+Every call stops for you first: helper asks before it sends anything, at any trust level.
+Use it with: asterism call writer helper issues
+```
+
+The channel says `writer` may ask for tool results at all; this says **which** tool. So an
+endpoint you set up for `helper` next week is not something `writer` can reach through a
+channel you opened today — you always name it. That is the whole reason the two are
+separate.
+
+Only an endpoint the other agent **already has** can be handed over. A grant left waiting
+for a tool to appear is exactly what this design avoids, so it is refused:
+
+```console
+$ asterism delegate writer helper payroll
+helper has no endpoint 'payroll' to hand over.
+See what it has: asterism api list helper
+```
+
+Two things are worth knowing before you grant one, and they are properties of the channel
+rather than of your setup:
+
+- **Every call stops for you.** The owning agent asks before it sends anything, at any
+  autonomy level, and it can never [earn](#earned-autonomy-per-capability-grants) its way
+  out of asking — sending a credential somewhere is the one thing this product will not
+  learn to do on its own.
+- **A `propose` agent never calls at all.** It only tells you what it would have done. If
+  the agent that owns the endpoint is at `propose`, the channel works and the grant holds,
+  and nothing is ever sent.
+
+See what a channel reaches with [`connections`](#connections). Take one grant back with
+[`undelegate`](#undelegate); withdrawing the channel with [`disconnect`](#disconnect)
+takes back everything on it at once.
+
+---
+
+## `undelegate`
+
+```
+asterism undelegate <from> <to> <endpoint>
+```
+
+Take back one tool you handed over. The channel stays open, the other tools on it are
+untouched, and the endpoint itself is left alone — the agent that owns it can still use
+it, and its credential is not touched.
+
+```console
+$ asterism undelegate writer helper issues
+writer can no longer ask helper to call 'issues'.
+The channel is still open and helper still has the endpoint — hand it back with: asterism delegate writer helper issues
+```
+
+**Changing the endpoint does this for you.** If you re-point it at a different address or
+credential with [`api add`](#api), or remove it with `api remove`, anyone who could ask
+for it stops being able to: what they were handed is no longer what would be sent, so
+asterism stops sending it rather than sending something else.
+
+```console
+$ asterism api add helper issues "https://api.example.com/repos/acme/site/pulls" --credential GITHUB_TOKEN
+Bound api.issues for helper — it may now send credential GITHUB_TOKEN to api.example.com.
+No call happens without you: at notify and autonomous it pauses and asks; a propose agent only ever plans it.
+This changed what the call sends, so writer can no longer ask helper to make it.
+  Grant it again with: asterism delegate writer helper issues
+```
+
+Re-running `api add` with the same address and credential changes nothing and takes
+nothing away.
+
+---
+
+## `call`
+
+```
+asterism call <from> <to> <endpoint>
+```
+
+Ask one agent to use a tool the other one has, and show what came back.
+
+```console
+$ asterism call writer helper issues
+{"open":3,"titles":["ship the pricing page"]}
+```
+
+The asking agent chooses nothing but **which tool**. The address, the credential and the
+request all belong to the agent that owns the endpoint; the call runs as that agent, under
+its rules; and what you see is the answer with anything credential-shaped stripped out.
+Nothing else of the owning agent crosses — not its memory, not its other tools, not its
+words.
+
+You are asked before anything is sent, every time:
+
+```console
+$ asterism call writer helper issues
+writer is asking helper to call 'issues' with helper's credential.
+Approve this destructive action? [y/N]
+```
+
+If the owning agent is at `propose`, nothing is sent at all:
+
+```console
+$ asterism call writer helper issues
+[proposed] would ask helper to call 'issues'. Nothing was sent.
+helper is at trust level propose, so it does not act on its own.
+```
+
+Three things turn this down, and they read differently on purpose: there is no
+`delegated-tool` channel between the two agents, the channel is open but this tool was
+never handed over, or what was handed over has changed since. A tool that was never handed
+over reads exactly like one that does not exist — the refusal tells you nothing about the
+other agent's tools.
+
+Both agents' records show that the channel was used and how it ended — never the answer
+itself, and never the credential.
 
 ---
 

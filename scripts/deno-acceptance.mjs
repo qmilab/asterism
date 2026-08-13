@@ -133,6 +133,47 @@ async function part1CliUnderDeno() {
       "…and the binding survived that refusal",
       asterism(work, ["api", "list", "personal"]).includes("api.issues"),
     );
+    // The FIFTH connection mode (#137) — the one Track-A mode that runs no model, so a
+    // real runtime can exercise it end to end. Two locks, and the second is the point:
+    // an open channel reaches nothing until a specific tool is named on it.
+    asterism(work, ["api", "add", "personal", "issues", "https://api.example.test/i?state=open", "--credential", "API_TOKEN"]);
+    asterism(work, ["connect", "work", "personal", "--mode", "delegated-tool"]);
+    check(
+      "an open delegated-tool channel reaches nothing until a tool is handed over",
+      asterism(work, ["connections", "work"]).includes("nothing handed over yet"),
+    );
+    let refusedUngranted = false;
+    try {
+      asterism(work, ["call", "work", "personal", "issues"]);
+    } catch {
+      refusedUngranted = true;
+    }
+    check("a call over an empty channel is refused", refusedUngranted);
+    let refusedUnbound = false;
+    try {
+      asterism(work, ["delegate", "work", "personal", "payroll"]);
+    } catch {
+      refusedUnbound = true;
+    }
+    check("a tool the callee does not hold cannot be handed over", refusedUnbound);
+    asterism(work, ["delegate", "work", "personal", "issues"]);
+    check(
+      "the grant shows on the channel it was made on",
+      asterism(work, ["connections", "work"]).includes("may call api.issues"),
+    );
+    // Re-pointing the binding withdraws the grant — the operator on the other side is told,
+    // and the call stops being possible rather than going somewhere else.
+    const rebound = asterism(work, ["api", "add", "personal", "issues", "https://api.example.test/other", "--credential", "API_TOKEN"]);
+    check(
+      "re-pointing a handed-over tool withdraws the grant, and says so",
+      rebound.includes("can no longer ask"),
+    );
+    check(
+      "…and the channel no longer reaches it",
+      asterism(work, ["connections", "work"]).includes("nothing handed over yet"),
+    );
+    asterism(work, ["disconnect", "work", "personal", "--mode", "delegated-tool"]);
+
     asterism(work, ["api", "remove", "personal", "issues"]);
     check(
       "api remove withdraws it",

@@ -243,7 +243,7 @@ describe("Phase 3 · connection revoke — acceptance", () => {
     ambiguousOut = await run(["disconnect", "writer", "helper"]);
 
     // Malformed invocations, before anything is withdrawn.
-    badModeOut = await run(["disconnect", "writer", "helper", "--mode", "delegated-tool"]);
+    badModeOut = await run(["disconnect", "writer", "helper", "--mode", "delegated_tool"]);
     valuelessModeOut = await run(["disconnect", "writer", "helper", "--mode"]);
 
     // (1) Withdraw the artifact-only channel by name.
@@ -352,7 +352,10 @@ describe("Phase 3 · connection revoke — acceptance", () => {
   });
 
   test("a malformed --mode is refused loudly rather than falling through to inference", () => {
-    expect(badModeOut).toContain('Unknown connection mode "delegated-tool"');
+    // A near-miss spelling of a REAL mode, deliberately: the refusal has to be the enum's,
+    // not "this mode is not implemented yet" — which is what it used to assert, back when
+    // `delegated-tool` was the mode with nothing behind it.
+    expect(badModeOut).toContain('Unknown connection mode "delegated_tool"');
     expect(valuelessModeOut).toContain("--mode needs a value");
   });
 

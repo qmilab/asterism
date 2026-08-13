@@ -238,6 +238,7 @@ export function formatConnectionList(
   connections: readonly Connection[],
   agent: Agent,
   nameById: ReadonlyMap<string, string>,
+  delegatedByConnectionId: ReadonlyMap<string, readonly string[]> = new Map(),
 ): string {
   if (connections.length === 0) {
     return `${agent.name} has no connections yet. Open one with: asterism connect ${agent.name} <other> --mode handoff`;
@@ -258,6 +259,22 @@ export function formatConnectionList(
     // `revoked` alone reads as a state a channel might come back from, and it cannot.
     const withdrawn = c.status === "revoked" ? "  (withdrawn — nothing crosses it)" : "";
     lines.push(`• ${arrow} · ${c.mode} · ${c.status} · ${shortId(c.id)}${withdrawn}`);
+    // A delegated-tool channel reaches exactly what has been handed over on it, so the
+    // channel alone does not say what it can do. The set comes from the KERNEL — the same
+    // query a call is authorized against — rather than being re-derived here, so this
+    // listing cannot claim a reach the gate does not honour. An open channel with nothing
+    // handed over says so in words: `delegated-tool · active` on its own would otherwise
+    // read as a working channel, when it can do nothing at all until something is named.
+    if (c.mode === "delegated-tool" && c.status === "active") {
+      const delegated = delegatedByConnectionId.get(c.id) ?? [];
+      if (delegated.length === 0) {
+        const asker = outbound ? agent.name : other;
+        const owner = outbound ? other : agent.name;
+        lines.push(`    nothing handed over yet — asterism delegate ${asker} ${owner} <endpoint>`);
+      } else {
+        for (const capability of delegated) lines.push(`    may call ${capability}`);
+      }
+    }
   }
   lines.push("");
   // Mode-neutral wording: a channel may carry a handoff, an artifact-only exchange, a
