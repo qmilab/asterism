@@ -7,7 +7,9 @@
 // transition. Only the substrate (a scripted adapter) is faked.
 //
 // It must demonstrate (design note §15):
-//   1. Revoke withdraws ALL FOUR capabilities — handoff, artifact, fetch, summary.
+//   1. Revoke withdraws the four capabilities THIS script exercises — handoff,
+//      artifact, fetch, summary. Not a claim about every mode: a shared brief and a
+//      delegated tool are withdrawn by the same single write, proven beside each mode.
 //   2. Revoke is exact: only the named (from, to, mode) triple is touched.
 //   3. Revoke is terminal — reconnecting opens a NEW channel that old references do not
 //      resolve over, and both rows stay visible in `connections`.
@@ -298,7 +300,7 @@ describe("Phase 3 · connection revoke — acceptance", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // --- Invariant 1: all four capabilities are withdrawn ---------------------
+  // --- Invariant 1: the capabilities this script exercises are withdrawn ------
 
   test("every scripted tool reached the scoped registry", () => {
     // Without this the demo can only fail on a downstream assertion, which names the

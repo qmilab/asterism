@@ -1822,13 +1822,16 @@ export class AsterismStore {
    *
    * What this actually takes away is the point, and it is more than the ability to ask for
    * work. Because every exchange re-reads the ACTIVE connection at the moment it acts, and
-   * because `exchanges` authorization is keyed on the connection ROW, one revoke withdraws
-   * all four capabilities at once:
+   * because `exchanges` and `delegations` authorization is keyed on the connection ROW, one
+   * revoke withdraws every capability the channel carried at once — one per mode, which is
+   * why this list is written per mode rather than counted:
    *
    *   - `handoff`  — the callee can no longer be asked to run work
    *   - `artifact` — nor to produce a manifest
    *   - `fetch`    — every artifact ever exchanged over this connection stops resolving
    *   - `summary`  — the callee's ratified memory stops being readable
+   *   - `brief`    — the standing brief stops framing either agent's next run
+   *   - `call`     — every tool handed over on the channel stops being askable (T3b)
    *
    * TERMINAL: there is no reverse transition, here or in the repository. Reconnecting means
    * {@link createConnection} again, which mints a fresh row — old `exchanges` rows stay keyed

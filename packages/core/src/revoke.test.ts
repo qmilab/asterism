@@ -4,9 +4,15 @@
 // status and the partial unique index designed for it, then deferred the transition. These
 // tests pin the invariants of the transition itself (design note §15):
 //
-//   1. Revoke withdraws ALL FOUR capabilities — `handoff`, `artifact`, `fetch` (D13) and
-//      `summary` (T2b). The summary case is the test T2b dropped rather than fake, because
-//      producing a revoked row would have meant reaching past the repository.
+//   1. Revoke withdraws every capability the channel carried — `handoff`, `artifact`,
+//      `fetch` (D13) and `summary` (T2b) here; a shared brief in `brief.test.ts` and a
+//      delegated tool in `delegation.test.ts`, each beside the mode it belongs to. The
+//      summary case is the test T2b dropped rather than fake, because producing a revoked
+//      row would have meant reaching past the repository.
+//
+//      Stated per mode rather than as a COUNT on purpose: "all four" was true when it was
+//      written and silently false one mode later, which is the defect this project keeps
+//      finding in its own surfaces — a claim of completeness nothing re-checks.
 //   2. Revoke is EXACT: it touches only the (from, to, mode) triple it was called for —
 //      not the reverse direction, not another mode between the same pair, not another pair.
 //   3. Revoke is TERMINAL, and a reconnect is a fresh row over which the OLD artifact
@@ -137,7 +143,7 @@ async function exchangeArtifact(): Promise<void> {
   expect(outcome.kind).toBe("ok");
 }
 
-// --- Invariant 1: revoke withdraws all four capabilities ---------------------
+// --- Invariant 1: revoke withdraws the capabilities this file covers ---------
 
 test("revoke withdraws HANDOFF-ability: the callee can no longer be asked to run work", async () => {
   store.createConnection(writer.id, helper.id, "handoff");
