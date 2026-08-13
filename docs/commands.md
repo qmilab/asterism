@@ -227,7 +227,7 @@ An agent's own working notes are always available and are not listed here.
 
 > **This is not the same as [`trust`](#trust).** `capabilities` decides **which** tools
 > an agent has; `trust` decides what it may do with them — its overall level, and the
-> few destructive actions it has [earned](#earned-autonomy--per-capability-grants) the
+> few destructive actions it has [earned](#earned-autonomy-per-capability-grants) the
 > right to take without pausing. They do not cascade: taking a tool away leaves any
 > grant it earned intact and unused, and giving the tool back makes that grant apply
 > again. Take a grant back with `asterism trust <agent> revoke <capability>`.
@@ -306,7 +306,7 @@ not implementation detail:
 - **No call happens without you, and it cannot earn its way out of asking.** At
   `notify` and `autonomous` the run pauses and asks; a `propose` agent never calls at
   all, it only tells you it would. Unlike every other destructive capability, this one
-  can never [earn](#earned-autonomy--per-capability-grants) a standing grant — sending
+  can never [earn](#earned-autonomy-per-capability-grants) a standing grant — sending
   a credential somewhere is the one thing this product will not learn to do on its own.
 - **The credential never reaches the agent.** It is attached on the way out and
   stripped from anything that comes back.

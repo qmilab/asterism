@@ -32,10 +32,10 @@ A mode answers one question: *how much of the other agent comes back?*
 
 | Mode | What crosses | The command that uses it |
 |---|---|---|
-| `handoff` | its final answer, and nothing behind it | [`asterism handoff`](#handoff--hand-over-a-task) |
-| `artifact-only` | a list of the files it made — not its words, not the contents | [`asterism artifact`](#artifact-only--get-the-files-not-the-words) |
-| `read-summary` | a short, screened extract of what it has learned | [`asterism summary`](#read-summary--read-what-it-knows) |
-| `shared-brief` | nothing comes back — this one carries context **in** | [`asterism brief`](#shared-brief--context-both-agents-run-with) |
+| `handoff` | its final answer, and nothing behind it | [`asterism handoff`](#handoff-hand-over-a-task) |
+| `artifact-only` | a list of the files it made — not its words, not the contents | [`asterism artifact`](#artifact-only-get-the-files-not-the-words) |
+| `read-summary` | a short, screened extract of what it has learned | [`asterism summary`](#read-summary-read-what-it-knows) |
+| `shared-brief` | nothing comes back — this one carries context **in** | [`asterism brief`](#shared-brief-context-both-agents-run-with) |
 
 Whatever the mode, these never cross: the other agent's **memory records**, its
 **secrets**, its **tools**, its **working notes**, and its **transcript** — how it got

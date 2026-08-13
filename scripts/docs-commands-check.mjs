@@ -32,8 +32,14 @@
 //
 // A second pass checks the OTHER claim a page makes constantly and just as silently: that
 // its internal links resolve. A cross-reference to a section that does not exist fails a
-// reader exactly like a command that does not run, and an em dash in a heading renders as
-// a DOUBLE hyphen in the anchor — which is how four links in one page were born broken.
+// reader exactly like a command that does not run.
+//
+// That pass has to slugify headings EXACTLY as the site does, and the first version of it
+// did not: it substituted whitespace singly where Python-Markdown collapses a run, so an
+// em-dash heading came out with a double hyphen. It then reported four correct links as
+// dead, and they were "fixed" to match the checker — breaking them on the published site
+// while CI called them green. `--self-test` now pins the port against known-good pairs,
+// because a wrong anchor helper is worse than no anchor helper: it certifies the damage.
 
 import { execFileSync } from "node:child_process";
 import { AsterismStore } from "../packages/core/dist/index.js";
@@ -492,10 +498,33 @@ function checkCommandCoverage(work) {
   return [...verbs].filter((v) => !documented.has(v)).sort();
 }
 
-/** Heading → anchor, the way the docs site slugifies it. */
+/**
+ * Heading → anchor, mirroring Python-Markdown's `toc` slugify, which is what builds the
+ * published site (`mkdocs.yml` configures no other). Ported line for line:
+ *
+ *   value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode()
+ *   value = re.sub(r'[^\w\s-]', '', value).strip().lower()
+ *   return re.sub(r'[-\s]+', '-', value)
+ *
+ * The last line is the one that matters and the one an eyeball reimplementation gets
+ * wrong: `+` COLLAPSES a run. `## handoff — hand over a task` drops the em dash, leaving
+ * two spaces, which collapse to ONE hyphen — `#handoff-hand-over-a-task`. A version of
+ * this that substituted `\s` singly produced a double hyphen, declared the correct links
+ * dead, and the links were then "fixed" to match the checker. An anchor checker that
+ * disagrees with the site is worse than none: it certifies the breakage.
+ */
 function anchorOf(heading) {
-  const text = heading.replace(/^#+\s*/, "").replace(/`/g, "").trim().toLowerCase();
-  return text.replace(/[^\w\s-]/gu, "").replace(/\s/g, "-");
+  const text = heading
+    .replace(/^#+\s*/, "")
+    .replace(/`/g, "")
+    .normalize("NFKD")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[^\x00-\x7F]/g, "");
+  return text
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s]+/g, "-");
 }
 
 /**
@@ -729,6 +758,29 @@ function report(total, tally, groups, coverageWork) {
   }
 
   if (SELF_TEST) {
+    // The anchor port is checked against pinned pairs taken from a real
+    // Python-Markdown `slugify` run, because getting it wrong is SILENT and worse than
+    // having no checker: an anchor helper that disagrees with the site reports the
+    // correct links as dead, and "fixing" them to agree breaks the published page.
+    // Every pair below has an em dash or punctuation — the cases an eyeball
+    // reimplementation gets wrong.
+    const ANCHOR_PAIRS = [
+      ["## `handoff` — hand over a task", "handoff-hand-over-a-task"],
+      ["### Earned autonomy — per-capability grants", "earned-autonomy-per-capability-grants"],
+      ["## `artifact-only` — get the files, not the words", "artifact-only-get-the-files-not-the-words"],
+      ["## What isolation means today", "what-isolation-means-today"],
+      ["## `channel telegram`", "channel-telegram"],
+    ];
+    const anchorFailures = ANCHOR_PAIRS.filter(([h, want]) => anchorOf(h) !== want);
+    if (anchorFailures.length) {
+      console.log("\nSELF-TEST FAILED: the anchor port no longer matches Python-Markdown:");
+      for (const [h, want] of anchorFailures) {
+        console.log(`  ${h}\n    want: ${want}\n    got:  ${anchorOf(h)}`);
+      }
+      process.exit(1);
+    }
+    console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
+
     // The planted lines are the point: every one must be reported as a failure. If
     // the harness excuses or skips any of them, its zero is worth nothing.
     const planted = total;
