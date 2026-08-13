@@ -42,14 +42,40 @@
 // because a wrong anchor helper is worse than no anchor helper: it certifies the damage.
 
 import { execFileSync } from "node:child_process";
-import { AsterismStore } from "../packages/core/dist/index.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BIN = join(ROOT, "packages", "cli", "dist", "bin.js");
+const CORE = join(ROOT, "packages", "core", "dist", "index.js");
+
+/**
+ * This checker types commands at the BUILT CLI, so it needs `dist/` — and it reaches into
+ * the store for the one fixture state no CLI verb can produce (a note awaiting review).
+ * Loaded after a preflight rather than as a static import, because an unbuilt or
+ * ABI-mismatched `dist` otherwise surfaces as a bare ERR_MODULE_NOT_FOUND or a native-load
+ * stack trace with no hint of the cause — which is exactly the failure CLAUDE.md warns
+ * reads like a regression and is not one.
+ */
+let AsterismStore;
+
+function preflight() {
+  const missing = [
+    [BIN, "packages/cli/dist/bin.js"],
+    [CORE, "packages/core/dist/index.js"],
+  ].filter(([abs]) => !existsSync(abs));
+  if (missing.length) {
+    console.error(
+      `This check runs against the BUILT CLI, and ${missing.map(([, rel]) => rel).join(" and ")} ` +
+        `${missing.length === 1 ? "is" : "are"} not there.\n` +
+        `Build first:  bun run build\n` +
+        `(Or run \`bun run check:docs\`, which builds for you.)`,
+    );
+    process.exit(2);
+  }
+}
 const SELF_TEST = process.argv.includes("--self-test");
 /**
  * Report where a page's pasted OUTPUT no longer matches what the binary prints. Not a
@@ -934,4 +960,17 @@ function plantedFailures() {
   ];
 }
 
+preflight();
+try {
+  ({ AsterismStore } = await import(CORE));
+} catch (err) {
+  // Present but unloadable — the classic case is a `better-sqlite3` built for a different
+  // Node ABI. Name the cause; the raw error alone sends people hunting a code regression.
+  console.error(
+    `packages/core/dist/index.js is present but could not be loaded.\n` +
+      `The usual cause is a native module built for a different runtime — rebuild with:\n` +
+      `  bun install --force && bun run build\n\n${err}`,
+  );
+  process.exit(2);
+}
 main();
