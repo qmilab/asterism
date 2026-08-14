@@ -243,11 +243,22 @@ export class DelegationRepository {
    * End every ACTIVE grant of `capability` that names `agentId` as the CALLEE — the write
    * behind "a binding that changes ends its delegations" (D42).
    *
-   * Deliberately NOT conditioned on the connection's status or mode, unlike every other
-   * write here. This is not an authorization: it is a withdrawal, reached only from the
-   * callee's own `api remove` / rebind, and a withdrawal that skipped rows on a channel
-   * someone had already revoked would leave grants that reactivate if the pair reconnects.
-   * Ending more than strictly grants anything is the safe direction.
+   * Carries {@link findActive}'s predicate — the same question, so this ends exactly the
+   * grants that were granting something and nothing else.
+   *
+   * It was unconditional at first, justified by "a withdrawal that skipped rows on a channel
+   * someone had already revoked would leave grants that reactivate if the pair reconnects."
+   * That is false, and the schema is what makes it false: a delegation is keyed on
+   * `connection_id`, and a reconnect mints a FRESH connection row (D20), so a row left behind
+   * on a revoked channel can never match a later channel's id. Such rows are permanently
+   * inert — the brief precedent exactly, where a revoked channel's brief also stays `active`
+   * and frames nothing.
+   *
+   * So the unconditional form ended nothing that was granting, and did two things that were
+   * wrong: it emitted `delegation.ended` on both logs for a permission `disconnect` had
+   * already withdrawn, and it made `api remove` tell the operator that another agent "can no
+   * longer ask" for something that agent had already lost. An audit entry for a transition
+   * that did not happen is worse than a missing one. [Codex review R5 P2.]
    *
    * Scoped to `to_agent_id` because only the CALLEE's binding backs a grant; a caller
    * rebinding an endpoint of its own with the same name touches nothing here.
@@ -263,9 +274,17 @@ export class DelegationRepository {
       .prepare(
         `UPDATE delegations SET status = 'ended', ended_at = ?
            WHERE to_agent_id = ? AND capability = ? AND status = 'active'
+             AND EXISTS (
+               SELECT 1 FROM connections c
+                WHERE c.id = delegations.connection_id
+                  AND c.status = 'active'
+                  AND c.mode = ?
+                  AND delegations.from_agent_id = c.from_agent_id
+                  AND delegations.to_agent_id = c.to_agent_id
+             )
          RETURNING *`,
       )
-      .all([endedAt, agentId, capability])
+      .all([endedAt, agentId, capability, DELEGATION_CONNECTION_MODE])
       .map(mapDelegation);
   }
 

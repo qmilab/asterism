@@ -346,6 +346,57 @@ test("a lost race does not clear the grant that was already there", () => {
   ]);
 });
 
+test("a row left on a revoked channel is permanently inert — a reconnect does not revive it", async () => {
+  // The PREMISE the fix below rests on, probed rather than asserted. A delegation is keyed
+  // on `connection_id` and a reconnect mints a fresh row (D20), so what the revoke left
+  // behind can never match the new channel.
+  bindIssues();
+  const original = connectAndDelegate();
+  store.revokeConnection(writer.id, helper.id, "delegated-tool");
+  const reconnected = store.createConnection(writer.id, helper.id, "delegated-tool");
+  expect(reconnected.id).not.toBe(original.id);
+
+  expect(store.listActiveDelegations(writer.id, reconnected.id)).toHaveLength(0);
+  const host = recordingHost();
+  const outcome = await performDelegatedCall(store, writer, helper, "issues", {
+    host,
+    confirm: approve,
+  });
+  expect(outcome.kind).toBe("not_delegated");
+  expect(host.calls).toHaveLength(0);
+});
+
+test("removing a binding after the channel was withdrawn ends nothing, and says nothing", () => {
+  bindIssues();
+  connectAndDelegate();
+  store.revokeConnection(writer.id, helper.id, "delegated-tool");
+  const before = typesOn(writer).filter((t) => t === "delegation.ended").length;
+
+  const { removed, endedDelegations } = store.removeEndpoint(helper.id, "issues");
+  expect(removed).toBe(true);
+  // Nothing to withdraw: `disconnect` already took that permission away. Ending the row here
+  // would put `delegation.ended` on both logs for a transition that happened earlier and by
+  // another cause, and would have the surface tell the operator that another agent "can no
+  // longer ask" for something it had already lost. [Codex review R5 P2.]
+  expect(endedDelegations).toHaveLength(0);
+  for (const agent of [writer, helper]) {
+    expect(typesOn(agent).filter((t) => t === "delegation.ended")).toHaveLength(before);
+  }
+});
+
+test("re-pointing a binding after the channel was withdrawn ends nothing either", () => {
+  bindIssues();
+  connectAndDelegate();
+  store.revokeConnection(writer.id, helper.id, "delegated-tool");
+  const { endedDelegations } = store.bindEndpoint(
+    helper.id,
+    "issues",
+    "https://api.example.test/pulls",
+    "GITHUB_TOKEN",
+  );
+  expect(endedDelegations).toHaveLength(0);
+});
+
 test("a grant whose binding changed behind the kernel's back is refused at the call", async () => {
   bindIssues();
   const connection = connectAndDelegate();
