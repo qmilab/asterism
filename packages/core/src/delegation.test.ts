@@ -113,7 +113,7 @@ test("a connection in another mode does not authorize a delegated call", async (
   // The grant cannot even be MADE on the wrong channel — the mode is part of the write's
   // own predicate, not a check a caller performs.
   const endpoint = store.endpoints.getByName(helper.id, "issues")!;
-  expect(store.grantDelegation(connection, endpoint)).toBeUndefined();
+  expect(store.grantDelegation(connection, endpoint).kind).toBe("no_connection");
 
   const host = recordingHost();
   const outcome = await performDelegatedCall(store, writer, helper, "issues", {
@@ -128,8 +128,9 @@ test("the channel is directional — the reverse direction authorizes nothing", 
   bindIssues(writer);
   const connection = store.createConnection(writer.id, helper.id, "delegated-tool");
   const endpoint = store.endpoints.getByName(writer.id, "issues")!;
-  // The binding belongs to the CALLER, not the callee: refused at the write.
-  expect(store.grantDelegation(connection, endpoint)).toBeUndefined();
+  // The binding belongs to the CALLER, not the callee: refused at the write, and reported
+  // as the endpoint half rather than the channel half — the channel is live and fine.
+  expect(store.grantDelegation(connection, endpoint).kind).toBe("endpoint_changed");
 
   const host = recordingHost();
   // And asking in the other direction finds no channel.
@@ -281,6 +282,68 @@ test("removing a delegated endpoint ends the delegation and says so on both logs
   for (const agent of [writer, helper]) {
     expect(typesOn(agent).filter((t) => t === "delegation.ended")).toHaveLength(1);
   }
+});
+
+test("a binding removed while the grant was being written stops the grant, not just the call", async () => {
+  bindIssues();
+  const connection = store.createConnection(writer.id, helper.id, "delegated-tool");
+  // The surface reads the endpoint, then writes the grant. `api remove` in another shell
+  // lands in between — the stale object is exactly what the surface would still be holding.
+  const stale = store.endpoints.getByName(helper.id, "issues")!;
+  store.removeEndpoint(helper.id, "issues");
+
+  const outcome = store.grantDelegation(connection, stale);
+  expect(outcome.kind).toBe("endpoint_changed");
+  expect(store.delegations.listActiveForConnection(writer.id, connection.id)).toHaveLength(0);
+
+  // Why it must decline at the WRITE and not merely at the call: the removal ended nothing
+  // (there was no grant yet to end), so a grant written here would be invisible to the
+  // withdrawal that was supposed to be its end. Re-binding the same name, URL and credential
+  // is then a FIRST bind — it ends nothing either — and the snapshot would match again, so
+  // the grant would come back to life with no `delegate` between. A removal is the end of a
+  // grant, not a pause in it. [Codex review R2 P2.]
+  store.bindEndpoint(helper.id, "issues", URL_A, "GITHUB_TOKEN");
+  const host = recordingHost();
+  const call = await performDelegatedCall(store, writer, helper, "issues", {
+    host,
+    confirm: approve,
+  });
+  expect(call.kind).toBe("not_delegated");
+  expect(host.calls).toHaveLength(0);
+});
+
+test("a binding re-pointed while the grant was being written stops the grant too", () => {
+  bindIssues();
+  const connection = store.createConnection(writer.id, helper.id, "delegated-tool");
+  const stale = store.endpoints.getByName(helper.id, "issues")!;
+  // Rebound in place — same row id, different address. The id is therefore exactly the field
+  // that cannot tell a rebind from the original, which is why the write compares the tuple.
+  store.bindEndpoint(helper.id, "issues", "https://api.example.test/elsewhere", "GITHUB_TOKEN");
+  expect(store.endpoints.getByName(helper.id, "issues")!.id).toBe(stale.id);
+
+  expect(store.grantDelegation(connection, stale).kind).toBe("endpoint_changed");
+  expect(store.delegations.listActiveForConnection(writer.id, connection.id)).toHaveLength(0);
+});
+
+test("a lost race does not clear the grant that was already there", () => {
+  bindIssues();
+  const connection = connectAndDelegate();
+  const stale = store.endpoints.getByName(helper.id, "issues")!;
+  // Re-granting supersedes: the existing row is ended, then the new one inserted. If the
+  // insert declines, that end must roll back with it — otherwise a `delegate` that failed
+  // would have NARROWED the channel, which is the opposite of what the operator asked for.
+  store.removeEndpoint(helper.id, "issues");
+  store.bindEndpoint(helper.id, "issues", "https://api.example.test/elsewhere", "GITHUB_TOKEN");
+  // (The remove above already ended it, so re-grant against a channel that still has one.)
+  store.grantDelegation(connection, store.endpoints.getByName(helper.id, "issues")!);
+  expect(store.listActiveDelegations(writer.id, connection.id)).toHaveLength(1);
+
+  const nowStale = { ...stale, url: "https://api.example.test/gone" };
+  expect(store.grantDelegation(connection, nowStale).kind).toBe("endpoint_changed");
+  // Still exactly the one that was there before the failed re-grant.
+  expect(store.listActiveDelegations(writer.id, connection.id).map((d) => d.url)).toEqual([
+    "https://api.example.test/elsewhere",
+  ]);
 });
 
 test("a grant whose binding changed behind the kernel's back is refused at the call", async () => {

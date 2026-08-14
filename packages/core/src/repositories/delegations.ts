@@ -59,11 +59,27 @@ export class DelegationRepository {
    * caller's diligence — and a grant for an unbound name would otherwise sit dormant until
    * the callee bound it, which is precisely the widening this lock exists to prevent.
    *
+   * BOTH halves of the grant test live inside the INSERT: the channel, and **the binding
+   * itself**. The endpoint half was outside it at first — the caller read a `BoundEndpoint`
+   * and this statement checked only the connection — and the gap that leaves is not a
+   * hypothetical. `api remove` in another shell, landing between the read and this write,
+   * ended nothing (there was no grant yet) and then this wrote a grant snapshotting a
+   * binding that no longer existed. Calls refuse it as `changed`, so nothing leaks — but a
+   * later `api add` of the SAME name, URL and credential is a first bind, ends nothing, and
+   * makes that grant live again with no `delegate` in between. A removal is supposed to be
+   * the end of a grant, not a pause in it. [Codex review R2 P2.]
+   *
+   * The predicate compares the tuple the call itself compares — agent, name, URL, credential
+   * key — rather than the row id, because `api add` rebinds IN PLACE and preserves the id, so
+   * the id is exactly the field that cannot tell a rebind from the original.
+   *
    * Returns `undefined` when the grant does not hold at the moment of the write — no such
-   * live channel, wrong mode, wrong direction, or a `Connection` whose participants do not
-   * match the row it names. Deliberately not a throw: another operator revoking a channel
-   * between a surface's permission read and this write is an ordinary event this flow
-   * models, not an invariant violation.
+   * live channel, wrong mode, wrong direction, a `Connection` whose participants do not match
+   * the row it names, or a binding that has since been removed or re-pointed. Deliberately
+   * not a throw: another operator revoking a channel or re-pointing an endpoint between a
+   * surface's read and this write is an ordinary event this flow models, not an invariant
+   * violation. The caller distinguishes the two causes so the surface never names one it did
+   * not verify.
    *
    * The partial unique index `(connection_id, capability) WHERE status = 'active'` is the
    * storage-layer backstop against a concurrent double-grant; the caller ends any existing
@@ -106,6 +122,13 @@ export class DelegationRepository {
                AND from_agent_id = ?
                AND to_agent_id = ?
           )
+            AND EXISTS (
+              SELECT 1 FROM agent_endpoints
+               WHERE agent_id = ?
+                 AND name = ?
+                 AND url = ?
+                 AND credential_key = ?
+            )
          RETURNING *`,
       )
       .get([
@@ -121,8 +144,38 @@ export class DelegationRepository {
         DELEGATION_CONNECTION_MODE,
         connection.fromAgentId,
         connection.toAgentId,
+        connection.toAgentId,
+        endpoint.name,
+        endpoint.url,
+        endpoint.credentialKey,
       ]);
     return row ? mapDelegation(row) : undefined;
+  }
+
+  /**
+   * Does the callee still hold the exact binding `endpoint` describes?
+   *
+   * The same predicate {@link create}'s INSERT carries, as a standalone read — used ONLY to
+   * tell a caller WHICH half of the grant test declined, never as the authorization. The
+   * INSERT keeps its own copy, so nothing here can be raced into a write that should not
+   * have happened; if this returns true and the binding is re-pointed a microsecond later,
+   * the insert still declines.
+   *
+   * It exists so a surface never reports a cause it did not check. Without it, a `delegate`
+   * that lost a race to `api remove` was reported as "no active delegated-tool connection" —
+   * a specific, confident, wrong diagnosis, and the sentence pattern this project has had to
+   * walk back more than any other.
+   */
+  bindingHolds(agentId: string, endpoint: BoundEndpoint): boolean {
+    requireAgentId(agentId);
+    return (
+      this.driver
+        .prepare(
+          `SELECT 1 FROM agent_endpoints
+             WHERE agent_id = ? AND name = ? AND url = ? AND credential_key = ?`,
+        )
+        .get([agentId, endpoint.name, endpoint.url, endpoint.credentialKey]) !== undefined
+    );
   }
 
   /**

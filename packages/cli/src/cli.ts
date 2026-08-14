@@ -2903,7 +2903,19 @@ function cmdDelegate(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
     const granted = store.grantDelegation(connection, endpoint);
-    if (!granted) return noConnection(io, fromName, toName, "delegated-tool");
+    if (granted.kind === "no_connection") {
+      return noConnection(io, fromName, toName, "delegated-tool");
+    }
+    if (granted.kind === "endpoint_changed") {
+      // The binding went away, or was re-pointed, between the read above and the write —
+      // another shell running `api remove` or `api add`. Reported as what it is: the grant
+      // did not happen, and re-running is the whole recovery. Deliberately NOT the
+      // no-connection message, which was what this said before the write learned to
+      // distinguish them.
+      io.err(`'${endpointName}' changed on ${toName} just now, so nothing was handed over.`);
+      io.err(`Check what it has and try again:  asterism api list ${toName}`);
+      return 1;
+    }
 
     io.out(
       `${fromName} may now ask ${toName} to call '${endpointName}' — and only that. ` +

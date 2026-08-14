@@ -294,7 +294,11 @@ export { auditTrustHooks } from "./audit.js";
 export type { AuditContext } from "./audit.js";
 
 export { AsterismStore } from "./store.js";
-export type { BindEndpointOutcome, RemoveEndpointOutcome } from "./store.js";
+export type {
+  BindEndpointOutcome,
+  RemoveEndpointOutcome,
+  GrantDelegationOutcome,
+} from "./store.js";
 export { openDatabase, BUSY_TIMEOUT_MS } from "./db/index.js";
 export type { SqlDriver, SqlStatement, SqlRow, SqlValue } from "./db/driver.js";
 

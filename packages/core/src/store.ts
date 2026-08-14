@@ -123,6 +123,18 @@ export interface RemoveEndpointOutcome {
 }
 
 /**
+ * What {@link AsterismStore.grantDelegation} did. A union rather than
+ * `Delegation | undefined` because the grant has TWO preconditions — a live channel and the
+ * exact binding still being held — and a surface that collapses them names a cause it did
+ * not check. `endpoint_changed` covers removed and re-pointed alike: both mean the tool the
+ * operator asked to hand over is not the tool that would be called.
+ */
+export type GrantDelegationOutcome =
+  | { kind: "ok"; delegation: Delegation }
+  | { kind: "no_connection" }
+  | { kind: "endpoint_changed" };
+
+/**
  * Whether two capability declarations name the same set. Element-wise is enough
  * because both sides are canonical — the write boundary de-duplicates and sorts — so
  * this compares sets without allocating one.
@@ -2017,7 +2029,7 @@ export class AsterismStore {
    * match the row it names. The test lives inside {@link DelegationRepository.create}'s
    * INSERT rather than in a caller.
    */
-  grantDelegation(connection: Connection, endpoint: BoundEndpoint): Delegation | undefined {
+  grantDelegation(connection: Connection, endpoint: BoundEndpoint): GrantDelegationOutcome {
     const capability = endpointCapabilityKey(endpoint.name);
     let granted: Delegation;
     try {
@@ -2036,8 +2048,15 @@ export class AsterismStore {
         return created;
       });
     } catch (err) {
-      if (err instanceof DelegationNotGrantedError) return undefined;
-      throw err;
+      if (!(err instanceof DelegationNotGrantedError)) throw err;
+      // WHICH half declined, read after the fact and never as the authorization. The write
+      // already refused; this only decides what the operator is told, and telling them "no
+      // connection" when their endpoint was the thing that vanished is a confident wrong
+      // diagnosis. Both halves can be false at once, and the binding is reported first
+      // because it is the one the operator just named on the command line.
+      return this.delegations.bindingHolds(connection.toAgentId, endpoint)
+        ? { kind: "no_connection" }
+        : { kind: "endpoint_changed" };
     }
     this.emitToBoth(connection.fromAgentId, connection.toAgentId, "delegation.granted", {
       delegationId: granted.id,
@@ -2054,7 +2073,7 @@ export class AsterismStore {
       target: endpointLogTarget(granted.url),
       credential: granted.credentialKey,
     });
-    return granted;
+    return { kind: "ok", delegation: granted };
   }
 
   /**
