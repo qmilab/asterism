@@ -688,52 +688,82 @@ test("a refused call is still recorded as a use of the channel", async () => {
 // The window between the prompt and the call.
 // ---------------------------------------------------------------------------
 
-test("a channel withdrawn while the human is deciding stops the call", async () => {
+/**
+ * Run a call whose confirmation withdraws something, then run a fresh one, and return both
+ * outcomes.
+ *
+ * The pair is the point. A refusal that arrives mid-pause must read the same as the refusal
+ * an operator gets by simply running the command again — otherwise the message names a
+ * recovery the state does not need, which is how "no active connection … open one first"
+ * came to be printed for a channel that was still open. [Codex review R4 P2.]
+ */
+async function racedThenFresh(
+  withdraw: () => void,
+): Promise<{ raced: string; fresh: string; dialed: number }> {
+  const host = recordingHost();
+  const raced = await performDelegatedCall(store, writer, helper, "issues", {
+    host,
+    confirm: () => {
+      withdraw();
+      return true;
+    },
+  });
+  const fresh = await performDelegatedCall(store, writer, helper, "issues", {
+    host,
+    confirm: approve,
+  });
+  return { raced: raced.kind, fresh: fresh.kind, dialed: host.calls.length };
+}
+
+test("a channel withdrawn while the human is deciding stops the call, and reads as a fresh attempt", async () => {
   bindIssues();
   connectAndDelegate();
-  const host = recordingHost();
-  const outcome = await performDelegatedCall(store, writer, helper, "issues", {
-    host,
-    confirm: () => {
-      // The operator on the other side runs `disconnect` while this prompt is open.
-      store.revokeConnection(writer.id, helper.id, "delegated-tool");
-      return true;
-    },
+  const { raced, fresh, dialed } = await racedThenFresh(() => {
+    store.revokeConnection(writer.id, helper.id, "delegated-tool");
   });
-  expect(outcome.kind).toBe("no_connection");
-  expect(host.calls).toHaveLength(0);
+  expect(raced).toBe("no_connection");
+  expect(raced).toBe(fresh);
+  expect(dialed).toBe(0);
 });
 
-test("a delegation withdrawn while the human is deciding stops the call", async () => {
+test("a delegation withdrawn while the human is deciding reads as not_delegated, not as a missing channel", async () => {
   bindIssues();
   const connection = connectAndDelegate();
-  const host = recordingHost();
-  const outcome = await performDelegatedCall(store, writer, helper, "issues", {
-    host,
-    confirm: () => {
-      store.endDelegation(connection, endpointCapabilityKey("issues"));
-      return true;
-    },
+  const { raced, fresh, dialed } = await racedThenFresh(() => {
+    store.endDelegation(connection, endpointCapabilityKey("issues"));
   });
-  expect(outcome.kind).toBe("no_connection");
-  expect(host.calls).toHaveLength(0);
+  // The channel is still open, so telling the operator to open one would be advice for a
+  // recovery the state does not need — and re-running gives this answer anyway.
+  expect(raced).toBe("not_delegated");
+  expect(raced).toBe(fresh);
+  expect(dialed).toBe(0);
+});
+
+test("the endpoint being removed mid-pause reads as not_delegated too", async () => {
+  bindIssues();
+  connectAndDelegate();
+  const { raced, fresh, dialed } = await racedThenFresh(() => {
+    // `api remove` ends the grant as a side effect, so this is the same lock failing by a
+    // different route — and it must read the same way.
+    store.removeEndpoint(helper.id, "issues");
+  });
+  expect(raced).toBe("not_delegated");
+  expect(raced).toBe(fresh);
+  expect(dialed).toBe(0);
 });
 
 test("a reconnect during the pause does not launder the withdrawn grant", async () => {
   bindIssues();
   connectAndDelegate();
-  const host = recordingHost();
-  const outcome = await performDelegatedCall(store, writer, helper, "issues", {
-    host,
-    confirm: () => {
-      store.revokeConnection(writer.id, helper.id, "delegated-tool");
-      // A FRESH channel, which does not inherit the old one's grants (D20).
-      store.createConnection(writer.id, helper.id, "delegated-tool");
-      return true;
-    },
+  const { raced, fresh, dialed } = await racedThenFresh(() => {
+    store.revokeConnection(writer.id, helper.id, "delegated-tool");
+    // A FRESH channel, which does not inherit the old one's grants (D20). So a channel IS
+    // active — reporting "no connection" here would be false as well as unhelpful.
+    store.createConnection(writer.id, helper.id, "delegated-tool");
   });
-  expect(outcome.kind).toBe("no_connection");
-  expect(host.calls).toHaveLength(0);
+  expect(raced).toBe("not_delegated");
+  expect(raced).toBe(fresh);
+  expect(dialed).toBe(0);
 });
 
 // ---------------------------------------------------------------------------

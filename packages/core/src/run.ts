@@ -1896,8 +1896,9 @@ export async function performArtifactFetch(
   let materialized: ArtifactMaterialization | undefined;
   // Set when the channel was withdrawn while the human was deciding — see the re-check in
   // `execute` below. Kept separate from `materialized` so the refusal is not mistaken for a
-  // declined confirmation, which is a different fact.
-  let withdrawn = false;
+  // declined confirmation, which is a different fact. Records WHICH refusal a fresh attempt
+  // would give, for the reason spelled out at the mapping below.
+  let withdrawn: "no_connection" | "not_exchanged" | undefined;
   const capability: Capability = {
     key: EXCHANGE_FETCH_KEY,
     // Declared destructive, unconditionally. Not "destructive when the destination exists":
@@ -1935,7 +1936,11 @@ export async function performArtifactFetch(
         // race is the one every permission check has, and is not what the revoke was failing.
         const current = store.connections.findActive(from.id, to.id, "artifact-only");
         if (!current || current.id !== connection.id) {
-          withdrawn = true;
+          // A revoke leaves no channel; a revoke-then-reconnect leaves a DIFFERENT one, which
+          // inherits none of the old channel's exchanges (D20) — so a fresh attempt resolves
+          // no reference over it and answers `not_exchanged`. Reporting `no_connection` there
+          // told the operator to open a channel that was already open.
+          withdrawn = current ? "not_exchanged" : "no_connection";
           return Promise.resolve({
             output: `the channel from ${from.name} to ${to.name} was withdrawn.`,
             isError: true,
@@ -1989,11 +1994,15 @@ export async function performArtifactFetch(
 
   // Checked BEFORE the confirmation outcomes, because the gate DID execute (it was the tool
   // that refused, not the human) — so without this the caller would be told the fetch was
-  // never confirmed, when confirmation was not the problem. Reported as `no_connection`, the
-  // same answer re-running the command now gives: a refusal should read the same whenever in
-  // the sequence the permission went away, and a distinct kind would only tell the caller
-  // WHEN it was withdrawn.
-  if (withdrawn) return { kind: "no_connection" };
+  // never confirmed, when confirmation was not the problem. Reported as whichever refusal
+  // re-running the command now gives, so a refusal reads the same whenever in the sequence
+  // the permission went away, and never names a recovery the state does not need.
+  //
+  // This said `no_connection` unconditionally, justified by that very sentence — which was
+  // true of a plain revoke and false of a revoke-then-reconnect. Found by auditing the
+  // category after the identical fault was reported in `performDelegatedCall`, which had
+  // inherited both the mapping and its justification from here. [Codex review R4 P2.]
+  if (withdrawn !== undefined) return { kind: withdrawn };
   if (decision === "withheld") {
     return { kind: "withheld", ref: exchanged.ref, path: parsed.path, sizeBytes };
   }
@@ -2162,7 +2171,12 @@ export async function performDelegatedCall(
   // Set when the channel or the grant was withdrawn while the human was deciding. Kept
   // separate from the tool's own result so a withdrawal is never reported as a declined
   // confirmation, which is a different fact.
-  let withdrawn = false;
+  //
+  // It records WHICH outcome, not merely THAT one happened, because the two locks fail
+  // differently and an operator's next move differs with them: a withdrawn channel wants
+  // `connect`, a withdrawn grant wants `delegate`. Collapsing them told the operator to
+  // open a channel that was still open. [Codex review R4 P2.]
+  let withdrawn: "no_connection" | "not_delegated" | undefined;
   const capabilityForGate: Capability = {
     ...built,
     // The gate prompt must name WHO ASKED. Without it the human is approving a
@@ -2186,7 +2200,13 @@ export async function performDelegatedCall(
         const channel = requireChannel(store, from, to, "delegated-tool");
         const current = channel ? store.delegations.findActive(channel, capability) : undefined;
         if (!channel || channel.id !== connection.id || !current || current.id !== delegation.id) {
-          withdrawn = true;
+          // Which refusal a FRESH attempt would give, read off the live state rather than
+          // off which comparison failed. That is what makes "a refusal reads the same
+          // whenever in the sequence the permission went away" true rather than merely
+          // claimed — and it gets the revoke-then-reconnect case right for free: a new
+          // channel is active, it carries none of the old channel's grants, so a fresh
+          // attempt says `not_delegated` and so does this.
+          withdrawn = channel ? "not_delegated" : "no_connection";
           return { output: `${from.name} may no longer ask ${to.name} to do this.`, isError: true };
         }
         // The callee's own execute — the binding re-read, the credential closed over, the
@@ -2235,12 +2255,16 @@ export async function performDelegatedCall(
   const result = await gated.execute({ args: {} });
 
   // Checked BEFORE the confirmation outcomes, because the gate DID execute — it was the
-  // re-check that refused, not the human. Reported as `no_connection`, the same answer
-  // re-running the command now gives: a refusal should read identically whenever in the
-  // sequence the permission went away.
-  if (withdrawn) {
+  // re-check that refused, not the human. Reported as whichever refusal re-running the
+  // command now gives, so a refusal reads identically whenever in the sequence the
+  // permission went away.
+  if (withdrawn === "no_connection") {
     complete("failed");
     return { kind: "no_connection" };
+  }
+  if (withdrawn === "not_delegated") {
+    complete("failed");
+    return { kind: "not_delegated", capability };
   }
   if (decision === "withheld") {
     complete("withheld");

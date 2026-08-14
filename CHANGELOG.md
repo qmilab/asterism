@@ -16,6 +16,7 @@ All notable changes to Asterism are documented here. Versions follow [SemVer](ht
 
 ### Fixed
 
+- **A withdrawn channel and a withdrawn tool read as the same refusal.** When `undelegate`, `api remove` or `disconnect` landed while a call was waiting for your confirmation, `asterism call` reported "no active delegated-tool connection — open one first" even when the channel was still open and only the tool had been taken back. Running the same command again gave the correct answer, which is now what the interrupted one gives too. The same fault, and the same justification for it, were in `asterism fetch`: withdrawing and reopening a channel mid-confirmation reported a missing channel rather than a reference the new channel never carried.
 - **Two messages about a `delegated-tool` channel described a different mode.** Opening one suggested `asterism handoff` as the next step, and withdrawing one reported that the asking agent "can no longer hand work to" the other. Both fell through to the `handoff` wording because each was a chain of comparisons with a default; both are now exhaustive, so a future mode is a build error rather than wrong copy.
 
 ### If you embed the kernel

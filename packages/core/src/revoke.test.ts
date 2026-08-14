@@ -286,7 +286,21 @@ test("a revoke AND reconnect during the confirmation still stops the bytes", asy
     },
   });
 
-  expect(outcome.kind).toBe("no_connection");
+  // `not_exchanged`, not `no_connection`: a channel IS active — a fresh one — and it carries
+  // none of the old channel's references, so that is exactly what re-running the command now
+  // answers. Reporting "no connection" would have told the operator to open a channel that
+  // was open, which is advice for a recovery the state does not need. What matters for the
+  // invariant is unchanged and asserted below: nothing crossed.
+  expect(outcome.kind).toBe("not_exchanged");
+  expect(materialized).toHaveLength(0);
+
+  // The property behind the choice, stated rather than implied: a refusal that arrives
+  // mid-pause reads the same as the refusal a fresh attempt gives.
+  const fresh = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host,
+    confirm: () => true,
+  });
+  expect(fresh.kind).toBe(outcome.kind);
   expect(materialized).toHaveLength(0);
 });
 
