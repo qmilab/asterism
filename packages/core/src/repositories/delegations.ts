@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlRow } from "../db/driver.js";
 import type { BoundEndpoint, Connection, ConnectionMode, Delegation, DelegationStatus } from "../types.js";
 import { isDelegableCapabilityKey } from "../capabilities.js";
+import { endpointCapabilityKey } from "../endpoints.js";
 import { requireAgentId } from "./scope.js";
 
 /**
@@ -52,12 +53,20 @@ export class DelegationRepository {
    * Grant one capability on a `delegated-tool` channel, snapshotting the binding it was
    * granted against.
    *
-   * Takes the {@link BoundEndpoint} rather than a capability key so the snapshot cannot be
-   * assembled by a caller: the key, the URL and the credential key all come off one row the
-   * kernel just read from the CALLEE's own scoped repository. That is what makes "this grant
-   * names a binding the callee currently holds" a property of the write rather than of the
-   * caller's diligence — and a grant for an unbound name would otherwise sit dormant until
-   * the callee bound it, which is precisely the widening this lock exists to prevent.
+   * Takes the {@link BoundEndpoint} and NOTHING ELSE about the grant: the capability key, the
+   * URL and the credential key are all DERIVED from that one row, which the kernel just read
+   * from the CALLEE's own scoped repository. That is what makes "this grant names a binding
+   * the callee currently holds" a property of the write rather than of the caller's
+   * diligence — and a grant for an unbound name would otherwise sit dormant until the callee
+   * bound it, which is precisely the widening this lock exists to prevent.
+   *
+   * The key was a THIRD PARAMETER when this was first written, and that sentence above was
+   * false of it. A caller could pass the `issues` row with capability `api.payroll`, and the
+   * binding predicate — which checks the row, not the key — would accept it: a dormant grant
+   * naming one endpoint, snapshotted from another, that comes alive the moment `payroll` is
+   * bound to a matching URL and credential. Deriving the key makes that state unrepresentable
+   * rather than refused, which is the stronger of the two fixes and the one the doc comment
+   * was already claiming. [Codex review R3 P2.]
    *
    * BOTH halves of the grant test live inside the INSERT: the channel, and **the binding
    * itself**. The endpoint half was outside it at first — the caller read a `BoundEndpoint`
@@ -85,16 +94,22 @@ export class DelegationRepository {
    * storage-layer backstop against a concurrent double-grant; the caller ends any existing
    * active grant in the same transaction when re-granting.
    */
-  create(connection: Connection, endpoint: BoundEndpoint, capability: string): Delegation | undefined {
+  create(connection: Connection, endpoint: BoundEndpoint): Delegation | undefined {
     requireAgentId(connection.fromAgentId);
     requireAgentId(connection.toAgentId);
-    // The delegable set is a NAMED classification, enforced where it is written rather than
-    // where it is read. Nothing that reaches here through a surface can fail this — the key
-    // is derived from a binding — which is exactly why it is asserted: a rule kept only by
-    // the callers that happen to respect it is not a rule, and this is the chokepoint every
-    // other write boundary in this kernel uses (`validateEnum`, `validateCapabilityKeys`).
-    // A throw, not `undefined`: a withdrawn channel is an ordinary outcome, an undelegable
-    // capability is a programming error.
+    // Derived, never accepted. One source of truth for what this grant names.
+    const capability = endpointCapabilityKey(endpoint.name);
+    // The delegable set is a NAMED classification, and this is the backstop for it.
+    //
+    // HONEST ABOUT ITS REACH: now that the key is derived, no in-process caller can fail
+    // this — `endpointCapabilityKey` only ever produces the credential-bearing namespace, so
+    // the branch is unreachable and deleting it breaks no test. That was measured, not
+    // assumed. It is kept for one reason worth stating rather than leaving a reader to
+    // wonder: it is the assertion that fires if `endpointCapabilityKey` is ever changed to
+    // mint a key outside that namespace, which would silently widen what a channel may carry
+    // — and a classification with no assertion anywhere is the thing this kernel refuses
+    // ("never a vibe"). A throw, not `undefined`: a withdrawn channel is an ordinary
+    // outcome, an undelegable capability is a programming error.
     if (!isDelegableCapabilityKey(capability)) {
       throw new Error(
         `capability ${JSON.stringify(capability)} is not delegable — only a bound endpoint is, because it is the one capability that takes no arguments from the agent asking for it`,

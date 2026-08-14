@@ -2036,7 +2036,7 @@ export class AsterismStore {
       granted = this.driver.transaction(() => {
         // Ended first so the unique index is free for the insert.
         this.delegations.endActive(connection, capability);
-        const created = this.delegations.create(connection, endpoint, capability);
+        const created = this.delegations.create(connection, endpoint);
         // The conditional INSERT declined. Thrown rather than returned so the supersede
         // above rolls back WITH it: a grant that could not be written must never have
         // cleared the one that was already there — a failed widening that narrows. This is

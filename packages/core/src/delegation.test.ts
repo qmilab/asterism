@@ -535,17 +535,41 @@ test("the delegable set is NAMED and narrow — not every capability an agent ow
   expect(isDelegableCapabilityKey(endpointCapabilityKey("issues"))).toBe(true);
 });
 
-test("a grant for an undelegable capability is refused at the write boundary", () => {
+test("the capability a grant names is DERIVED from the row, so it cannot name another endpoint", () => {
   bindIssues();
+  store.bindEndpoint(helper.id, "payroll", URL_A, "GITHUB_TOKEN");
   const connection = store.createConnection(writer.id, helper.id, "delegated-tool");
-  // Reached only by a caller that hand-builds a row — no surface can produce one, because
-  // the key is derived from a binding. The write refuses it anyway, on the chokepoint rule
-  // every other write boundary here follows: a classification enforced only by the callers
-  // that happen to respect it is not enforced.
-  const notAnEndpoint = { ...store.endpoints.getByName(helper.id, "issues")!, name: "read" };
-  expect(() => store.delegations.create(connection, notAnEndpoint, "fs.read")).toThrow(
-    /not delegable/i,
-  );
+
+  // The write takes the binding and nothing else about the grant. When the key was a third
+  // parameter, a caller could hand over the `issues` ROW under the name `api.payroll` — the
+  // binding predicate checks the row, not the key, so it was accepted. Note both endpoints
+  // here share a URL and credential, which is exactly the state that made such a row come
+  // alive at call time. [Codex review R3 P2.]
+  const issues = store.endpoints.getByName(helper.id, "issues")!;
+  const granted = store.grantDelegation(connection, issues);
+  expect(granted.kind).toBe("ok");
+  if (granted.kind !== "ok") throw new Error("unreachable");
+  expect(granted.delegation.capability).toBe(endpointCapabilityKey("issues"));
+
+  // …and the grant reaches only what it names, even though `payroll` is bound to the very
+  // same address with the very same credential.
+  expect(store.listActiveDelegations(writer.id, connection.id).map((d) => d.capability)).toEqual([
+    endpointCapabilityKey("issues"),
+  ]);
+  expect(store.delegations.findActive(connection, endpointCapabilityKey("payroll"))).toBeUndefined();
+});
+
+test("a delegated call for a look-alike endpoint is refused, even sharing a URL and credential", async () => {
+  bindIssues();
+  store.bindEndpoint(helper.id, "payroll", URL_A, "GITHUB_TOKEN");
+  connectAndDelegate();
+  const host = recordingHost();
+  const outcome = await performDelegatedCall(store, writer, helper, "payroll", {
+    host,
+    confirm: approve,
+  });
+  expect(outcome.kind).toBe("not_delegated");
+  expect(host.calls).toHaveLength(0);
 });
 
 test("every delegable capability accepts no arguments — the property D38 rests on", () => {
