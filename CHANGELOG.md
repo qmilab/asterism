@@ -2,6 +2,34 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## Unreleased
+
+### Added
+
+- **The fifth and last way two agents can work together: lend one tool, never the credential.** `asterism connect <from> <to> --mode delegated-tool` opens a channel over which one agent can ask another to use one of *its own* [bound endpoints](https://qmilab.com/asterism/docs/commands/#api) — and hand back what came out.
+
+  The channel is not the grant, and that is the point. It says the asking agent may ask for tool results at all; `asterism delegate <from> <to> <endpoint>` says **which** tool, one at a time. So a tool you set up for an agent next month is not something anyone can reach through a channel you opened today. Take one back with `asterism undelegate`, which leaves the channel and every other tool on it alone; changing or removing the endpoint does it for you, and says so at the time. Ask with `asterism call <from> <to> <endpoint>`, and `asterism connections` shows what each channel actually reaches.
+
+  Three properties are the whole design. **The asking agent supplies nothing but the choice** — the address, the credential and the request all belong to the agent that owns the tool, so nothing the asking agent wrote leaves your machine. **The call runs under the owning agent's rules**: its autonomy level decides, never the asker's, so a `propose` agent never calls at all and only tells you what it would have done. And **every call stops for a human**, at any autonomy level, with no way to earn out of it — sending a credential somewhere is the one thing Asterism will not learn to do on its own. What crosses is the answer, screened; the credential is stripped from it and appears on neither agent's record.
+
+  Nothing runs a model, so this mode works with no model configured. Handing a tool over and calling it are command-line only for now — the console reports what a channel reaches but has no route to grant or use one.
+
+### Fixed
+
+- **Changing a tool after withdrawing the channel announced a withdrawal that had already happened.** With a `delegated-tool` channel already disconnected, `api add` or `api remove` on a tool that had been handed over on it said the other agent "can no longer ask" — which `disconnect` had already seen to — and wrote that withdrawal to both agents' event logs a second time.
+- **A withdrawn channel and a withdrawn tool read as the same refusal.** When `undelegate`, `api remove` or `disconnect` landed while a call was waiting for your confirmation, `asterism call` reported "no active delegated-tool connection — open one first" even when the channel was still open and only the tool had been taken back. Running the same command again gave the correct answer, which is now what the interrupted one gives too. The same fault, and the same justification for it, were in `asterism fetch`: withdrawing and reopening a channel mid-confirmation reported a missing channel rather than a reference the new channel never carried.
+- **Two messages about a `delegated-tool` channel described a different mode.** Opening one suggested `asterism handoff` as the next step, and withdrawing one reported that the asking agent "can no longer hand work to" the other. Both fell through to the `handoff` wording because each was a chain of comparisons with a default; both are now exhaustive, so a future mode is a build error rather than wrong copy.
+
+### If you embed the kernel
+
+Three changes visible only to code that depends on `@qmilab/asterism-core` directly. The shipped CLI, and every existing install, are unaffected.
+
+- **Breaking: `AsterismStore.bindEndpoint` and `.removeEndpoint` now return an outcome object.** `bindEndpoint` returns `{ endpoint, endedDelegations }` instead of the `BoundEndpoint`; `removeEndpoint` returns `{ removed, endedDelegations }` instead of a boolean. Both verbs gained a second effect — re-pointing or removing a binding withdraws every delegation of it — and a caller that performs that effect without being told is how the operator on the other side of a channel finds out at their next call instead of at the moment it happened. TypeScript callers get a compile error on both.
+
+  **`removeEndpoint` is the one to check by hand**, because its break is silent in plain JavaScript: `if (!store.removeEndpoint(a, n))` used to mean "there was no such binding" and an object is always truthy, so a missing removal now reads as a successful one. Test `.removed` instead. `bindEndpoint`'s break surfaces as an `undefined` property rather than an inverted branch, but it is the same shape of change.
+- **`ConnectionMode` and the event vocabulary each gained members.** `ConnectionMode` gains `delegated-tool`, and `EventType` gains `delegation.granted` / `.ended` / `.requested` / `.completed`. Additive at runtime, but a consumer that switches exhaustively over either union will stop compiling until it handles the new members — which is the intended failure, and the same reason both of this release's copy bugs are fixed with total records rather than a default branch. New and purely additive alongside them: the `Delegation` entity, `performDelegatedCall`, `isDelegableCapabilityKey`, and the `delegations` repository on the store.
+
+
 ## 0.5.0 — 2026-08-13
 
 Agents that can work together — without giving up a single thing that kept them apart. Until now an agent was reachable only by you. This release adds an explicit channel you open by hand between two agents, and lets you choose what that channel is for: hand over a result, hand over files, read what the other agent knows, or share standing context. Only that ever crosses. Alongside it, two ways to draw an agent's boundary more finely: choose which tools it has at all, and let it call exactly one web address with one of its stored credentials — without ever seeing that credential.

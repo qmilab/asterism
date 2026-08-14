@@ -309,6 +309,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_briefs_active_connection
 CREATE INDEX IF NOT EXISTS idx_briefs_from ON briefs(from_agent_id);
 CREATE INDEX IF NOT EXISTS idx_briefs_to ON briefs(to_agent_id);
 
+-- Delegated capabilities on a delegated-tool connection (Phase 3 T3b). The mode's SECOND
+-- lock: the channel says the caller may ask for tool results at all, this row says which
+-- tool. Pair-scoped like connections, exchanges and briefs -- two agent ids, every read
+-- asserting a participant.
+--
+-- Why the capability is NOT a column on connections: that table's uniqueness rule is a
+-- PARTIAL index over (from, to, mode), and SQLite treats NULLs in a unique index as
+-- distinct -- so a nullable capability column joined to it would stop enforcing
+-- one-active-channel-per-mode for the four modes that do not use it. It also has to be
+-- possible to withdraw ONE delegation without withdrawing the channel, which a column
+-- cannot express and which api remove already settled for bindings: revoking one says
+-- nothing about another.
+--
+-- The unique index is per (connection, capability) rather than per connection -- unlike a
+-- brief, of which a channel holds at most one, a channel may delegate several endpoints,
+-- and each is its own grant.
+--
+-- url + credential_key are a SNAPSHOT of the binding at grant time, never a source to
+-- dial from. api add REBINDS a name in place (agent_endpoints has ON CONFLICT DO UPDATE,
+-- preserving the id), so a grant naming only the capability key would follow a rebind to a
+-- different address and credential and silently redirect a call the operator authorized
+-- against the old one. Same argument as exchanges.size_bytes: a name names a location,
+-- and what was granted was a specific address.
+CREATE TABLE IF NOT EXISTS delegations (
+  id             TEXT PRIMARY KEY,
+  connection_id  TEXT NOT NULL REFERENCES connections(id),
+  from_agent_id  TEXT NOT NULL REFERENCES agents(id),
+  to_agent_id    TEXT NOT NULL REFERENCES agents(id),
+  capability     TEXT NOT NULL,
+  url            TEXT NOT NULL,
+  credential_key TEXT NOT NULL,
+  status         TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  ended_at       TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delegations_active_capability
+  ON delegations(connection_id, capability) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_delegations_from ON delegations(from_agent_id);
+CREATE INDEX IF NOT EXISTS idx_delegations_to ON delegations(to_agent_id);
+
 -- An agent's earned standing per destructive capability — the "trust contract"
 -- underneath the coarse trust_level. Scoped by agent_id like every other table;
 -- one row per (agent, capability). standing is 'gated' or 'standing-grant'; only

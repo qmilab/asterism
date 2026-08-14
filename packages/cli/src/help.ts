@@ -48,6 +48,9 @@ Commands:
   brief <from> <to> "<brief>"       Set standing context both agents run with
   unbrief <from> <to>               End that standing context
   briefs <agent>                    Show the briefs an agent runs with
+  delegate <from> <to> <endpoint>   Let one agent ask another to use one of its tools
+  undelegate <from> <to> <endpoint> Take that back, leaving the channel open
+  call <from> <to> <endpoint>       Ask for it — the other agent calls, you approve
   confirm [<agent>] <run>           Confirm a paused action and let the run finish
   runs <agent>                      Review an agent's run history
   memory inspect <agent>            Review what an agent remembers
@@ -283,7 +286,7 @@ Choose a model with \`asterism config\` (or the ASTERISM_MODEL_ID environment
 variable), and set an API key in the environment (e.g. OPENAI_API_KEY), before
 running.`,
 
-  connect: `asterism connect <from> <to> --mode <handoff|artifact-only|read-summary|shared-brief>
+  connect: `asterism connect <from> <to> --mode <handoff|artifact-only|read-summary|shared-brief|delegated-tool>
 
 Open an explicit channel from one agent to another, so the first can hand it work.
 Agents are separate by default and can't reach each other; a connection is the only
@@ -306,13 +309,17 @@ re-run the same connect harmlessly — it won't make a duplicate.
                      shared-brief   The one channel that carries context IN rather than
                                     results back. You write a brief and BOTH agents run
                                     with it as standing context. Use \`asterism brief\`.
+                     delegated-tool The receiving agent uses one of its OWN tools and
+                                    hands back what came out — its credentials never
+                                    leave it. You then say which tool, with
+                                    \`asterism delegate\`, and ask with \`asterism call\`.
 
 Opening a connection is a deliberate act you take; from then on, either agent's record
 shows the channel exists and each time it is used — never the task text or any result.
 
 Close one with \`asterism disconnect\`.`,
 
-  disconnect: `asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary|shared-brief>]
+  disconnect: `asterism disconnect <from> <to> [--mode <handoff|artifact-only|read-summary|shared-brief|delegated-tool>]
 
 Withdraw a channel you opened. From then on the two agents are as separate as they were
 before you connected them.
@@ -322,7 +329,8 @@ work. Withdrawing an artifact-only channel also means files the other agent alre
 handed over can no longer be fetched — the list you were given stops resolving. And
 withdrawing a read-summary channel means it stops sharing what it knows, including from
 anything it learned while the channel was open. Withdrawing a shared-brief channel means
-the brief stops shaping BOTH agents' runs, from their next run onward.
+the brief stops shaping BOTH agents' runs, from their next run onward. And withdrawing a
+delegated-tool channel takes back every tool you handed over on it at once.
 
   --mode <m>       Which channel, when the two agents have more than one open. With a
                    single open channel you can leave it out; with several, asterism will
@@ -487,6 +495,69 @@ cross-check \`connections\` to work out why a brief stopped applying.
 
 Only ever the named agent's own briefs — it never reveals a brief between two other
 agents.`,
+
+  delegate: `asterism delegate <from> <to> <endpoint>
+
+Hand one agent the ability to ask another to use ONE of its tools — and only that one.
+
+Opening a delegated-tool channel is not enough on its own, and that is the point. The
+channel says the first agent may ask for tool results at all; this says which tool. So an
+endpoint you set up for an agent tomorrow is not something anyone else can reach through a
+channel you opened today — you always name it.
+
+  asterism connect  writer helper --mode delegated-tool
+  asterism delegate writer helper issues
+
+Only an endpoint the other agent already has can be handed over — there is nothing to
+grant otherwise, and a grant left waiting for a tool to appear is exactly what this
+avoids. What crosses when it is used is the tool's answer, screened. The credential goes
+out with the call and never comes back into either agent.
+
+Every call stops for you: the receiving agent asks before it sends anything, at any
+autonomy level, and it can never earn its way out of asking. If the receiving agent is at
+\`propose\` it will never call at all — it only ever tells you it would.
+
+Take it back with \`asterism undelegate\`, which leaves the channel open. Withdrawing the
+channel takes back everything on it at once.`,
+
+  undelegate: `asterism undelegate <from> <to> <endpoint>
+
+Take back one tool you handed over. The channel stays open and the other tools on it are
+untouched — so this is how you narrow what one agent may ask for without closing the
+channel or disturbing anything else.
+
+The endpoint itself is left alone: the agent that owns it can still use it, and its
+credential is not touched.
+
+You can hand the same tool over again later; it opens a fresh grant.
+
+Changing or removing the endpoint does this for you. If you re-point it at a different
+address or credential, or remove it, anyone who could ask for it stops being able to —
+what they were handed is no longer what would be sent, so asterism does not keep sending
+it. asterism says so at the time, and you can hand it over again.`,
+
+  call: `asterism call <from> <to> <endpoint>
+
+Ask one agent to use a tool the other one has, and show what came back.
+
+  asterism call writer helper issues
+
+The asking agent chooses nothing but which tool. The address, the credential and the
+request all belong to the agent that owns it, the call runs as that agent under its rules,
+and what you see is its answer with anything credential-shaped stripped out.
+
+You are asked before anything is sent, every time. That is not a setting: a call that
+carries a credential always stops for a human, at any autonomy level, and no amount of
+successful calls will change it. If the owning agent is at \`propose\`, nothing is sent at
+all and you are told what it would have done.
+
+Three things can turn this down, and they read differently on purpose: there is no
+delegated-tool channel between the two agents, the channel is open but this tool was never
+handed over, or what was handed over has changed since. Nothing here tells you anything
+about tools that were not handed over.
+
+Both agents' records show that the channel was used and how it ended — never the answer
+itself, and never the credential.`,
 
   confirm: `asterism confirm [<agent>] <run>
 

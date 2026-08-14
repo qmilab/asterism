@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AsterismStore, DEFAULT_WORLD_FACT_CAP } from "@qmilab/asterism-core";
+import { AsterismStore, CONNECTION_MODES, DEFAULT_WORLD_FACT_CAP } from "@qmilab/asterism-core";
 import type {
   Capability,
   ProposedMemory,
@@ -3667,14 +3667,55 @@ test("connect rejects a self-connection and an unimplemented mode", async () => 
   expect(h.err.join("\n")).toMatch(/can't connect to itself/i);
 
   await runCli(["new", "b", "--trust", "propose"], h.io);
-  // `delegated-tool` is the LAST mode with no implementation — `artifact-only` became real
-  // in T2a, `read-summary` in T2b and `shared-brief` in T3a, so the "unknown mode" assertion
-  // moves rather than disappearing. It retires when #123 unblocks T3b.
-  expect(await runCli(["connect", "a", "b", "--mode", "delegated-tool"], h.io)).toBe(1);
+  // This assertion used to name `delegated-tool`, the last mode the design described and
+  // the code did not implement. All five are real now, so it names a near-miss SPELLING
+  // instead — the property being pinned is that the surface refuses anything outside the
+  // enum, which is what protected the unimplemented mode and is what protects a typo.
+  expect(await runCli(["connect", "a", "b", "--mode", "delegated_tool"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
-  // The now-real modes open channels.
-  expect(await runCli(["connect", "a", "b", "--mode", "artifact-only"], h.io)).toBe(0);
-  expect(await runCli(["connect", "a", "b", "--mode", "read-summary"], h.io)).toBe(0);
+  // Every mode in the enum opens a channel — derived, so a sixth mode joins by existing
+  // rather than by someone remembering to add a line here.
+  for (const mode of CONNECTION_MODES) {
+    expect(await runCli(["connect", "a", "b", "--mode", mode], h.io)).toBe(0);
+  }
+});
+
+test("connect and disconnect describe each mode in its OWN words — no two alike", async () => {
+  // The defect this pins shipped: both messages were a chain of comparisons ending in a
+  // default, so a `delegated-tool` channel was announced with `asterism handoff` as its
+  // next step and withdrawn with "can no longer hand work to". Asserting a per-mode TABLE
+  // here would just restate the one in `cli.ts` and pass whatever it said, so what is
+  // asserted instead is INJECTIVITY: a fall-through makes two modes share a sentence, and
+  // that is observable without knowing which sentence either should be.
+  const connectLines = new Map<string, string>();
+  const disconnectLines = new Map<string, string>();
+  for (const mode of CONNECTION_MODES) {
+    const h = harness();
+    await runCli(["init"], h.io);
+    await runCli(["new", "a", "--trust", "autonomous"], h.io);
+    await runCli(["new", "b", "--trust", "autonomous"], h.io);
+
+    h.out.length = 0;
+    expect(await runCli(["connect", "a", "b", "--mode", mode], h.io)).toBe(0);
+    const connected = h.out.join("\n");
+    expect(connected).toContain("Use it with:");
+    connectLines.set(mode, connected.slice(connected.indexOf("Use it with:")));
+
+    h.out.length = 0;
+    expect(await runCli(["disconnect", "a", "b", "--mode", mode], h.io)).toBe(0);
+    // The consequence sentence ALONE. The full line begins "Disconnected a → b (<mode>).",
+    // which differs per mode for free — so comparing it would let every mode share one
+    // consequence and still look injective. That is not hypothetical: it is what the first
+    // version of this test did, and the `handoff` fall-through survived it.
+    const line = h.out.join("\n").split("\n")[0] ?? "";
+    disconnectLines.set(mode, line.slice(line.indexOf(").") + 2).trim());
+  }
+  // Derived over the enum, so a sixth mode joins this test by existing.
+  expect(new Set(connectLines.values()).size).toBe(CONNECTION_MODES.length);
+  expect(new Set(disconnectLines.values()).size).toBe(CONNECTION_MODES.length);
+  // And one anchored fact, so injectivity alone cannot be satisfied by five wrong lines:
+  // the mode whose channel grants nothing until a tool is named points at the grant.
+  expect(connectLines.get("delegated-tool")).toContain("asterism delegate a b <endpoint>");
 });
 
 test("connect rejects --mode with no value rather than opening a default connection (Codex P2)", async () => {
@@ -3835,7 +3876,7 @@ test("disconnect rejects a malformed or unknown --mode rather than falling throu
 
   expect(await runCli(["disconnect", "a", "b", "--mode"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/--mode needs a value/i);
-  expect(await runCli(["disconnect", "a", "b", "--mode", "delegated-tool"], h.io)).toBe(1);
+  expect(await runCli(["disconnect", "a", "b", "--mode", "delegated_tool"], h.io)).toBe(1);
   expect(h.err.join("\n")).toMatch(/Unknown connection mode/i);
   // Neither malformed invocation withdrew the open channel.
   const conns = await capture(["connections", "a"], h.io);

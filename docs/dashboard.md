@@ -115,7 +115,7 @@ yet.) They are the only routes that name two agents, and they are all rooted at 
 | Method & path | What it does |
 |---|---|
 | `GET /agents/<a>/connections` | The channels `<a>` is on, both directions, with each mode and whether it is still open. |
-| `POST /agents/<a>/connections` | Open a channel. Body `{ "to": "<agent>", "mode": "handoff" \| "artifact-only" \| "read-summary" \| "shared-brief" }`. |
+| `POST /agents/<a>/connections` | Open a channel. Body `{ "to": "<agent>", "mode": "handoff" \| "artifact-only" \| "read-summary" \| "shared-brief" \| "delegated-tool" }`. |
 | `DELETE /agents/<a>/connections/<b>?mode=<mode>` | Withdraw a channel. `mode` is required — it is never guessed. |
 | `POST /agents/<a>/connections/<b>/handoff` | Hand `<b>` a task; body `{ "task": "…" }`. Returns `<b>`'s final result. |
 | `POST /agents/<a>/connections/<b>/artifact` | Same, but returns only the files `<b>` produced; body `{ "task": "…" }`. |
@@ -124,6 +124,14 @@ yet.) They are the only routes that name two agents, and they are all rooted at 
 | `PUT /agents/<a>/connections/<b>/brief` | Set the standing context both agents run with; body `{ "content": "…" }`. |
 | `DELETE /agents/<a>/connections/<b>/brief` | End that standing context. The channel stays open. |
 | `GET /agents/<a>/briefs` | The standing briefs on `<a>`'s channels. |
+
+A `delegated-tool` channel opened here reports what it reaches — every response that
+returns a connection carries a `delegated` list of the tools handed over on it, and only
+that mode carries the field — but **handing a tool over and calling it are command-line
+only**. `asterism delegate`, `undelegate` and
+[`call`](./commands.md#call) have no route yet, so a channel opened over HTTP does nothing
+until you name a tool from the terminal. Stated rather than left to be discovered: every
+other mode is complete here.
 
 Three things carry over from the command line unchanged, because they are enforced
 before any of this is reached:

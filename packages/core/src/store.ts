@@ -23,6 +23,10 @@ import { EndpointRepository } from "./repositories/endpoints.js";
 import { ConnectionRepository } from "./repositories/connections.js";
 import { ExchangeRepository } from "./repositories/exchanges.js";
 import { BriefRepository, BRIEF_CONNECTION_MODE } from "./repositories/briefs.js";
+import {
+  DelegationRepository,
+  DELEGATION_CONNECTION_MODE,
+} from "./repositories/delegations.js";
 import { CapabilityStandingRepository } from "./repositories/capability-standing.js";
 import { AgentSettingsRepository } from "./repositories/agent-settings.js";
 import { InstallSettingsRepository } from "./repositories/install-settings.js";
@@ -31,6 +35,7 @@ import type {
   AgentSettings,
   BoundEndpoint,
   Brief,
+  Delegation,
   CapabilityGrant,
   CapabilityStanding,
   Connection,
@@ -86,6 +91,50 @@ import {
 class BriefGrantWithdrawnError extends Error {}
 
 /**
+ * The same rollback signal for {@link AsterismStore.grantDelegation}. Its own class rather
+ * than a reuse, so a future `catch` in either method cannot silently swallow the other's
+ * abort — the two mean different things about which grant did not hold.
+ */
+class DelegationNotGrantedError extends Error {}
+
+/**
+ * What {@link AsterismStore.bindEndpoint} did. The binding is the obvious half; the other
+ * half is the reason this is a struct rather than a `BoundEndpoint`.
+ *
+ * Re-pointing a name that another agent holds a delegation for ends that delegation (design
+ * note §21, D42), and that consequence has to be REPORTED, not merely performed — the
+ * operator who ran `api add` is not the one whose next call will be refused. Returning the
+ * rows makes the surface's line derived from what the kernel did, rather than a claim the
+ * surface re-computes and can get wrong. Empty on a first bind and on an idempotent re-bind.
+ */
+export interface BindEndpointOutcome {
+  endpoint: BoundEndpoint;
+  endedDelegations: Delegation[];
+}
+
+/**
+ * What {@link AsterismStore.removeEndpoint} did. `removed: false` means there was no such
+ * binding — distinct from "removed and nothing was delegated", which a bare boolean could
+ * not express once removal gained a second effect.
+ */
+export interface RemoveEndpointOutcome {
+  removed: boolean;
+  endedDelegations: Delegation[];
+}
+
+/**
+ * What {@link AsterismStore.grantDelegation} did. A union rather than
+ * `Delegation | undefined` because the grant has TWO preconditions — a live channel and the
+ * exact binding still being held — and a surface that collapses them names a cause it did
+ * not check. `endpoint_changed` covers removed and re-pointed alike: both mean the tool the
+ * operator asked to hand over is not the tool that would be called.
+ */
+export type GrantDelegationOutcome =
+  | { kind: "ok"; delegation: Delegation }
+  | { kind: "no_connection" }
+  | { kind: "endpoint_changed" };
+
+/**
  * Whether two capability declarations name the same set. Element-wise is enough
  * because both sides are canonical — the write boundary de-duplicates and sorts — so
  * this compares sets without allocating one.
@@ -112,6 +161,8 @@ export class AsterismStore {
   readonly exchanges: ExchangeRepository;
   /** Standing operator-authored briefs on `shared-brief` channels (Phase 3 · T3a). */
   readonly briefs: BriefRepository;
+  /** Which capabilities a `delegated-tool` channel reaches — the mode's second lock (T3b). */
+  readonly delegations: DelegationRepository;
   /** Per-capability earned standing — the agent's "trust contracts". */
   readonly capabilityStanding: CapabilityStandingRepository;
   /** Per-agent kernel settings — the operator-configurable tunables (e.g. recall budget). */
@@ -136,6 +187,7 @@ export class AsterismStore {
     this.connections = new ConnectionRepository(driver);
     this.exchanges = new ExchangeRepository(driver);
     this.briefs = new BriefRepository(driver);
+    this.delegations = new DelegationRepository(driver);
     this.capabilityStanding = new CapabilityStandingRepository(driver);
     this.agentSettings = new AgentSettingsRepository(driver);
     this.installSettings = new InstallSettingsRepository(driver);
@@ -1782,13 +1834,16 @@ export class AsterismStore {
    *
    * What this actually takes away is the point, and it is more than the ability to ask for
    * work. Because every exchange re-reads the ACTIVE connection at the moment it acts, and
-   * because `exchanges` authorization is keyed on the connection ROW, one revoke withdraws
-   * all four capabilities at once:
+   * because `exchanges` and `delegations` authorization is keyed on the connection ROW, one
+   * revoke withdraws every capability the channel carried at once — one per mode, which is
+   * why this list is written per mode rather than counted:
    *
    *   - `handoff`  — the callee can no longer be asked to run work
    *   - `artifact` — nor to produce a manifest
    *   - `fetch`    — every artifact ever exchanged over this connection stops resolving
    *   - `summary`  — the callee's ratified memory stops being readable
+   *   - `brief`    — the standing brief stops framing either agent's next run
+   *   - `call`     — every tool handed over on the channel stops being askable (T3b)
    *
    * TERMINAL: there is no reverse transition, here or in the repository. Reconnecting means
    * {@link createConnection} again, which mints a fresh row — old `exchanges` rows stay keyed
@@ -1952,6 +2007,170 @@ export class AsterismStore {
    */
   listBriefs(agentId: string): Brief[] {
     return this.briefs.listForAgent(agentId);
+  }
+
+  /**
+   * Grant one of the callee's bound endpoints on a `delegated-tool` channel, recording
+   * `delegation.granted` on BOTH logs (Phase 3 · T3b; design note §21, D39).
+   *
+   * Takes the {@link BoundEndpoint} the kernel just read from the CALLEE's own scoped
+   * repository, never a capability key a caller composed. That is what makes "you may only
+   * delegate something the callee currently holds" a property of the write: a grant for an
+   * unbound name would otherwise lie dormant until the callee bound it, which is the exact
+   * widening this lock exists to prevent.
+   *
+   * Re-granting an already-granted capability is a SUPERSEDE, not an error — the existing
+   * active row is ended and a new one inserted inside one transaction, so a re-grant after
+   * a rebind refreshes the snapshot the call compares against. Two rows can never be active
+   * for one capability; the partial unique index is the storage-layer backstop.
+   *
+   * Returns `undefined` when the grant does not hold at the moment of the write: no live
+   * `delegated-tool` channel in this direction, or a `Connection` whose participants do not
+   * match the row it names. The test lives inside {@link DelegationRepository.create}'s
+   * INSERT rather than in a caller.
+   */
+  grantDelegation(connection: Connection, endpoint: BoundEndpoint): GrantDelegationOutcome {
+    const capability = endpointCapabilityKey(endpoint.name);
+    let granted: Delegation;
+    try {
+      granted = this.driver.transaction(() => {
+        // Ended first so the unique index is free for the insert.
+        this.delegations.endActive(connection, capability);
+        const created = this.delegations.create(connection, endpoint);
+        // The conditional INSERT declined. Thrown rather than returned so the supersede
+        // above rolls back WITH it: a grant that could not be written must never have
+        // cleared the one that was already there — a failed widening that narrows. This is
+        // `setBrief`'s shape, and it is reachable here in a way it is not there: the two
+        // statements do NOT share a predicate, because `create` additionally requires the
+        // endpoint to belong to the callee, so an end that succeeds can be followed by an
+        // insert that declines.
+        if (!created) throw new DelegationNotGrantedError();
+        return created;
+      });
+    } catch (err) {
+      if (!(err instanceof DelegationNotGrantedError)) throw err;
+      // WHICH half declined, read after the fact and never as the authorization. The write
+      // already refused; this only decides what the operator is told, and telling them "no
+      // connection" when their endpoint was the thing that vanished is a confident wrong
+      // diagnosis. Both halves can be false at once, and the binding is reported first
+      // because it is the one the operator just named on the command line.
+      //
+      // The OWNER is part of the endpoint half, and leaving it out here reported the wrong
+      // one: hand over a binding of the CALLER's own while the callee happens to hold an
+      // identical name/URL/credential, and `bindingHolds` says yes — so a refusal that was
+      // entirely about the endpoint was announced as "no active connection". The diagnosis
+      // has to ask the same question the write asked, or it is just a different guess.
+      const endpointHeld =
+        endpoint.agentId === connection.toAgentId &&
+        this.delegations.bindingHolds(connection.toAgentId, endpoint);
+      return endpointHeld ? { kind: "no_connection" } : { kind: "endpoint_changed" };
+    }
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "delegation.granted", {
+      delegationId: granted.id,
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      // The VERIFIED mode, not the caller's field — the correction the brief audit needed
+      // twice. A `Connection` a caller holds is a claim; the constant is what the SQL
+      // actually enforced.
+      mode: DELEGATION_CONNECTION_MODE,
+      capability: granted.capability,
+      // References only, exactly as `endpoint.bound` records them: the origin of the address
+      // and the credential's KEY. The event log holds references, never values.
+      target: endpointLogTarget(granted.url),
+      credential: granted.credentialKey,
+    });
+    return { kind: "ok", delegation: granted };
+  }
+
+  /**
+   * Withdraw one delegated capability, leaving the channel and the binding alone, and
+   * recording `delegation.ended` on both logs.
+   *
+   * Returns `undefined` for "there was no such live grant", which a surface must be able to
+   * tell apart from "there is no channel" — collapsing them would tell an operator their
+   * delegation is gone when the channel it lived on was the thing that was missing.
+   */
+  endDelegation(connection: Connection, capability: string): Delegation | undefined {
+    const ended = this.driver.transaction(() => this.delegations.endActive(connection, capability));
+    if (!ended) return undefined;
+    this.emitDelegationEnded(ended, "withdrawn");
+    return ended;
+  }
+
+  /**
+   * End every live delegation of one capability, because the binding behind it changed or
+   * went away (D42). Called only from {@link bindEndpoint} and {@link removeEndpoint},
+   * inside their transactions.
+   *
+   * The audit goes to BOTH participants of each channel, not to the agent whose command
+   * caused it: the operator on the other side of that channel is the one who is about to
+   * find a call refused, and a withdrawal recorded on one log only is how an event log
+   * comes to describe half of what happened.
+   */
+  private endDelegationsForCapability(agentId: string, capability: string): Delegation[] {
+    const ended = this.delegations.endAllForCapability(agentId, capability);
+    for (const row of ended) this.emitDelegationEnded(row, "binding-changed");
+    return ended;
+  }
+
+  /** One `delegation.ended` on both logs, references only. Shared so the two paths agree. */
+  private emitDelegationEnded(delegation: Delegation, reason: "withdrawn" | "binding-changed"): void {
+    this.emitToBoth(delegation.fromAgentId, delegation.toAgentId, "delegation.ended", {
+      delegationId: delegation.id,
+      connectionId: delegation.connectionId,
+      fromAgentId: delegation.fromAgentId,
+      toAgentId: delegation.toAgentId,
+      mode: DELEGATION_CONNECTION_MODE,
+      capability: delegation.capability,
+      reason,
+    });
+  }
+
+  /**
+   * The capabilities a `delegated-tool` channel currently reaches, for a participant —
+   * the read behind `connections`, and the SAME query the call authorizes against
+   * ({@link DelegationRepository.listActiveForConnection} is `findActive` minus the
+   * capability). One resolver, so the list an operator reads cannot claim a completeness the
+   * gate does not honor.
+   */
+  listActiveDelegations(agentId: string, connectionId: string): Delegation[] {
+    return this.delegations.listActiveForConnection(agentId, connectionId);
+  }
+
+  /**
+   * Audit that a delegated call was ASKED FOR, on both logs, before the gate runs — so the
+   * use of a channel is on the record even if the call is then withheld, unconfirmed, or
+   * fails. The rule every mode follows.
+   */
+  recordDelegationRequested(connection: Connection, capability: string): void {
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "delegation.requested", {
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: DELEGATION_CONNECTION_MODE,
+      capability,
+    });
+  }
+
+  /**
+   * Audit how a delegated call ended, on both logs. The outcome is a REFERENCE — which of
+   * the four things happened — and never a byte of what came back, for the same reason
+   * `handoff.requested` never carries the task text.
+   */
+  recordDelegationCompleted(
+    connection: Connection,
+    capability: string,
+    outcome: "executed" | "withheld" | "not_confirmed" | "failed",
+  ): void {
+    this.emitToBoth(connection.fromAgentId, connection.toAgentId, "delegation.completed", {
+      connectionId: connection.id,
+      fromAgentId: connection.fromAgentId,
+      toAgentId: connection.toAgentId,
+      mode: DELEGATION_CONNECTION_MODE,
+      capability,
+      outcome,
+    });
   }
 
   /**
@@ -2303,7 +2522,7 @@ export class AsterismStore {
     name: string,
     url: string,
     credentialKey: string,
-  ): BoundEndpoint {
+  ): BindEndpointOutcome {
     const validName = validateEndpointName(name);
     const validUrl = validateEndpointUrl(url);
     if (typeof credentialKey !== "string" || credentialKey.length === 0) {
@@ -2333,6 +2552,9 @@ export class AsterismStore {
           `too many bound endpoints (at most ${MAX_BOUND_ENDPOINTS}) — remove one with \`asterism api remove\` first`,
         );
       }
+      // Read before the write, because `create` rebinds in place and the previous address
+      // is what decides whether anyone else's grant survives it (below).
+      const previous = existing.find((e) => e.name === validName);
       const endpoint = this.endpoints.create(agentId, {
         name: validName,
         url: validUrl,
@@ -2344,7 +2566,24 @@ export class AsterismStore {
         target: endpointLogTarget(endpoint.url),
         credential: endpoint.credentialKey,
       });
-      return endpoint;
+      // A REBIND THAT CHANGES THE CALL ENDS EVERY DELEGATION OF IT (design note §21, D42).
+      //
+      // `api add` is agent-scoped and this is its one cross-connection consequence, which
+      // is deliberate rather than reluctant: another agent's operator granted a delegation
+      // against a specific address and credential, and re-pointing the name underneath them
+      // would silently redirect a call they authorized. The alternative — warn and carry on
+      // — needs this same lookup to produce the warning, and puts a notice where a
+      // withdrawal belongs.
+      //
+      // An idempotent re-bind (same URL, same credential) changes nothing and ends nothing,
+      // so re-running the command an operator already ran is not a way to break their own
+      // channels. The comparison is against the SERIALIZED URL both sides store, so it
+      // cannot report a change that is only a difference in spelling.
+      const endedDelegations =
+        previous && (previous.url !== endpoint.url || previous.credentialKey !== endpoint.credentialKey)
+          ? this.endDelegationsForCapability(agentId, endpointCapabilityKey(endpoint.name))
+          : [];
+      return { endpoint, endedDelegations };
     });
   }
 
@@ -2352,15 +2591,20 @@ export class AsterismStore {
    * Remove a binding, and with it the capability it granted. Returns false when no such
    * binding exists, so a caller can tell "removed" from "was never there".
    *
-   * Deliberately touches nothing else. The CREDENTIAL is not removed — that is
-   * `secrets`' job, and one verb doing two jobs is how an operator loses a token they
-   * meant to keep. No standing grant can exist to revoke, because a credential-bearing
-   * capability is never auto-approved.
+   * The CREDENTIAL is not removed — that is `secrets`' job, and one verb doing two jobs is
+   * how an operator loses a token they meant to keep. No standing grant can exist to
+   * revoke, because a credential-bearing capability is never auto-approved.
+   *
+   * What it DOES touch beyond the binding is every delegation of it (D42): a grant whose
+   * binding no longer exists grants nothing, and leaving the row would let it start
+   * granting again the moment the name was rebound — which is exactly the widening the
+   * delegation lock exists to prevent. Returned rather than merely done, so the surface can
+   * say whose channel just narrowed instead of the operator finding out at the next call.
    */
-  removeEndpoint(agentId: string, name: string): boolean {
+  removeEndpoint(agentId: string, name: string): RemoveEndpointOutcome {
     return this.driver.transaction(() => {
       const endpoint = this.endpoints.getByName(agentId, name);
-      if (!endpoint) return false;
+      if (!endpoint) return { removed: false, endedDelegations: [] };
       this.endpoints.deleteByName(agentId, name);
       this.emit(agentId, "endpoint.removed", {
         endpoint: endpoint.name,
@@ -2368,7 +2612,13 @@ export class AsterismStore {
         target: endpointLogTarget(endpoint.url),
         credential: endpoint.credentialKey,
       });
-      return true;
+      return {
+        removed: true,
+        endedDelegations: this.endDelegationsForCapability(
+          agentId,
+          endpointCapabilityKey(endpoint.name),
+        ),
+      };
     });
   }
 

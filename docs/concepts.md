@@ -358,9 +358,9 @@ what it is:
 - **It is one-way.** `writer → researcher` lets `writer` hand work to `researcher`, not
   the reverse. The other direction is its own connection.
 - **It is for one thing.** Each channel is opened for a specific purpose — hand over a
-  result, hand over files, read what the other agent knows, or share standing context —
-  and only that ever crosses. Opening one never grants another, and asking over the
-  wrong one is refused.
+  result, hand over files, read what the other agent knows, share standing context, or
+  borrow the answer from one tool it owns — and only that ever crosses. Opening one never
+  grants another, and asking over the wrong one is refused.
 - **Withdrawing it is final.** Reconnecting opens a new channel; it does not restore the
   old one or what was reachable through it.
 

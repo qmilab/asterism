@@ -7,7 +7,9 @@
 // transition. Only the substrate (a scripted adapter) is faked.
 //
 // It must demonstrate (design note §15):
-//   1. Revoke withdraws ALL FOUR capabilities — handoff, artifact, fetch, summary.
+//   1. Revoke withdraws the four capabilities THIS script exercises — handoff,
+//      artifact, fetch, summary. Not a claim about every mode: a shared brief and a
+//      delegated tool are withdrawn by the same single write, proven beside each mode.
 //   2. Revoke is exact: only the named (from, to, mode) triple is touched.
 //   3. Revoke is terminal — reconnecting opens a NEW channel that old references do not
 //      resolve over, and both rows stay visible in `connections`.
@@ -243,7 +245,7 @@ describe("Phase 3 · connection revoke — acceptance", () => {
     ambiguousOut = await run(["disconnect", "writer", "helper"]);
 
     // Malformed invocations, before anything is withdrawn.
-    badModeOut = await run(["disconnect", "writer", "helper", "--mode", "delegated-tool"]);
+    badModeOut = await run(["disconnect", "writer", "helper", "--mode", "delegated_tool"]);
     valuelessModeOut = await run(["disconnect", "writer", "helper", "--mode"]);
 
     // (1) Withdraw the artifact-only channel by name.
@@ -298,7 +300,7 @@ describe("Phase 3 · connection revoke — acceptance", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // --- Invariant 1: all four capabilities are withdrawn ---------------------
+  // --- Invariant 1: the capabilities this script exercises are withdrawn ------
 
   test("every scripted tool reached the scoped registry", () => {
     // Without this the demo can only fail on a downstream assertion, which names the
@@ -352,7 +354,10 @@ describe("Phase 3 · connection revoke — acceptance", () => {
   });
 
   test("a malformed --mode is refused loudly rather than falling through to inference", () => {
-    expect(badModeOut).toContain('Unknown connection mode "delegated-tool"');
+    // A near-miss spelling of a REAL mode, deliberately: the refusal has to be the enum's,
+    // not "this mode is not implemented yet" — which is what it used to assert, back when
+    // `delegated-tool` was the mode with nothing behind it.
+    expect(badModeOut).toContain('Unknown connection mode "delegated_tool"');
     expect(valuelessModeOut).toContain("--mode needs a value");
   });
 

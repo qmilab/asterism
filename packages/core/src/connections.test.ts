@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { AsterismStore } from "./store.js";
+import { CONNECTION_MODES } from "./types.js";
 import type { Agent } from "./types.js";
 
 let store: AsterismStore;
@@ -125,15 +126,32 @@ test("every scoped connection method requires an agentId", () => {
   expect(() => store.connections.findActive(alice.id, "", "handoff")).toThrow(/agentId is required/);
 });
 
-test("an unimplemented mode is refused at the write boundary", () => {
-  // The repository validates the mode through the same enum chokepoint the kernel uses,
-  // so a connection in a mode nothing consumes can never be persisted. `delegated-tool` is
-  // the LAST unimplemented mode: `artifact-only` became real in T2a, `read-summary` in T2b
-  // and `shared-brief` in T3a, and all three are asserted to persist below. This assertion
-  // retires when the #123 prerequisite lands and T3b makes the fifth mode real (§17, D23).
-  expect(() => store.createConnection(alice.id, bob.id, "delegated-tool" as "handoff")).toThrow(
-    /invalid connection mode/,
-  );
+test("a mode outside the enum is refused at the write boundary", () => {
+  // The repository validates the mode through the same enum chokepoint the kernel uses, so
+  // a connection in a mode nothing consumes can never be persisted.
+  //
+  // This assertion USED to name `delegated-tool`, which was the last mode the design had
+  // described and the code had not implemented. T3b implemented it, and with all five real
+  // there is no longer a mode to point at — so what is asserted is the property that was
+  // always underneath: the write boundary refuses a string that is not a mode, whether it
+  // is a plausible future one, a typo, or a mode name from another product. The refusal is
+  // the enum's, not a list this test maintains.
+  for (const notAMode of ["delegated_tool", "Handoff", "shared-briefs", "tool", ""]) {
+    expect(() => store.createConnection(alice.id, bob.id, notAMode as "handoff")).toThrow(
+      /invalid connection mode/,
+    );
+  }
+});
+
+test("every mode in the enum persists — the enum and the implementations agree", () => {
+  // The other half of the assertion above, and the one that would catch a mode ADDED to the
+  // enum with nothing behind it. Derived from CONNECTION_MODES rather than listing the five,
+  // so a sixth mode joins this test by existing.
+  for (const mode of CONNECTION_MODES) {
+    const conn = store.createConnection(alice.id, bob.id, mode);
+    expect(conn.mode).toBe(mode);
+    expect(store.connections.findActive(alice.id, bob.id, mode)?.id).toBe(conn.id);
+  }
 });
 
 test("an artifact-only connection persists and is scoped to its participants", () => {

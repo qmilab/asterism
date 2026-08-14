@@ -4,9 +4,15 @@
 // status and the partial unique index designed for it, then deferred the transition. These
 // tests pin the invariants of the transition itself (design note §15):
 //
-//   1. Revoke withdraws ALL FOUR capabilities — `handoff`, `artifact`, `fetch` (D13) and
-//      `summary` (T2b). The summary case is the test T2b dropped rather than fake, because
-//      producing a revoked row would have meant reaching past the repository.
+//   1. Revoke withdraws every capability the channel carried — `handoff`, `artifact`,
+//      `fetch` (D13) and `summary` (T2b) here; a shared brief in `brief.test.ts` and a
+//      delegated tool in `delegation.test.ts`, each beside the mode it belongs to. The
+//      summary case is the test T2b dropped rather than fake, because producing a revoked
+//      row would have meant reaching past the repository.
+//
+//      Stated per mode rather than as a COUNT on purpose: "all four" was true when it was
+//      written and silently false one mode later, which is the defect this project keeps
+//      finding in its own surfaces — a claim of completeness nothing re-checks.
 //   2. Revoke is EXACT: it touches only the (from, to, mode) triple it was called for —
 //      not the reverse direction, not another mode between the same pair, not another pair.
 //   3. Revoke is TERMINAL, and a reconnect is a fresh row over which the OLD artifact
@@ -137,7 +143,7 @@ async function exchangeArtifact(): Promise<void> {
   expect(outcome.kind).toBe("ok");
 }
 
-// --- Invariant 1: revoke withdraws all four capabilities ---------------------
+// --- Invariant 1: revoke withdraws the capabilities this file covers ---------
 
 test("revoke withdraws HANDOFF-ability: the callee can no longer be asked to run work", async () => {
   store.createConnection(writer.id, helper.id, "handoff");
@@ -280,7 +286,21 @@ test("a revoke AND reconnect during the confirmation still stops the bytes", asy
     },
   });
 
-  expect(outcome.kind).toBe("no_connection");
+  // `not_exchanged`, not `no_connection`: a channel IS active — a fresh one — and it carries
+  // none of the old channel's references, so that is exactly what re-running the command now
+  // answers. Reporting "no connection" would have told the operator to open a channel that
+  // was open, which is advice for a recovery the state does not need. What matters for the
+  // invariant is unchanged and asserted below: nothing crossed.
+  expect(outcome.kind).toBe("not_exchanged");
+  expect(materialized).toHaveLength(0);
+
+  // The property behind the choice, stated rather than implied: a refusal that arrives
+  // mid-pause reads the same as the refusal a fresh attempt gives.
+  const fresh = await performArtifactFetch(store, writer, helper, ARTIFACT_REF, {
+    host,
+    confirm: () => true,
+  });
+  expect(fresh.kind).toBe(outcome.kind);
   expect(materialized).toHaveLength(0);
 });
 
@@ -469,10 +489,12 @@ test("revoking a channel that is not open is a no-op — no row, no event", () =
   }
 });
 
-test("an unimplemented mode is refused at the revoke write boundary", () => {
+test("a mode outside the enum is refused at the revoke write boundary", () => {
+  // Named `delegated-tool` until T3b made that mode real. The property is the enum's, not
+  // any particular absent mode's — see the twin assertion in `connections.test.ts`.
   expect(() =>
     // @ts-expect-error deliberately outside the enum — the storage layer never trusts the type
-    store.revokeConnection(writer.id, helper.id, "delegated-tool"),
+    store.revokeConnection(writer.id, helper.id, "delegated_tool"),
   ).toThrow(/invalid connection mode/);
 });
 

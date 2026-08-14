@@ -29,7 +29,7 @@ import {
   WORLD_FACT_FORGET_TOOL,
 } from "./world-facts.js";
 import { RESERVED_CAPABILITY_KEYS, isCredentialBearingKey } from "./capabilities.js";
-import { endpointCapabilities } from "./endpoints.js";
+import { endpointCapabilities, endpointCapabilityKey } from "./endpoints.js";
 import type { OutboundHost } from "./endpoints.js";
 import { harvestWorldFactCandidates } from "./world-fact-harvest.js";
 import type { ObservedEffect } from "./world-fact-harvest.js";
@@ -1896,8 +1896,9 @@ export async function performArtifactFetch(
   let materialized: ArtifactMaterialization | undefined;
   // Set when the channel was withdrawn while the human was deciding — see the re-check in
   // `execute` below. Kept separate from `materialized` so the refusal is not mistaken for a
-  // declined confirmation, which is a different fact.
-  let withdrawn = false;
+  // declined confirmation, which is a different fact. Records WHICH refusal a fresh attempt
+  // would give, for the reason spelled out at the mapping below.
+  let withdrawn: "no_connection" | "not_exchanged" | undefined;
   const capability: Capability = {
     key: EXCHANGE_FETCH_KEY,
     // Declared destructive, unconditionally. Not "destructive when the destination exists":
@@ -1935,7 +1936,11 @@ export async function performArtifactFetch(
         // race is the one every permission check has, and is not what the revoke was failing.
         const current = store.connections.findActive(from.id, to.id, "artifact-only");
         if (!current || current.id !== connection.id) {
-          withdrawn = true;
+          // A revoke leaves no channel; a revoke-then-reconnect leaves a DIFFERENT one, which
+          // inherits none of the old channel's exchanges (D20) — so a fresh attempt resolves
+          // no reference over it and answers `not_exchanged`. Reporting `no_connection` there
+          // told the operator to open a channel that was already open.
+          withdrawn = current ? "not_exchanged" : "no_connection";
           return Promise.resolve({
             output: `the channel from ${from.name} to ${to.name} was withdrawn.`,
             isError: true,
@@ -1989,11 +1994,15 @@ export async function performArtifactFetch(
 
   // Checked BEFORE the confirmation outcomes, because the gate DID execute (it was the tool
   // that refused, not the human) — so without this the caller would be told the fetch was
-  // never confirmed, when confirmation was not the problem. Reported as `no_connection`, the
-  // same answer re-running the command now gives: a refusal should read the same whenever in
-  // the sequence the permission went away, and a distinct kind would only tell the caller
-  // WHEN it was withdrawn.
-  if (withdrawn) return { kind: "no_connection" };
+  // never confirmed, when confirmation was not the problem. Reported as whichever refusal
+  // re-running the command now gives, so a refusal reads the same whenever in the sequence
+  // the permission went away, and never names a recovery the state does not need.
+  //
+  // This said `no_connection` unconditionally, justified by that very sentence — which was
+  // true of a plain revoke and false of a revoke-then-reconnect. Found by auditing the
+  // category after the identical fault was reported in `performDelegatedCall`, which had
+  // inherited both the mapping and its justification from here. [Codex review R4 P2.]
+  if (withdrawn !== undefined) return { kind: withdrawn };
   if (decision === "withheld") {
     return { kind: "withheld", ref: exchanged.ref, path: parsed.path, sizeBytes };
   }
@@ -2013,6 +2022,265 @@ export async function performArtifactFetch(
       overwrote: destExists,
     },
   };
+}
+
+// --- delegated-tool --------------------------------------------------------
+//
+// The last Track-A mode, and the only one where the CALLEE's tools do something for the
+// caller (design note §21). Every guarantee it needs already exists and is tested — the
+// credential lives in one closure, the response is scrubbed of the exact value disclosed,
+// the call is destructive at every trust level and can never auto-approve. This op adds the
+// CROSSING, not the capability, and the shape of that is deliberately small:
+//
+//   the channel + the delegation authorize it → the callee's gate decides it →
+//   the callee's own `execute` performs it → the screened output is handed back.
+//
+// What it is NOT is a run on the callee. Routed through `executeRun`, the callee's MODEL
+// would decide whether to call the tool, the caller's free text would enter the callee's
+// prompt, and what crossed would be whatever the callee chose to say about it — which is
+// `handoff`, a different mode with its own connection. Run-less, the caller supplies not one
+// byte that leaves the machine: it chooses WHICH endpoint, never what is sent. That is the
+// property that makes delegation safe here and would not survive an argument-taking
+// capability, which is why `isDelegableCapabilityKey` is written about INPUT rather than
+// about credentials (D38).
+
+/** Options for {@link performDelegatedCall}. */
+export interface DelegatedCallOptions {
+  /**
+   * The outbound seam (see {@link OutboundHost}). Absent ⇒ the call reports itself
+   * unavailable rather than happening — the same safe default a direct call has, and
+   * deliberately not "refuse earlier", so an unavailable surface never reads like a refused
+   * permission.
+   */
+  host?: OutboundHost;
+  /**
+   * Resolve the CALLEE's destructive-action confirmation. Absent ⇒ nothing is called and the
+   * outcome is `not_confirmed`. A bound endpoint can never auto-approve (E9), so this is the
+   * only path to an actual call, at every trust level, forever.
+   */
+  confirm?: (action: Action) => boolean | Promise<boolean>;
+}
+
+/**
+ * The outcome of {@link performDelegatedCall} — a discriminated union so a surface maps each
+ * case without guessing, and so the three different refusals stay three different facts:
+ *
+ * - `ok`            — the callee's gate authorized it and the screened response crossed.
+ * - `no_connection` — no ACTIVE `from → to` connection in `delegated-tool` mode (invariant 1).
+ * - `not_delegated` — the channel is live but this capability was never granted on it, or the
+ *                     grant was withdrawn. Says NOTHING about whether the callee has such an
+ *                     endpoint: an ungranted capability must look exactly like one that does
+ *                     not exist, or the refusal becomes a way to enumerate the callee's tools.
+ * - `changed`       — the binding behind the grant is gone or now names a different address
+ *                     or credential, so the call a human authorized is not the call that
+ *                     would go out.
+ * - `withheld`      — the CALLEE's trust level is `propose`, so nothing was sent. Not "asks
+ *                     first": a `propose` callee cannot serve this mode at all (D41).
+ * - `not_confirmed` — the gate fired and no human approved. Nothing was sent, and nothing is
+ *                     parked: run the command again to be asked again.
+ * - `failed`        — authorized, confirmed, and the call itself did not succeed. `reason` has
+ *                     already been through the endpoint response pipeline.
+ */
+export type DelegatedCallOutcome =
+  | { kind: "ok"; capability: string; output: string }
+  | { kind: "no_connection" }
+  | { kind: "not_delegated"; capability: string }
+  | { kind: "changed"; capability: string }
+  | { kind: "withheld"; capability: string }
+  | { kind: "not_confirmed"; capability: string }
+  | { kind: "failed"; capability: string; reason: string };
+
+/**
+ * Ask the callee to use one endpoint it owns, and hand back what came out.
+ *
+ * Five refusal points, in order, each of which is a different fact about why nothing
+ * happened:
+ *
+ *   1. **The channel.** An ACTIVE `from → to` connection in `delegated-tool` mode.
+ *   2. **The delegation.** A live grant naming this capability ON that channel — the second
+ *      lock (D39). The channel alone never suffices, which is what keeps an endpoint the
+ *      callee is bound to LATER out of reach of a channel opened earlier.
+ *   3. **The binding still matches the grant.** D42's fail-closed half. `bindEndpoint` and
+ *      `removeEndpoint` already end a grant whose binding changed, so reaching this check is
+ *      not the ordinary path — it is the one that holds if a row is written some other way,
+ *      and it costs nothing because the address and credential key were snapshotted at grant.
+ *   4. **The callee's gate.** Its trust level, its classification, its confirmation —
+ *      resolved through the SAME `resolveToolRegistry` chokepoint every capability passes
+ *      through, so there is no second gate implementation written for this op. Invariant 3:
+ *      the callee's gate is sovereign, and a caller cannot raise it. `autoApprove` is empty
+ *      by construction, so a caller can never ride the callee's earned standing.
+ *   5. **The call.** Only now, and it is the callee's own `execute` — the kernel's existing
+ *      one, which re-reads the binding after the pause, closes the credential into a single
+ *      closure, and scrubs the exact disclosed value out of whatever comes back.
+ *
+ * Deliberately NOT a run, for `performArtifactFetch`'s reasons verbatim: no model call, no
+ * framing, nothing to resume, and no `Run` row claiming an agent "ran" when it did not.
+ *
+ * The audit goes to BOTH logs — the request before the gate, the outcome after — because
+ * this is a channel being used, and both operators are entitled to the same history.
+ * `secret.read` still lands on the callee's log alone, from inside `execute`, and remains
+ * the only record that a credential was disclosed.
+ */
+export async function performDelegatedCall(
+  store: AsterismStore,
+  from: Agent,
+  to: Agent,
+  endpointName: string,
+  options: DelegatedCallOptions,
+): Promise<DelegatedCallOutcome> {
+  const connection = requireChannel(store, from, to, "delegated-tool");
+  if (!connection) return { kind: "no_connection" };
+
+  // Built rather than validated: a name that could never be bound simply matches no grant,
+  // which is the same answer an ungranted one gets. Validating first would answer a
+  // different question loudly ("that is not a well-formed endpoint name") on a path whose
+  // whole job is to reveal nothing about the callee's endpoints.
+  const capability = endpointCapabilityKey(endpointName);
+  const delegation = store.delegations.findActive(connection, capability);
+  if (!delegation) return { kind: "not_delegated", capability };
+
+  const binding = store.endpoints.getByName(to.id, endpointName);
+  if (
+    !binding ||
+    binding.url !== delegation.url ||
+    binding.credentialKey !== delegation.credentialKey
+  ) {
+    return { kind: "changed", capability };
+  }
+
+  // Audited BEFORE the gate, so a use of the channel is on the record even when the call is
+  // then withheld, unconfirmed, or fails — the rule every mode follows.
+  store.recordDelegationRequested(connection, capability);
+
+  const complete = (
+    outcome: "executed" | "withheld" | "not_confirmed" | "failed",
+  ): void => store.recordDelegationCompleted(connection, capability, outcome);
+
+  // The callee's own capability, built by the kernel's one builder from the callee's own
+  // binding rows. Not reconstructed here: everything that makes this class safe lives inside
+  // that builder, and a second construction is how one of them comes to differ.
+  const built = endpointCapabilities(store, to.id, options.host).find((c) => c.key === capability);
+  if (!built) {
+    // The binding was read a moment ago, so this is the type-required guard rather than a
+    // real branch — reported as `changed` because "it is not there now" is what it means.
+    complete("failed");
+    return { kind: "changed", capability };
+  }
+
+  let decision: "executed" | "withheld" | "paused" | undefined;
+  // Set when the channel or the grant was withdrawn while the human was deciding. Kept
+  // separate from the tool's own result so a withdrawal is never reported as a declined
+  // confirmation, which is a different fact.
+  //
+  // It records WHICH outcome, not merely THAT one happened, because the two locks fail
+  // differently and an operator's next move differs with them: a withdrawn channel wants
+  // `connect`, a withdrawn grant wants `delegate`. Collapsing them told the operator to
+  // open a channel that was still open. [Codex review R4 P2.]
+  let withdrawn: "no_connection" | "not_delegated" | undefined;
+  const capabilityForGate: Capability = {
+    ...built,
+    // The gate prompt must name WHO ASKED. Without it the human is approving a
+    // credential-bearing call that looks exactly like one the callee's own run made, and the
+    // one thing that distinguishes this call is that another agent asked for it. References
+    // only, like every other field here.
+    gateContext: { ...built.gateContext, requestedBy: from.name },
+    tool: {
+      ...built.tool,
+      execute: async (invocation, signal): Promise<ToolResult> => {
+        // BOTH LOCKS ARE RE-READ HERE, after the human's pause and before the credential is
+        // read. A confirmation is human-length, and either the channel or the grant can be
+        // withdrawn while the prompt is open — the failure `artifact fetch`'s first review
+        // round found, where a revoke could not stop the fetch that was already asking.
+        // `findActive` joins the connection, so one read covers both locks and they cannot
+        // be checked to different depths.
+        //
+        // Identity is compared, not mere existence: a revoke-then-reconnect during the pause
+        // leaves a DIFFERENT channel active, and a fresh channel does not inherit the old
+        // one's grants (D20).
+        const channel = requireChannel(store, from, to, "delegated-tool");
+        const current = channel ? store.delegations.findActive(channel, capability) : undefined;
+        if (!channel || channel.id !== connection.id || !current || current.id !== delegation.id) {
+          // Which refusal a FRESH attempt would give, read off the live state rather than
+          // off which comparison failed. That is what makes "a refusal reads the same
+          // whenever in the sequence the permission went away" true rather than merely
+          // claimed — and it gets the revoke-then-reconnect case right for free: a new
+          // channel is active, it carries none of the old channel's grants, so a fresh
+          // attempt says `not_delegated` and so does this.
+          withdrawn = channel ? "not_delegated" : "no_connection";
+          return { output: `${from.name} may no longer ask ${to.name} to do this.`, isError: true };
+        }
+        // The callee's own execute — the binding re-read, the credential closed over, the
+        // response scrubbed. Nothing of that is reimplemented here.
+        return built.tool.execute(invocation, signal);
+      },
+    },
+  };
+
+  // The CALLEE's profile, resolved exactly as a run resolves it, so "the callee must actually
+  // own this capability" is the same answer here as it is in `driveRun` rather than a second
+  // derivation of it. `autoApprove` is EMPTY: `isCredentialBearingKey` already excludes this
+  // class at the run path (E9's first lock), so an empty set is the same answer today and the
+  // stricter one if the delegable set is ever widened. A caller must never be able to spend
+  // the callee's earned standing.
+  const profile = trustProfile({
+    level: to.trustLevel,
+    capabilities: store.resolveOwnedCapabilities(to.id),
+    autoApprove: [],
+  });
+  // Audited to the CALLEE's log: the gate decision is the callee's own policy, and it is the
+  // callee's credential at stake. The crossing itself is what both logs record.
+  const tools = resolveToolRegistry(
+    profile,
+    [capabilityForGate],
+    auditTrustHooks(store.events, to.id, {}, {
+      onExecute: () => {
+        decision = "executed";
+      },
+      onWithhold: () => {
+        decision = "withheld";
+      },
+      onAwaitConfirmation: () => {
+        decision = "paused";
+      },
+      ...(options.confirm ? { confirm: options.confirm } : {}),
+    }),
+  );
+  const gated = tools.list()[0];
+  if (!gated) {
+    // Unreachable: the profile was resolved from the callee's own ownership, which unions
+    // every bound endpoint key. The type-required guard, not a real branch.
+    complete("failed");
+    return { kind: "changed", capability };
+  }
+  const result = await gated.execute({ args: {} });
+
+  // Checked BEFORE the confirmation outcomes, because the gate DID execute — it was the
+  // re-check that refused, not the human. Reported as whichever refusal re-running the
+  // command now gives, so a refusal reads identically whenever in the sequence the
+  // permission went away.
+  if (withdrawn === "no_connection") {
+    complete("failed");
+    return { kind: "no_connection" };
+  }
+  if (withdrawn === "not_delegated") {
+    complete("failed");
+    return { kind: "not_delegated", capability };
+  }
+  if (decision === "withheld") {
+    complete("withheld");
+    return { kind: "withheld", capability };
+  }
+  if (decision !== "executed") {
+    complete("not_confirmed");
+    return { kind: "not_confirmed", capability };
+  }
+  if (result.isError) {
+    complete("failed");
+    // Already through `screenEndpointResponse` on every path that produces it.
+    return { kind: "failed", capability, reason: result.output };
+  }
+  complete("executed");
+  return { kind: "ok", capability, output: result.output };
 }
 
 /**

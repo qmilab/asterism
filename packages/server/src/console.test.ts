@@ -543,6 +543,77 @@ async function body(res: Response): Promise<Record<string, unknown>> {
 
 // --- connect / connections / disconnect ------------------------------------
 
+test("every endpoint that returns a connection returns the SAME shape for it", async () => {
+  // Create, list, disconnect. One resource, three responses, and a client should not have to
+  // learn which of them tells the truth about a channel's reach. `delegated` was a parameter
+  // that only the listing passed, so creating and withdrawing a `delegated-tool` channel
+  // omitted it — under this field's own rule ("absent means the question does not arise")
+  // those bodies denied the question for the one mode it arises for. [Codex review R6 P2.]
+  for (const mode of ["delegated-tool", "handoff"] as const) {
+    const created = await body(
+      await handleConsoleRequest(deps(), send("POST", "/agents/personal/connections", { to: "work", mode })),
+    );
+    const listed = (
+      (await body(await handleConsoleRequest(deps(), send("GET", "/agents/personal/connections"))))
+        .connections as Record<string, unknown>[]
+    ).find((c) => c.mode === mode)!;
+    const removed = await body(
+      await handleConsoleRequest(
+        deps(),
+        send("DELETE", `/agents/personal/connections/work?mode=${mode}`),
+      ),
+    );
+
+    const keys = (o: unknown): string[] => Object.keys(o as object).sort();
+    expect(keys(created.connection)).toEqual(keys(listed));
+    expect(keys(removed.connection)).toEqual(keys(listed));
+    // And the field is present exactly for the mode where the question arises.
+    expect(keys(listed).includes("delegated")).toBe(mode === "delegated-tool");
+  }
+});
+
+test("a delegated-tool channel reports what it reaches, and other modes carry no such claim", async () => {
+  // The one mode whose channel does not say what it can do. A body with mode and status
+  // alone would describe an open channel that grants nothing — so the listing carries the
+  // set, resolved through the kernel rather than re-derived here.
+  await handleConsoleRequest(
+    deps(),
+    send("POST", "/agents/personal/connections", { to: "work", mode: "delegated-tool" }),
+  );
+  await handleConsoleRequest(
+    deps(),
+    send("POST", "/agents/personal/connections", { to: "work", mode: "handoff" }),
+  );
+
+  const empty = await body(await handleConsoleRequest(deps(), send("GET", "/agents/personal/connections")));
+  const delegatedRow = (empty.connections as Record<string, unknown>[]).find(
+    (c) => c.mode === "delegated-tool",
+  )!;
+  expect(delegatedRow.delegated).toEqual([]);
+  // Absent, not empty, on a mode where the question does not arise — so a client cannot
+  // read "reaches nothing" into a handoff channel.
+  const handoffRow = (empty.connections as Record<string, unknown>[]).find(
+    (c) => c.mode === "handoff",
+  )!;
+  expect("delegated" in handoffRow).toBe(false);
+
+  // Hand one over through the kernel (there is no route for it yet — deliberately, and
+  // documented), and the listing follows without being told.
+  store.addCredential(work.id, "TOK", "tok-value");
+  store.bindEndpoint(work.id, "issues", "https://api.example.test/issues", "TOK");
+  const channel = store.connections.findActive(personal.id, work.id, "delegated-tool")!;
+  store.grantDelegation(channel, store.endpoints.getByName(work.id, "issues")!);
+
+  const filled = await body(await handleConsoleRequest(deps(), send("GET", "/agents/personal/connections")));
+  const filledRow = (filled.connections as Record<string, unknown>[]).find(
+    (c) => c.mode === "delegated-tool",
+  )!;
+  expect(filledRow.delegated).toEqual(["api.issues"]);
+  // References only: the address and the credential key stay out of the body.
+  expect(JSON.stringify(filled)).not.toContain("api.example.test");
+  expect(JSON.stringify(filled)).not.toContain("tok-value");
+});
+
 test("POST /agents/:a/connections grants a directional channel, and is idempotent", async () => {
   const first = await handleConsoleRequest(
     deps(),

@@ -122,19 +122,24 @@ export type CapabilityStanding = (typeof CAPABILITY_STANDINGS)[number];
  *   The text is firewall-screened before it is ever persisted (D26) and framed in its own
  *   attributed block (D27), because it is the one thing in an agent's prompt that the agent
  *   did not author.
+ * - `delegated-tool` — the caller asks the callee to use one of the callee's OWN tools, and
+ *   what crosses is that tool's screened result. The callee runs no model and composes
+ *   nothing; the kernel invokes the capability under the callee's gate and hands back what
+ *   came out. Narrow by construction: only a bound endpoint is delegable, because it is the
+ *   one capability class that takes no agent-authored input, so the caller chooses WHICH
+ *   tool and never what it sends (design note §21, decisions D38/D40). A second grant — a
+ *   {@link Delegation} naming one endpoint — is required on top of the channel, so a tool
+ *   the callee is bound to later is not reachable through a channel opened before it (D39).
  *
  * Only the modes with a real implementation are enumerated, so the write boundary
- * ({@link validateEnum}) can never persist a connection in a mode nothing consumes. The
- * last mode (`delegated-tool`) is deliberately absent: it means "the result of a tool the
- * callee OWNS", and this product has no per-agent tool ownership and no credential-bearing
- * capability, so over today's install-wide catalog it could only mean a live read into the
- * callee's workspace (design note §17, decision D23; prerequisite tracked in #123).
+ * ({@link validateEnum}) can never persist a connection in a mode nothing consumes.
  */
 export const CONNECTION_MODES = [
   "handoff",
   "artifact-only",
   "read-summary",
   "shared-brief",
+  "delegated-tool",
 ] as const;
 export type ConnectionMode = (typeof CONNECTION_MODES)[number];
 
@@ -202,6 +207,10 @@ export const EVENT_TYPES = [
   "brief.set",
   "brief.ended",
   "brief.blocked",
+  "delegation.granted",
+  "delegation.ended",
+  "delegation.requested",
+  "delegation.completed",
   "credential.added",
   "credential.rotated",
   "credential.removed",
@@ -491,6 +500,52 @@ export interface Connection {
  */
 export const BRIEF_STATUSES = ["active", "ended"] as const;
 export type BriefStatus = (typeof BRIEF_STATUSES)[number];
+
+/** A {@link Delegation}'s lifecycle. `active → ended`, one way, like a {@link Brief}'s. */
+export const DELEGATION_STATUSES = ["active", "ended"] as const;
+export type DelegationStatus = (typeof DELEGATION_STATUSES)[number];
+
+/**
+ * One capability the caller may ask the callee to use, on a `delegated-tool`
+ * {@link Connection} — the second of the mode's two locks (design note §21, decision D39).
+ *
+ * The channel says the caller may ask for tool results at all; this row says WHICH tool.
+ * Neither implies the other, and both are re-read after the human's confirmation pause. The
+ * split exists because a channel names no capability: were the channel alone the grant, its
+ * reach would include every endpoint the callee is bound to *later*, and `asterism api add`
+ * — a command about one agent, whose output can only honestly speak about that agent —
+ * would silently widen what another agent may reach.
+ *
+ * Scoping mirrors {@link Brief}: two agent ids rather than one `agentId` column, because the
+ * grant belongs to a PAIR, and every read asserts a participant through the connection.
+ *
+ * `url` and `credentialKey` are a SNAPSHOT of the binding as it stood when the grant was
+ * made, not a cache to read from — nothing resolves a call through them. They exist because
+ * `api add` rebinds a name in place, so a grant naming only `api.issues` would follow a
+ * rebind to a different address and credential, silently redirecting a call someone else
+ * authorized. This is `Exchange`'s `sizeBytes`/`createdAt` argument in a new place: a name
+ * names a location, and what was delegated was a specific address. A binding that changes
+ * ends its grants outright, and the call compares these anyway (D42).
+ */
+export interface Delegation {
+  id: string;
+  /** The `delegated-tool` channel this grant sits on — the permission it narrows. */
+  connectionId: string;
+  /** The channel's initiating agent — the one that may ask. */
+  fromAgentId: string;
+  /** The channel's receiving agent — the one that OWNS the capability and gates its use. */
+  toAgentId: string;
+  /** The delegated capability key, always `api.<name>` under D38. */
+  capability: string;
+  /** The address the binding named when this grant was made. A snapshot; never dialed from. */
+  url: string;
+  /** The credential KEY the binding named when this grant was made. Never a value. */
+  credentialKey: string;
+  status: DelegationStatus;
+  createdAt: string;
+  /** When the grant stopped granting — set by `undelegate` and by a binding that changed. */
+  endedAt?: string;
+}
 
 /**
  * A standing, operator-authored brief on a `shared-brief` {@link Connection} — the shared
