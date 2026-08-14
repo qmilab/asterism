@@ -18,6 +18,16 @@ All notable changes to Asterism are documented here. Versions follow [SemVer](ht
 
 - **Two messages about a `delegated-tool` channel described a different mode.** Opening one suggested `asterism handoff` as the next step, and withdrawing one reported that the asking agent "can no longer hand work to" the other. Both fell through to the `handoff` wording because each was a chain of comparisons with a default; both are now exhaustive, so a future mode is a build error rather than wrong copy.
 
+### If you embed the kernel
+
+Three changes visible only to code that depends on `@qmilab/asterism-core` directly. The shipped CLI, and every existing install, are unaffected.
+
+- **Breaking: `AsterismStore.bindEndpoint` and `.removeEndpoint` now return an outcome object.** `bindEndpoint` returns `{ endpoint, endedDelegations }` instead of the `BoundEndpoint`; `removeEndpoint` returns `{ removed, endedDelegations }` instead of a boolean. Both verbs gained a second effect — re-pointing or removing a binding withdraws every delegation of it — and a caller that performs that effect without being told is how the operator on the other side of a channel finds out at their next call instead of at the moment it happened. TypeScript callers get a compile error on both.
+
+  **`removeEndpoint` is the one to check by hand**, because its break is silent in plain JavaScript: `if (!store.removeEndpoint(a, n))` used to mean "there was no such binding" and an object is always truthy, so a missing removal now reads as a successful one. Test `.removed` instead. `bindEndpoint`'s break surfaces as an `undefined` property rather than an inverted branch, but it is the same shape of change.
+- **`ConnectionMode` and the event vocabulary each gained members.** `ConnectionMode` gains `delegated-tool`, and `EventType` gains `delegation.granted` / `.ended` / `.requested` / `.completed`. Additive at runtime, but a consumer that switches exhaustively over either union will stop compiling until it handles the new members — which is the intended failure, and the same reason both of this release's copy bugs are fixed with total records rather than a default branch. New and purely additive alongside them: the `Delegation` entity, `performDelegatedCall`, `isDelegableCapabilityKey`, and the `delegations` repository on the store.
+
+
 ## 0.5.0 — 2026-08-13
 
 Agents that can work together — without giving up a single thing that kept them apart. Until now an agent was reachable only by you. This release adds an explicit channel you open by hand between two agents, and lets you choose what that channel is for: hand over a result, hand over files, read what the other agent knows, or share standing context. Only that ever crosses. Alongside it, two ways to draw an agent's boundary more finely: choose which tools it has at all, and let it call exactly one web address with one of its stored credentials — without ever seeing that credential.
