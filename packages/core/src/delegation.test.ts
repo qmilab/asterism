@@ -535,6 +535,29 @@ test("the delegable set is NAMED and narrow — not every capability an agent ow
   expect(isDelegableCapabilityKey(endpointCapabilityKey("issues"))).toBe(true);
 });
 
+test("a binding of the CALLER's own is refused, even when the callee holds an identical one", () => {
+  // Both agents bind `issues` to the same address with the same credential key. The SQL
+  // predicate binds every field to the CALLEE, so it cannot tell these two rows apart — it
+  // would accept the caller's row and write a grant indistinguishable from a legitimate one.
+  //
+  // That is why the ownership check above the statement is not redundant, and this test is
+  // what says so: with it removed, this case silently succeeds. Every OTHER shape of foreign
+  // row is already refused by the predicate, which is why deleting the check broke nothing
+  // until this case existed. [Found by mutation, after Codex review R3.]
+  bindIssues();
+  store.addCredential(writer.id, "GITHUB_TOKEN", TOKEN);
+  store.bindEndpoint(writer.id, "issues", URL_A, "GITHUB_TOKEN");
+  const connection = store.createConnection(writer.id, helper.id, "delegated-tool");
+
+  const callersOwn = store.endpoints.getByName(writer.id, "issues")!;
+  expect(callersOwn.agentId).toBe(writer.id);
+  expect(store.grantDelegation(connection, callersOwn).kind).toBe("endpoint_changed");
+  expect(store.listActiveDelegations(writer.id, connection.id)).toHaveLength(0);
+
+  // …while the callee's own row, identical in every field but the owner, grants normally.
+  expect(store.grantDelegation(connection, store.endpoints.getByName(helper.id, "issues")!).kind).toBe("ok");
+});
+
 test("the capability a grant names is DERIVED from the row, so it cannot name another endpoint", () => {
   bindIssues();
   store.bindEndpoint(helper.id, "payroll", URL_A, "GITHUB_TOKEN");

@@ -2054,9 +2054,16 @@ export class AsterismStore {
       // connection" when their endpoint was the thing that vanished is a confident wrong
       // diagnosis. Both halves can be false at once, and the binding is reported first
       // because it is the one the operator just named on the command line.
-      return this.delegations.bindingHolds(connection.toAgentId, endpoint)
-        ? { kind: "no_connection" }
-        : { kind: "endpoint_changed" };
+      //
+      // The OWNER is part of the endpoint half, and leaving it out here reported the wrong
+      // one: hand over a binding of the CALLER's own while the callee happens to hold an
+      // identical name/URL/credential, and `bindingHolds` says yes — so a refusal that was
+      // entirely about the endpoint was announced as "no active connection". The diagnosis
+      // has to ask the same question the write asked, or it is just a different guess.
+      const endpointHeld =
+        endpoint.agentId === connection.toAgentId &&
+        this.delegations.bindingHolds(connection.toAgentId, endpoint);
+      return endpointHeld ? { kind: "no_connection" } : { kind: "endpoint_changed" };
     }
     this.emitToBoth(connection.fromAgentId, connection.toAgentId, "delegation.granted", {
       delegationId: granted.id,
