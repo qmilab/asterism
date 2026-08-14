@@ -238,7 +238,13 @@ export function formatConnectionList(
   connections: readonly Connection[],
   agent: Agent,
   nameById: ReadonlyMap<string, string>,
-  delegatedByConnectionId: ReadonlyMap<string, readonly string[]> = new Map(),
+  // REQUIRED, not defaulted. A default of "no delegations" is silently wrong for a
+  // `delegated-tool` channel, and a new caller that omitted it would show an open channel
+  // as reaching nothing rather than failing to compile. This module is deliberately
+  // store-free, so the set is passed in — but the compiler, not the caller's memory, is
+  // what makes sure it arrives. (The console had the same parameter and two of its three
+  // call sites forgot it — Codex review R6.)
+  delegatedByConnectionId: ReadonlyMap<string, readonly string[]>,
 ): string {
   if (connections.length === 0) {
     return `${agent.name} has no connections yet. Open one with: asterism connect ${agent.name} <other> --mode handoff`;
