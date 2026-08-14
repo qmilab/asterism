@@ -696,6 +696,34 @@ test("nothing of the callee beyond the response crosses — memory, credentials 
 // Audit.
 // ---------------------------------------------------------------------------
 
+test("a third agent cannot read what a channel between two others reaches", () => {
+  // Golden rule 1, on this slice's own reads: the agent is the isolation boundary, and no
+  // query is issued without it in the filter. A delegation joins TWO agents, so the scope is
+  // "a participant" — and an outsider holding the connection id must still get nothing.
+  bindIssues();
+  const connection = connectAndDelegate();
+  const outsider = store.createAgent({
+    name: "outsider",
+    role: "unrelated",
+    soulRef: "casual-helper",
+    workspaceDir: "/tmp/outsider",
+    trustLevel: "autonomous",
+  });
+
+  // Both participants see it…
+  expect(store.listActiveDelegations(writer.id, connection.id)).toHaveLength(1);
+  expect(store.listActiveDelegations(helper.id, connection.id)).toHaveLength(1);
+  // …and the third agent does not, even naming the channel exactly.
+  expect(store.listActiveDelegations(outsider.id, connection.id)).toHaveLength(0);
+  // Nor can a forged `Connection` claiming the outsider as a participant resolve the grant:
+  // the read compares the row's participants against the CONNECTION's, so an id a caller
+  // supplies is a claim rather than a fact.
+  const forged = { ...connection, fromAgentId: outsider.id };
+  expect(store.delegations.findActive(forged, endpointCapabilityKey("issues"))).toBeUndefined();
+  // And the scope is asserted, not merely filtered.
+  expect(() => store.listActiveDelegations("", connection.id)).toThrow(/agentId is required/);
+});
+
 test("a use of the channel is recorded on both logs, references only, with its outcome", async () => {
   bindIssues();
   connectAndDelegate();

@@ -299,11 +299,21 @@ export class DelegationRepository {
    *      HERE, live, joined rather than trusted from whenever the grant was made. This is
    *      what makes `disconnect` withdraw every delegation on a channel without touching a
    *      delegation row, the same connection-keyed property `exchanges` and briefs have.
-   *   3. **The grant's participants must MATCH its connection's.** Not redundant with the
-   *      caller's own lookup: a row naming a third agent while sitting on a real A→B channel
-   *      is refused here even though `create` derives the ids from the connection and cannot
-   *      produce one. A permission read must not trust the row it is authorizing to describe
-   *      its own scope.
+   *   3. **The grant's participants must MATCH its connection's.** A permission read must not
+   *      trust the row it is authorizing to describe its own scope.
+   *
+   *      HONEST ABOUT ITS REACH: no in-process path can produce a row that fails this.
+   *      {@link create} derives both ids from the connection, and its INSERT only fires when
+   *      those ids match a live `connections` row — so a stored delegation's participants are
+   *      always a real channel's. Deleting this predicate breaks no test, and that was
+   *      measured rather than assumed.
+   *
+   *      It stays because this class is EXPORTED from `@qmilab/asterism-core`, and a host
+   *      that constructs one over its own `SqlDriver` can insert whatever it likes. That is
+   *      a real caller, not a hypothetical one, and it is the caller for whom "the row says
+   *      it belongs to these two agents" is a claim rather than a fact. The brief repository
+   *      carries the identical predicate for a reason that WAS reachable in-process, which is
+   *      how the shape got here.
    */
   findActive(connection: Connection, capability: string): Delegation | undefined {
     requireAgentId(connection.fromAgentId);
