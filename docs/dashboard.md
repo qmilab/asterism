@@ -125,9 +125,10 @@ yet.) They are the only routes that name two agents, and they are all rooted at 
 | `DELETE /agents/<a>/connections/<b>/brief` | End that standing context. The channel stays open. |
 | `GET /agents/<a>/briefs` | The standing briefs on `<a>`'s channels. |
 
-A `delegated-tool` channel opened here reports what it reaches — each connection body
-carries a `delegated` list of the tools handed over on it — but **handing a tool over and
-calling it are command-line only**. `asterism delegate`, `undelegate` and
+A `delegated-tool` channel opened here reports what it reaches — every response that
+returns a connection carries a `delegated` list of the tools handed over on it, and only
+that mode carries the field — but **handing a tool over and calling it are command-line
+only**. `asterism delegate`, `undelegate` and
 [`call`](./commands.md#call) have no route yet, so a channel opened over HTTP does nothing
 until you name a tool from the terminal. Stated rather than left to be discovered: every
 other mode is complete here.

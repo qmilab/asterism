@@ -531,12 +531,22 @@ function agentNames(deps: ConsoleDeps): ReadonlyMap<string, string> {
  * compare ids it does not otherwise handle.
  */
 function connectionBody(
+  deps: ConsoleDeps,
   connection: Connection,
   viewer: Agent,
   names: ReadonlyMap<string, string>,
-  delegated?: readonly string[],
 ): Record<string, unknown> {
   const outbound = connection.fromAgentId === viewer.id;
+  // DERIVED here rather than passed in. It was a parameter, and two of the three call sites
+  // forgot it: creating a `delegated-tool` channel and withdrawing one both answered without
+  // the field, while listing the same channel answered with it. Under this field's own rule
+  // — absent means the question does not arise — those bodies said the question does not
+  // arise about the one mode it arises for. A parameter every caller must remember is the
+  // shape that defect comes in. [Codex review R6 P2.]
+  const delegated =
+    connection.mode === "delegated-tool"
+      ? deps.store.listActiveDelegations(viewer.id, connection.id).map((d) => d.capability)
+      : undefined;
   return {
     id: connection.id,
     from: names.get(connection.fromAgentId) ?? connection.fromAgentId,
@@ -645,18 +655,9 @@ function listConnectionsEndpoint(deps: ConsoleDeps, agent: Agent): Response {
   // agent is on.
   const names = agentNames(deps);
   return json(200, {
-    connections: deps.store.listConnections(agent.id).map((c) =>
-      connectionBody(
-        c,
-        agent,
-        names,
-        // Resolved through the kernel — the same query a delegated call is authorized
-        // against — so this list cannot claim a reach the gate does not honour.
-        c.mode === "delegated-tool"
-          ? deps.store.listActiveDelegations(agent.id, c.id).map((d) => d.capability)
-          : undefined,
-      ),
-    ),
+    connections: deps.store
+      .listConnections(agent.id)
+      .map((c) => connectionBody(deps, c, agent, names)),
   });
 }
 
@@ -698,7 +699,7 @@ async function connect(deps: ConsoleDeps, agent: Agent, req: Request): Promise<R
   const existing = deps.store.connections.findActive(agent.id, to.id, mode as ConnectionMode);
   const connection = deps.store.createConnection(agent.id, to.id, mode as ConnectionMode);
   return json(existing ? 200 : 201, {
-    connection: connectionBody(connection, agent, agentNames(deps)),
+    connection: connectionBody(deps, connection, agent, agentNames(deps)),
     created: existing === undefined,
   });
 }
@@ -729,7 +730,7 @@ function disconnect(deps: ConsoleDeps, agent: Agent, to: Agent, url: URL): Respo
   // them: the fact the operator cares about is that the channel is not open, and which way
   // it got there is not this endpoint's to disclose.
   if (!revoked) return fail(409, `${agent.name} has no open ${modeRaw} channel to ${to.name}.`);
-  return json(200, { connection: connectionBody(revoked, agent, agentNames(deps)) });
+  return json(200, { connection: connectionBody(deps, revoked, agent, agentNames(deps)) });
 }
 
 /**
