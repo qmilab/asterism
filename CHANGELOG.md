@@ -17,6 +17,8 @@ All notable changes to Asterism are documented here. Versions follow [SemVer](ht
 ### Fixed
 
 - **A missing API key was reported by the model substrate, at the first token, in its own vocabulary.** `asterism run` built its client and only discovered there was no key when the run had already started, surfacing "Run failed: No API key for provider: openai" through the path reserved for unexpected faults. It is now checked before anything is built, and says what to set — the same check, and the same wording, `asterism reflect` has always used. The two used to answer the question separately, which is how they came to disagree about it.
+
+  The check widens rather than narrows: a run the model runtime can authenticate on its own — through a provider variable that is not `<PROVIDER>_API_KEY`, such as `GEMINI_API_KEY` or `HF_TOKEN` — is not refused. It never asks whether a *local* provider aimed at a remote endpoint might be authenticated by something lying around; that refusal is a decision, not a failed lookup.
 - **An installed service asked for the wrong key, in three different ways.** `asterism service install` worked out for itself which variables could authenticate a model, rather than asking the same resolver the command line asks. So it listed a required `<PROVIDER>_API_KEY` for a local model that needs no key at all; it reported a service as ready to run on the strength of `ASTERISM_API_KEY` where that key would be refused; and it captured that key into the service's environment file, where nothing would ever read it. All three now come from one answer, so an install that works in your shell works as a service.
 
 ## 0.6.0 — 2026-08-14

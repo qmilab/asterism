@@ -185,6 +185,18 @@ export interface ProviderAuth {
   apiKey?: string;
   /** When `apiKey` is absent, a user-facing explanation of what to configure. */
   reason?: string;
+  /**
+   * Set when the refusal is a POLICY decision rather than "nothing was set": a
+   * keyless provider pointed at an endpoint that is not this machine.
+   *
+   * The distinction matters to a caller with a credential source of its own. The
+   * substrate keeps its own environment lookup, with aliases this module does not
+   * know (`ANTHROPIC_OAUTH_TOKEN`, `GEMINI_API_KEY`, `HF_TOKEN`), and a caller may
+   * consult it when we simply found nothing. It must never consult it to overturn
+   * *this* — the whole point of the refusal is that no credential makes an
+   * unauthenticated-by-design provider safe to send to someone else's server.
+   */
+  refused?: true;
 }
 
 /**
@@ -217,6 +229,7 @@ export function resolveProviderAuth(
   if (declaredKeyless) {
     if (isLoopbackUrl(model.baseUrl)) return { apiKey: NO_API_KEY_PLACEHOLDER };
     return {
+      refused: true,
       reason:
         `"${model.provider}" needs no API key when it is served from this machine, but ` +
         `${model.baseUrl} is not. Point --base-url at localhost, or set ${keyVar} for that endpoint.`,

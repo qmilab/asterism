@@ -85,6 +85,15 @@ The key is then read from `<PROVIDER>_API_KEY` — `MISTRAL_API_KEY` here — or
 `ASTERISM_API_KEY`. If the provider speaks Anthropic's protocol rather than
 OpenAI's, add `--api anthropic-messages`.
 
+!!! note "One asymmetry worth knowing"
+
+    A few providers settled on a variable name that is not `<PROVIDER>_API_KEY`
+    — `GEMINI_API_KEY`, `HF_TOKEN`. `asterism run` will still find those, because
+    the model runtime underneath keeps its own list. `asterism reflect` will not:
+    it talks to the provider directly and knows only the names above. If you want
+    both to work, set the `<PROVIDER>_API_KEY` name (or `ASTERISM_API_KEY`) as
+    well.
+
 ## A model per agent
 
 `--agent` pins one agent to its own model; everyone else keeps the install
