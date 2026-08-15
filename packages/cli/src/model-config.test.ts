@@ -287,10 +287,47 @@ test("an endpoint that merely READS as local is not local", () => {
   // The userinfo trick: everything before the `@` is credentials, not a host.
   // A string match on "localhost" would call this local and send an
   // unauthenticated request to example.com; parsing it as a URL does not.
-  expect(isLoopbackUrl("http://localhost:11434@example.com/v1")).toBe(false);
-  expect(isLoopbackUrl("https://localhost.example.com/v1")).toBe(false);
-  expect(isLoopbackUrl("https://notlocalhost/v1")).toBe(false);
-  expect(isLoopbackUrl("http://127.0.0.1.example.com/v1")).toBe(false);
+  //
+  // The whole list is here because only ONE direction of this predicate is
+  // dangerous. A false negative asks for a key that was not needed — friction.
+  // A false positive sends an unauthenticated request to somebody else's server,
+  // so every way a hostile string can wear "localhost" belongs in a test.
+  for (const url of [
+    "http://localhost:11434@example.com/v1",
+    "http://localhost@example.com/v1",
+    "http://user:localhost@example.com/",
+    "https://localhost.example.com/v1",
+    "https://notlocalhost/v1",
+    "http://127.0.0.1.example.com/v1",
+    "https://0.0.0.0.example.com/",
+    "http://[::1].example.com/",
+    "http://127.0.0.1%2eexample.com/",
+    "http://example.com/127.0.0.1",
+    "http://example.com#localhost",
+    "http://example.com/?h=localhost",
+    // Neighbours of the loopback block, not in it.
+    "http://128.0.0.1/v1",
+    "http://12.7.0.1/v1",
+    "http://1.2.3.4/v1",
+  ]) {
+    expect(`${url}: ${isLoopbackUrl(url)}`).toBe(`${url}: false`);
+  }
+});
+
+test("loopback survives the spellings a URL parser normalizes away", () => {
+  // Written the awkward ways a real config file contains: a compressed IPv4
+  // (`127.1`), a hexadecimal octet, and a fully-expanded IPv6 loopback. These
+  // pass only because the check reads `URL.hostname` after normalization rather
+  // than matching the text, and they would go silently keyed if it stopped doing
+  // that — an agent asking for a key to reach its own machine.
+  for (const url of [
+    "http://127.1/v1",
+    "http://0x7f.0.0.1/v1",
+    "http://[0:0:0:0:0:0:0:1]:11434/v1",
+    "http://127.0.0.2/v1",
+  ]) {
+    expect(`${url}: ${isLoopbackUrl(url)}`).toBe(`${url}: true`);
+  }
 });
 
 test("an endpoint we cannot parse or do not speak is never treated as local", () => {
