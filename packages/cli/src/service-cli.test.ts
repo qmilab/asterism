@@ -277,7 +277,7 @@ describe("asterism service", () => {
     expect(env).toContain("OPENAI_API_KEY='sk-xyz'");
   });
 
-  test("a channel on a local model asks for no API key at all", async () => {
+  test("a channel on a local model requires no API key, and is not offered the shared one", async () => {
     // A model served from this machine needs no key, so the install hint must not
     // demand a variable the operator can never satisfy — and the env file must not
     // offer ASTERISM_API_KEY to a provider the foreground path refuses to send it to.
@@ -297,11 +297,63 @@ describe("asterism service", () => {
     expect(code).toBe(0);
 
     const env = readFileSync(p.env, "utf8");
-    expect(env).not.toContain("OLLAMA_API_KEY");
     expect(env).not.toContain("ASTERISM_API_KEY");
+    // Offered, but only as an unset placeholder — nothing is required.
+    expect(env).toContain("# OLLAMA_API_KEY=");
     // The model still travels, so the service resolves the same model this shell did.
     expect(env).toContain("ASTERISM_MODEL_PROVIDER='ollama'");
     expect(text).not.toContain("Before it can work");
+  });
+
+  test("--capture-env keeps the key for a LOCAL model behind an auth proxy", async () => {
+    // `resolveProviderAuth` honours an explicitly set OLLAMA_API_KEY even at a
+    // local endpoint. Dropping it here — on the grounds that the provider is
+    // "keyless" — is how a setup that works in the shell fails as a service: the
+    // installed process would send the no-key placeholder to a proxy expecting a
+    // token.
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "tok",
+        ASTERISM_MODEL_ID: "qwen3",
+        ASTERISM_MODEL_PROVIDER: "ollama",
+        OLLAMA_API_KEY: "proxy-token",
+      },
+    });
+    const p = paths("writer", "telegram");
+    const { code } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+    expect(readFileSync(p.env, "utf8")).toContain("OLLAMA_API_KEY='proxy-token'");
+  });
+
+  test("a local provider pointed remotely is not made ready by the shared key", async () => {
+    // `resolveProviderAuth` refuses ASTERISM_API_KEY for a keyless provider at any
+    // endpoint. Reporting the service ready on the strength of it would capture a
+    // key the foreground path will never read, and the service would fail at once
+    // with the remote-endpoint refusal.
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "tok",
+        ASTERISM_MODEL_ID: "qwen3",
+        ASTERISM_MODEL_PROVIDER: "ollama",
+        ASTERISM_MODEL_BASE_URL: "https://ollama.example.com/v1",
+        ASTERISM_API_KEY: "sk-a-real-hosted-key",
+      },
+    });
+    const p = paths("writer", "telegram");
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+    // Still missing what it needs, and it says so rather than starting broken.
+    expect(text).toContain("Before it can work");
+    expect(text).toContain("OLLAMA_API_KEY");
+    expect(readFileSync(p.env, "utf8")).not.toContain("ASTERISM_API_KEY='sk-a-real-hosted-key'");
   });
 
   test("the env template names the API key for the env-configured provider, plus the fallback", async () => {

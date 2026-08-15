@@ -6,9 +6,11 @@ import {
   needsNoApiKey,
   NO_API_KEY_PLACEHOLDER,
   PROVIDER_DEFAULTS,
+  providerAuthPlan,
   providerKeyEnvVar,
   resolveModelConfig,
   resolveProviderAuth,
+  SHARED_KEY_ENV,
 } from "./model-config.ts";
 
 test("openai is the default provider with its OpenAI endpoint", () => {
@@ -450,4 +452,68 @@ test("naming the keyless provider is what makes a custom local endpoint keyless"
     ASTERISM_MODEL_BASE_URL: "http://127.0.0.1:12345/v1",
   });
   expect(resolveProviderAuth({}, model!).apiKey).toBe(NO_API_KEY_PLACEHOLDER);
+});
+
+// --- what a surface should ASK for ------------------------------------------
+
+test("every variable the plan lists actually authenticates on its own", () => {
+  // The property that matters for anything that prints "set this": a variable we
+  // name must be one the resolver will read. Listing a variable that does not
+  // work is how an install that worked in a shell fails as a service.
+  for (const provider of Object.keys(PROVIDER_DEFAULTS)) {
+    const { model } = resolveModelConfig({
+      ASTERISM_MODEL_ID: "x",
+      ASTERISM_MODEL_PROVIDER: provider,
+    });
+    for (const name of providerAuthPlan({}, model).vars) {
+      const auth = resolveProviderAuth({ [name]: "a-key" }, model!);
+      expect(`${provider}/${name}: ${auth.apiKey}`).toBe(`${provider}/${name}: a-key`);
+    }
+  }
+});
+
+test("the plan does not offer the shared key to a provider that will not read it", () => {
+  const local = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+  }).model;
+  expect(providerAuthPlan({}, local).vars).toEqual(["OLLAMA_API_KEY"]);
+
+  const hosted = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "groq",
+  }).model;
+  expect(providerAuthPlan({}, hosted).vars).toEqual(["GROQ_API_KEY", SHARED_KEY_ENV]);
+});
+
+test("a local model requires nothing, but still accepts its own key", () => {
+  // Both halves matter to a service: nothing to demand from an operator, and yet
+  // an auth-proxy token must not be dropped on the grounds that it is optional.
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+  });
+  expect(providerAuthPlan({}, model).required).toBe(false);
+  expect(providerAuthPlan({}, model).satisfied).toBe(true);
+  expect(providerAuthPlan({ OLLAMA_API_KEY: "proxy-token" }, model).vars).toContain(
+    "OLLAMA_API_KEY",
+  );
+});
+
+test("the shared key does not satisfy a local provider pointed remotely", () => {
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+    ASTERISM_MODEL_BASE_URL: "https://ollama.example.com/v1",
+  });
+  expect(providerAuthPlan({}, model).required).toBe(true);
+  expect(providerAuthPlan({ [SHARED_KEY_ENV]: "sk-shared" }, model).satisfied).toBe(false);
+  expect(providerAuthPlan({ OLLAMA_API_KEY: "token" }, model).satisfied).toBe(true);
+});
+
+test("with no model configured the plan is the default provider's", () => {
+  const plan = providerAuthPlan({});
+  expect(plan.vars).toEqual(["OPENAI_API_KEY", SHARED_KEY_ENV]);
+  expect(plan.required).toBe(true);
+  expect(providerAuthPlan({ OPENAI_API_KEY: "sk" }).satisfied).toBe(true);
 });

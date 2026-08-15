@@ -134,6 +134,9 @@ export function providerKeyEnvVar(provider: string): string {
  */
 export const NO_API_KEY_PLACEHOLDER = "asterism-local-no-key";
 
+/** The "one key across providers" variable, read when a provider's own is unset. */
+export const SHARED_KEY_ENV = "ASTERISM_API_KEY";
+
 /**
  * Whether a resolved endpoint is served from this machine. Parsed as a URL, not
  * matched as a string: `http://localhost:11434@example.com/v1` has the loopback
@@ -220,13 +223,61 @@ export function resolveProviderAuth(
     };
   }
 
-  const shared = env.ASTERISM_API_KEY;
+  const shared = env[SHARED_KEY_ENV];
   if (shared !== undefined && shared !== "") return { apiKey: shared };
   return {
     reason:
-      `No API key configured for ${model.provider}. Set ${keyVar} (or ASTERISM_API_KEY) — ` +
+      `No API key configured for ${model.provider}. Set ${keyVar} (or ${SHARED_KEY_ENV}) — ` +
       "or run a model on your own machine, which needs no key at all " +
       "(`asterism config set <model-id> --provider ollama`).",
+  };
+}
+
+/**
+ * What a surface needs to know to ASK for a key rather than to use one: which
+ * variables can authenticate this model, whether one is needed at all, and
+ * whether a given environment already supplies it.
+ *
+ * It exists because a second surface — the service env plan, which writes the
+ * file an installed service reads — had re-derived that rule itself, and drifted
+ * from it in both directions. It dropped the provider's own variable for a local
+ * provider behind an auth proxy, which {@link resolveProviderAuth} honours; and
+ * it accepted the shared key for a keyless provider pointed at a remote
+ * endpoint, which {@link resolveProviderAuth} refuses. Both answers are now read
+ * off the same function the foreground path calls, so the two cannot disagree
+ * about what a working setup looks like.
+ *
+ * With no model configured, the answer is the default provider's — which is what
+ * a not-yet-configured install has always been shown.
+ */
+export function providerAuthPlan(
+  env: Env,
+  model?: Pick<PiModelConfig, "provider" | "baseUrl">,
+): {
+  /** Variables that can authenticate, the provider's own first. */
+  vars: string[];
+  /** Whether anything must be set: false for a model served from this machine. */
+  required: boolean;
+  /** Whether `env` already authenticates this model. */
+  satisfied: boolean;
+} {
+  const target = model ?? {
+    provider: DEFAULT_PROVIDER,
+    baseUrl: PROVIDER_DEFAULTS[DEFAULT_PROVIDER]?.baseUrl ?? "",
+  };
+  const keyVar = providerKeyEnvVar(target.provider);
+  // A provider with no key ecosystem is never offered the shared key, matching
+  // the resolver, which will not read it for one at any endpoint. Its own
+  // variable stays listed: a local server behind an auth proxy still needs it,
+  // and dropping it is how an install that worked in the shell failed as a
+  // service.
+  const declaredKeyless = PROVIDER_DEFAULTS[target.provider]?.needsNoKey === true;
+  return {
+    vars: declaredKeyless ? [keyVar] : [keyVar, SHARED_KEY_ENV],
+    // Derived, not declared: nothing is required exactly when resolution already
+    // succeeds against an empty environment.
+    required: resolveProviderAuth({}, target).apiKey === undefined,
+    satisfied: resolveProviderAuth(env, target).apiKey !== undefined,
   };
 }
 
