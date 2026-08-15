@@ -4,7 +4,7 @@ import type { RunEvent, RunRequest, ScopedTool } from "@qmilab/asterism-core";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { PiAdapter } from "./index";
+import { hasSubstrateCredential, PiAdapter } from "./index";
 
 // --- Compile-time proof that the run contract carries no path to the store. ---
 // If RunRequest ever grew a `store` / credential / memory / agentId key, the
@@ -268,5 +268,49 @@ describe("PiAdapter — run lifecycle hardening", () => {
     expect(JSON.stringify(events)).not.toContain(secret);
     const messageEnd = events.find((e) => e.type === "message_end");
     expect(messageEnd?.payload).toEqual({ chars: secret.length });
+  });
+});
+
+describe("hasSubstrateCredential", () => {
+  /** Run `fn` with `name` set to `value` (or unset), restoring afterwards. */
+  function withEnv(name: string, value: string | undefined, fn: () => void): void {
+    const saved = process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+    try {
+      fn();
+    } finally {
+      if (saved === undefined) delete process.env[name];
+      else process.env[name] = saved;
+    }
+  }
+
+  test("reports a provider key the substrate reads under the host's own name", () => {
+    withEnv("OPENAI_API_KEY", "sk-test", () => {
+      expect(hasSubstrateCredential("openai")).toBe(true);
+    });
+    withEnv("OPENAI_API_KEY", undefined, () => {
+      expect(hasSubstrateCredential("openai")).toBe(false);
+    });
+  });
+
+  test("reports an ALIAS the host wiring's own convention would miss", () => {
+    // The entire reason this is exported: `<PROVIDER>_API_KEY` would derive
+    // ANTHROPIC_API_KEY and see nothing here, and a pre-flight that trusted only
+    // that would refuse a run the substrate can authenticate.
+    withEnv("ANTHROPIC_API_KEY", undefined, () => {
+      withEnv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-not-a-real-token", () => {
+        expect(hasSubstrateCredential("anthropic")).toBe(true);
+      });
+    });
+  });
+
+  test("says no for a provider the substrate has never heard of", () => {
+    // Includes the locally-served providers, which is why the host's refusal for
+    // one aimed at a remote endpoint cannot be overturned here today — and why
+    // that guard is proven with a stub rather than with this.
+    expect(hasSubstrateCredential("ollama")).toBe(false);
+    expect(hasSubstrateCredential("lmstudio")).toBe(false);
+    expect(hasSubstrateCredential("no-such-provider")).toBe(false);
   });
 });

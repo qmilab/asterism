@@ -130,7 +130,7 @@ import {
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import type { ModelResolutionContext } from "./model-config.js";
-import { providerKeyEnvVar, resolveModelConfig } from "./model-config.js";
+import { providerAuthPlan, resolveModelConfig } from "./model-config.js";
 import {
   isServiceKind,
   launchdLabel,
@@ -5800,14 +5800,22 @@ interface ServiceEnvPlan {
 }
 
 /**
- * Build the env plan for a service, mirroring EXACTLY how the foreground CLI
- * resolves a model and its key ({@link resolveModelConfig} / {@link resolveApiKey}):
+ * Build the env plan for a service, mirroring how the foreground CLI resolves a
+ * model and its key ({@link resolveModelConfig} / {@link resolveProviderAuth}):
  * the provider-specific key OR the `ASTERISM_API_KEY` fallback, plus the
  * `ASTERISM_MODEL_*` coordinates for anyone who configures the model through the
  * environment instead of `asterism config`. Listing (and, with `--capture-env`,
  * capturing) all of them is what keeps an installed service working in the same
  * setups that work in the user's shell — a service starts from a clean environment
  * and reads only this file (plus the on-disk config).
+ *
+ * "Mirroring" is why this asks {@link providerAuthPlan} rather than restating the
+ * rule. Every restatement of it drifted: a hand-written `has(keyVar) ||
+ * has(ASTERISM_API_KEY)` marked a service ready on a key the foreground path
+ * refuses to read, and a hand-written "this provider is keyless, skip its key"
+ * dropped the token a local server behind an auth proxy needs. The variables to
+ * list, whether any is required, and whether this environment already supplies
+ * one are all read off the resolver the foreground path calls.
  */
 function serviceEnvPlan(
   io: CliIO,
@@ -5818,7 +5826,7 @@ function serviceEnvPlan(
 ): ServiceEnvPlan {
   const config = loadConfig(home);
   const { model } = resolveModelConfig(io.env, { config, agentName });
-  const keyVar = providerKeyEnvVar(model?.provider ?? "openai");
+  const auth = providerAuthPlan(io.env, model);
   const has = (name: string): boolean => io.env[name] !== undefined;
 
   const vars: EnvVarSpec[] = [];
@@ -5865,25 +5873,35 @@ function serviceEnvPlan(
     }
   }
 
-  // Model API key — the provider-specific variable, or the ASTERISM_API_KEY fallback.
-  vars.push({
-    name: keyVar,
-    required: kind !== "serve",
-    note:
-      kind === "serve"
-        ? "your model API key — needed to start runs; the read endpoints work without it."
-        : "your model API key — every chat message is a task, so a channel needs one.",
-  });
-  vars.push({
-    name: "ASTERISM_API_KEY",
-    required: false,
-    note: `an alternative to ${keyVar} if you keep one key across providers.`,
-  });
-  if (kind !== "serve") {
+  // Model API key — which variables can authenticate, whether one is needed at
+  // all, and whether this environment already supplies it, all read off the same
+  // resolver the foreground path uses. Nothing about that rule is restated here:
+  // every version of it that was, drifted.
+  const [primaryKeyVar, ...alternateKeyVars] = auth.vars;
+  for (const name of auth.vars) {
+    const alternate = name !== primaryKeyVar;
+    vars.push({
+      name,
+      required: auth.required && !alternate && kind !== "serve",
+      note: !auth.required
+        ? // A model on this machine authenticates with nothing — unless the user
+          // put their own server behind an auth proxy, which is why the variable
+          // is still offered rather than hidden.
+          "only if your local server asks for one — a model on your own machine normally needs no key."
+        : alternate
+          ? `an alternative to ${primaryKeyVar} if you keep one key across providers.`
+          : kind === "serve"
+            ? "your model API key — needed to start runs; the read endpoints work without it."
+            : "your model API key — every chat message is a task, so a channel needs one.",
+    });
+  }
+  if (auth.required && kind !== "serve") {
     needs.push({
-      label: `${keyVar} (or ASTERISM_API_KEY)`,
+      label: alternateKeyVars.length
+        ? `${primaryKeyVar} (or ${alternateKeyVars.join(" / ")})`
+        : `${primaryKeyVar}`,
       note: "your model API key.",
-      satisfied: captureEnv && (has(keyVar) || has("ASTERISM_API_KEY")),
+      satisfied: captureEnv && auth.satisfied,
     });
   }
 
@@ -6083,7 +6101,9 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     }
     // What the service still lacks to run: required needs capture did not satisfy (or,
     // without --capture-env, all of them — the operator fills the template in by hand).
-    // The API-key need is satisfied by EITHER the provider key or ASTERISM_API_KEY.
+    // Which variables count as satisfying the API-key need is not decided here: it
+    // varies by provider (a local model has no such need at all, and one aimed at a
+    // remote endpoint is not satisfied by the shared key), and the plan already asked.
     const missing = envPlan.needs.filter((n) => !n.satisfied);
     if (missing.length > 0) {
       io.out("  Before it can work, set these in that file:");

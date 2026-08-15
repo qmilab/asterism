@@ -16,7 +16,7 @@ import type {
   AgentToolResult,
   StreamFn,
 } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { getEnvApiKey, Type } from "@earendil-works/pi-ai";
 import type { Api, Model, TextContent } from "@earendil-works/pi-ai";
 import type {
   RunEvent,
@@ -65,6 +65,32 @@ export interface PiAdapterOptions {
   getApiKey?: (
     provider: string,
   ) => string | undefined | Promise<string | undefined>;
+}
+
+/**
+ * Whether the substrate can authenticate this provider from the process
+ * environment on its own, with no key handed to it.
+ *
+ * It keeps its own table of provider key variables, which is wider than the host
+ * wiring's `<PROVIDER>_API_KEY` convention in two ways: aliases where a provider's
+ * ecosystem settled on another name (`GEMINI_API_KEY`, `HF_TOKEN`,
+ * `AI_GATEWAY_API_KEY`), and `ANTHROPIC_OAUTH_TOKEN`, which it detects by shape and
+ * sends with different headers. A run configured that way works, so a pre-flight
+ * check that only knew the host's own convention would refuse a setup that runs.
+ *
+ * Exported so the host can ask before refusing, without learning any of it: this
+ * is the one package permitted to know the substrate, and this is a question only
+ * the substrate can answer. It reads the ambient process environment because that
+ * is precisely what the substrate itself will read when the request is made —
+ * asking about any other environment would answer a different question.
+ */
+export function hasSubstrateCredential(provider: string): boolean {
+  try {
+    return getEnvApiKey(provider) !== undefined;
+  } catch {
+    // An unknown provider is not an error here, just an absence.
+    return false;
+  }
 }
 
 /** Build the Pi `Model` Pi's loop expects from plain config. */

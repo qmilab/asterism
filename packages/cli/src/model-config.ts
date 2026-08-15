@@ -31,25 +31,71 @@ export interface ModelResolutionContext {
   agentName?: string;
 }
 
+/**
+ * The wire protocols a built-in provider is allowed to name: the ones BOTH call
+ * sites speak. `run` goes through Pi, which registers many more; `reflect`
+ * builds its own HTTP client (`@qmilab/asterism-reflect`) that knows exactly
+ * `anthropic-messages` and OpenAI chat-completions, and falls through to the
+ * OpenAI shape for anything it does not recognize — so a third protocol in the
+ * table below would run fine and reflect wrongly, sending an OpenAI-shaped body
+ * to an endpoint that speaks something else.
+ *
+ * Naming the permitted set as a TYPE makes that a build error on the entry
+ * itself, rather than a rule stated in a comment for someone to read. A provider
+ * whose protocol is not here stays reachable with an explicit ASTERISM_MODEL_API
+ * — that is a user telling us what they want, not us shipping a wrong default.
+ */
+type ReflectableApi = "openai-completions" | "anthropic-messages";
+
 interface ProviderDefaults {
   /** Default base URL for the provider's API. */
   baseUrl: string;
   /**
-   * Default Pi API/protocol. Omitted for OpenAI, whose protocol is the adapter's
-   * own default (`openai-completions`); set explicitly where it differs.
+   * Default Pi API/protocol. Omitted for OpenAI-compatible providers, whose
+   * protocol is the adapter's own default (`openai-completions`); set explicitly
+   * where it differs. Constrained to {@link ReflectableApi}.
    */
-  api?: string;
+  api?: ReflectableApi;
+  /**
+   * This provider's endpoint takes no API key — a model served from the user's
+   * own machine (Ollama, LM Studio). Declared per provider rather than inferred
+   * from the endpoint, so the set of keyless providers is a short list someone
+   * can read, and an unknown or mistyped provider falls through to the normal
+   * "you need a key" path instead of quietly becoming keyless.
+   *
+   * A declaration alone is NOT sufficient to skip the key: see
+   * {@link needsNoApiKey}. The declaration names a provider; the endpoint it is
+   * pointed at can change under it.
+   */
+  needsNoKey?: true;
 }
 
 /**
- * Built-in defaults for the providers Asterism configures out of the box. The
- * Anthropic entry sets `api` so an Anthropic provider/key is never silently sent
- * over the OpenAI protocol. Other providers are reachable by supplying
- * ASTERISM_MODEL_BASE_URL (and ASTERISM_MODEL_API where it is not OpenAI-shaped).
+ * Built-in defaults for the providers Asterism configures out of the box, so
+ * naming a provider is enough to reach it. The Anthropic entry sets `api` so an
+ * Anthropic provider/key is never silently sent over the OpenAI protocol; the
+ * rest are OpenAI-compatible and take the adapter's default protocol.
+ *
+ * Every hosted endpoint here is taken from the substrate's own model registry
+ * rather than typed from memory, and every provider name matches the one the
+ * substrate uses — so the key variable this module derives
+ * ({@link providerKeyEnvVar}) is the variable that provider's users already set.
+ * Providers whose endpoint carries an account-specific path, or whose protocol
+ * `reflect` cannot speak, are deliberately absent: they stay reachable with an
+ * explicit ASTERISM_MODEL_BASE_URL / ASTERISM_MODEL_API.
  */
 export const PROVIDER_DEFAULTS: Readonly<Record<string, ProviderDefaults>> = {
   openai: { baseUrl: "https://api.openai.com/v1" },
   anthropic: { baseUrl: "https://api.anthropic.com", api: "anthropic-messages" },
+  openrouter: { baseUrl: "https://openrouter.ai/api/v1" },
+  groq: { baseUrl: "https://api.groq.com/openai/v1" },
+  deepseek: { baseUrl: "https://api.deepseek.com" },
+  xai: { baseUrl: "https://api.x.ai/v1" },
+  together: { baseUrl: "https://api.together.ai/v1" },
+  cerebras: { baseUrl: "https://api.cerebras.ai/v1" },
+  // Served from the user's own machine: no account, no key, no network egress.
+  ollama: { baseUrl: "http://localhost:11434/v1", needsNoKey: true },
+  lmstudio: { baseUrl: "http://localhost:1234/v1", needsNoKey: true },
 };
 
 /**
@@ -65,11 +111,11 @@ export interface ModelConfigResult {
 }
 
 /**
- * The environment variable that holds a given provider's API key: the well-known
- * name for the providers we configure out of the box, else a derived
- * `<PROVIDER>_API_KEY`. So an OpenAI-compatible provider like `openrouter` reads
- * `OPENROUTER_API_KEY`, and the "no key" message can name the variable that
- * actually works instead of always pointing at `OPENAI_API_KEY`.
+ * The environment variable that holds a given provider's API key: an explicit
+ * name where the ecosystem's convention differs from the derived one, else a
+ * derived `<PROVIDER>_API_KEY`. So an OpenAI-compatible provider like
+ * `openrouter` reads `OPENROUTER_API_KEY`, and the "no key" message can name the
+ * variable that actually works instead of always pointing at `OPENAI_API_KEY`.
  */
 export function providerKeyEnvVar(provider: string): string {
   const known: Record<string, string> = {
@@ -80,13 +126,172 @@ export function providerKeyEnvVar(provider: string): string {
 }
 
 /**
- * Resolve the LLM provider API key from the environment — infrastructure, never an
- * agent-scoped credential. Read from the provider's own variable
- * ({@link providerKeyEnvVar}), falling back to `ASTERISM_API_KEY`. Shared by `run`
- * (the adapter) and `reflect` (the reflection model), so both resolve it the same way.
+ * Stand-in sent as the API key where the provider needs none. Not a secret and
+ * not a credential — the substrate requires a non-empty string before it will
+ * make a request at all, so "no key" has to be spelled as *some* value. It is
+ * deliberately self-describing: if it ever shows up in a server log, it reads as
+ * what it is rather than as a key someone should try.
  */
-export function resolveApiKey(env: Env, provider: string): string | undefined {
-  return env[providerKeyEnvVar(provider)] ?? env.ASTERISM_API_KEY;
+export const NO_API_KEY_PLACEHOLDER = "asterism-local-no-key";
+
+/** The "one key across providers" variable, read when a provider's own is unset. */
+export const SHARED_KEY_ENV = "ASTERISM_API_KEY";
+
+/**
+ * Whether a resolved endpoint is served from this machine. Parsed as a URL, not
+ * matched as a string: `http://localhost:11434@example.com/v1` has the loopback
+ * text in it and a hostname of `example.com`, and only parsing tells them apart.
+ * Anything unparseable, or on a scheme other than HTTP(S), is not loopback —
+ * an endpoint we cannot understand is never treated as local.
+ */
+export function isLoopbackUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  // WHATWG keeps IPv6 hosts bracketed and lowercases/compresses them.
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "localhost" || host === "::1") return true;
+  // The whole 127.0.0.0/8 loopback block, plus 0.0.0.0 — which connects to this
+  // host, so it can only ever reach a local server, never a remote one.
+  return /^127(\.\d{1,3}){3}$/.test(host) || host === "0.0.0.0";
+}
+
+/**
+ * Whether this model's endpoint takes no API key. BOTH halves are required: the
+ * provider must be declared keyless in {@link PROVIDER_DEFAULTS}, *and* the
+ * endpoint that actually resolved must be on this machine.
+ *
+ * The declaration on its own would be a grant to a NAME, and a name outlives the
+ * endpoint attached to it — `--provider ollama --base-url https://ollama.example.com`
+ * would then send an unauthenticated request to someone else's server, silently,
+ * because of a default typed months earlier. The loopback check on its own would
+ * make an auth decision out of free user input, and would flip as a side effect
+ * of the provider-change rule in {@link mergeSettings}. Requiring both means the
+ * only way to reach an unauthenticated remote call is to satisfy neither.
+ */
+export function needsNoApiKey(model: Pick<PiModelConfig, "provider" | "baseUrl">): boolean {
+  return (
+    PROVIDER_DEFAULTS[model.provider]?.needsNoKey === true && isLoopbackUrl(model.baseUrl)
+  );
+}
+
+/** What a run or a reflection should authenticate with, or why it cannot. */
+export interface ProviderAuth {
+  /** The value to send. Absent only when `reason` explains what to set. */
+  apiKey?: string;
+  /** When `apiKey` is absent, a user-facing explanation of what to configure. */
+  reason?: string;
+  /**
+   * Set when the refusal is a POLICY decision rather than "nothing was set": a
+   * keyless provider pointed at an endpoint that is not this machine.
+   *
+   * The distinction matters to a caller with a credential source of its own. The
+   * substrate keeps its own environment lookup, with aliases this module does not
+   * know (`ANTHROPIC_OAUTH_TOKEN`, `GEMINI_API_KEY`, `HF_TOKEN`), and a caller may
+   * consult it when we simply found nothing. It must never consult it to overturn
+   * *this* — the whole point of the refusal is that no credential makes an
+   * unauthenticated-by-design provider safe to send to someone else's server.
+   */
+  refused?: true;
+}
+
+/**
+ * Resolve what to authenticate the provider call with — infrastructure, never an
+ * agent-scoped credential. The single door for both `run` (the adapter) and
+ * `reflect` (the reflection model): they used to answer the "is a key required?"
+ * question separately and disagree about it, so it is answered once, here.
+ *
+ * Order, and why:
+ *  1. The provider's own variable ({@link providerKeyEnvVar}) always wins — a
+ *     local server put behind an auth proxy is a real setup, and an explicitly
+ *     set OLLAMA_API_KEY is an unambiguous instruction.
+ *  2. A keyless provider ({@link needsNoApiKey}) gets the placeholder.
+ *  3. `ASTERISM_API_KEY` — the "one key across providers" fallback — but NOT for
+ *     a provider declared keyless. That variable is by construction a key for a
+ *     hosted provider the user pays for; forwarding it to a local server (or to
+ *     whatever a keyless provider has been re-pointed at) sends a real secret
+ *     somewhere it was never meant to go. A provider whose ecosystem has no keys
+ *     has no use for it, so it is not offered one.
+ */
+export function resolveProviderAuth(
+  env: Env,
+  model: Pick<PiModelConfig, "provider" | "baseUrl">,
+): ProviderAuth {
+  const keyVar = providerKeyEnvVar(model.provider);
+  const explicit = env[keyVar];
+  if (explicit !== undefined && explicit !== "") return { apiKey: explicit };
+
+  const declaredKeyless = PROVIDER_DEFAULTS[model.provider]?.needsNoKey === true;
+  if (declaredKeyless) {
+    if (isLoopbackUrl(model.baseUrl)) return { apiKey: NO_API_KEY_PLACEHOLDER };
+    return {
+      refused: true,
+      reason:
+        `"${model.provider}" needs no API key when it is served from this machine, but ` +
+        `${model.baseUrl} is not. Point --base-url at localhost, or set ${keyVar} for that endpoint.`,
+    };
+  }
+
+  const shared = env[SHARED_KEY_ENV];
+  if (shared !== undefined && shared !== "") return { apiKey: shared };
+  return {
+    reason:
+      `No API key configured for ${model.provider}. Set ${keyVar} (or ${SHARED_KEY_ENV}) — ` +
+      "or run a model on your own machine, which needs no key at all " +
+      "(`asterism config set <model-id> --provider ollama`).",
+  };
+}
+
+/**
+ * What a surface needs to know to ASK for a key rather than to use one: which
+ * variables can authenticate this model, whether one is needed at all, and
+ * whether a given environment already supplies it.
+ *
+ * It exists because a second surface — the service env plan, which writes the
+ * file an installed service reads — had re-derived that rule itself, and drifted
+ * from it in both directions. It dropped the provider's own variable for a local
+ * provider behind an auth proxy, which {@link resolveProviderAuth} honours; and
+ * it accepted the shared key for a keyless provider pointed at a remote
+ * endpoint, which {@link resolveProviderAuth} refuses. Both answers are now read
+ * off the same function the foreground path calls, so the two cannot disagree
+ * about what a working setup looks like.
+ *
+ * With no model configured, the answer is the default provider's — which is what
+ * a not-yet-configured install has always been shown.
+ */
+export function providerAuthPlan(
+  env: Env,
+  model?: Pick<PiModelConfig, "provider" | "baseUrl">,
+): {
+  /** Variables that can authenticate, the provider's own first. */
+  vars: string[];
+  /** Whether anything must be set: false for a model served from this machine. */
+  required: boolean;
+  /** Whether `env` already authenticates this model. */
+  satisfied: boolean;
+} {
+  const target = model ?? {
+    provider: DEFAULT_PROVIDER,
+    baseUrl: PROVIDER_DEFAULTS[DEFAULT_PROVIDER]?.baseUrl ?? "",
+  };
+  const keyVar = providerKeyEnvVar(target.provider);
+  // A provider with no key ecosystem is never offered the shared key, matching
+  // the resolver, which will not read it for one at any endpoint. Its own
+  // variable stays listed: a local server behind an auth proxy still needs it,
+  // and dropping it is how an install that worked in the shell failed as a
+  // service.
+  const declaredKeyless = PROVIDER_DEFAULTS[target.provider]?.needsNoKey === true;
+  return {
+    vars: declaredKeyless ? [keyVar] : [keyVar, SHARED_KEY_ENV],
+    // Derived, not declared: nothing is required exactly when resolution already
+    // succeeds against an empty environment.
+    required: resolveProviderAuth({}, target).apiKey === undefined,
+    satisfied: resolveProviderAuth(env, target).apiKey !== undefined,
+  };
 }
 
 /** The model coordinates carried by the ASTERISM_MODEL_* environment variables. */

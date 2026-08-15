@@ -1,7 +1,17 @@
 import { expect, test } from "bun:test";
 
 import type { AsterismConfig } from "./config.ts";
-import { resolveModelConfig } from "./model-config.ts";
+import {
+  isLoopbackUrl,
+  needsNoApiKey,
+  NO_API_KEY_PLACEHOLDER,
+  PROVIDER_DEFAULTS,
+  providerAuthPlan,
+  providerKeyEnvVar,
+  resolveModelConfig,
+  resolveProviderAuth,
+  SHARED_KEY_ENV,
+} from "./model-config.ts";
 
 test("openai is the default provider with its OpenAI endpoint", () => {
   const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o-mini" });
@@ -213,4 +223,334 @@ test("an unknown provider builds once given a base URL", () => {
   });
   // No protocol default for an unknown provider — the adapter's default applies.
   expect(model?.api).toBeUndefined();
+});
+
+// --- built-in providers -----------------------------------------------------
+
+test("every built-in provider resolves from its name alone", () => {
+  // The point of the table: naming a provider is enough, no endpoint to look up.
+  for (const [provider, defaults] of Object.entries(PROVIDER_DEFAULTS)) {
+    const { model, reason } = resolveModelConfig({
+      ASTERISM_MODEL_ID: "some-model",
+      ASTERISM_MODEL_PROVIDER: provider,
+    });
+    expect(reason).toBeUndefined();
+    expect(model?.baseUrl).toBe(defaults.baseUrl);
+  }
+});
+
+test("no built-in provider names a protocol `reflect` cannot speak", () => {
+  // `reflect` hand-rolls its HTTP client and knows exactly two wire formats,
+  // falling through to the OpenAI shape for anything else — so a third protocol
+  // here would run fine and reflect wrongly. The TYPE forbids it; this catches a
+  // cast, and fails loudly rather than at someone's first `reflect`.
+  for (const defaults of Object.values(PROVIDER_DEFAULTS)) {
+    expect([undefined, "openai-completions", "anthropic-messages"]).toContain(defaults.api);
+  }
+});
+
+test("no built-in endpoint carries an unfilled placeholder", () => {
+  // Several providers the substrate knows have account-specific paths
+  // ("…/{CLOUDFLARE_ACCOUNT_ID}/…"). Those are excluded on purpose: a default
+  // nobody can use is worse than no default.
+  for (const defaults of Object.values(PROVIDER_DEFAULTS)) {
+    expect(defaults.baseUrl).not.toContain("{");
+    expect(() => new URL(defaults.baseUrl)).not.toThrow();
+  }
+});
+
+test("a keyless provider is served from this machine, a keyed one is not", () => {
+  for (const [provider, defaults] of Object.entries(PROVIDER_DEFAULTS)) {
+    // The two claims must agree: "needs no key" and "runs on your own machine"
+    // are the same fact, and a hosted default marked keyless would be a leak.
+    expect(isLoopbackUrl(defaults.baseUrl)).toBe(defaults.needsNoKey === true);
+  }
+});
+
+// --- is this endpoint on this machine? --------------------------------------
+
+test("loopback endpoints are recognized across their spellings", () => {
+  for (const url of [
+    "http://localhost:11434/v1",
+    "https://localhost/v1",
+    "http://127.0.0.1:1234/v1",
+    "http://127.2.3.4/v1",
+    "http://[::1]:11434/v1",
+    "http://0.0.0.0:11434/v1",
+    "http://LOCALHOST:11434/v1",
+  ]) {
+    expect(isLoopbackUrl(url)).toBe(true);
+  }
+});
+
+test("an endpoint that merely READS as local is not local", () => {
+  // The userinfo trick: everything before the `@` is credentials, not a host.
+  // A string match on "localhost" would call this local and send an
+  // unauthenticated request to example.com; parsing it as a URL does not.
+  //
+  // The whole list is here because only ONE direction of this predicate is
+  // dangerous. A false negative asks for a key that was not needed — friction.
+  // A false positive sends an unauthenticated request to somebody else's server,
+  // so every way a hostile string can wear "localhost" belongs in a test.
+  for (const url of [
+    "http://localhost:11434@example.com/v1",
+    "http://localhost@example.com/v1",
+    "http://user:localhost@example.com/",
+    "https://localhost.example.com/v1",
+    "https://notlocalhost/v1",
+    "http://127.0.0.1.example.com/v1",
+    "https://0.0.0.0.example.com/",
+    "http://[::1].example.com/",
+    "http://127.0.0.1%2eexample.com/",
+    "http://example.com/127.0.0.1",
+    "http://example.com#localhost",
+    "http://example.com/?h=localhost",
+    // Neighbours of the loopback block, not in it.
+    "http://128.0.0.1/v1",
+    "http://12.7.0.1/v1",
+    "http://1.2.3.4/v1",
+  ]) {
+    expect(`${url}: ${isLoopbackUrl(url)}`).toBe(`${url}: false`);
+  }
+});
+
+test("loopback survives the spellings a URL parser normalizes away", () => {
+  // Written the awkward ways a real config file contains: a compressed IPv4
+  // (`127.1`), a hexadecimal octet, and a fully-expanded IPv6 loopback. These
+  // pass only because the check reads `URL.hostname` after normalization rather
+  // than matching the text, and they would go silently keyed if it stopped doing
+  // that — an agent asking for a key to reach its own machine.
+  for (const url of [
+    "http://127.1/v1",
+    "http://0x7f.0.0.1/v1",
+    "http://[0:0:0:0:0:0:0:1]:11434/v1",
+    "http://127.0.0.2/v1",
+  ]) {
+    expect(`${url}: ${isLoopbackUrl(url)}`).toBe(`${url}: true`);
+  }
+});
+
+test("an endpoint we cannot parse or do not speak is never treated as local", () => {
+  expect(isLoopbackUrl("not a url")).toBe(false);
+  expect(isLoopbackUrl("")).toBe(false);
+  expect(isLoopbackUrl("ftp://localhost/v1")).toBe(false);
+  expect(isLoopbackUrl("file:///etc/hosts")).toBe(false);
+});
+
+// --- keyless: declaration AND endpoint --------------------------------------
+
+test("a keyless provider at its own default endpoint needs no key", () => {
+  expect(needsNoApiKey({ provider: "ollama", baseUrl: "http://localhost:11434/v1" })).toBe(true);
+  expect(needsNoApiKey({ provider: "lmstudio", baseUrl: "http://localhost:1234/v1" })).toBe(true);
+});
+
+test("a keyless provider pointed at a REMOTE endpoint is not keyless", () => {
+  // The declaration names a provider; the endpoint under it can change. Without
+  // this, a default typed months ago would send an unauthenticated request to
+  // someone else's server.
+  expect(needsNoApiKey({ provider: "ollama", baseUrl: "https://ollama.example.com/v1" })).toBe(false);
+});
+
+test("a local endpoint under a KEYED provider is not keyless", () => {
+  // The other half: a local URL alone must not waive the key, or anyone running
+  // an OpenAI-compatible proxy on localhost silently stops sending credentials.
+  expect(needsNoApiKey({ provider: "openai", baseUrl: "http://localhost:11434/v1" })).toBe(false);
+  expect(needsNoApiKey({ provider: "unknown", baseUrl: "http://localhost:11434/v1" })).toBe(false);
+});
+
+// --- what a call authenticates with -----------------------------------------
+
+test("a local model runs with no key configured at all", () => {
+  // The headline: trying Asterism needs no account anywhere.
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "qwen3",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+  });
+  const auth = resolveProviderAuth({}, model!);
+  expect(auth.reason).toBeUndefined();
+  expect(auth.apiKey).toBe(NO_API_KEY_PLACEHOLDER);
+});
+
+test("an explicitly set key wins even for a keyless provider", () => {
+  // A local server behind an auth proxy is a real setup, and setting
+  // OLLAMA_API_KEY is an unambiguous instruction.
+  const auth = resolveProviderAuth(
+    { OLLAMA_API_KEY: "proxy-token" },
+    { provider: "ollama", baseUrl: "http://localhost:11434/v1" },
+  );
+  expect(auth.apiKey).toBe("proxy-token");
+});
+
+test("the shared ASTERISM_API_KEY is never sent to a keyless provider", () => {
+  // ASTERISM_API_KEY is by construction a key for a hosted provider the user
+  // pays for. Forwarding it to a server on their own machine hands a real secret
+  // to something that never asked for one.
+  const auth = resolveProviderAuth(
+    { ASTERISM_API_KEY: "sk-a-real-hosted-key" },
+    { provider: "ollama", baseUrl: "http://localhost:11434/v1" },
+  );
+  expect(auth.apiKey).toBe(NO_API_KEY_PLACEHOLDER);
+  expect(auth.apiKey).not.toBe("sk-a-real-hosted-key");
+});
+
+test("a keyless provider pointed remotely refuses rather than sending anything", () => {
+  // Neither the placeholder (unauthenticated call to someone else's server) nor
+  // the shared key (a hosted secret to an unrelated host). It stops and says so.
+  const env = { ASTERISM_API_KEY: "sk-a-real-hosted-key" };
+  const auth = resolveProviderAuth(env, {
+    provider: "ollama",
+    baseUrl: "https://ollama.example.com/v1",
+  });
+  expect(auth.apiKey).toBeUndefined();
+  expect(auth.reason).toContain("OLLAMA_API_KEY");
+  expect(auth.reason).toContain("ollama.example.com");
+});
+
+test("a keyed provider still takes its own variable, then the shared one", () => {
+  const own = resolveProviderAuth(
+    { OPENROUTER_API_KEY: "sk-or", ASTERISM_API_KEY: "sk-shared" },
+    { provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" },
+  );
+  expect(own.apiKey).toBe("sk-or");
+  const shared = resolveProviderAuth(
+    { ASTERISM_API_KEY: "sk-shared" },
+    { provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" },
+  );
+  expect(shared.apiKey).toBe("sk-shared");
+});
+
+test("a missing key names the variable that actually works for that provider", () => {
+  for (const provider of ["openai", "anthropic", "openrouter", "groq"]) {
+    const { model } = resolveModelConfig({
+      ASTERISM_MODEL_ID: "x",
+      ASTERISM_MODEL_PROVIDER: provider,
+    });
+    const auth = resolveProviderAuth({}, model!);
+    expect(auth.apiKey).toBeUndefined();
+    expect(auth.reason).toContain(providerKeyEnvVar(provider));
+  }
+});
+
+test("an empty key variable counts as unset, not as a key", () => {
+  // An exported-but-empty variable is a common shell accident; sending "" would
+  // fail at the provider with an auth error instead of here with an answer.
+  const auth = resolveProviderAuth(
+    { OPENAI_API_KEY: "", ASTERISM_API_KEY: "" },
+    { provider: "openai", baseUrl: "https://api.openai.com/v1" },
+  );
+  expect(auth.apiKey).toBeUndefined();
+  expect(auth.reason).toContain("OPENAI_API_KEY");
+});
+
+// --- keyless meets the provider-change drop ---------------------------------
+
+test("switching TO a local provider drops the hosted endpoint and needs no key", () => {
+  const config: AsterismConfig = {
+    model: { id: "gpt-4o", provider: "openrouter" },
+    agents: { personal: { model: { id: "qwen3", provider: "ollama" } } },
+  };
+  const { model } = resolveModelConfig({}, { config, agentName: "personal" });
+  expect(model?.baseUrl).toBe("http://localhost:11434/v1");
+  expect(resolveProviderAuth({}, model!).apiKey).toBe(NO_API_KEY_PLACEHOLDER);
+});
+
+test("switching AWAY from a local provider drops the local endpoint and needs a key", () => {
+  // The dangerous direction: without the drop, `work` would keep the localhost
+  // endpoint AND — since the provider is no longer keyless — start requiring a
+  // key for it. The endpoint must move to the new provider's own.
+  const config: AsterismConfig = {
+    model: { id: "qwen3", provider: "ollama" },
+    agents: { work: { model: { id: "claude-opus-4-8", provider: "anthropic" } } },
+  };
+  const { model } = resolveModelConfig({}, { config, agentName: "work" });
+  expect(model?.baseUrl).toBe("https://api.anthropic.com");
+  expect(needsNoApiKey(model!)).toBe(false);
+  expect(resolveProviderAuth({}, model!).reason).toContain("ANTHROPIC_API_KEY");
+});
+
+test("a bare local base-url belongs to the default provider, so it still needs a key", () => {
+  // `--base-url http://localhost:11434/v1` with no provider is an endpoint for
+  // DEFAULT_PROVIDER (openai), which is not declared keyless. Fails closed: the
+  // user is told to name the provider rather than quietly getting no auth.
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "qwen3",
+    ASTERISM_MODEL_BASE_URL: "http://localhost:11434/v1",
+  });
+  expect(model?.provider).toBe("openai");
+  expect(needsNoApiKey(model!)).toBe(false);
+  expect(resolveProviderAuth({}, model!).reason).toContain("OPENAI_API_KEY");
+});
+
+test("naming the keyless provider is what makes a custom local endpoint keyless", () => {
+  // Same URL as above, provider named: a second Ollama on another port works.
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "qwen3",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+    ASTERISM_MODEL_BASE_URL: "http://127.0.0.1:12345/v1",
+  });
+  expect(resolveProviderAuth({}, model!).apiKey).toBe(NO_API_KEY_PLACEHOLDER);
+});
+
+// --- what a surface should ASK for ------------------------------------------
+
+test("every variable the plan lists actually authenticates on its own", () => {
+  // The property that matters for anything that prints "set this": a variable we
+  // name must be one the resolver will read. Listing a variable that does not
+  // work is how an install that worked in a shell fails as a service.
+  for (const provider of Object.keys(PROVIDER_DEFAULTS)) {
+    const { model } = resolveModelConfig({
+      ASTERISM_MODEL_ID: "x",
+      ASTERISM_MODEL_PROVIDER: provider,
+    });
+    for (const name of providerAuthPlan({}, model).vars) {
+      const auth = resolveProviderAuth({ [name]: "a-key" }, model!);
+      expect(`${provider}/${name}: ${auth.apiKey}`).toBe(`${provider}/${name}: a-key`);
+    }
+  }
+});
+
+test("the plan does not offer the shared key to a provider that will not read it", () => {
+  const local = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+  }).model;
+  expect(providerAuthPlan({}, local).vars).toEqual(["OLLAMA_API_KEY"]);
+
+  const hosted = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "groq",
+  }).model;
+  expect(providerAuthPlan({}, hosted).vars).toEqual(["GROQ_API_KEY", SHARED_KEY_ENV]);
+});
+
+test("a local model requires nothing, but still accepts its own key", () => {
+  // Both halves matter to a service: nothing to demand from an operator, and yet
+  // an auth-proxy token must not be dropped on the grounds that it is optional.
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+  });
+  expect(providerAuthPlan({}, model).required).toBe(false);
+  expect(providerAuthPlan({}, model).satisfied).toBe(true);
+  expect(providerAuthPlan({ OLLAMA_API_KEY: "proxy-token" }, model).vars).toContain(
+    "OLLAMA_API_KEY",
+  );
+});
+
+test("the shared key does not satisfy a local provider pointed remotely", () => {
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "x",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+    ASTERISM_MODEL_BASE_URL: "https://ollama.example.com/v1",
+  });
+  expect(providerAuthPlan({}, model).required).toBe(true);
+  expect(providerAuthPlan({ [SHARED_KEY_ENV]: "sk-shared" }, model).satisfied).toBe(false);
+  expect(providerAuthPlan({ OLLAMA_API_KEY: "token" }, model).satisfied).toBe(true);
+});
+
+test("with no model configured the plan is the default provider's", () => {
+  const plan = providerAuthPlan({});
+  expect(plan.vars).toEqual(["OPENAI_API_KEY", SHARED_KEY_ENV]);
+  expect(plan.required).toBe(true);
+  expect(providerAuthPlan({ OPENAI_API_KEY: "sk" }).satisfied).toBe(true);
 });

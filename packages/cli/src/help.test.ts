@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import { AUTONOMY_HELP, COMMAND_HELP, USAGE } from "./help.ts";
 import { formatStandingList } from "./format.ts";
+import { PROVIDER_DEFAULTS } from "./model-config.ts";
 
 test("usage lists every command in the surface", () => {
   for (const command of [
@@ -116,4 +117,33 @@ test("the exposure verb's help keeps it distinct from trust, and never implies a
   // may suggest an agent was loose before this existed.
   expect(copy).toContain("perfectly normal");
   expect(copy).not.toMatch(/unconfined|unrestricted|unlimited|no restrictions|sandbox/i);
+});
+
+test("the config help lists exactly the providers that are built in", () => {
+  // The help text asserts a completeness it cannot check for itself: "naming one
+  // of these is enough". Adding a PROVIDER_DEFAULTS entry and forgetting the copy
+  // leaves a provider that works but is invisible; removing one leaves copy that
+  // advertises an endpoint nobody has. Derive the list, do not assert it.
+  const copy = COMMAND_HELP.config!;
+  // Anchor on the OPTIONS block: the synopsis line above it also names
+  // `--provider <name>`, and slicing from the first match found only that.
+  const start = copy.indexOf("Options for");
+  expect(start).toBeGreaterThan(-1);
+  const options = copy.slice(start, copy.indexOf("--base-url <url>", start));
+  expect(options).toContain("--provider <name>");
+  const listed = new Set(
+    options.match(/\b[a-z][a-z0-9-]{2,}\b/g)?.filter((w) => w in PROVIDER_DEFAULTS),
+  );
+  expect([...listed].sort()).toEqual(Object.keys(PROVIDER_DEFAULTS).sort());
+});
+
+test("the config help separates the providers that need no key", () => {
+  // Not just that both sets appear, but that the keyless ones are named in the
+  // sentence promising no account — the claim a reader actually acts on.
+  const copy = COMMAND_HELP.config!;
+  const keyless = Object.entries(PROVIDER_DEFAULTS)
+    .filter(([, d]) => d.needsNoKey === true)
+    .map(([name]) => name);
+  const noAccountClause = copy.slice(copy.indexOf("no\n                      account"));
+  for (const name of keyless) expect(noAccountClause).toContain(name);
 });

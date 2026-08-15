@@ -770,10 +770,21 @@ only (which tool ran, success or failure, output size) — never the contents of
 input or output, so it cannot leak a secret.
 
 Options for \`set\`:
-  --provider <name>   Provider name. Built-in: openai, anthropic. Default: openai.
-  --base-url <url>    The provider's API base URL (needed for other providers).
+  --provider <name>   Provider name. Default: openai. Naming one of these is
+                      enough — the endpoint and wire protocol come with it:
+                        openai  anthropic  openrouter  groq
+                        deepseek  xai  together  cerebras
+                      ...or, for a model running on your own machine, needing no
+                      account and no key at all:
+                        ollama  lmstudio
+  --base-url <url>    The provider's API base URL (needed for any other provider).
   --api <protocol>    The wire protocol, when it differs from the provider default.
   --agent <name>      Apply to this one agent instead of the install default.
+
+Each provider reads its own key from the environment — OPENAI_API_KEY,
+OPENROUTER_API_KEY, and so on — or ASTERISM_API_KEY if you keep one key across
+providers. A model on your own machine reads neither, and is never sent the
+shared key.
 
 API keys are never stored here. Keep them in the environment (e.g. OPENAI_API_KEY)
 — this configuration holds only which model to use, and is safe to share.`,
