@@ -6101,7 +6101,9 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     }
     // What the service still lacks to run: required needs capture did not satisfy (or,
     // without --capture-env, all of them — the operator fills the template in by hand).
-    // The API-key need is satisfied by EITHER the provider key or ASTERISM_API_KEY.
+    // Which variables count as satisfying the API-key need is not decided here: it
+    // varies by provider (a local model has no such need at all, and one aimed at a
+    // remote endpoint is not satisfied by the shared key), and the plan already asked.
     const missing = envPlan.needs.filter((n) => !n.satisfied);
     if (missing.length > 0) {
       io.out("  Before it can work, set these in that file:");

@@ -50,6 +50,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BIN = join(ROOT, "packages", "cli", "dist", "bin.js");
 const CORE = join(ROOT, "packages", "core", "dist", "index.js");
+const MODEL_CONFIG_DIST = join(ROOT, "packages", "cli", "dist", "model-config.js");
 
 /**
  * This checker types commands at the BUILT CLI, so it needs `dist/` — and it reaches into
@@ -62,11 +63,14 @@ const CORE = join(ROOT, "packages", "core", "dist", "index.js");
 let AsterismStore;
 /** The kernel's own connection-mode enum, so the fixture cannot fall behind it. */
 let CONNECTION_MODES;
+/** The shipped provider table, so the docs check derives it rather than restating it. */
+let MODEL_CONFIG;
 
 function preflight() {
   const missing = [
     [BIN, "packages/cli/dist/bin.js"],
     [CORE, "packages/core/dist/index.js"],
+    [MODEL_CONFIG_DIST, "packages/cli/dist/model-config.js"],
   ].filter(([abs]) => !existsSync(abs));
   if (missing.length) {
     console.error(
@@ -963,9 +967,73 @@ function report(total, tally, groups, coverageWork) {
     console.log("Every internal doc link resolves.");
   }
 
+  const providerGaps = SELF_TEST ? [] : checkProviderCoverage();
+  if (providerGaps.length) {
+    console.log(
+      `\nPROVIDER TABLE OUT OF DATE (${providerGaps.length}) — \`docs/models.md\` claims to list` +
+        " every built-in provider and the variable it reads:",
+    );
+    for (const g of providerGaps) console.log(`  ${g}`);
+  } else if (!SELF_TEST) {
+    console.log("Every built-in provider appears in the models page, with the key it reads.");
+  }
+
   rmSync(coverageWork, { recursive: true, force: true });
-  if (groups.failures.length || broken.length || undocumented.length) process.exit(1);
+  if (groups.failures.length || broken.length || undocumented.length || providerGaps.length) {
+    process.exit(1);
+  }
   console.log("Every command the docs advertise runs, or matches the binary's own help.");
+}
+
+/**
+ * `docs/models.md` says "Naming any of these is enough" and tabulates every built-in
+ * provider against the variable it reads. That is a completeness claim about a table
+ * in the code, and nothing else checks it: the command checker types VERBS, so a
+ * provider added to PROVIDER_DEFAULTS and left out of the page works but is invisible,
+ * and one removed leaves copy advertising an endpoint nobody has.
+ *
+ * Derived from the shipped module rather than from a list kept here — a second
+ * hand-maintained list would just move the staleness.
+ */
+function checkProviderCoverage() {
+  const page = join(ROOT, "docs", "models.md");
+  if (!existsSync(page)) return ["docs/models.md is missing"];
+  const text = readFileSync(page, "utf8");
+  const { PROVIDER_DEFAULTS, providerKeyEnvVar } = MODEL_CONFIG;
+
+  const gaps = [];
+  // Only the provider table's own rows, so a provider merely mentioned in prose
+  // (`--provider ollama` in an example) does not count as documented.
+  const rows = text.match(/^\| *`[a-z0-9-]+` *\|.*$/gm) ?? [];
+  const documented = new Map(
+    rows.map((row) => {
+      const cells = row.split("|").map((c) => c.trim());
+      return [cells[1]?.replace(/`/g, "") ?? "", cells[2] ?? ""];
+    }),
+  );
+
+  for (const [name, defaults] of Object.entries(PROVIDER_DEFAULTS)) {
+    const cell = documented.get(name);
+    if (cell === undefined) {
+      gaps.push(`${name} — built in, but absent from the provider table`);
+      continue;
+    }
+    // A keyless provider must be shown as reading nothing; a keyed one must name
+    // the variable that actually works, not a plausible-looking neighbour.
+    if (defaults.needsNoKey === true) {
+      if (/_API_KEY/.test(cell)) {
+        gaps.push(`${name} — needs no key, but the table names one (${cell})`);
+      }
+    } else if (!cell.includes(providerKeyEnvVar(name))) {
+      gaps.push(`${name} — table says ${cell || "(nothing)"}, code reads ${providerKeyEnvVar(name)}`);
+    }
+  }
+  for (const name of documented.keys()) {
+    if (!(name in PROVIDER_DEFAULTS)) {
+      gaps.push(`${name} — listed as built in, but there is no such provider`);
+    }
+  }
+  return gaps;
 }
 
 /**
@@ -1002,6 +1070,7 @@ function plantedFailures() {
 preflight();
 try {
   ({ AsterismStore, CONNECTION_MODES } = await import(CORE));
+  MODEL_CONFIG = await import(MODEL_CONFIG_DIST);
 } catch (err) {
   // Present but unloadable — the classic case is a `better-sqlite3` built for a different
   // Node ABI. Name the cause; the raw error alone sends people hunting a code regression.
