@@ -2,7 +2,7 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## Unreleased
+## 0.6.0 — 2026-08-14
 
 ### Added
 
