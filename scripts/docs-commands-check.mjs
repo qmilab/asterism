@@ -177,10 +177,18 @@ const UNRUNNABLE = [
  */
 const EXCUSED = [
   [/^No model configured\./, "needs-model", "no model is configured in a checker"],
+  // The CLI's own refusal, raised before a model client is built. It used to be
+  // the substrate's ("Run failed: No API key for provider: x"), which arrived at
+  // the first token instead; matching that string here would now excuse nothing.
   [
-    /^Run failed: No API key for provider:/,
+    /^No API key configured for /,
     "needs-model",
     "no provider API key is present in a checker",
+  ],
+  [
+    /needs no API key when it is served from this machine/,
+    "needs-model",
+    "the documented endpoint is not reachable from a checker",
   ],
   [
     /^Set ASTERISM_(TELEGRAM|DISCORD)_TOKEN\b/,

@@ -34,6 +34,7 @@ nav:
       - Tutorial: getting-started.md
       - Concepts: concepts.md
   - Guides:
+      - Models and providers: models.md
       - Working together: collaboration.md
       - Dashboard: dashboard.md
       - Chat channels: channels.md

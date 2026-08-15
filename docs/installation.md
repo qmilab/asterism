@@ -172,7 +172,7 @@ in the environment (below).
 | Variable | Purpose |
 |---|---|
 | `ASTERISM_MODEL_ID` | The model identifier, e.g. `gpt-4o` or `claude-sonnet-4-6`. |
-| `ASTERISM_MODEL_PROVIDER` | Provider name. Default: `openai`. Built-in: `openai`, `anthropic`. |
+| `ASTERISM_MODEL_PROVIDER` | Provider name. Default: `openai`. See [Models and providers](./models.md) for the built-in list. |
 | `ASTERISM_MODEL_BASE_URL` | Override the provider's API base URL (required for providers other than the built-ins). |
 | `ASTERISM_MODEL_API` | Override the wire protocol when it differs from the provider default. |
 
@@ -182,13 +182,15 @@ built-in provider settings.
 
 ### API keys
 
-The key is read from the provider's well-known variable, falling back to a
-generic one:
+The key is read from the provider's own variable, falling back to a generic one:
 
 - `openai` → `OPENAI_API_KEY`
 - `anthropic` → `ANTHROPIC_API_KEY`
 - any other provider → `<PROVIDER>_API_KEY` (e.g. `OPENROUTER_API_KEY`)
 - or, for any provider, `ASTERISM_API_KEY`
+
+A model running on your own machine needs **no key at all** — see
+[Models and providers](./models.md).
 
 The API key is infrastructure for talking to your model provider. It is **not**
 an agent-scoped credential — those are added per agent with

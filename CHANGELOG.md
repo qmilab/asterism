@@ -2,6 +2,23 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## Unreleased
+
+### Added
+
+- **Trying Asterism no longer needs an account anywhere.** `asterism config set <model-id> --provider ollama` (or `--provider lmstudio`) points the install at a model running on your own machine. There is no key to set, no variable to export, and nothing an agent writes leaves the machine. `run`, the chat channels and `reflect` all work this way — `reflect` used to demand a key even where none existed, so a local model could be run and then not reflected on.
+
+  A local provider is trusted to need no key only when both halves hold: the provider is one Asterism knows is served locally, **and** the endpoint it resolved to really is on this machine. Either half alone is a way to get it wrong. A provider name outlives the endpoint under it, so `--provider ollama` re-pointed at a remote server would otherwise send an unauthenticated request to someone else's machine, on the strength of a default typed months earlier; that case now stops and says so instead. And a local-looking URL alone waives nothing — an OpenAI-compatible proxy on `localhost` still gets the key for the provider you named.
+
+  The shared `ASTERISM_API_KEY` is never sent to a local provider, at any endpoint. It is by construction a key for a hosted provider you pay for, and a server on your own machine never asked for one. Set `OLLAMA_API_KEY` explicitly if yours sits behind an auth proxy — that is unambiguous, and it is honoured.
+
+- **Eight more providers reachable by name alone.** `openrouter`, `groq`, `deepseek`, `xai`, `together` and `cerebras` join `openai` and `anthropic`, alongside the two local ones. These were all reachable before — each already read its own `<PROVIDER>_API_KEY` — but you had to know and type the endpoint. Now the endpoint and the wire protocol come with the name. A provider that is not on the list still works exactly as it did, with `--base-url`. There is a new page, [Models and providers](https://qmilab.com/asterism/docs/models/), listing every one and the variable it reads.
+
+### Fixed
+
+- **A missing API key was reported by the model substrate, at the first token, in its own vocabulary.** `asterism run` built its client and only discovered there was no key when the run had already started, surfacing "Run failed: No API key for provider: openai" through the path reserved for unexpected faults. It is now checked before anything is built, and says what to set — the same check, and the same wording, `asterism reflect` has always used. The two used to answer the question separately, which is how they came to disagree about it.
+- **An installed service for a local model asked for a key that does not exist.** `asterism service install` listed a required `<PROVIDER>_API_KEY` and reported the service as not yet workable until it was filled in, for a model that needs no key at all.
+
 ## 0.6.0 — 2026-08-14
 
 ### Added

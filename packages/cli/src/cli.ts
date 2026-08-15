@@ -130,7 +130,7 @@ import {
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import type { ModelResolutionContext } from "./model-config.js";
-import { providerKeyEnvVar, resolveModelConfig } from "./model-config.js";
+import { needsNoApiKey, providerKeyEnvVar, resolveModelConfig } from "./model-config.js";
 import {
   isServiceKind,
   launchdLabel,
@@ -5800,14 +5800,19 @@ interface ServiceEnvPlan {
 }
 
 /**
- * Build the env plan for a service, mirroring EXACTLY how the foreground CLI
- * resolves a model and its key ({@link resolveModelConfig} / {@link resolveApiKey}):
+ * Build the env plan for a service, mirroring how the foreground CLI resolves a
+ * model and its key ({@link resolveModelConfig} / {@link resolveProviderAuth}):
  * the provider-specific key OR the `ASTERISM_API_KEY` fallback, plus the
  * `ASTERISM_MODEL_*` coordinates for anyone who configures the model through the
  * environment instead of `asterism config`. Listing (and, with `--capture-env`,
  * capturing) all of them is what keeps an installed service working in the same
  * setups that work in the user's shell — a service starts from a clean environment
  * and reads only this file (plus the on-disk config).
+ *
+ * "Mirroring" has to include the case where the answer is *no key*: a model
+ * served from this machine needs none, so a channel backed by one must not be
+ * told it is missing a required variable it can never satisfy. That is asked of
+ * the same function the foreground path asks, not re-decided here.
  */
 function serviceEnvPlan(
   io: CliIO,
@@ -5819,6 +5824,9 @@ function serviceEnvPlan(
   const config = loadConfig(home);
   const { model } = resolveModelConfig(io.env, { config, agentName });
   const keyVar = providerKeyEnvVar(model?.provider ?? "openai");
+  // A model served from this machine authenticates with nothing, so there is no
+  // key variable to list, capture, or block the install hint on.
+  const keyless = model !== undefined && needsNoApiKey(model);
   const has = (name: string): boolean => io.env[name] !== undefined;
 
   const vars: EnvVarSpec[] = [];
@@ -5865,26 +5873,30 @@ function serviceEnvPlan(
     }
   }
 
-  // Model API key — the provider-specific variable, or the ASTERISM_API_KEY fallback.
-  vars.push({
-    name: keyVar,
-    required: kind !== "serve",
-    note:
-      kind === "serve"
-        ? "your model API key — needed to start runs; the read endpoints work without it."
-        : "your model API key — every chat message is a task, so a channel needs one.",
-  });
-  vars.push({
-    name: "ASTERISM_API_KEY",
-    required: false,
-    note: `an alternative to ${keyVar} if you keep one key across providers.`,
-  });
-  if (kind !== "serve") {
-    needs.push({
-      label: `${keyVar} (or ASTERISM_API_KEY)`,
-      note: "your model API key.",
-      satisfied: captureEnv && (has(keyVar) || has("ASTERISM_API_KEY")),
+  // Model API key — the provider-specific variable, or the ASTERISM_API_KEY
+  // fallback. Skipped entirely for a model served from this machine: it takes no
+  // key, and ASTERISM_API_KEY is not offered to it in the foreground either.
+  if (!keyless) {
+    vars.push({
+      name: keyVar,
+      required: kind !== "serve",
+      note:
+        kind === "serve"
+          ? "your model API key — needed to start runs; the read endpoints work without it."
+          : "your model API key — every chat message is a task, so a channel needs one.",
     });
+    vars.push({
+      name: "ASTERISM_API_KEY",
+      required: false,
+      note: `an alternative to ${keyVar} if you keep one key across providers.`,
+    });
+    if (kind !== "serve") {
+      needs.push({
+        label: `${keyVar} (or ASTERISM_API_KEY)`,
+        note: "your model API key.",
+        satisfied: captureEnv && (has(keyVar) || has("ASTERISM_API_KEY")),
+      });
+    }
   }
 
   // Model coordinates — needed only when the model is chosen through the environment

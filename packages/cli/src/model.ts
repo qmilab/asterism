@@ -13,7 +13,7 @@ import { PiAdapter } from "@qmilab/asterism-adapter-pi";
 import type { RuntimeAdapter } from "@qmilab/asterism-core";
 
 import type { ModelResolutionContext } from "./model-config.js";
-import { resolveApiKey, resolveModelConfig } from "./model-config.js";
+import { resolveModelConfig, resolveProviderAuth } from "./model-config.js";
 
 export interface AdapterResult {
   adapter?: RuntimeAdapter;
@@ -26,18 +26,31 @@ type Env = Record<string, string | undefined>;
 /**
  * Build the run adapter from the resolved model configuration, or return a
  * `reason` explaining what to set. Configuration (config file, env, per-agent
- * override, provider defaults) is resolved by {@link resolveModelConfig}; the API
- * key is read per provider (OPENAI_API_KEY / ANTHROPIC_API_KEY) or from
- * ASTERISM_API_KEY — keys stay in the environment, never the config file.
+ * override, provider defaults) is resolved by {@link resolveModelConfig}; what to
+ * authenticate with by {@link resolveProviderAuth} — the provider's own variable,
+ * the shared fallback, or nothing at all for a model served from this machine.
+ * Keys stay in the environment, never the config file.
+ *
+ * The key is checked HERE, before the adapter exists, for the same reason
+ * `reflect` checks it before building its client: without this, a missing key
+ * surfaced at the first token as the substrate's own "No API key for provider: x"
+ * arriving down the adapter's unexpected-fault path — a failed run, in the
+ * substrate's vocabulary, for a setup problem the CLI could see up front.
  */
 export function buildAdapter(env: Env, context: ModelResolutionContext = {}): AdapterResult {
   const { model, reason } = resolveModelConfig(env, context);
   if (!model) {
     return reason !== undefined ? { reason } : {};
   }
+  const auth = resolveProviderAuth(env, model);
+  if (auth.apiKey === undefined) {
+    return auth.reason !== undefined ? { reason: auth.reason } : {};
+  }
   const adapter = new PiAdapter({
     model,
-    getApiKey: (p: string) => resolveApiKey(env, p),
+    // Kept a callback rather than a captured value: the substrate re-resolves it
+    // per request, which is what lets an expiring token be replaced in place.
+    getApiKey: () => resolveProviderAuth(env, model).apiKey,
   });
   return { adapter };
 }

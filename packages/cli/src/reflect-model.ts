@@ -15,11 +15,7 @@ import {
 import type { ReflectionProvider } from "@qmilab/asterism-core";
 
 import type { ModelResolutionContext } from "./model-config.js";
-import {
-  providerKeyEnvVar,
-  resolveApiKey,
-  resolveModelConfig,
-} from "./model-config.js";
+import { resolveModelConfig, resolveProviderAuth } from "./model-config.js";
 
 export interface ReflectionProviderResult {
   provider?: ReflectionProvider;
@@ -33,7 +29,10 @@ type Env = Record<string, string | undefined>;
  * Build the reflection provider from the resolved model configuration, or return
  * a `reason` explaining what to set. Resolves the model the same way `run` does
  * (config file, env, the agent's own override), so reflecting on an agent uses
- * that agent's model; the provider API key is read from the environment.
+ * that agent's model — and resolves what to authenticate with the same way too
+ * ({@link resolveProviderAuth}), including deciding that a model served from this
+ * machine needs no key. Reflecting must not be the one command that still demands
+ * a key for a local model the agent already ran on.
  */
 export function buildReflectionProvider(
   env: Env,
@@ -43,13 +42,10 @@ export function buildReflectionProvider(
   if (!model) {
     return reason !== undefined ? { reason } : {};
   }
-  const apiKey = resolveApiKey(env, model.provider);
-  if (!apiKey) {
-    return {
-      reason:
-        `No API key for reflection. Set ${providerKeyEnvVar(model.provider)} ` +
-        "(or ASTERISM_API_KEY) before reflecting.",
-    };
+  const auth = resolveProviderAuth(env, model);
+  const apiKey = auth.apiKey;
+  if (apiKey === undefined) {
+    return auth.reason !== undefined ? { reason: auth.reason } : {};
   }
   const client = createHttpChatClient({
     provider: model.provider,

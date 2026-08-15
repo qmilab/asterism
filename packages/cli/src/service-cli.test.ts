@@ -277,6 +277,33 @@ describe("asterism service", () => {
     expect(env).toContain("OPENAI_API_KEY='sk-xyz'");
   });
 
+  test("a channel on a local model asks for no API key at all", async () => {
+    // A model served from this machine needs no key, so the install hint must not
+    // demand a variable the operator can never satisfy — and the env file must not
+    // offer ASTERISM_API_KEY to a provider the foreground path refuses to send it to.
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "tok",
+        ASTERISM_MODEL_ID: "qwen3",
+        ASTERISM_MODEL_PROVIDER: "ollama",
+      },
+    });
+    const p = paths("writer", "telegram");
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+
+    const env = readFileSync(p.env, "utf8");
+    expect(env).not.toContain("OLLAMA_API_KEY");
+    expect(env).not.toContain("ASTERISM_API_KEY");
+    // The model still travels, so the service resolves the same model this shell did.
+    expect(env).toContain("ASTERISM_MODEL_PROVIDER='ollama'");
+    expect(text).not.toContain("Before it can work");
+  });
+
   test("the env template names the API key for the env-configured provider, plus the fallback", async () => {
     const io = baseIo({
       platform: "linux",

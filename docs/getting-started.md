@@ -72,9 +72,21 @@ create. That separation is the whole point; see [Concepts](./concepts.md).
 ## 3. Point it at a model
 
 Creating agents, inspecting memory, and reading the event log all work with no
-model at all. But to make `writer` actually *do* something, give Asterism a model
-and an API key. The key lives in your environment; the choice of model is saved
-locally (never the key):
+model at all. But to make `writer` actually *do* something, give Asterism a model.
+
+**No API key to hand?** If you run [Ollama](https://ollama.com) or
+[LM Studio](https://lmstudio.ai), naming it as the provider is the whole setup —
+no key, no account, and nothing your agents write leaves your machine:
+
+```console
+$ asterism config set llama3.2 --provider ollama
+Set the model for the install default: llama3.2 (provider: ollama).
+API keys are never stored here — keep them in the environment (e.g. OPENAI_API_KEY).
+```
+
+With a hosted provider, the key lives in your environment; the choice of model is
+saved locally (never the key). The rest of this tutorial follows this path, but
+it reads the same either way:
 
 ```console
 $ export OPENAI_API_KEY=sk-...
@@ -97,8 +109,8 @@ Per-agent model:
 API keys are never stored here — set them in the environment (e.g. OPENAI_API_KEY).
 ```
 
-Using Anthropic or an OpenAI-compatible provider instead? The exact variables and
-per-agent overrides are in [Configuring a model](./installation.md#configuring-a-model).
+Using Anthropic, OpenRouter, or another provider instead? The full list, and the
+per-agent overrides, are in [Models and providers](./models.md).
 
 ## 4. Run a task
 

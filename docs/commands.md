@@ -1369,7 +1369,7 @@ the kernel store, scoped to each agent.
 
 | Option (for `set`) | Description |
 |---|---|
-| `--provider <name>` | Provider name. Built-in: `openai`, `anthropic`. Default: `openai`. |
+| `--provider <name>` | Provider name. Default: `openai`. Naming a [built-in provider](./models.md) is enough — the endpoint and wire protocol come with it. |
 | `--base-url <url>` | The provider's API base URL (needed for providers other than the built-ins). |
 | `--api <protocol>` | The wire protocol, when it differs from the provider default. |
 | `--agent <name>` | Apply to this one agent instead of the install default. The agent must already exist. |

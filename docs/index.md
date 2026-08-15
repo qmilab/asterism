@@ -50,7 +50,7 @@ deleting one, and remembers what you approve.
 |---|---|
 | Get it running | [Installation](./installation.md) |
 | Follow a guided first run | [Tutorial](./getting-started.md) |
-| Point it at OpenAI / Anthropic / another provider | [Configuring a model](./installation.md#configuring-a-model) |
+| Point it at a model — hosted, or one on your own machine with no key | [Models and providers](./models.md) |
 | Understand trust levels and the destructive-action gate | [Concepts → Trust](./concepts.md#trust-levels) |
 | Have two agents work together | [Working together](./collaboration.md) |
 | Let an agent call an API with a stored credential | [Command reference → `api`](./commands.md#api) |
