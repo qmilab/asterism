@@ -128,6 +128,30 @@ function normalize(file) {
 }
 
 /**
+ * Which source file a `<testcase>` belongs to.
+ *
+ * Bun puts `file` on the testcase itself AND on every enclosing `<testsuite>`, and the
+ * outermost suite's `name` is the path too. We read them in that order and stop at the
+ * first that answers, so the check does not rest on one optional attribute surviving a
+ * runner upgrade — CI installs `bun-version: latest`, so the report shape is not pinned.
+ *
+ * ⚠ `classname` is NOT a path. Bun sets it to the enclosing `describe` title
+ * ("secret store — issue / read round-trip"), so treating it as a filename would attribute
+ * every test to a file that does not exist. Verified against a real report; do not "fix"
+ * this by reaching for classname.
+ */
+function fileOf(attrs, suiteStack) {
+  const own = attr(attrs, "file");
+  if (own !== undefined) return own;
+  for (let i = suiteStack.length - 1; i >= 0; i--) {
+    if (suiteStack[i].file !== undefined) return suiteStack[i].file;
+  }
+  // Last resort: the OUTERMOST suite's name, which in bun's report is the file path. An
+  // inner suite's name is a describe title, so only the outermost one is safe here.
+  return suiteStack[0]?.name;
+}
+
+/**
  * Map file → Set(titles of tests that RAN AND PASSED), plus the run's own totals.
  *
  * The tag shapes bun emits, verified against a real run rather than assumed:
@@ -135,30 +159,66 @@ function normalize(file) {
  *   <testcase …> <skipped />   </testcase>  skipped (`test.skip`) or todo
  *   <testcase …> <failure … /> </testcase>  failed
  * Only the first is evidence. Matching the opening tag alone would accept all three.
+ *
+ * `unattributed` counts passing tests we could not tie to a file. It is reported as the
+ * PARSER's failure, never as the document's — see {@link corpusProblem}.
  */
 function parseJUnit(xml) {
   const passed = new Map();
   let total = 0;
   let excluded = 0;
-  for (const m of xml.matchAll(/<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g)) {
-    const attrs = m[1];
-    const selfClosing = m[2] === "/>";
-    const body = selfClosing ? "" : m[3];
+  let unattributed = 0;
+  const suites = [];
+  // One linear pass so a testcase can see the suites enclosing it. `<testsuite\b` does not
+  // match `<testsuites` — there is no word boundary between "testsuite" and "s".
+  const TAG = /<testsuite\b([^>]*?)(\/?)>|<\/testsuite\s*>|<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase\s*>)/g;
+  for (const m of xml.matchAll(TAG)) {
+    if (m[0].startsWith("</testsuite")) {
+      suites.pop();
+      continue;
+    }
+    if (m[0].startsWith("<testsuite")) {
+      if (m[2] !== "/") suites.push({ file: attr(m[1], "file"), name: attr(m[1], "name") });
+      continue;
+    }
+    const attrs = m[3];
+    const hasBody = m[4] !== undefined;
     const name = attr(attrs, "name");
-    const file = attr(attrs, "file");
-    if (name === undefined || file === undefined) continue;
+    if (name === undefined) continue;
     total++;
-    if (!selfClosing && /<\s*(skipped|failure|error)\b/.test(body)) {
+    if (hasBody && /<\s*(skipped|failure|error)\b/.test(m[4])) {
       excluded++;
+      continue;
+    }
+    const file = fileOf(attrs, suites);
+    if (file === undefined) {
+      unattributed++;
       continue;
     }
     const key = normalize(file);
     if (!passed.has(key)) passed.set(key, new Set());
     passed.get(key).add(name);
   }
-  const suites = /<testsuites\b([^>]*)>/.exec(xml);
-  const failures = suites ? Number(attr(suites[1], "failures") ?? "0") : 0;
-  return { passed, total, excluded, failures };
+  const root = /<testsuites\b([^>]*)>/.exec(xml);
+  const failures = root ? Number(attr(root[1], "failures") ?? "0") : 0;
+  return { passed, total, excluded, failures, unattributed };
+}
+
+/**
+ * Can this corpus be trusted to judge citations at all? Returns a message if not.
+ *
+ * Without this, a report the parser cannot read produces the WORST possible output: every
+ * citation reported as "NO SUCH FILE", i.e. the instrument blaming the document for its own
+ * breakage. Someone would then "fix" 44 correct citations to satisfy a broken checker. The
+ * parser must be able to say "this is me, not you".
+ */
+function corpusProblem(corpus) {
+  if (corpus.total === 0) return "the test report contained no test cases at all";
+  if (corpus.passed.size === 0)
+    return `parsed ${corpus.total} test case(s) but could not attribute ANY of them to a source file`;
+  if (corpus.unattributed > 0)
+    return `parsed ${corpus.total} test case(s) but could not attribute ${corpus.unattributed} of them to a source file`;
+  return undefined;
 }
 
 /** Run the suite and return its JUnit XML. */
@@ -321,6 +381,37 @@ function selfTest() {
   if (!emptyOk) failed++;
   console.log(`  ${emptyOk ? "✓" : "✗"} an empty test corpus fails every citation (a zero cannot be vacuous)`);
 
+  // --- where the file path is read from. Bun puts it on the testcase AND every enclosing
+  // suite; a runner upgrade could move it. Each of these must still attribute correctly,
+  // and the one that CANNOT must indict the parser rather than the docs.
+  const cite1 = [{ page: "x", line: 1, file: "pkg/a.test.ts", title: "t" }];
+  const shapes = [
+    ["file on the testcase", `<testsuites tests="1"><testsuite name="s" file="pkg/a.test.ts"><testcase name="t" file="pkg/a.test.ts" /></testsuite></testsuites>`, true],
+    ["file only on the enclosing suite", `<testsuites tests="1"><testsuite name="pkg/a.test.ts" file="pkg/a.test.ts"><testcase name="t" classname="a describe title" /></testsuite></testsuites>`, true],
+    ["file only on an OUTER suite, nested describe inside", `<testsuites tests="1"><testsuite name="pkg/a.test.ts" file="pkg/a.test.ts"><testsuite name="a describe title"><testcase name="t" classname="a describe title" /></testsuite></testsuite></testsuites>`, true],
+    ["no file anywhere — outermost suite NAME is the path", `<testsuites tests="1"><testsuite name="pkg/a.test.ts"><testcase name="t" /></testsuite></testsuites>`, true],
+  ];
+  for (const [label, xml, shouldResolve] of shapes) {
+    const c = parseJUnit(xml);
+    const ok = corpusProblem(c) === undefined && (check(cite1, c).length === 0) === shouldResolve;
+    if (!ok) failed++;
+    console.log(`  ${ok ? "✓" : "✗"} path read from: ${label}`);
+  }
+
+  // classname is a describe TITLE, not a path. If it were ever used as one, this resolves
+  // against "a describe title" and the real file goes missing.
+  const cnCorpus = parseJUnit(`<testsuites tests="1"><testsuite name="pkg/a.test.ts" file="pkg/a.test.ts"><testcase name="t" classname="a describe title" file="pkg/a.test.ts" /></testsuite></testsuites>`);
+  const cnOk = check(cite1, cnCorpus).length === 0 && !cnCorpus.passed.has("a describe title");
+  if (!cnOk) failed++;
+  console.log(`  ${cnOk ? "✓" : "✗"} classname is never mistaken for a file path`);
+
+  // The one that matters most: a report this parser cannot read must say so, not accuse the
+  // docs of 44 bad citations.
+  const brokenCorpus = parseJUnit(`<testsuites tests="1"><testcase name="t" classname="a describe title" /></testsuites>`);
+  const brokenSaysSo = corpusProblem(brokenCorpus) !== undefined;
+  if (!brokenSaysSo) failed++;
+  console.log(`  ${brokenSaysSo ? "✓" : "✗"} an unreadable report indicts the PARSER, not the citations`);
+
   // --- half 2: the real page, really parsed, with a real defect planted in a copy.
   const realPage = join("docs", "threat-model.md");
   if (existsSync(join(ROOT, realPage))) {
@@ -369,6 +460,16 @@ if (SELF_TEST) {
     process.exit(1);
   }
   const corpus = parseJUnit(runSuite());
+  const problem = corpusProblem(corpus);
+  if (problem !== undefined) {
+    console.error(
+      `Could not read the test report: ${problem}.\n\n` +
+        `This is a failure of THIS SCRIPT, not of the citations in the docs. Do not "fix" the\n` +
+        `Evidence blocks to satisfy it. The likely cause is a change in the test runner's JUnit\n` +
+        `output — see \`fileOf\` for the attributes it reads and in what order.`,
+    );
+    process.exit(2);
+  }
   if (corpus.failures > 0) {
     console.error(
       `The test suite reports ${corpus.failures} failure(s). Citations claim a test "ran and passed",\n` +
