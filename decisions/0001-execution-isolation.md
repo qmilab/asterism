@@ -290,12 +290,37 @@ outside the RPC: it classifies, decides, and prompts *before* anything is sent.
 The thing it guards loses the ability to bypass it — a jailed host cannot delete
 outside its namespace even if its own logic were wrong.
 
-**At-most-once already assumes this boundary.** `onExecute` fires *before*
-`await tool.execute` (`trust.ts:675`) precisely because a lost response does not
-tell you whether the effect happened. That pessimism was written for an
-in-process call and is exactly what a process boundary needs. One new failure
-mode: **a child that dies mid-call must map to the existing throw path, never to
-a retry.**
+**At-most-once assumes this boundary for _destructive_ actions only — and that is
+the sharpest open problem this spike found.** In the destructive branch,
+`onExecute` fires *before* `await tool.execute` (`trust.ts:675`) precisely because
+a lost response does not tell you whether the effect happened. That pessimism is
+exactly what a process boundary needs.
+
+**The ordinary branch does the opposite, deliberately** (`trust.ts:694-705`): a
+`read`/`write` action is awaited first and recorded *only on success*, so "a
+transient failure simply re-runs". The comment justifies it in one word —
+*reversible*.
+
+Check that word against the catalog. Of the nine `fs.*` capabilities **only
+`fs.delete` is `destructive`**; `fs.write`, `fs.mkdir`, `fs.move` and **`fs.append`
+are all `write`**. `fs.append` is neither reversible nor idempotent: running it
+twice duplicates content. `fs.move` is not idempotent either.
+
+In-process this is close to harmless — `appendFileSync` returns or throws in the
+same memory, so a throw means it almost certainly did not happen. **A process
+boundary widens that window into a real one:** the child can complete the append
+and die before the reply is delivered, and the current design will re-run it.
+
+So the earlier draft's prescription — "a child that dies mid-call must map to the
+existing throw path, never to a retry" — was wrong, because the existing path for
+a reversible action *is* to re-run. **This is a design question the build must
+answer, not a property it inherits.** The options are to record `write` actions
+up front as destructive ones already are (costing a re-run on genuinely transient
+failures), to make the tool host's replies idempotent by call id, or to
+reclassify the non-idempotent writes. It is not decided here.
+
+This is the repo's recurring shape, again: *the sentence explaining why a check is
+unnecessary is where the check is missing.*
 
 **Credential rule, one line:** credential-bearing capabilities never cross the
 boundary. `fs.*` and any future `exec` go in; `api.<name>` and the two reserved
@@ -339,6 +364,9 @@ conditional security page is worse than an honest static one, and
   needs `lstat` on every component, `stat` of a known path outside the workspace
   still succeeds (enumeration does not). Whether that is worth further narrowing
   is open; it must be published as a limitation either way.
+- **How a non-idempotent `write` survives a child that dies mid-call** — see §7.
+  Record up front, idempotent replies keyed by call id, or reclassify. This is the
+  one open question that must be settled before any code is written.
 - Nothing ships behind a flag this cycle. The bugs in this design are lifecycle
   bugs (a child that dies, hangs, or orphans), and they want a full slice with
   its own review rounds.

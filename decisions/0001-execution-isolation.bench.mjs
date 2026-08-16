@@ -426,21 +426,40 @@ if (FALSIFY) {
     "the tool host cannot exec",
     "directory enumeration outside the workspace is denied",
   ];
-  const flipped = results
-    .filter((r) => mustFail.some((m) => r.name.includes(m)))
-    .map((r) => ({ prefix: r.name, verdict: r.verdict }));
-  // A matrix that matched nothing at all is a broken matcher, not a clean run.
-  if (flipped.length < mustFail.length) {
+  // Check the full CROSS PRODUCT of runtime × claim, by name, rather than counting
+  // matches. Counting is not enough: if one runtime's probe dies before emitting any
+  // per-claim result, the other runtime's failures alone satisfy a length test and
+  // the run prints "FALSIFIED CORRECTLY" for assertions that never executed. An
+  // absent pair is a FAILED falsification, not a missing row.
+  const expected = [];
+  for (const runtime of sbAvailable ? RUNTIMES : []) {
+    for (const claim of mustFail) expected.push({ runtime: runtime.name, claim });
+  }
+  const flipped = expected.map(({ runtime, claim }) => {
+    const hit = results.find((r) => r.name.includes(`[${runtime}]`) && r.name.includes(claim));
+    return {
+      prefix: `[${runtime}] ${claim}`,
+      verdict: hit ? hit.verdict : "MISSING (probe never produced this assertion)",
+    };
+  });
+  const missing = flipped.filter((f) => f.verdict.startsWith("MISSING"));
+  const inert = flipped.filter((f) => f.verdict === "PASS");
+  if (missing.length > 0) {
     console.log(
-      `\n✗ BROKEN MATCHER: expected at least ${mustFail.length} security claims, matched ${flipped.length}.`,
+      `\n✗ NOT FALSIFIED — ${missing.length} runtime/claim pair(s) produced no assertion at all: ` +
+        `${missing.map((f) => `"${f.prefix}"`).join(", ")}. An absent assertion is an UNTESTED claim, not a passing one.`,
     );
   }
-  const inert = flipped.filter((f) => f.verdict !== "FAIL");
-  console.log(
-    inert.length === 0
-      ? `\n✓ FALSIFIED CORRECTLY — all ${flipped.length} claims fail once their deny line is removed. The checks are real.`
-      : `\n✗ INERT CHECK(S): ${inert.map((f) => `"${f.prefix}" (${f.verdict})`).join(", ")} — passed with the deny removed, so it was never testing anything.`,
-  );
+  if (inert.length > 0) {
+    console.log(
+      `\n✗ INERT CHECK(S): ${inert.map((f) => `"${f.prefix}"`).join(", ")} — still passed with the capability granted back, so it was never testing anything.`,
+    );
+  }
+  if (missing.length === 0 && inert.length === 0) {
+    console.log(
+      `\n✓ FALSIFIED CORRECTLY — all ${flipped.length} runtime/claim pairs fail once the capability is granted back. The checks are real.`,
+    );
+  }
 }
 listener.close();
 rmSync(root, { recursive: true, force: true });
