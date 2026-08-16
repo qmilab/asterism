@@ -112,3 +112,35 @@ jobs:
       # failed citation, so a green run cannot be vacuous.
       - run: bun run check:safety-case:self-test
       - run: bun run check:safety-case
+
+  # The docs SITE, built exactly as Pages builds it.
+  #
+  # Why this is a PR gate and not only a deploy step: docs.yml runs on push to `main`, so
+  # until now a page that broke the site build reached `main` first and was discovered by
+  # the deploy — the same "caught at publish time" gap this workflow was created to close
+  # for the test suite.
+  #
+  # This does NOT duplicate `check:docs`. That check types the commands the pages advertise
+  # at the real binary and never builds the site; and where the two do overlap, on internal
+  # links, they see different things. `check:docs` matches link targets with `[a-z0-9-]+\.md`
+  # — LOWERCASE only — so a broken link to an upper-case filename (`./SECURITY-NOPE.md`) is
+  # invisible to it and it still reports "Every internal doc link resolves". `--strict` fails
+  # on it. Verified both ways by planting one. Neither check subsumes the other; run both.
+  #
+  # Separate job because it shares nothing with the test matrix — no Bun, no Node, no
+  # native addon — so it runs in parallel instead of adding a minute to both legs.
+  docs-site:
+    runs-on: ubuntu-latest
+    name: docs site
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          # Left floating deliberately: the renderer is what decides the output and it is
+          # pinned (requirements-docs.txt); the interpreter minor is not worth a second
+          # pin to keep current.
+          python-version: '3.x'
+      - run: pip install -r requirements-docs.txt
+      # Same command docs.yml deploys with, `--strict` included, so a page that would fail
+      # the deploy fails here instead — while it is still a pull request.
+      - run: mkdocs build --strict --site-dir _site/docs

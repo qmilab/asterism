@@ -1,0 +1,18 @@
+# The documentation site's renderer. Pinned, and used by BOTH the PR gate (ci.yml) and the
+# Pages deploy (docs.yml) — one file so the two can never drift apart and gate a build that
+# is not the build we ship.
+#
+# Why pinned at all: an unpinned `pip install mkdocs-material` resolves at deploy time, so
+# the renderer changed under the site with no commit to point at, and a PR that built fine
+# could deploy differently a week later. This is also not a hypothetical risk right now —
+# Material for MkDocs is warning that MkDocs 2.0 is a backward-incompatible rewrite with,
+# in its own words, no migration path. Floating into that is not a bump we want to take by
+# accident.
+#
+# `mkdocs-material` pins its own `mkdocs`, so this line fixes both: 9.7.7 resolves
+# mkdocs 1.6.1 — the exact pair the published site reports in its generator meta tag.
+#
+# To upgrade: change the version, run `mkdocs build --strict` locally, and confirm the
+# pages still render — the diagrams especially, since Material's Mermaid integration is
+# where a renderer bump would show up first.
+mkdocs-material==9.7.7
