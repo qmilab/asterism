@@ -107,21 +107,26 @@ unsigned) settled the cost question and the feasibility question together.
 Medians over repeated runs; figures are approximate because they vary by a few
 tens of microseconds between runs.
 
+The harness runs a **runtime matrix** — Node (the compatibility floor) and Bun
+(the recommended runtime) — because a feasibility claim about "a JS runtime" that
+is measured for one and asserted for the other is not evidence. **18/18 assertions
+pass, on both.**
+
 | Measurement | Result |
 |---|---|
 | Seatbelt denies a read outside the granted subpath | **EPERM** |
-| A JS runtime boots under `(deny default)` | **yes — Node _and_ Bun** |
-| Workspace read + write inside the jail | **works** |
-| Read of a neighbouring directory in `$HOME` | **EPERM** |
-| Network from the tool host | **EPERM** |
-| `exec` of anything but the runtime itself | **EPERM** |
+| Boots under `(deny default)` | **Node ✓ Bun ✓** |
+| Workspace read + write inside the jail | **works, both** |
+| Read of a neighbouring directory in `$HOME` | **denied, both** |
+| Directory enumeration of `$HOME` | **denied, both** |
+| `stat` of a *known* outside path | **succeeds — published limitation** |
+| Network from the tool host | **denied, both** |
+| `exec` of anything but the runtime itself | **EPERM, both** |
 | In-process `fs.read` today | ≈ **0.011 ms** |
 | Long-lived jailed child, RPC per tool call | ≈ **0.03 ms** |
 | **Added latency per tool call** | ≈ **0.02 ms** |
 | Spawn + first call | **32–46 ms, once per run** |
 | Per-**call** spawn, had we designed it that way | ≈ **1000× worse** |
-
-Bun was measured because Asterism is Bun-first; the tier is not Node-specific.
 
 **Latency does not decide this fork.** Hundredths of a millisecond against a
 model round-trip of 300–3000 ms is not perceptible — *provided the child is
@@ -136,19 +141,26 @@ is paid on the call, not on the walk.
 ### The harness had to be falsified before it could be believed
 
 `--falsify` grants back what the profile denies and requires every security
-assertion to flip. Doing that found **two inert checks in the harness itself**:
+assertion, on every runtime, to flip. Doing that found **three defects in the
+harness itself**, none of which a passing run would have revealed:
 
 - The network check treated anything other than `CONNECTED` as a pass — but a
-  *permitted* connection to `127.0.0.1:1` returns `ECONNREFUSED`. It would have
+  *permitted* connection to a dead port returns `ECONNREFUSED`. It would have
   reported a green network jail with the sandbox wide open.
 - Removing `(deny network*)` did not falsify anything, because `(deny default)`
   already denies it. **That line is belt-and-braces, not the mechanism** — a real
   falsification has to *grant* the capability, not un-deny it.
+- The inert-check *reporter* was itself broken: a prefix matching no result read
+  as `undefined` rather than as a failure, so a mistyped assertion name would have
+  been silently excluded from the matrix.
 
-Both were found only by demanding that the checks fail on command. All three
-security assertions now flip under `--falsify` and pass without it.
+All eight security assertions (four claims × two runtimes) now flip under
+`--falsify` and pass without it. Two further claims are asserted but deliberately
+**outside** the falsification matrix, because they are not security properties:
+that the runtime boots, and that the published `stat` limitation still holds —
+the latter asserted so the record is known to be stale if it ever changes.
 
-### Three traps the harness found, each a design constraint
+### Five traps the harness found, each a design constraint
 
 1. **Seatbelt matches on the real path.** `/var/folders/…` is a symlink to
    `/private/var/folders/…`; a profile written against the symlinked form matches
@@ -168,6 +180,18 @@ security assertions now flip under `--falsify` and pass without it.
    already-known path succeeds** — so existence, size and mtime of a guessed path
    remain observable while its contents do not. A real, bounded limitation, and it
    must be published as one.
+4. **The tool host must be started with its cwd inside a granted path.** Bun reads
+   its working directory at startup; launched from a directory inside the denied
+   subtree it dies with `error: An unknown error occurred (Unexpected)` — no
+   mention of the sandbox, nothing to search for. Node does not care, so this is
+   invisible until the Bun-first product hits it. Setting cwd to the agent's
+   workspace fixes it, which is where the tool host belongs anyway.
+5. **The errno is runtime-specific; judge by reachability, not by error code.** A
+   denied socket surfaces as `EPERM` on Node and **`ECONNREFUSED` on Bun**. A check
+   reading "ECONNREFUSED means it was allowed" therefore fails a jail that is
+   holding. Proven by connecting to a **real listener**: Bun unsandboxed connects,
+   Bun sandboxed does not. The assertion must test whether a connection was
+   *established*, never what error came back.
 
 The profile that actually works, in full:
 
@@ -216,19 +240,46 @@ Four reasons:
 
 ### Why (b) is demoted rather than scheduled
 
-(b)'s sandbox has a **mandatory hole in exactly the place the threat lives.** The
-substrate must reach the model — including `http://localhost:11434` for the local
-providers shipped in #148. Deny network and local models break; allow network and
-a compromised dependency can exfiltrate. The alternative is proxying every model
-call back through the kernel, which is a larger project than the isolation
-itself.
+**An earlier draft of this record demoted (b) on a false premise** — that its
+sandbox must choose between denying network (breaking local models) and allowing
+it (handing a compromised dependency an exfiltration path). That binary is wrong,
+and adversarial review caught it. Measured:
+
+| Profile | loopback:11434 | external:443 |
+|---|---|---|
+| `(deny network*)` | `EPERM` | `EPERM` |
+| **`(allow network-outbound (remote tcp "localhost:*"))`** | **allowed** | **`EPERM`** |
+| `(allow network-outbound (remote tcp "*:443"))` | `EPERM` | allowed |
+
+SBPL filters by host and port. **A substrate sandbox can allow loopback only** —
+so with a local model, (b) is not merely feasible, it is *tight*: the substrate
+reaches `localhost:11434` and nothing else. Local models would not break.
+
+(b) is still second, for three reasons that survive the correction:
+
+1. **It does not close the gap the page names.** The workspace is still not a
+   jail under (b), because the tools are not what is sandboxed.
+2. **Cost.** (b) moves the model client across the boundary and has to stream
+   `RunEvent`s back and settle `output` independently. (c) is `{key, args} →
+   ToolResult` over nine functions in one file.
+3. **Against a hosted provider its containment is weak, and the residual path is
+   in-band.** Host filtering degrades to "any host on port 443", which is a broad
+   exfil channel. And even a perfect host filter would not help: **the substrate's
+   legitimate function is to send workspace content to the model endpoint**, so no
+   network policy can separate "the prompt" from "the prompt plus your SSH key".
+
+That third point is the honest shape of it: **(b)'s value is a function of where
+the model runs.** Airtight for local models, weak for hosted ones — which is the
+majority configuration today.
 
 The threat (b) contains — a compromised dependency — also has cheaper mitigations
 that cost the user nothing: lockfile provenance, dependency review, and the fact
 that `RuntimeAdapter` already hands the substrate no store, no credential reader
 and no memory writer.
 
-**Trigger to revisit (b):** an `exec`-class capability ships, or the substrate's
+**Trigger to revisit (b), sharpened by the above:** when **local models become the
+common configuration** — that is when loopback-only makes (b) genuinely airtight
+rather than partial. Also if an `exec`-class capability ships, or the substrate's
 dependency surface grows materially. Same trigger-gating already used for
 #144/#146/#147.
 

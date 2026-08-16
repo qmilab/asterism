@@ -3,14 +3,16 @@
 //
 // It answers three questions the decision could not be written without:
 //   1. Does macOS seatbelt (`sandbox-exec`) still deny, unsigned, on this host?
-//   2. Can a JS runtime BOOT under a `(deny default)` profile?
+//   2. Can a JS runtime BOOT under a `(deny default)` profile — Node AND Bun?
 //   3. What does a process boundary actually cost per tool call?
 //
 //   node decisions/0001-execution-isolation.bench.mjs
 //   node decisions/0001-execution-isolation.bench.mjs --falsify
 //
-// `--falsify` removes the single deny line the security assertions rest on and
-// requires the escape check to FAIL. Run it. A check that cannot fail is not one.
+// `--falsify` GRANTS BACK what the profile denies and requires every security
+// assertion, on every runtime, to flip to FAIL. Run it. A check that cannot fail
+// is not one — and demanding it found three defects in this file that a passing
+// run never would have.
 //
 // It writes and removes a temporary directory under $HOME — deliberately, because
 // a real agent workspace lives there, and re-allowing a path inside the denied
@@ -19,6 +21,7 @@
 // When the tier in ADR-0001 is built, this is the skeleton of its acceptance test.
 
 import { spawnSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
@@ -106,14 +109,16 @@ if (!sbAvailable) {
 // check, and this repo has been burned by instruments that reported a clean zero.
 const FALSIFY = process.argv.includes("--falsify");
 const home = realpathSync(homedir());
-const runtimeDir = dirname(dirname(execPath));
-const allowProfile = join(root, "toolhost.sb");
-writeFileSync(
-  allowProfile,
-  `(version 1)
+
+/** The tier's profile, parameterised by which runtime binary hosts the tools. */
+function writeProfile(path, runtimePath) {
+  const runtimeDir = dirname(dirname(runtimePath));
+  writeFileSync(
+    path,
+    `(version 1)
 (deny default)
 (allow process-fork)
-(allow process-exec (literal "${execPath}"))
+(allow process-exec (literal "${runtimePath}"))
 (allow sysctl*)
 (allow mach*)
 (allow signal)
@@ -126,7 +131,37 @@ ${FALSIFY ? `(allow process-exec) ;; falsification run` : ""}
 (allow file-write* (subpath "${workspace}") (literal "/dev/null"))
 ${FALSIFY ? "(allow network*) ;; falsification run" : "(deny network*)"}
 `,
-);
+  );
+}
+
+// Asterism is Bun-first and Node is the compatibility floor, so a feasibility
+// claim about "a JS runtime" has to be executable for BOTH — not measured for one
+// and asserted for the other.
+const bunPath = (() => {
+  const found = spawnSync("which", ["bun"], { encoding: "utf8" });
+  if (found.status !== 0) return null;
+  try { return realpathSync(found.stdout.trim()); } catch { return null; }
+})();
+const RUNTIMES = [
+  { name: "node", path: execPath },
+  ...(bunPath ? [{ name: "bun", path: bunPath }] : []),
+];
+
+const allowProfile = join(root, "toolhost.sb");
+writeProfile(allowProfile, execPath);
+
+// A real listener, outside the sandbox, so the network assertion tests reachability
+// rather than an error code. Bound to loopback only.
+// Under --falsify the child DOES connect, then exits — so the server side sees a
+// reset. Swallow it: an unhandled 'error' here kills the whole falsification run.
+const listener = createServer((c) => {
+  c.on("error", () => {});
+  c.end("hi");
+});
+listener.on("error", () => {});
+await new Promise((r) => listener.listen(0, "127.0.0.1", r));
+const LISTEN_PORT = listener.address().port;
+record("control: the probe's target listener is up", "INFO", `127.0.0.1:${LISTEN_PORT}`);
 
 const probe = `
 const fs = require("node:fs");
@@ -147,46 +182,88 @@ try { out.listHome = "LISTED " + fs.readdirSync(process.env.HOME).length + " ent
 // A filesystem tool host has no business execing anything but its own runtime.
 try { require("node:child_process").execSync("/bin/echo x"); out.exec = "EXEC SUCCEEDED"; }
   catch (e) { out.exec = e.code ?? String(e).slice(0, 30); }
-const s = net.connect(1, "127.0.0.1");
-s.on("error", (e) => { out.network = e.code ?? String(e); console.log(JSON.stringify(out)); process.exit(0); });
-s.on("connect", () => { out.network = "CONNECTED"; console.log(JSON.stringify(out)); process.exit(0); });
-setTimeout(() => { out.network = "timeout"; console.log(JSON.stringify(out)); process.exit(0); }, 2000);
+// Connect to a REAL listener the parent is running, and judge only on whether the
+// connection was ESTABLISHED. Inferring from errno is runtime-specific and wrong:
+// Node reports a denied socket as EPERM, Bun reports the same denial as
+// ECONNREFUSED — so "ECONNREFUSED means it was allowed" is a Node-ism that fails
+// Bun for a jail that is in fact holding.
+const s = net.connect(${LISTEN_PORT}, "127.0.0.1");
+const done = (v) => { out.network = v; console.log(JSON.stringify(out)); process.exit(0); };
+s.on("error", (e) => done("blocked:" + (e.code ?? String(e))));
+s.on("connect", () => done("CONNECTED"));
+setTimeout(() => done("blocked:timeout"), 2000);
 `;
 
-if (sbAvailable) {
-  const booted = spawnSync("sandbox-exec", ["-f", allowProfile, execPath, "-e", probe], {
+for (const runtime of sbAvailable ? RUNTIMES : []) {
+  const rp = join(root, `toolhost-${runtime.name}.sb`);
+  writeProfile(rp, runtime.path);
+  const booted = spawnSync("sandbox-exec", ["-f", rp, runtime.path, "-e", probe], {
     encoding: "utf8",
+    cwd: workspace,
   });
   const line = (booted.stdout ?? "").trim().split("\n").pop() ?? "";
   let parsed = null;
   try { parsed = JSON.parse(line); } catch { /* boot failed */ }
+  const t = (name) => `[${runtime.name}] ${name}`;
+
+  // Boot is asked SEPARATELY from the capability probe, with a trivial script.
+  // Collapsing the two reports "cannot boot" for a runtime that boots fine but
+  // whose probe misbehaved — which is exactly what Bun did here, and it sent me
+  // hunting a profile bug that did not exist.
+  const bootCheck = spawnSync("sandbox-exec", ["-f", rp, runtime.path, "-e", 'console.log("BOOTED")'], {
+    encoding: "utf8",
+    cwd: workspace,
+  });
+  const boots = (bootCheck.stdout ?? "").includes("BOOTED");
+  record(
+    t("boots under a (deny default) allow-list profile"),
+    boots ? "PASS" : "FAIL",
+    boots ? "trivial script ran inside the jail" : `exit=${bootCheck.status} stderr=${(bootCheck.stderr ?? "").trim().split("\n")[0]}`,
+  );
+
   if (!parsed) {
     record(
-      "node boots under a (deny default) allow-list profile",
+      t("capability probe returned a readable result"),
       "FAIL",
-      `exit=${booted.status} stderr=${(booted.stderr ?? "").trim().split("\n").slice(0, 3).join(" | ")}`,
+      `exit=${booted.status} stderr=${(booted.stderr ?? "").trim().split("\n").slice(0, 3).join(" | ")}` +
+        (boots ? "  — NOTE: this runtime BOOTS; the probe itself is what failed" : ""),
     );
   } else {
-    record("node boots under a (deny default) allow-list profile", "PASS", JSON.stringify(parsed));
+    record(t("capability probe returned a readable result"), "PASS", JSON.stringify(parsed));
     record(
-      "workspace read+write still work inside the jail",
+      t("workspace read+write still work inside the jail"),
       parsed.readWorkspace === "ok" && parsed.writeWorkspace === "ok" ? "PASS" : "FAIL",
       `read=${parsed.readWorkspace} write=${parsed.writeWorkspace}`,
     );
     record(
-      "the OS denies the escape the kernel check would have caught",
+      t("the OS denies the escape the kernel check would have caught"),
       parsed.readOutside !== "READ SUCCEEDED" ? "PASS" : "FAIL",
       `reading ${outside}/id_rsa → ${parsed.readOutside}`,
     );
     record(
-      "network is denied to the tool host",
-      parsed.network !== "CONNECTED" && parsed.network !== "ECONNREFUSED" ? "PASS" : "FAIL",
-      `connect(127.0.0.1:1) → ${parsed.network}  (ECONNREFUSED means the socket was ALLOWED)`,
+      t("network is denied to the tool host"),
+      parsed.network !== "CONNECTED" ? "PASS" : "FAIL",
+      `connect to a live listener on 127.0.0.1:${LISTEN_PORT} → ${parsed.network}`,
     );
     record(
-      "the tool host cannot exec anything but its own runtime",
+      t("the tool host cannot exec anything but its own runtime"),
       parsed.exec !== "EXEC SUCCEEDED" ? "PASS" : "FAIL",
       `execSync("/bin/echo") → ${parsed.exec}`,
+    );
+    // The ADR leans on BOTH halves of the metadata story. Recorded as assertions,
+    // not as fields inside a JSON blob nobody diffs: a host or profile change that
+    // moved either one would otherwise pass every named check in this file.
+    record(
+      t("directory enumeration outside the workspace is denied"),
+      parsed.listHome === "EPERM" ? "PASS" : "FAIL",
+      `readdir($HOME) → ${parsed.listHome}`,
+    );
+    // NOT a security property — a KNOWN LIMITATION the record publishes. Asserted so
+    // that if it ever stops being true (either way) the ADR is known to be stale.
+    record(
+      t("known limitation still holds: stat of a known outside path succeeds"),
+      parsed.statOutside === "STAT SUCCEEDED (structure visible)" ? "PASS" : "FAIL",
+      `stat(outside/id_rsa) → ${parsed.statOutside}`,
     );
   }
 }
@@ -206,7 +283,7 @@ for (let i = 0; i < SPAWNS; i++) {
     t = process.hrtime.bigint();
     // A FAILED sandbox-exec exits in ~9ms and would otherwise be recorded as a
     // suspiciously fast "spawn" — the first version of this bench did exactly that.
-    const jailed = spawnSync("sandbox-exec", ["-f", allowProfile, execPath, "-e", "0"]);
+    const jailed = spawnSync("sandbox-exec", ["-f", allowProfile, execPath, "-e", "0"], { cwd: workspace });
     if (jailed.status === 0) spawnJailed.push(ms(process.hrtime.bigint() - t));
     else jailedSpawnFailures++;
   }
@@ -261,7 +338,7 @@ const rpc = await new Promise((resolve) => {
     : [childSrc];
   const cmd = sbAvailable ? "sandbox-exec" : execPath;
   const t0 = process.hrtime.bigint();
-  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], cwd: workspace });
   const samples = [];
   const CALLS = 2000;
   let n = 0;
@@ -338,24 +415,32 @@ if (FALSIFY) {
   // NOTE what falsifying these required: dropping `(deny network*)` was NOT enough,
   // because `(deny default)` already denies it — that line is belt-and-braces, not
   // the mechanism. A real falsification must GRANT the thing, not un-deny it.
-  const mustFail = ["the OS denies the escape", "network is denied", "the tool host cannot exec"];
-  const flipped = mustFail.map((prefix) => ({
-    prefix,
-    verdict: results.find((r) => r.name.startsWith(prefix))?.verdict,
-  }));
-  // `undefined` means the PREFIX MATCHED NOTHING — a broken matcher, not a passing
-  // check. It happened. Report it as its own failure rather than as an inert check.
-  const unmatched = flipped.filter((f) => f.verdict === undefined);
-  if (unmatched.length > 0) {
+  //
+  // Every SECURITY claim goes here, for EVERY runtime — matching one runtime's copy
+  // would leave the other's free to be inert. `stat of a known outside path` is
+  // deliberately absent: it is a published limitation, not a security property, and
+  // it correctly still holds when the denies are removed.
+  const mustFail = [
+    "the OS denies the escape",
+    "network is denied",
+    "the tool host cannot exec",
+    "directory enumeration outside the workspace is denied",
+  ];
+  const flipped = results
+    .filter((r) => mustFail.some((m) => r.name.includes(m)))
+    .map((r) => ({ prefix: r.name, verdict: r.verdict }));
+  // A matrix that matched nothing at all is a broken matcher, not a clean run.
+  if (flipped.length < mustFail.length) {
     console.log(
-      `\n✗ BROKEN MATCHER: no result named like ${unmatched.map((f) => `"${f.prefix}"`).join(", ")} — fix the prefix before trusting this run.`,
+      `\n✗ BROKEN MATCHER: expected at least ${mustFail.length} security claims, matched ${flipped.length}.`,
     );
   }
-  const inert = flipped.filter((f) => f.verdict === "PASS");
+  const inert = flipped.filter((f) => f.verdict !== "FAIL");
   console.log(
     inert.length === 0
       ? `\n✓ FALSIFIED CORRECTLY — all ${flipped.length} claims fail once their deny line is removed. The checks are real.`
       : `\n✗ INERT CHECK(S): ${inert.map((f) => `"${f.prefix}" (${f.verdict})`).join(", ")} — passed with the deny removed, so it was never testing anything.`,
   );
 }
+listener.close();
 rmSync(root, { recursive: true, force: true });
