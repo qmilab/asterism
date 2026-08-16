@@ -92,9 +92,14 @@ From `docs/threat-model.md` § "What this boundary is not":
 | Published gap | (b) substrate | (c) tools |
 |---|---|---|
 | Agents share a process | closes it for the substrate | closes the residue |
-| **Workspace is a directory, not a jail** | **no** — tools touch the filesystem, not the model loop | **yes, and only this** |
+| **Workspace is a directory, not a jail** | **no** — tools touch the filesystem, not the model loop | **partly, and only this** — see below |
 | Data is not encrypted at rest | no | no |
 | Runtime cannot vouch for the model | no | no |
+
+"Partly" is doing real work in that table, and §5 measures exactly how much:
+writes and network become OS-enforced absolutely, reads become OS-enforced for
+**user data**, and system paths stay readable. When the page is eventually
+updated it must say that, not "the workspace is now a jail".
 
 **Two of the four gaps are untouched by any isolation tier.** Encryption at rest
 and model trust are separate work. A writeup implying "spike C closes the gap
@@ -118,6 +123,8 @@ pass, on both.**
 | Boots under `(deny default)` | **Node ✓ Bun ✓** |
 | Workspace read + write inside the jail | **works, both** |
 | Read of a neighbouring directory in `$HOME` | **denied, both** |
+| Read of a path **outside** `$HOME` (`/private/tmp/…`) | **denied, both** |
+| Read of a system path (`/etc/hosts`) | **allowed — by design** |
 | Directory enumeration of `$HOME` | **denied, both** |
 | `stat` of a *known* outside path | **succeeds — published limitation** |
 | Network from the tool host | **denied, both** |
@@ -202,13 +209,30 @@ The profile that actually works, in full:
 (allow process-exec (literal "<the runtime binary>"))   ; NOT (allow process*)
 (allow sysctl*) (allow mach*) (allow signal)
 (allow file-read*)
+;; every root that can hold USER DATA — not $HOME alone
+(deny  file-read-data (subpath "/Users"))
 (deny  file-read-data (subpath "<$HOME, realpath'd>"))
+(deny  file-read-data (subpath "/tmp"))
+(deny  file-read-data (subpath "/private/tmp"))
+(deny  file-read-data (subpath "/Volumes"))
 (allow file-read-data (subpath "<runtime dir>"))
 (allow file-read-data (subpath "<Asterism install dir>"))   ; the host's own code
 (allow file-read-data (subpath "<this agent's workspace>"))
 (allow file-write*    (subpath "<this agent's workspace>") (literal "/dev/null"))
 (deny  network*)                                        ; redundant under deny-default
 ```
+
+**Denying `$HOME` alone is not enough, and an earlier draft of this record did
+exactly that.** It produced a profile that confined *writes* to the workspace
+while a read of `/tmp/anything` still succeeded — a jail on one axis, wide open on
+the other, and the harness never noticed because its only escape probe was a
+sibling directory inside `$HOME`. Both runtimes still boot with the full deny list.
+
+So state what the tier is, precisely: **no reads of user data anywhere outside the
+workspace; no writes anywhere but the workspace; no network; no exec beyond the
+runtime.** It is *not* "no reads outside the workspace" — `/usr`, `/etc`,
+`/System` and `/Library` stay readable, deliberately, because the runtime needs
+them and they are not the agent's secrets.
 
 Two notes on that profile. **`(allow process*)` is broader than the tier needs** —
 narrowing to `process-fork` plus an exec of the runtime alone still boots, and
@@ -360,6 +384,9 @@ conditional security page is worse than an honest static one, and
   seatbelt was tested, on one machine.
 - Whether the availability detector ships as an `asterism doctor`-style report.
 - Encryption at rest, and model trust — untouched by any tier here.
+- **How much further reads can be narrowed.** `/etc` and `/usr` stay readable in
+  the measured profile. Whether a tighter list still boots on a clean machine —
+  and what a Linux tier's equivalent list is — is unmeasured.
 - **The metadata leak is accepted but not designed away.** Because path resolution
   needs `lstat` on every component, `stat` of a known path outside the workspace
   still succeeds (enumeration does not). Whether that is worth further narrowing

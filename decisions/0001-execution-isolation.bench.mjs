@@ -49,6 +49,11 @@ mkdirSync(hostDir);
 writeFileSync(join(workspace, "note.md"), "# in the workspace\n");
 // Stands in for a neighbouring agent's workspace / ~/.ssh — same subtree, not granted.
 writeFileSync(join(outside, "id_rsa"), "PRIVATE KEY MATERIAL\n");
+// A second escape target OUTSIDE $HOME. Without this the harness only ever proves
+// confinement for the flattering case, and a profile that denies $HOME alone would
+// look like a jail while /tmp stayed wide open.
+const outsideHome = `/private/tmp/asterism-spike-escape-${process.pid}.txt`;
+writeFileSync(outsideHome, "SECRET OUTSIDE HOME\n");
 
 const ms = (ns) => Number(ns) / 1e6;
 const pct = (sorted, p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
@@ -93,22 +98,31 @@ if (!sbAvailable) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. Can node boot under a REALISTIC allow-list profile — the one (c) would use?
-//    deny default; read the system + the runtime; read/write ONLY the workspace;
-//    no network at all. This is the profile the nine fs.* capabilities need.
+//    deny default; read the system + the runtime; deny every USER-DATA root;
+//    write ONLY the workspace; no network, no exec. This is what the nine fs.*
+//    capabilities need — and note reads of /usr and /etc remain permitted.
 // ─────────────────────────────────────────────────────────────────────────────
 // The profile that actually works. An enumerated read ALLOW-list does not boot a
 // JS runtime (silent SIGABRT — no stderr, because it dies before it has one).
 // What does work is layered, and SBPL is last-rule-wins: read the system broadly,
-// then deny the user's HOME wholesale, then re-allow the runtime's own tree and
-// this agent's workspace. Writes and network stay deny-default.
+// then deny every user-data root, then re-allow the runtime's own tree, the tool
+// host's code, and this agent's workspace. Writes, network and exec stay
+// deny-default.
 //
-// That ordering is the design: the secrets are in $HOME (~/.ssh, other agents'
-// workspaces, the user's documents), not in /usr.
-// `--falsify` removes the one line the security claims rest on. Every isolation
-// assertion below must FLIP to FAIL. A security check that cannot fail is not a
-// check, and this repo has been burned by instruments that reported a clean zero.
+// That ordering IS the design, and it is also its limit: this confines user data,
+// not all reads. /usr and /etc stay readable by construction.
+// `--falsify` grants back what the denies removed. Every isolation assertion must
+// FLIP to FAIL. A security check that cannot fail is not a check, and this repo has
+// been burned by instruments that reported a clean zero.
 const FALSIFY = process.argv.includes("--falsify");
 const home = realpathSync(homedir());
+
+// Denying only $HOME leaves /tmp, mounted volumes and other users' homes readable
+// — so the tier would confine WRITES to the workspace while a read of
+// /tmp/whatever still succeeded. Every location that can hold USER DATA is denied;
+// system paths (/usr, /etc, /System, /Library) stay readable, which is deliberate:
+// they are what the runtime needs to boot, and they are not the agent's secrets.
+const READ_DENY_ROOTS = ["/Users", home, "/tmp", "/private/tmp", "/Volumes"];
 
 /** The tier's profile, parameterised by which runtime binary hosts the tools. */
 function writeProfile(path, runtimePath) {
@@ -123,7 +137,11 @@ function writeProfile(path, runtimePath) {
 (allow mach*)
 (allow signal)
 (allow file-read*)
-${FALSIFY ? ";; READ DENY REMOVED — falsification run" : `(deny file-read-data (subpath "${home}"))`}
+${
+      FALSIFY
+        ? ";; READ DENIES REMOVED — falsification run"
+        : READ_DENY_ROOTS.map((d) => `(deny file-read-data (subpath "${d}"))`).join("\n")
+    }
 ${FALSIFY ? `(allow process-exec) ;; falsification run` : ""}
 (allow file-read-data (subpath "${runtimeDir}"))
 (allow file-read-data (subpath "${hostDir}"))
@@ -173,6 +191,12 @@ try { fs.readFileSync(${JSON.stringify(join(workspace, "note.md"))}); out.readWo
   catch (e) { out.readWorkspace = e.code ?? String(e); }
 try { fs.readFileSync(${JSON.stringify(join(outside, "id_rsa"))}); out.readOutside = "READ SUCCEEDED"; }
   catch (e) { out.readOutside = e.code ?? String(e); }
+// The escape that is NOT under $HOME — the case a $HOME-only deny would miss.
+try { fs.readFileSync(${JSON.stringify(outsideHome)}); out.readOutsideHome = "READ SUCCEEDED"; }
+  catch (e) { out.readOutsideHome = e.code ?? String(e); }
+// A system path SHOULD stay readable; the tier confines user data, not /etc.
+try { fs.readFileSync("/etc/hosts"); out.readSystem = "ok"; }
+  catch (e) { out.readSystem = e.code ?? String(e); }
 // Metadata is deliberately NOT denied (path resolution into the workspace needs it).
 // Record what that leaks, rather than letting it pass unnoticed.
 try { fs.statSync(${JSON.stringify(join(outside, "id_rsa"))}); out.statOutside = "STAT SUCCEEDED (structure visible)"; }
@@ -239,6 +263,16 @@ for (const runtime of sbAvailable ? RUNTIMES : []) {
       t("the OS denies the escape the kernel check would have caught"),
       parsed.readOutside !== "READ SUCCEEDED" ? "PASS" : "FAIL",
       `reading ${outside}/id_rsa → ${parsed.readOutside}`,
+    );
+    record(
+      t("the OS denies an escape OUTSIDE $HOME too"),
+      parsed.readOutsideHome !== "READ SUCCEEDED" ? "PASS" : "FAIL",
+      `reading ${outsideHome} → ${parsed.readOutsideHome}`,
+    );
+    record(
+      t("system paths stay readable (the tier confines user data, not /etc)"),
+      parsed.readSystem === "ok" ? "PASS" : "FAIL",
+      `/etc/hosts → ${parsed.readSystem}`,
     );
     record(
       t("network is denied to the tool host"),
@@ -421,7 +455,8 @@ if (FALSIFY) {
   // deliberately absent: it is a published limitation, not a security property, and
   // it correctly still holds when the denies are removed.
   const mustFail = [
-    "the OS denies the escape",
+    "the OS denies the escape the kernel check",
+    "the OS denies an escape OUTSIDE $HOME",
     "network is denied",
     "the tool host cannot exec",
     "directory enumeration outside the workspace is denied",
@@ -462,4 +497,5 @@ if (FALSIFY) {
   }
 }
 listener.close();
+try { rmSync(outsideHome, { force: true }); } catch {}
 rmSync(root, { recursive: true, force: true });
