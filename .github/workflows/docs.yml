@@ -16,10 +16,16 @@ name: docs
 on:
   push:
     branches: [main]
+    # Every INPUT to the build below, not just the content. `requirements-docs.txt` pins
+    # the renderer, so a commit that only bumps that pin changes what the site is built
+    # with — and its own documented upgrade path is exactly that commit. Omit it and the
+    # bump merges to `main` without deploying, leaving the published site on the old
+    # renderer until some unrelated docs change happens along.
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
       - 'landing/**'
+      - 'requirements-docs.txt'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -40,8 +46,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
-      - run: pip install mkdocs-material
-      - run: mkdocs build --site-dir _site/docs
+      # Pinned in requirements-docs.txt, shared with the PR gate in ci.yml so the build
+      # that is gated and the build that is deployed are the same build.
+      - run: pip install -r requirements-docs.txt
+      # `--strict` turns MkDocs' warnings — an unresolvable internal link, a nav entry
+      # pointing at a page that does not exist — into a failed build. Without it those
+      # deploy silently, and the first person to find them is a reader.
+      - run: mkdocs build --strict --site-dir _site/docs
       # Land the landing page at the /asterism/ root, next to /asterism/docs/.
       # README.md is a maintainer note, not a published asset — drop it.
       - run: |

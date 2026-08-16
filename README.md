@@ -106,7 +106,7 @@ See [Run in a container](./docs/container.md) for the full setup.
 | **Run as a service** | Keep an agent running in the background, started by your OS. → [Service](./docs/service.md) |
 | **Container image** | Package the same runtime to run on any container host. → [Container](./docs/container.md) |
 
-> **What "separate" means today.** Each agent's memory, secrets, skills, workspace, and event log are scoped to it and enforced everywhere data is read or written — real, tested separation. This is *logical* scoping, **not** OS-level containment: it does not yet claim to safely contain deliberately hostile code. Stronger execution isolation comes in a later phase. See [what isolation means today](./docs/concepts.md#what-isolation-means-today).
+> **What "separate" means today.** Each agent's memory, secrets, skills, workspace, and event log are scoped to it and enforced everywhere data is read or written — real, tested separation. This is *logical* scoping, **not** OS-level containment: it does not yet claim to safely contain deliberately hostile code. Stronger execution isolation comes in a later phase. See [what isolation means today](./docs/concepts.md#what-isolation-means-today), or the [threat model](./docs/threat-model.md) for the enforced-versus-not account in full.
 
 ## Documentation
 
@@ -118,7 +118,7 @@ Full docs live in [`docs/`](./docs/) ([browse the site](https://qmilab.com/aster
 
 **Reference** — [Command reference](./docs/commands.md)
 
-**Deep dive** — [Five-claims walkthrough](./docs/walkthrough.md): the separation guarantees proven end to end.
+**Deep dive** — [Five-claims walkthrough](./docs/walkthrough.md): the separation guarantees proven end to end · [Threat model](./docs/threat-model.md): what the kernel enforces, the test behind each claim, and what today's boundary does not contain.
 
 ## Continuous, reviewable learning
 

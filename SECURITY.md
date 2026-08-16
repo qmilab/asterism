@@ -29,6 +29,14 @@ We'll acknowledge your report, work with you on a fix, and credit you in the
 advisory unless you'd prefer to stay anonymous. Please give us a reasonable
 window to ship a fix before any public disclosure.
 
+## What we enforce, and what we don't
+
+Before reporting, it may help to read the
+[**threat model**](https://qmilab.com/asterism/docs/threat-model/). It sets out
+what the kernel enforces and by what mechanism — with the test behind each claim
+— along with the known gaps and, explicitly, what today's boundary does not
+contain. Anything that breaks a claim on that page is in scope here.
+
 ## What's in scope
 
 Anything that breaks an isolation or safety invariant, including:

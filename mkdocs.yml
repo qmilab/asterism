@@ -45,6 +45,7 @@ nav:
       - Command reference: commands.md
   - Deep dive:
       - Five-claims walkthrough: walkthrough.md
+      - Threat model: threat-model.md
 
 markdown_extensions:
   - admonition
