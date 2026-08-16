@@ -102,3 +102,13 @@ jobs:
       # can still tell a broken page from a working one rather than passing vacuously.
       - run: bun run check:docs:self-test
       - run: bun run check:docs
+
+      # The threat model claims "this invariant is proven by that test" ~40 times. Each is a
+      # citation that goes stale silently the first time a test is renamed — and a dead
+      # citation in a security document reads as fabrication, not as a formatting nit. This
+      # resolves every one against the tests that actually RAN AND PASSED, read from the
+      # runner's own report rather than grepped out of source. Self-test first, same reason
+      # as the docs check: it plants a renamed, a misfiled, a paraphrased, a skipped and a
+      # failed citation, so a green run cannot be vacuous.
+      - run: bun run check:safety-case:self-test
+      - run: bun run check:safety-case

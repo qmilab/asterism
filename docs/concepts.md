@@ -380,7 +380,9 @@ it happened, never the task text or the result. The full picture is in
 ## What isolation means today
 
 Asterism leans on the word *boundary*, so it is worth being exact about which
-boundary exists today.
+boundary exists today. This section is the short version; the
+[threat model](./threat-model.md) is the long one, with the test behind each
+claim and a full account of the known gaps.
 
 **What you get now:** each agent's memory, secrets, skills, workspace, trust
 profile, event log, standing objectives, working notes, and the tools available to

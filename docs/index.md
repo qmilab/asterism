@@ -43,6 +43,9 @@ deleting one, and remembers what you approve.
 - **[Five-claims walkthrough](./walkthrough.md)** — the canonical demo, with the
   separation and trust guarantees proven end to end. The skeptic's version of the
   tutorial.
+- **[Threat model](./threat-model.md)** — what the runtime enforces and by what
+  mechanism, each claim carrying the test that proves it — and, just as plainly,
+  what today's boundary does not contain.
 
 ## Quick links
 
@@ -57,6 +60,7 @@ deleting one, and remembers what you approve.
 | Choose which tools an agent has | [Command reference → `capabilities`](./commands.md#capabilities) |
 | Look up a command | [Command reference](./commands.md) |
 | See the separation guarantees proven | [Walkthrough](./walkthrough.md) |
+| Know exactly what is enforced — and what is not | [Threat model](./threat-model.md) |
 | Call an agent over HTTP | [HTTP endpoint](./http.md) |
 | Watch and steer every agent at once | [Dashboard](./dashboard.md) |
 | Keep an agent running in the background | [Run as a service](./service.md) |
