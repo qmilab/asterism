@@ -16,10 +16,16 @@ name: docs
 on:
   push:
     branches: [main]
+    # Every INPUT to the build below, not just the content. `requirements-docs.txt` pins
+    # the renderer, so a commit that only bumps that pin changes what the site is built
+    # with — and its own documented upgrade path is exactly that commit. Omit it and the
+    # bump merges to `main` without deploying, leaving the published site on the old
+    # renderer until some unrelated docs change happens along.
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
       - 'landing/**'
+      - 'requirements-docs.txt'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
