@@ -2,7 +2,9 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## Unreleased
+## 0.7.0 — 2026-08-17
+
+Two ways to judge Asterism before you commit anything to it. It now runs with no account and no key anywhere — point it at a model already running on your own machine, and nothing an agent writes ever leaves it. And you can read precisely what its boundary does and does not hold: a published threat model that names the mechanism behind each claim and the test that proves it, and is as specific about the gaps as about the guarantees.
 
 ### Added
 

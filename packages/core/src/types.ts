@@ -151,10 +151,11 @@ export type ConnectionMode = (typeof CONNECTION_MODES)[number];
  * - `active`  — the default on create, and the ONLY state that grants the exchange.
  * - `revoked` — withdrawn; kept for audit/history, no longer grants anything.
  *
- * T1 creates only `active` connections (there is no revoke command yet); the state exists
- * so the "active connection IS the permission" check is honest from day one, and so a
- * later revoke is an additive transition, not a schema reshape — the same forward-compat
- * discipline the reserved `teamId`/`ownerPrincipalId` columns follow.
+ * `revoked` was carried from the first release, before any command could produce it, so
+ * that the "active connection IS the permission" check was honest from day one and revoke
+ * would land as an additive transition rather than a schema reshape — the same
+ * forward-compat discipline the reserved `teamId`/`ownerPrincipalId` columns follow. It
+ * paid off: `asterism disconnect` writes it now, and nothing about the check changed.
  */
 export const CONNECTION_STATUSES = ["active", "revoked"] as const;
 export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
