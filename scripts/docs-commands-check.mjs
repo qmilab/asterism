@@ -727,15 +727,22 @@ const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
  *
  * Matched broadly and then CLASSIFIED by the resolver, rather than recognised by a
  * pattern that enumerates the shapes we happened to remember. Enumerating shapes is the
- * mistake this whole file exists to stop making. The HTML matcher takes all three
- * attribute forms for the same reason: this repo happens to use double quotes today, and
- * "the form we currently write" is the kind of boundary that gets crossed silently.
+ * mistake this whole file exists to stop making — and the first draft of THIS function
+ * made it again in miniature: it took HTML attributes in all three quoting forms while
+ * accepting only a double-quoted Markdown title, so `[x](./missing.md 'label')` matched
+ * nothing and was dropped without a word. CommonMark allows `"…"`, `'…'` and `(…)` titles
+ * and an `<…>` destination; all four are taken here.
+ *
+ * The general defence is the last loop: anything shaped like an inline link that this
+ * parser could not take apart is REPORTED as undecidable rather than skipped. A shape we
+ * do not recognise is precisely the failure this pass exists to stop, and silence is how
+ * the previous version of it hid five at once.
  *
  * A fenced block is skipped: a link inside a code listing is a sample, not a claim about
  * a file in this repo, and reporting it would manufacture a defect.
  */
 function* internalLinks(text) {
-  const inline = /\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
+  const inline = /\]\(\s*(<[^<>]*>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?\s*\)/g;
   const htmlAttr =
     /<[a-zA-Z][^>]*?\s(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
   const refDef = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/;
@@ -749,12 +756,15 @@ function* internalLinks(text) {
     }
     if (inFence) continue;
     const ref = refDef.exec(line);
+    const inlineTargets = [...line.matchAll(inline)].map((m) => m[1].replace(/^<|>$/g, ""));
     const targets = [
-      ...[...line.matchAll(inline)].map((m) => m[1]),
+      ...inlineTargets,
       ...[...line.matchAll(htmlAttr)].map((m) => m[1] ?? m[2] ?? m[3]),
       ...(ref ? [ref[1]] : []),
     ];
     for (const target of targets) if (!EXTERNAL_TARGET.test(target)) yield { target, line: i + 1 };
+    const unparsed = line.split("](").length - 1 - inlineTargets.length;
+    for (let n = 0; n < unparsed; n++) yield { target: null, line: i + 1, raw: line.trim() };
   }
 }
 
@@ -819,9 +829,13 @@ function checkLinks(root = ROOT, files = linkSourceFiles()) {
   let links = 0;
   for (const rel of files) {
     const abs = join(rootAbs, rel);
-    for (const { target, line } of internalLinks(readFileSync(abs, "utf8"))) {
+    for (const { target, line, raw } of internalLinks(readFileSync(abs, "utf8"))) {
       links++;
       const where = `${rel}:${line}`;
+      if (target === null) {
+        unchecked.push(`${where} → could not read the link destination (${raw.slice(0, 90)})`);
+        continue;
+      }
       const hash = target.indexOf("#");
       const pathPart = hash === -1 ? target : target.slice(0, hash);
       const frag = hash === -1 ? "" : target.slice(hash + 1);
@@ -843,6 +857,23 @@ function checkLinks(root = ROOT, files = linkSourceFiles()) {
     }
   }
   return { broken, unchecked, links, files: files.length };
+}
+
+/**
+ * The report's sentence about links, derived from the result rather than written beside
+ * it. The whole defect this pass is repairing was a sentence that had outgrown its check,
+ * so the sentence is now a function of the numbers: a link the pass could not decide is
+ * named IN it, not left for a section further down to quietly contradict.
+ */
+function linkSummary({ links, files, broken, unchecked }) {
+  const where = `internal links in the ${files} docs/ and root markdown files`;
+  if (unchecked.length === 0) {
+    return `Every one of the ${links} ${where} resolves, headings included.`;
+  }
+  return (
+    `${links - broken.length - unchecked.length} of the ${links} ${where} resolve, headings` +
+    ` included; ${unchecked.length} could not be decided and are listed below.`
+  );
 }
 
 /**
@@ -875,6 +906,10 @@ function probeLinkFixture() {
     ["OTHER.md#fenced-only", "section that exists only as a # comment inside a fence"],
     ["sub/nosuch-ref.md", "missing target of a reference-style definition"],
     ["../nosuch-from-sub.md", "missing page relative to a file in a subdirectory"],
+    ["nosuch-single-title.md", "missing page behind a SINGLE-quoted Markdown title"],
+    ["nosuch-paren-title.md", "missing page behind a PARENTHESISED Markdown title"],
+    ["nosuch-angle.md", "missing page given as an <angle-bracket> destination"],
+    ["nosuch spaced.md", "missing page whose <angle-bracket> destination contains a space"],
   ];
   // Every one of these is correct and must stay unreported.
   const CONTROLS = [
@@ -892,6 +927,10 @@ function probeLinkFixture() {
   ];
   // Not failures, but they must not be silently counted as resolved either.
   const UNDECIDABLE = ["../outside-the-fixture.md", "img/real.png#zoom"];
+  // A link shape this parser cannot take apart is the case that has to stay LOUD: a
+  // silent drop is how the previous matcher reported five blind spots as "every link
+  // resolves". The count assertion below is what makes that general rather than a list.
+  const UNPARSEABLE = "could not read the link destination";
 
   const dir = mkdtempSync(join(tmpdir(), "asterism-doclinks-"));
   try {
@@ -947,8 +986,15 @@ function probeLinkFixture() {
         "- [ok9](sub/)",
         "- [ok11](OTHER.md#repeat)",
         "- <a href='sub/page.md'>ok12</a>",
+        "- [t1](nosuch-single-title.md 'label')",
+        "- [t2](nosuch-paren-title.md (label))",
+        "- [t3](<nosuch-angle.md>)",
+        "- [t4](<nosuch spaced.md>)",
+        "- [ok13](OTHER.md 'label')",
+        '- [ok14](OTHER.md#real-heading "label")',
         "- [u1](../outside-the-fixture.md)",
         "- [u2](img/real.png#zoom)",
+        "- [u3](this-shape-has-no-closing-paren.md",
         "",
         "```markdown",
         "- [ok7](nosuch-in-fence.md)",
@@ -963,7 +1009,8 @@ function probeLinkFixture() {
       ),
     );
 
-    const { broken, unchecked } = checkLinks(dir, ["index.md", "OTHER.md", "sub/page.md"]);
+    const result = checkLinks(dir, ["index.md", "OTHER.md", "sub/page.md"]);
+    const { broken, unchecked } = result;
     const reported = (list, target) => list.some((entry) => entry.includes(`→ ${target} (`));
     const failures = [];
     for (const [target, why] of PLANTED) {
@@ -977,10 +1024,30 @@ function probeLinkFixture() {
       if (reported(broken, target)) failures.push(`  reported as broken, not undecidable: ${target}`);
       if (!reported(unchecked, target)) failures.push(`  silently accepted: ${target}`);
     }
-    // A count check on top of the membership checks: anything reported that no line above
-    // names is a defect the fixture did not plant, and it should be looked at.
+    if (!unchecked.some((entry) => entry.includes(UNPARSEABLE))) {
+      failures.push("  silently dropped a link shape it could not parse");
+    }
+    // Count checks on top of the membership checks. Anything reported that no line above
+    // names is a defect the fixture did not plant — and on the `unchecked` side that is
+    // the whole general defence: a link form this parser stops recognising lands here and
+    // shows up as an extra, whether or not anyone thought to plant that form.
     if (broken.length !== PLANTED.length) {
       failures.push(`  reported ${broken.length} broken links, planted ${PLANTED.length}`);
+    }
+    if (unchecked.length !== UNDECIDABLE.length + 1) {
+      failures.push(
+        `  reported ${unchecked.length} undecidable links, expected ${UNDECIDABLE.length + 1}:` +
+          `\n${unchecked.map((u) => `      ${u}`).join("\n")}`,
+      );
+    }
+    // The sentence the report prints is part of the check, not decoration: it claimed
+    // "every internal link resolves" while listing undecidable ones underneath.
+    const summary = linkSummary(result);
+    if (/^Every one of/.test(summary)) {
+      failures.push(`  claims every link resolves with ${unchecked.length} undecided: ${summary}`);
+    }
+    if (!linkSummary({ links: 3, files: 1, broken: [], unchecked: [] }).startsWith("Every one of")) {
+      failures.push("  will not say 'every' even when nothing is undecided");
     }
     return failures;
   } finally {
@@ -1269,10 +1336,7 @@ function report(total, tally, groups, coverageWork) {
     // The numbers are the point. "Every internal doc link resolves" was true of a pass
     // that had looked at a fraction of them; saying how many were read, and out of what,
     // is what stops the sentence from outgrowing the check again.
-    console.log(
-      `Every one of the ${links.links} internal links in the ${links.files} docs/ and` +
-        ` root markdown files resolves, headings included.`,
-    );
+    console.log(linkSummary(links));
   }
   if (links.unchecked.length) {
     console.log(`\nINTERNAL LINKS THIS PASS CANNOT DECIDE (${links.unchecked.length}):`);
