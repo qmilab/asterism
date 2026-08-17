@@ -720,29 +720,109 @@ function anchorsOf(text) {
 const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
 /**
+ * Read one inline link destination, starting just after `](`. Returns `{ dest, end }`, or
+ * null when the text is not a readable inline link — which the caller REPORTS rather than
+ * skips.
+ *
+ * A scanner rather than a pattern, because the destination rule is not expressible as one.
+ * A destination may contain parentheses when they BALANCE, and may escape them with a
+ * backslash; the renderer resolves both. Checked against the site's own Python-Markdown:
+ * `[a](assets/flow(2).png)` renders `href="assets/flow(2).png"`, `[c](foo\(bar\).md)`
+ * renders `href="foo(bar).md"`, and `[e](unbalanced(.md)` renders as literal text and is
+ * not a link at all.
+ *
+ * An expression that stops at the first `)` gets all three wrong in the same direction —
+ * it resolves `assets/flow(2`, reports a link that is not broken, and reports a
+ * non-link. That is the one failure this file must not have: it has manufactured a defect
+ * once already, and four CORRECT links were edited to agree with it, breaking the
+ * published page while CI stayed green. Hence a scanner, and hence the fixture controls.
+ */
+function readInlineLink(line, start) {
+  let i = start;
+  const isSpace = (ch) => ch !== undefined && /\s/.test(ch);
+  while (isSpace(line[i])) i++;
+  let dest = "";
+  if (line[i] === "<") {
+    i++;
+    while (i < line.length && line[i] !== ">") {
+      if (line[i] === "\\" && i + 1 < line.length) i++;
+      dest += line[i++];
+    }
+    if (line[i] !== ">") return null;
+    i++;
+  } else {
+    let depth = 0;
+    for (; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === "\\" && i + 1 < line.length) {
+        dest += line[++i];
+        continue;
+      }
+      if (isSpace(ch)) break;
+      if (ch === "(") depth++;
+      else if (ch === ")") {
+        if (depth === 0) break;
+        depth--;
+      }
+      dest += ch;
+    }
+    // An UNBALANCED paren is the other place the two renderers part company, measured the
+    // same way: `[x](a(b "t")` links to `a(b` under Python-Markdown, while CommonMark
+    // admits parentheses in a bare destination only in balanced pairs — so on GitHub it
+    // is not a link at all. Declining is the only answer true of both.
+    if (depth !== 0) return null;
+  }
+  while (isSpace(line[i])) i++;
+  const opener = line[i];
+  // Quoted titles only. A PARENTHESISED title is where the two renderers that see these
+  // files disagree, measured not assumed: `[x](page.md (t))` is a link to `page.md` under
+  // CommonMark — so on GitHub, which renders README — and a link to the whole of
+  // `page.md (t)` under the Python-Markdown that builds the site. Guessing either way is
+  // a defect: take CommonMark and a docs page's broken link reports as resolved; take
+  // Python-Markdown and a README link reports as broken. So this returns null and the
+  // caller calls it undecidable, which is the one answer that is true of both.
+  if (opener === '"' || opener === "'") {
+    const closer = opener;
+    i++;
+    while (i < line.length && line[i] !== closer) {
+      if (line[i] === "\\" && i + 1 < line.length) i++;
+      i++;
+    }
+    if (line[i] !== closer) return null;
+    i++;
+    while (isSpace(line[i])) i++;
+  }
+  if (line[i] !== ")") return null;
+  return { dest, end: i + 1 };
+}
+
+/**
  * Every internal link a file makes, in every form these pages actually use: markdown
  * inline links AND images, reference definitions, and raw HTML `href`/`src` — README's
  * wordmark, both screenshots, and its "Watch it live" link are HTML, and the pass that
  * only understood markdown could not see any of them.
  *
- * Matched broadly and then CLASSIFIED by the resolver, rather than recognised by a
+ * Read by a scanner and then CLASSIFIED by the resolver, rather than recognised by a
  * pattern that enumerates the shapes we happened to remember. Enumerating shapes is the
- * mistake this whole file exists to stop making — and the first draft of THIS function
- * made it again in miniature: it took HTML attributes in all three quoting forms while
- * accepting only a double-quoted Markdown title, so `[x](./missing.md 'label')` matched
- * nothing and was dropped without a word. CommonMark allows `"…"`, `'…'` and `(…)` titles
- * and an `<…>` destination; all four are taken here.
+ * mistake this whole file exists to stop making — and the first two drafts of THIS
+ * function each made it again in miniature. The first took HTML attributes in all three
+ * quoting forms while accepting only a double-quoted Markdown title, so
+ * `[x](./missing.md 'label')` matched nothing and was dropped without a word. The second
+ * fixed that with a wider expression and still stopped the destination at the first `)`,
+ * which reads a VALID `[a](flow(2).png)` as a link to `flow(2` — inventing a broken link
+ * rather than missing one. It also took a parenthesised title on the strength of the
+ * CommonMark spec, which the site's renderer does not implement. `readInlineLink` is
+ * where all of that now lives, checked case by case against the renderer itself.
  *
- * The general defence is the last loop: anything shaped like an inline link that this
- * parser could not take apart is REPORTED as undecidable rather than skipped. A shape we
- * do not recognise is precisely the failure this pass exists to stop, and silence is how
- * the previous version of it hid five at once.
+ * The general defence is that every `](` is accounted for: one that the scanner cannot
+ * read is REPORTED as undecidable rather than skipped. A shape we do not recognise is
+ * precisely the failure this pass exists to stop, and silence is how the version before
+ * these hid five at once.
  *
  * A fenced block is skipped: a link inside a code listing is a sample, not a claim about
  * a file in this repo, and reporting it would manufacture a defect.
  */
 function* internalLinks(text) {
-  const inline = /\]\(\s*(<[^<>]*>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?\s*\)/g;
   const htmlAttr =
     /<[a-zA-Z][^>]*?\s(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
   const refDef = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/;
@@ -755,16 +835,22 @@ function* internalLinks(text) {
       continue;
     }
     if (inFence) continue;
+    for (let at = line.indexOf("]("); at !== -1; ) {
+      const parsed = readInlineLink(line, at + 2);
+      if (parsed === null) {
+        yield { target: null, line: i + 1, raw: line.trim() };
+        at = line.indexOf("](", at + 2);
+        continue;
+      }
+      if (!EXTERNAL_TARGET.test(parsed.dest)) yield { target: parsed.dest, line: i + 1 };
+      at = line.indexOf("](", parsed.end);
+    }
     const ref = refDef.exec(line);
-    const inlineTargets = [...line.matchAll(inline)].map((m) => m[1].replace(/^<|>$/g, ""));
     const targets = [
-      ...inlineTargets,
       ...[...line.matchAll(htmlAttr)].map((m) => m[1] ?? m[2] ?? m[3]),
       ...(ref ? [ref[1]] : []),
     ];
     for (const target of targets) if (!EXTERNAL_TARGET.test(target)) yield { target, line: i + 1 };
-    const unparsed = line.split("](").length - 1 - inlineTargets.length;
-    for (let n = 0; n < unparsed; n++) yield { target: null, line: i + 1, raw: line.trim() };
   }
 }
 
@@ -907,9 +993,10 @@ function probeLinkFixture() {
     ["sub/nosuch-ref.md", "missing target of a reference-style definition"],
     ["../nosuch-from-sub.md", "missing page relative to a file in a subdirectory"],
     ["nosuch-single-title.md", "missing page behind a SINGLE-quoted Markdown title"],
-    ["nosuch-paren-title.md", "missing page behind a PARENTHESISED Markdown title"],
     ["nosuch-angle.md", "missing page given as an <angle-bracket> destination"],
     ["nosuch spaced.md", "missing page whose <angle-bracket> destination contains a space"],
+    ["img/nosuch(1).png", "missing image whose destination contains BALANCED parentheses"],
+    ["img/nosuch(2).png", "missing image whose parentheses are BACKSLASH-ESCAPED"],
   ];
   // Every one of these is correct and must stay unreported.
   const CONTROLS = [
@@ -924,19 +1011,29 @@ function probeLinkFixture() {
     "../OTHER.md#real-heading",
     "OTHER.md#repeat",
     "sub/page.md",
+    // A real file whose name contains parentheses, linked both bare and escaped. The
+    // renderer resolves both to the same path; a checker that stops at the first `)`
+    // calls both of them broken and invites someone to "fix" a working link.
+    "img/real(1).png",
   ];
   // Not failures, but they must not be silently counted as resolved either.
   const UNDECIDABLE = ["../outside-the-fixture.md", "img/real.png#zoom"];
   // A link shape this parser cannot take apart is the case that has to stay LOUD: a
   // silent drop is how the previous matcher reported five blind spots as "every link
   // resolves". The count assertion below is what makes that general rather than a list.
+  // Four are planted, each a shape where guessing would be a defect rather than a miss:
+  // an unclosed `](`; an unbalanced paren the site's renderer leaves as literal text; a
+  // PARENTHESISED title; and an unbalanced paren followed by a quoted title, where the
+  // site links to a truncated path and GitHub links to nothing (see readInlineLink).
   const UNPARSEABLE = "could not read the link destination";
+  const UNPARSEABLE_PLANTS = 4;
 
   const dir = mkdtempSync(join(tmpdir(), "asterism-doclinks-"));
   try {
     mkdirSync(join(dir, "sub"), { recursive: true });
     mkdirSync(join(dir, "img"), { recursive: true });
     writeFileSync(join(dir, "img", "real.png"), "");
+    writeFileSync(join(dir, "img", "real(1).png"), "");
     writeFileSync(
       join(dir, "OTHER.md"),
       [
@@ -992,9 +1089,15 @@ function probeLinkFixture() {
         "- [t4](<nosuch spaced.md>)",
         "- [ok13](OTHER.md 'label')",
         '- [ok14](OTHER.md#real-heading "label")',
+        "- [p1](img/nosuch(1).png)",
+        "- [p2](img/nosuch\\(2\\).png)",
+        "- [ok15](img/real(1).png)",
+        "- [ok16](img/real\\(1\\).png)",
         "- [u1](../outside-the-fixture.md)",
         "- [u2](img/real.png#zoom)",
         "- [u3](this-shape-has-no-closing-paren.md",
+        "- [u4](unbalanced(.md)",
+        '- [u5](a(b "t")',
         "",
         "```markdown",
         "- [ok7](nosuch-in-fence.md)",
@@ -1034,9 +1137,9 @@ function probeLinkFixture() {
     if (broken.length !== PLANTED.length) {
       failures.push(`  reported ${broken.length} broken links, planted ${PLANTED.length}`);
     }
-    if (unchecked.length !== UNDECIDABLE.length + 1) {
+    if (unchecked.length !== UNDECIDABLE.length + UNPARSEABLE_PLANTS) {
       failures.push(
-        `  reported ${unchecked.length} undecidable links, expected ${UNDECIDABLE.length + 1}:` +
+        `  reported ${unchecked.length} undecidable links, expected ${UNDECIDABLE.length + UNPARSEABLE_PLANTS}:` +
           `\n${unchecked.map((u) => `      ${u}`).join("\n")}`,
       );
     }
