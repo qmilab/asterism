@@ -92,6 +92,40 @@ function preflight() {
     process.exit(2);
   }
 }
+
+/** The directory this checker assumes mkdocs publishes. Asserted below, not guessed. */
+const SITE_DIR = "docs";
+
+/**
+ * Three separate things here read `docs/` as "the pages mkdocs publishes": which files
+ * the command pass extracts from, which files the link pass reads, and — since anchors
+ * are resolved by the renderer that serves the page — WHICH ANCHOR RULE a link gets.
+ *
+ * None of them asks `mkdocs.yml`. If `docs_dir` ever moves, all three go on being sure
+ * about a directory that is no longer the site, and the anchor rule is the one that goes
+ * wrong quietly: every published page would be judged by GitHub's slug rule instead of
+ * mkdocs', and the pass would keep reporting that every link resolves.
+ *
+ * Deriving the value into all three is a bigger change than this is worth while the
+ * answer is `docs`. Making the assumption LOUD is not: an assumption a checker cannot
+ * state is the same defect as a claim it cannot check, which is the whole subject of
+ * this file.
+ */
+function assertSiteDir() {
+  const config = readFileSync(join(ROOT, "mkdocs.yml"), "utf8");
+  const declared = /^docs_dir:\s*(\S+)\s*$/m.exec(config)?.[1]?.replace(/^["']|["']$/g, "");
+  // Absent is not a mismatch: mkdocs defaults `docs_dir` to `docs`, which is what we assume.
+  if (declared !== undefined && declared !== SITE_DIR) {
+    console.error(
+      `mkdocs.yml publishes '${declared}', and this checker assumes '${SITE_DIR}'.\n` +
+        `Three things depend on it: which files the command pass extracts from, which\n` +
+        `files the link pass reads, and which anchor rule each link is judged by — a\n` +
+        `page on the site uses mkdocs' slugs, anything else uses GitHub's.\n` +
+        `Point SITE_DIR at '${declared}' (and re-check anchorRuleFor) before this can run.`,
+    );
+    process.exit(2);
+  }
+}
 const SELF_TEST = process.argv.includes("--self-test");
 /**
  * Report where a page's pasted OUTPUT no longer matches what the binary prints. Not a
@@ -106,10 +140,10 @@ const HOME = ".asterism";
 
 /** Source files whose fenced blocks are checked. */
 function sourceFiles() {
-  const docs = readdirSync(join(ROOT, "docs"))
+  const docs = readdirSync(join(ROOT, SITE_DIR))
     .filter((f) => f.endsWith(".md"))
     .sort()
-    .map((f) => join("docs", f));
+    .map((f) => join(SITE_DIR, f));
   return [...docs, "README.md"];
 }
 
@@ -737,7 +771,7 @@ function githubAnchorOf(heading) {
  * the page that makes the claim.
  */
 function anchorRuleFor(sourceRel, targetRel) {
-  const inDocs = (p) => p.startsWith("docs/") || p.startsWith(`docs${sep}`);
+  const inDocs = (p) => p.startsWith(`${SITE_DIR}/`) || p.startsWith(`${SITE_DIR}${sep}`);
   return inDocs(sourceRel) && inDocs(targetRel)
     ? { slug: anchorOf, joiner: "_", name: "mkdocs" }
     : { slug: githubAnchorOf, joiner: "-", name: "github" };
@@ -930,7 +964,7 @@ function linkSourceFiles() {
   return tracked
     .split("\0")
     .filter(Boolean)
-    .filter((p) => p.startsWith("docs/") || !p.includes("/"))
+    .filter((p) => p.startsWith(`${SITE_DIR}/`) || !p.includes("/"))
     .sort();
 }
 
@@ -1696,6 +1730,7 @@ function plantedFailures() {
 }
 
 preflight();
+assertSiteDir();
 try {
   ({ AsterismStore, CONNECTION_MODES } = await import(CORE));
   MODEL_CONFIG = await import(MODEL_CONFIG_DIST);
