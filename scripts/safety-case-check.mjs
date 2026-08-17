@@ -64,6 +64,22 @@ function sourcePages() {
 const EVIDENCE_HEADER = /^>\s*\*\*Evidence\*\*\s*[—-]\s*`bun test ([^`]+)`\s*$/;
 const EVIDENCE_ITEM = /^>\s*-\s*"(.+)"\s*$/;
 const BLOCKQUOTE = /^>/;
+/**
+ * A line OPENING with the bold `Evidence` marker is trying to be a header, whether or not
+ * this check can read it. Without this, a header the pattern does not match is not an
+ * error — it simply never opens a block, so every citation under it is skipped in silence
+ * and the page still reports "all resolve". Measured: a real block appended to
+ * `docs/threat-model.md` with an EN dash instead of an em dash, citing a test that does
+ * not exist, left the count at 44 and the exit status at 0.
+ *
+ * The check already refuses to skip an unreadable line INSIDE a block. This is the same
+ * refusal one level up, at the only other place a citation can go missing.
+ *
+ * It matches on the OPENING because the page also discusses Evidence blocks in prose
+ * ("Every claim below carries an **Evidence** block naming the test file…"), and a
+ * sentence that mentions one is not a malformed one.
+ */
+const LOOKS_LIKE_HEADER = /^>?\s*\*\*Evidence\b/;
 
 /**
  * Pull every Evidence block out of one page.
@@ -83,9 +99,20 @@ function extractCitations(relPath) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const header = EVIDENCE_HEADER.exec(line);
-    if (header) {
+    const unreadableHeader = !header && LOOKS_LIKE_HEADER.test(line);
+    if (header || unreadableHeader) {
       if (current && current.count === 0)
         malformed.push({ page: relPath, line: current.line, text: "Evidence block cites no tests" });
+      if (unreadableHeader) {
+        malformed.push({
+          page: relPath,
+          line: i + 1,
+          text: `Evidence header this check cannot read: ${line.trim()}`,
+        });
+        // Opened nothing, so nothing below it may be attributed to the previous block.
+        current = null;
+        continue;
+      }
       current = { file: header[1].trim(), line: i + 1, count: 0 };
       continue;
     }
@@ -362,6 +389,38 @@ function selfTest() {
       "two blocks are both checked (a good one does not cover a bad one)",
       cite("pkg/a.test.ts", "a real passing test") + "\ntext\n\n" + cite("pkg/a.test.ts", "nope"),
       1,
+    ],
+    // A header this check cannot read opens no block, so everything under it is skipped
+    // in silence — the one place left where a citation could go missing while the page
+    // reported "all resolve". Every case below cites a REAL passing test, so the header
+    // is the only thing that can make it fail.
+    [
+      "an Evidence header with an EN dash is caught, not skipped",
+      '> **Evidence** – `bun test pkg/a.test.ts`\n> - "a real passing test"\n',
+      1,
+    ],
+    [
+      "an Evidence header with the dash inside the bold is caught",
+      '> **Evidence —** `bun test pkg/a.test.ts`\n> - "a real passing test"\n',
+      1,
+    ],
+    [
+      "an Evidence header with a colon is caught",
+      '> **Evidence**: `bun test pkg/a.test.ts`\n> - "a real passing test"\n',
+      1,
+    ],
+    [
+      "an Evidence header missing its blockquote marker is caught",
+      '**Evidence** — `bun test pkg/a.test.ts`\n> - "a real passing test"\n',
+      1,
+    ],
+    // The controls, taken VERBATIM from the shipped page: the check must not mistake a
+    // sentence that discusses Evidence blocks for a malformed one.
+    [
+      "prose naming an Evidence block is not mistaken for a header",
+      "Every claim below carries an **Evidence** block naming the test file and the\n" +
+        "Every **Evidence** citation on this page is checked in CI, on both supported\n",
+      0,
     ],
   ];
 
