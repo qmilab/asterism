@@ -721,47 +721,45 @@ function githubAnchorOf(heading) {
 }
 
 /**
- * Which anchor rules may serve a file's fragments — the renderers that actually render
- * it. `docs/` is published by mkdocs AND browsable on GitHub, so a fragment valid under
- * either is genuinely reachable and accepting both is accuracy, not laxity. The repo
- * root is never on the site (`docs_dir: docs`), so only GitHub's rule applies there, and
- * this pass stays strict about it.
+ * Which anchor rule serves a link — decided by where the link is CLICKED, which is where
+ * the page MAKING it is published, not by the page it points at.
  *
- * The rule follows the file the link POINTS AT, not the file making the link: it is the
- * target that gets rendered and carries the anchor.
+ * A `docs/` page is published on the site, so a `docs/` → `docs/` fragment must be the
+ * anchor mkdocs emits: a GitHub-only form is dead for every reader of the published page,
+ * and `mkdocs --strict` will not say so, because it logs a missing anchor at INFO. Every
+ * other combination is only ever followed on GitHub — the repo root is not on the site at
+ * all (`docs_dir: docs`), and a `docs/` page pointing outside `docs/` has already left it.
+ *
+ * The first version of this keyed on the TARGET and accepted EITHER rule for a `docs/`
+ * page, reasoning that both renderers serve it. Both do render it — but a link is
+ * followed in one place, and accepting the union let a fragment that is dead on the
+ * published site pass as resolved. Reachable somewhere is not the same as reachable from
+ * the page that makes the claim.
  */
-function anchorRulesFor(rel) {
-  return rel.startsWith(`docs${sep}`) || rel.startsWith("docs/")
-    ? [
-        [anchorOf, "_"],
-        [githubAnchorOf, "-"],
-      ]
-    : [[githubAnchorOf, "-"]];
+function anchorRuleFor(sourceRel, targetRel) {
+  const inDocs = (p) => p.startsWith("docs/") || p.startsWith(`docs${sep}`);
+  return inDocs(sourceRel) && inDocs(targetRel)
+    ? { slug: anchorOf, joiner: "_", name: "mkdocs" }
+    : { slug: githubAnchorOf, joiner: "-", name: "github" };
 }
 
 /**
- * A page's anchors under every rule that serves it. Each renderer also guarantees ids are
- * UNIQUE — a repeated heading gets a suffix, `_1`/`_2` under Python-Markdown and
- * `-1`/`-2` under GitHub — so each rule is uniquified separately before the union.
- * Verified against both renderers, not assumed. This repo has no duplicate heading today,
- * which is exactly why it is worth handling now: the first one added would otherwise have
- * its correct link reported dead, and this pass has already taught us once that a link
- * declared dead gets "fixed" to agree with the checker.
+ * A page's anchors under one rule. Each renderer also guarantees ids are UNIQUE — a
+ * repeated heading gets a suffix, `_1`/`_2` under Python-Markdown and `-1`/`-2` under
+ * GitHub. Verified against both renderers, not assumed. This repo has no duplicate
+ * heading today, which is exactly why it is worth handling now: the first one added would
+ * otherwise have its correct link reported dead, and this pass has already taught us once
+ * that a link declared dead gets "fixed" to agree with the checker.
  */
-function anchorsOf(text, rules) {
-  const all = new Set();
-  const headings = [...headingLines(text)];
-  for (const [slug, joiner] of rules) {
-    const seen = new Set();
-    for (const line of headings) {
-      const base = slug(line);
-      let id = base;
-      for (let n = 1; seen.has(id); n++) id = `${base}${joiner}${n}`;
-      seen.add(id);
-      all.add(id);
-    }
+function anchorsOf(text, { slug, joiner }) {
+  const ids = new Set();
+  for (const line of headingLines(text)) {
+    const base = slug(line);
+    let id = base;
+    for (let n = 1; ids.has(id); n++) id = `${base}${joiner}${n}`;
+    ids.add(id);
   }
-  return all;
+  return ids;
 }
 
 /** Anything carrying a URI scheme (or protocol-relative) is not this repo's to resolve. */
@@ -954,12 +952,12 @@ function linkSourceFiles() {
 function checkLinks(root = ROOT, files = linkSourceFiles()) {
   const rootAbs = resolve(root);
   const anchorCache = new Map();
-  const anchorsFor = (abs) => {
-    if (!anchorCache.has(abs)) {
-      const rules = anchorRulesFor(relative(rootAbs, abs));
-      anchorCache.set(abs, anchorsOf(readFileSync(abs, "utf8"), rules));
+  const anchorsFor = (abs, rule) => {
+    const key = `${abs}\u0000${rule.name}`;
+    if (!anchorCache.has(key)) {
+      anchorCache.set(key, anchorsOf(readFileSync(abs, "utf8"), rule));
     }
-    return anchorCache.get(abs);
+    return anchorCache.get(key);
   };
   const broken = [];
   const unchecked = [];
@@ -990,7 +988,10 @@ function checkLinks(root = ROOT, files = linkSourceFiles()) {
         unchecked.push(`${where} → ${target} (fragment into a non-markdown file)`);
         continue;
       }
-      if (!anchorsFor(targetAbs).has(frag)) broken.push(`${where} → ${target} (no such section)`);
+      const rule = anchorRuleFor(rel, relative(rootAbs, targetAbs));
+      if (!anchorsFor(targetAbs, rule).has(frag)) {
+        broken.push(`${where} → ${target} (no such section under ${rule.name} anchors)`);
+      }
     }
   }
   return { broken, unchecked, links, files: files.length };
@@ -1052,6 +1053,16 @@ function probeLinkFixture() {
     // there. Both of these resolve under Python-Markdown and must not under GitHub.
     ["OTHER.md#repeat_1", "site-style duplicate suffix on a GitHub-rendered file"],
     ["OTHER.md#a-b", "site-style collapsed em-dash anchor on a GitHub-rendered file"],
+    // The rule follows where the link is CLICKED. These four are the other two quadrants:
+    // a root page's link is followed on GitHub even when it points into docs/, and a
+    // docs page's link is followed on the published site.
+    ["docs/site.md#a-b", "site-style anchor in a link followed on GitHub (root source)"],
+    ["docs/site.md#same_1", "site-style duplicate suffix in a link followed on GitHub"],
+    ["target.md#a--b", "GitHub-style anchor in a link followed on the published site"],
+    ["target.md#same-1", "GitHub-style duplicate suffix in a link followed on the site"],
+    // A docs/ page pointing OUTSIDE docs/ has left the site, so its fragment is GitHub's
+    // even though the page making the link is published. Source alone does not decide it.
+    ["../OTHER.md#a-b", "site-style anchor on a link that leaves the site"],
   ];
   // Every one of these is correct and must stay unreported.
   const CONTROLS = [
@@ -1073,10 +1084,15 @@ function probeLinkFixture() {
     "img/real(1).png",
     // A `docs/` page is published by mkdocs AND browsable on GitHub, so a fragment valid
     // under either rule is genuinely reachable and neither may be reported.
-    "docs/site.md#a-b",
     "docs/site.md#a--b",
-    "docs/site.md#same_1",
     "docs/site.md#same-1",
+    "target.md#a-b",
+    "target.md#same_1",
+    "../OTHER.md#a--b",
+    // Resolved from a root source AND a docs source, so the two rules meet on one file:
+    // an anchor cache that forgets which rule produced its answer hands the second source
+    // the first one's anchors.
+    "docs/target.md#a--b",
   ];
   // Not failures, but they must not be silently counted as resolved either.
   const UNDECIDABLE = ["../outside-the-fixture.md", "img/real.png#zoom"];
@@ -1145,6 +1161,7 @@ function probeLinkFixture() {
         "- [ok6](#local-heading)",
         "- [ok9](sub/)",
         "- [ok11](OTHER.md#repeat)",
+        "- [ok23](docs/target.md#a--b)",
         "- [ok17](OTHER.md#repeat-1)",
         "- [ok18](OTHER.md#a--b)",
         "- [ok19](docs/site.md#a-b)",
@@ -1179,7 +1196,27 @@ function probeLinkFixture() {
     mkdirSync(join(dir, "docs"), { recursive: true });
     writeFileSync(
       join(dir, "docs", "site.md"),
-      ["# Site page", "", "## A — B", "", "## Same", "", "## Same", ""].join("\n"),
+      [
+        "# Site page",
+        "",
+        "## A — B",
+        "",
+        "## Same",
+        "",
+        "## Same",
+        "",
+        "- [d1](target.md#a-b)",
+        "- [d2](target.md#a--b)",
+        "- [d3](target.md#same_1)",
+        "- [d4](target.md#same-1)",
+        "- [d5](../OTHER.md#a--b)",
+        "- [d6](../OTHER.md#a-b)",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, "docs", "target.md"),
+      ["# Target", "", "## A — B", "", "## Same", "", "## Same", ""].join("\n"),
     );
     writeFileSync(
       join(dir, "sub", "page.md"),
@@ -1188,7 +1225,7 @@ function probeLinkFixture() {
       ),
     );
 
-    const result = checkLinks(dir, ["index.md", "OTHER.md", "sub/page.md", "docs/site.md"]);
+    const result = checkLinks(dir, ["index.md", "OTHER.md", "sub/page.md", "docs/site.md", "docs/target.md"]);
     const { broken, unchecked } = result;
     const reported = (list, target) => list.some((entry) => entry.includes(`→ ${target} (`));
     const failures = [];
