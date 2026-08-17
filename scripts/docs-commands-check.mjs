@@ -54,7 +54,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve, sep } from "node:path";
+import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -698,22 +698,70 @@ function* headingLines(text) {
 }
 
 /**
- * A page's anchors. Python-Markdown's `toc` also guarantees ids are UNIQUE — a repeated
- * heading gets `_1`, `_2`, … appended, so a second `## Same title` is `#same-title_1`.
- * Verified against the installed renderer, not assumed. This repo has no duplicate
- * heading today, which is exactly why it is worth handling now: the first one added
- * would otherwise have its correct link reported dead, and this pass has already taught
- * us once that a link declared dead gets "fixed" to agree with the checker.
+ * Heading → anchor the way GITHUB does it, which is not the way the site does it.
+ *
+ * The difference is the one this file has been burned by before, in the other direction:
+ * Python-Markdown collapses a run of spaces to a single hyphen, GitHub replaces each
+ * space one for one. So `## Contributing & security` is `#contributing-security` on the
+ * site and `#contributing--security` on GitHub, because dropping the `&` leaves two
+ * spaces. Thirteen headings in this repo's root markdown differ between the two rules.
+ *
+ * Taken from GitHub's own rendering of this repo rather than from a description of the
+ * algorithm — see GITHUB_ANCHOR_PAIRS in the self-test, which pins every anchor GitHub
+ * emits for README. Duplicates get `-1`, `-2` here, not the `_1` Python-Markdown uses.
  */
-function anchorsOf(text) {
-  const ids = new Set();
-  for (const line of headingLines(text)) {
-    const base = anchorOf(line);
-    let id = base;
-    for (let n = 1; ids.has(id); n++) id = `${base}_${n}`;
-    ids.add(id);
+function githubAnchorOf(heading) {
+  return heading
+    .replace(/^#+\s*/, "")
+    .replace(/`/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+    .replace(/\s/g, "-");
+}
+
+/**
+ * Which anchor rules may serve a file's fragments — the renderers that actually render
+ * it. `docs/` is published by mkdocs AND browsable on GitHub, so a fragment valid under
+ * either is genuinely reachable and accepting both is accuracy, not laxity. The repo
+ * root is never on the site (`docs_dir: docs`), so only GitHub's rule applies there, and
+ * this pass stays strict about it.
+ *
+ * The rule follows the file the link POINTS AT, not the file making the link: it is the
+ * target that gets rendered and carries the anchor.
+ */
+function anchorRulesFor(rel) {
+  return rel.startsWith(`docs${sep}`) || rel.startsWith("docs/")
+    ? [
+        [anchorOf, "_"],
+        [githubAnchorOf, "-"],
+      ]
+    : [[githubAnchorOf, "-"]];
+}
+
+/**
+ * A page's anchors under every rule that serves it. Each renderer also guarantees ids are
+ * UNIQUE — a repeated heading gets a suffix, `_1`/`_2` under Python-Markdown and
+ * `-1`/`-2` under GitHub — so each rule is uniquified separately before the union.
+ * Verified against both renderers, not assumed. This repo has no duplicate heading today,
+ * which is exactly why it is worth handling now: the first one added would otherwise have
+ * its correct link reported dead, and this pass has already taught us once that a link
+ * declared dead gets "fixed" to agree with the checker.
+ */
+function anchorsOf(text, rules) {
+  const all = new Set();
+  const headings = [...headingLines(text)];
+  for (const [slug, joiner] of rules) {
+    const seen = new Set();
+    for (const line of headings) {
+      const base = slug(line);
+      let id = base;
+      for (let n = 1; seen.has(id); n++) id = `${base}${joiner}${n}`;
+      seen.add(id);
+      all.add(id);
+    }
   }
-  return ids;
+  return all;
 }
 
 /** Anything carrying a URI scheme (or protocol-relative) is not this repo's to resolve. */
@@ -907,7 +955,10 @@ function checkLinks(root = ROOT, files = linkSourceFiles()) {
   const rootAbs = resolve(root);
   const anchorCache = new Map();
   const anchorsFor = (abs) => {
-    if (!anchorCache.has(abs)) anchorCache.set(abs, anchorsOf(readFileSync(abs, "utf8")));
+    if (!anchorCache.has(abs)) {
+      const rules = anchorRulesFor(relative(rootAbs, abs));
+      anchorCache.set(abs, anchorsOf(readFileSync(abs, "utf8"), rules));
+    }
     return anchorCache.get(abs);
   };
   const broken = [];
@@ -997,6 +1048,10 @@ function probeLinkFixture() {
     ["nosuch spaced.md", "missing page whose <angle-bracket> destination contains a space"],
     ["img/nosuch(1).png", "missing image whose destination contains BALANCED parentheses"],
     ["img/nosuch(2).png", "missing image whose parentheses are BACKSLASH-ESCAPED"],
+    // The repo root is rendered only by GitHub, so the SITE's anchor forms are wrong
+    // there. Both of these resolve under Python-Markdown and must not under GitHub.
+    ["OTHER.md#repeat_1", "site-style duplicate suffix on a GitHub-rendered file"],
+    ["OTHER.md#a-b", "site-style collapsed em-dash anchor on a GitHub-rendered file"],
   ];
   // Every one of these is correct and must stay unreported.
   const CONTROLS = [
@@ -1005,7 +1060,8 @@ function probeLinkFixture() {
     "img/real.png",
     "https://example.com/nosuch-external.md",
     "#local-heading",
-    "OTHER.md#repeat_1",
+    "OTHER.md#repeat-1",
+    "OTHER.md#a--b",
     "sub/",
     "nosuch-in-fence.md",
     "../OTHER.md#real-heading",
@@ -1015,6 +1071,12 @@ function probeLinkFixture() {
     // renderer resolves both to the same path; a checker that stops at the first `)`
     // calls both of them broken and invites someone to "fix" a working link.
     "img/real(1).png",
+    // A `docs/` page is published by mkdocs AND browsable on GitHub, so a fragment valid
+    // under either rule is genuinely reachable and neither may be reported.
+    "docs/site.md#a-b",
+    "docs/site.md#a--b",
+    "docs/site.md#same_1",
+    "docs/site.md#same-1",
   ];
   // Not failures, but they must not be silently counted as resolved either.
   const UNDECIDABLE = ["../outside-the-fixture.md", "img/real.png#zoom"];
@@ -1044,6 +1106,8 @@ function probeLinkFixture() {
         "## Repeat",
         "",
         "## Repeat",
+        "",
+        "## A — B",
         "",
         "```bash",
         "# fenced only",
@@ -1079,9 +1143,16 @@ function probeLinkFixture() {
         '- <a href="OTHER.md">ok4</a>',
         "- [ok5](https://example.com/nosuch-external.md)",
         "- [ok6](#local-heading)",
-        "- [ok8](OTHER.md#repeat_1)",
         "- [ok9](sub/)",
         "- [ok11](OTHER.md#repeat)",
+        "- [ok17](OTHER.md#repeat-1)",
+        "- [ok18](OTHER.md#a--b)",
+        "- [ok19](docs/site.md#a-b)",
+        "- [ok20](docs/site.md#a--b)",
+        "- [ok21](docs/site.md#same_1)",
+        "- [ok22](docs/site.md#same-1)",
+        "- [pm1](OTHER.md#repeat_1)",
+        "- [pm2](OTHER.md#a-b)",
         "- <a href='sub/page.md'>ok12</a>",
         "- [t1](nosuch-single-title.md 'label')",
         "- [t2](nosuch-paren-title.md (label))",
@@ -1105,6 +1176,11 @@ function probeLinkFixture() {
         "",
       ].join("\n"),
     );
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(
+      join(dir, "docs", "site.md"),
+      ["# Site page", "", "## A — B", "", "## Same", "", "## Same", ""].join("\n"),
+    );
     writeFileSync(
       join(dir, "sub", "page.md"),
       ["# Sub page", "", "- [j](../nosuch-from-sub.md)", "- [ok10](../OTHER.md#real-heading)", ""].join(
@@ -1112,7 +1188,7 @@ function probeLinkFixture() {
       ),
     );
 
-    const result = checkLinks(dir, ["index.md", "OTHER.md", "sub/page.md"]);
+    const result = checkLinks(dir, ["index.md", "OTHER.md", "sub/page.md", "docs/site.md"]);
     const { broken, unchecked } = result;
     const reported = (list, target) => list.some((entry) => entry.includes(`→ ${target} (`));
     const failures = [];
@@ -1378,6 +1454,37 @@ function report(total, tally, groups, coverageWork) {
       process.exit(1);
     }
     console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
+
+    // The other renderer, pinned the same way and for the same reason. These are not a
+    // description of GitHub's algorithm — they are every heading in README.md paired with
+    // the id GitHub actually emitted for it, read off the rendered repo page. The pair
+    // that matters is the last: dropping the `&` leaves TWO spaces, and GitHub replaces
+    // each one, where Python-Markdown collapses the run. Getting that backwards is how
+    // this pass would report a correct link dead on the one file it cannot preview.
+    const GITHUB_ANCHOR_PAIRS = [
+      ["### Many agents. One runtime. Separate lives.", "many-agents-one-runtime-separate-lives"],
+      ["## Why", "why"],
+      ["## Quickstart", "quickstart"],
+      ["## What you get", "what-you-get"],
+      ["## Documentation", "documentation"],
+      ["## Continuous, reviewable learning", "continuous-reviewable-learning"],
+      ["## Pairs with Lodestar", "pairs-with-lodestar"],
+      ["## Status", "status"],
+      ["## Contributing & security", "contributing--security"],
+      ["## License", "license"],
+    ];
+    const ghFailures = GITHUB_ANCHOR_PAIRS.filter(([h, want]) => githubAnchorOf(h) !== want);
+    if (ghFailures.length) {
+      console.log("\nSELF-TEST FAILED: the GitHub anchor port no longer matches GitHub:");
+      for (const [h, want] of ghFailures) {
+        console.log(`  ${h}\n    want: ${want}\n    got:  ${githubAnchorOf(h)}`);
+      }
+      process.exit(1);
+    }
+    console.log(
+      `GitHub anchor slugify matches every id GitHub emits for README` +
+        ` (${GITHUB_ANCHOR_PAIRS.length} headings).`,
+    );
 
     // Pinning the slugify is not the same as exercising the pass that uses it, and until
     // now only the former existed: `--self-test` skipped the link pass entirely, so it
