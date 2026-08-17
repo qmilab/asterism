@@ -40,11 +40,21 @@
 // dead, and they were "fixed" to match the checker — breaking them on the published site
 // while CI called them green. `--self-test` now pins the port against known-good pairs,
 // because a wrong anchor helper is worse than no anchor helper: it certifies the damage.
+//
+// The link pass RESOLVES targets rather than recognising them. The version before this one
+// matched them with `[a-z0-9-]+\.md` and still printed "Every internal doc link resolves" —
+// lower case, no directory, markdown only, `docs/` only. So it could not see an upper-case
+// filename, any `./docs/…` link, any image, any raw HTML `href`, or any of the 56 internal
+// links in README, and it counted a `# comment` inside a fenced block as a heading, which
+// minted 25 anchors this repo's pages do not have and made links into them report as good.
+// `mkdocs --strict` backstops only part of that: it never reads README (`docs_dir: docs`),
+// and it logs a MISSING ANCHOR at INFO, so a dead `#fragment` does not fail the build.
+// Measured, both of them, by planting one of each. What the pass claims is now what it did.
 
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -668,36 +678,314 @@ function anchorOf(heading) {
 }
 
 /**
- * Every internal link in docs/ resolves — the page exists, and the `#fragment` matches a
- * heading on it. Returns a list of broken ones.
+ * The lines of a page that become anchors on the site — which is NOT every line starting
+ * with `#`. A `# comment` inside a fenced block is shell, and the renderer emits no id for
+ * it: checked against Python-Markdown with `pymdownx.superfences` loaded, the extension
+ * `mkdocs.yml` actually configures, where the same input yields ids with the fence
+ * extension absent and none with it present. Counting them minted 25 anchors this repo's
+ * pages do not have (`#on-the-host`, `#openai_api_key`, …), each of which would have let a
+ * link to a section that does not exist report as resolved.
  */
-function checkLinks() {
-  const pages = readdirSync(join(ROOT, "docs")).filter((f) => f.endsWith(".md"));
-  const anchors = new Map();
-  const bodies = new Map();
-  for (const page of pages) {
-    const text = readFileSync(join(ROOT, "docs", page), "utf8");
-    bodies.set(page, text);
-    anchors.set(
-      page,
-      new Set(text.split("\n").filter((l) => /^#{1,6}\s/.test(l)).map(anchorOf)),
-    );
+function* headingLines(text) {
+  let inFence = false;
+  for (const line of text.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && /^#{1,6}\s/.test(line)) yield line;
   }
+}
+
+/**
+ * A page's anchors. Python-Markdown's `toc` also guarantees ids are UNIQUE — a repeated
+ * heading gets `_1`, `_2`, … appended, so a second `## Same title` is `#same-title_1`.
+ * Verified against the installed renderer, not assumed. This repo has no duplicate
+ * heading today, which is exactly why it is worth handling now: the first one added
+ * would otherwise have its correct link reported dead, and this pass has already taught
+ * us once that a link declared dead gets "fixed" to agree with the checker.
+ */
+function anchorsOf(text) {
+  const ids = new Set();
+  for (const line of headingLines(text)) {
+    const base = anchorOf(line);
+    let id = base;
+    for (let n = 1; ids.has(id); n++) id = `${base}_${n}`;
+    ids.add(id);
+  }
+  return ids;
+}
+
+/** Anything carrying a URI scheme (or protocol-relative) is not this repo's to resolve. */
+const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+
+/**
+ * Every internal link a file makes, in every form these pages actually use: markdown
+ * inline links AND images, reference definitions, and raw HTML `href`/`src` — README's
+ * wordmark, both screenshots, and its "Watch it live" link are HTML, and the pass that
+ * only understood markdown could not see any of them.
+ *
+ * Matched broadly and then CLASSIFIED by the resolver, rather than recognised by a
+ * pattern that enumerates the shapes we happened to remember. Enumerating shapes is the
+ * mistake this whole file exists to stop making. The HTML matcher takes all three
+ * attribute forms for the same reason: this repo happens to use double quotes today, and
+ * "the form we currently write" is the kind of boundary that gets crossed silently.
+ *
+ * A fenced block is skipped: a link inside a code listing is a sample, not a claim about
+ * a file in this repo, and reporting it would manufacture a defect.
+ */
+function* internalLinks(text) {
+  const inline = /\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
+  const htmlAttr =
+    /<[a-zA-Z][^>]*?\s(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
+  const refDef = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/;
+  let inFence = false;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const ref = refDef.exec(line);
+    const targets = [
+      ...[...line.matchAll(inline)].map((m) => m[1]),
+      ...[...line.matchAll(htmlAttr)].map((m) => m[1] ?? m[2] ?? m[3]),
+      ...(ref ? [ref[1]] : []),
+    ];
+    for (const target of targets) if (!EXTERNAL_TARGET.test(target)) yield { target, line: i + 1 };
+  }
+}
+
+/**
+ * The markdown this repo publishes: `docs/` and the repo root. Derived from git rather
+ * than a readdir, because the root also holds a contributor's PRIVATE notes — `ROADMAP.md`
+ * and friends are gitignored — and a gate that fails on files the repo does not ship is a
+ * gate people learn to skip.
+ *
+ * Deliberately not a package's own README, nor `decisions/`: their relative links resolve
+ * against a different base (npm renders the package README against GitHub), and a claim
+ * this pass cannot check is a claim it must not make. The report names the set it read.
+ */
+function linkSourceFiles() {
+  let tracked;
+  try {
+    tracked = execFileSync("git", ["ls-files", "-z", "--", "*.md"], {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+  } catch (err) {
+    // Not a fallback — a readdir here would gate on a contributor's private notes, and
+    // an empty list would let this pass report a green zero over nothing at all. Say why
+    // it stopped, because `spawnSync git ENOENT` reads like a broken checkout.
+    console.error(
+      "The link pass lists the markdown this repo ships by asking git, and git did not" +
+        ` answer here (${err.message}). Run this from a git checkout with git available.`,
+    );
+    process.exit(2);
+  }
+  return tracked
+    .split("\0")
+    .filter(Boolean)
+    .filter((p) => p.startsWith("docs/") || !p.includes("/"))
+    .sort();
+}
+
+/**
+ * Every internal link resolves — the file exists, and a `#fragment` names a real heading
+ * on it. Targets are resolved on disk, relative to the file that makes the link, so a
+ * subdirectory path and an upper-case filename are ordinary cases rather than shapes the
+ * matcher forgot.
+ *
+ * `root`/`files` are parameters so `--self-test` can point the whole pass at a fixture of
+ * known-bad links. Until this rewrite the pass had no self-test at all — the planted-
+ * command run skipped it outright, so it could have been reporting nothing and the
+ * harness would still have printed PASSED.
+ *
+ * `unchecked` is not a failure but is never silent: it is where a link this pass cannot
+ * decide gets counted, so the difference between "resolved" and "not looked at" stays
+ * visible in the report instead of hiding inside the word "every".
+ */
+function checkLinks(root = ROOT, files = linkSourceFiles()) {
+  const rootAbs = resolve(root);
+  const anchorCache = new Map();
+  const anchorsFor = (abs) => {
+    if (!anchorCache.has(abs)) anchorCache.set(abs, anchorsOf(readFileSync(abs, "utf8")));
+    return anchorCache.get(abs);
+  };
   const broken = [];
-  for (const [page, text] of bodies) {
-    for (const m of text.matchAll(/\]\((\.\/)?([a-z0-9-]+\.md)?(#[^)\s]+)?\)/g)) {
-      const target = m[2] ?? page;
-      const frag = m[3];
-      if (!frag) {
-        if (m[2] && !pages.includes(m[2])) broken.push(`docs/${page} → ${m[2]} (no such page)`);
+  const unchecked = [];
+  let links = 0;
+  for (const rel of files) {
+    const abs = join(rootAbs, rel);
+    for (const { target, line } of internalLinks(readFileSync(abs, "utf8"))) {
+      links++;
+      const where = `${rel}:${line}`;
+      const hash = target.indexOf("#");
+      const pathPart = hash === -1 ? target : target.slice(0, hash);
+      const frag = hash === -1 ? "" : target.slice(hash + 1);
+      const targetAbs = pathPart === "" ? abs : resolve(dirname(abs), pathPart);
+      if (targetAbs !== rootAbs && !targetAbs.startsWith(rootAbs + sep)) {
+        unchecked.push(`${where} → ${target} (resolves outside the repo)`);
         continue;
       }
-      if (!anchors.has(target)) broken.push(`docs/${page} → ${target}${frag} (no such page)`);
-      else if (!anchors.get(target).has(frag.slice(1)))
-        broken.push(`docs/${page} → ${target}${frag} (no such section)`);
+      if (!existsSync(targetAbs)) {
+        broken.push(`${where} → ${target} (no such file)`);
+        continue;
+      }
+      if (!frag) continue;
+      if (!targetAbs.endsWith(".md")) {
+        unchecked.push(`${where} → ${target} (fragment into a non-markdown file)`);
+        continue;
+      }
+      if (!anchorsFor(targetAbs).has(frag)) broken.push(`${where} → ${target} (no such section)`);
     }
   }
-  return broken;
+  return { broken, unchecked, links, files: files.length };
+}
+
+/**
+ * The link pass, run against a fixture of known-bad links — one per blind spot the
+ * previous matcher had, plus controls it must NOT report.
+ *
+ * The controls are half the point. The failure this pass has already committed once was
+ * not missing a defect, it was INVENTING one: a wrong anchor port declared four correct
+ * links dead, and they were "fixed" to agree with it. So a checker that reports a valid
+ * upper-case link, a valid image, or a link inside a code fence is as broken as one that
+ * stays quiet — and only the plant-and-control pair catches both directions.
+ *
+ * Returns a list of failures; empty means the pass sees exactly what it should.
+ */
+function probeLinkFixture() {
+  // Each planted target names the blind spot it covers; every one of these was invisible
+  // to the `[a-z0-9-]+\.md`, `docs/`-only matcher this replaced — except the first two,
+  // which it did catch and which are here so a rewrite cannot lose them.
+  const PLANTED = [
+    ["nosuch.md", "lower-case missing page"],
+    ["#no-such-local-section", "missing section on the page itself"],
+    ["NOSUCH.md", "UPPER-CASE missing page"],
+    ["sub/nosuch.md", "missing page down a subdirectory"],
+    ["OTHER.md#no-such-section", "missing section on an upper-case page"],
+    ["img/nosuch.png", "missing image"],
+    ["nosuch-html.md", "missing target of a raw HTML href"],
+    ["img/nosuch-html.png", "missing source of a raw HTML img"],
+    ["nosuch-single.md", "missing target of a SINGLE-quoted HTML href"],
+    ["img/nosuch-unquoted.png", "missing source of an UNQUOTED HTML src"],
+    ["OTHER.md#fenced-only", "section that exists only as a # comment inside a fence"],
+    ["sub/nosuch-ref.md", "missing target of a reference-style definition"],
+    ["../nosuch-from-sub.md", "missing page relative to a file in a subdirectory"],
+  ];
+  // Every one of these is correct and must stay unreported.
+  const CONTROLS = [
+    "OTHER.md",
+    "OTHER.md#real-heading",
+    "img/real.png",
+    "https://example.com/nosuch-external.md",
+    "#local-heading",
+    "OTHER.md#repeat_1",
+    "sub/",
+    "nosuch-in-fence.md",
+    "../OTHER.md#real-heading",
+    "OTHER.md#repeat",
+    "sub/page.md",
+  ];
+  // Not failures, but they must not be silently counted as resolved either.
+  const UNDECIDABLE = ["../outside-the-fixture.md", "img/real.png#zoom"];
+
+  const dir = mkdtempSync(join(tmpdir(), "asterism-doclinks-"));
+  try {
+    mkdirSync(join(dir, "sub"), { recursive: true });
+    mkdirSync(join(dir, "img"), { recursive: true });
+    writeFileSync(join(dir, "img", "real.png"), "");
+    writeFileSync(
+      join(dir, "OTHER.md"),
+      [
+        "# Other",
+        "",
+        "## Real heading",
+        "",
+        "## Repeat",
+        "",
+        "## Repeat",
+        "",
+        "```bash",
+        "# fenced only",
+        "echo hi",
+        "```",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, "index.md"),
+      [
+        "# Fixture index",
+        "",
+        "## Local heading",
+        "",
+        "- [a](nosuch.md)",
+        "- [b](NOSUCH.md)",
+        "- [c](sub/nosuch.md)",
+        "- [d](OTHER.md#no-such-section)",
+        "- ![e](img/nosuch.png)",
+        '- <a href="nosuch-html.md">f</a>',
+        '- <img src="img/nosuch-html.png" alt="g">',
+        "- <a href='nosuch-single.md'>f2</a>",
+        "- <img src=img/nosuch-unquoted.png alt=g2>",
+        "- [h](OTHER.md#fenced-only)",
+        "- [k](#no-such-local-section)",
+        "",
+        "[i]: sub/nosuch-ref.md",
+        "",
+        "- [ok1](OTHER.md)",
+        "- [ok2](OTHER.md#real-heading)",
+        "- ![ok3](img/real.png)",
+        '- <a href="OTHER.md">ok4</a>',
+        "- [ok5](https://example.com/nosuch-external.md)",
+        "- [ok6](#local-heading)",
+        "- [ok8](OTHER.md#repeat_1)",
+        "- [ok9](sub/)",
+        "- [ok11](OTHER.md#repeat)",
+        "- <a href='sub/page.md'>ok12</a>",
+        "- [u1](../outside-the-fixture.md)",
+        "- [u2](img/real.png#zoom)",
+        "",
+        "```markdown",
+        "- [ok7](nosuch-in-fence.md)",
+        "```",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, "sub", "page.md"),
+      ["# Sub page", "", "- [j](../nosuch-from-sub.md)", "- [ok10](../OTHER.md#real-heading)", ""].join(
+        "\n",
+      ),
+    );
+
+    const { broken, unchecked } = checkLinks(dir, ["index.md", "OTHER.md", "sub/page.md"]);
+    const reported = (list, target) => list.some((entry) => entry.includes(`→ ${target} (`));
+    const failures = [];
+    for (const [target, why] of PLANTED) {
+      if (!reported(broken, target)) failures.push(`  missed: ${target} — ${why}`);
+    }
+    for (const target of CONTROLS) {
+      if (reported(broken, target)) failures.push(`  INVENTED a defect: ${target} is correct`);
+      if (reported(unchecked, target)) failures.push(`  gave up on: ${target}, which resolves`);
+    }
+    for (const target of UNDECIDABLE) {
+      if (reported(broken, target)) failures.push(`  reported as broken, not undecidable: ${target}`);
+      if (!reported(unchecked, target)) failures.push(`  silently accepted: ${target}`);
+    }
+    // A count check on top of the membership checks: anything reported that no line above
+    // names is a defect the fixture did not plant, and it should be looked at.
+    if (broken.length !== PLANTED.length) {
+      failures.push(`  reported ${broken.length} broken links, planted ${PLANTED.length}`);
+    }
+    return failures;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function main() {
@@ -921,6 +1209,20 @@ function report(total, tally, groups, coverageWork) {
     }
     console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
 
+    // Pinning the slugify is not the same as exercising the pass that uses it, and until
+    // now only the former existed: `--self-test` skipped the link pass entirely, so it
+    // could have been reporting nothing at all and this harness would still say PASSED.
+    const linkFixtureFailures = probeLinkFixture();
+    if (linkFixtureFailures.length) {
+      console.log("\nSELF-TEST FAILED: the link pass does not see what it claims to see:");
+      for (const f of linkFixtureFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      "Every planted broken link is caught, every correct one is left alone, and every" +
+        " undecidable one is counted rather than assumed.",
+    );
+
     // Derived from the binary, not from a list here: every verb the docs give
     // subcommands must reject an invented one in a way `isShapeRejection` recognises.
     const missedRejections = probeSubcommandRejections(coverageWork);
@@ -959,12 +1261,22 @@ function report(total, tally, groups, coverageWork) {
     console.log("Every command in `asterism --help` has a section in the command reference.");
   }
 
-  const broken = SELF_TEST ? [] : checkLinks();
-  if (broken.length) {
-    console.log(`\nBROKEN INTERNAL LINKS (${broken.length}):`);
-    for (const b of broken) console.log(`  ${b}`);
+  const links = SELF_TEST ? { broken: [], unchecked: [], links: 0, files: 0 } : checkLinks();
+  if (links.broken.length) {
+    console.log(`\nBROKEN INTERNAL LINKS (${links.broken.length}):`);
+    for (const b of links.broken) console.log(`  ${b}`);
   } else if (!SELF_TEST) {
-    console.log("Every internal doc link resolves.");
+    // The numbers are the point. "Every internal doc link resolves" was true of a pass
+    // that had looked at a fraction of them; saying how many were read, and out of what,
+    // is what stops the sentence from outgrowing the check again.
+    console.log(
+      `Every one of the ${links.links} internal links in the ${links.files} docs/ and` +
+        ` root markdown files resolves, headings included.`,
+    );
+  }
+  if (links.unchecked.length) {
+    console.log(`\nINTERNAL LINKS THIS PASS CANNOT DECIDE (${links.unchecked.length}):`);
+    for (const u of links.unchecked) console.log(`  ${u}`);
   }
 
   const providerGaps = SELF_TEST ? [] : checkProviderCoverage();
@@ -979,7 +1291,12 @@ function report(total, tally, groups, coverageWork) {
   }
 
   rmSync(coverageWork, { recursive: true, force: true });
-  if (groups.failures.length || broken.length || undocumented.length || providerGaps.length) {
+  if (
+    groups.failures.length ||
+    links.broken.length ||
+    undocumented.length ||
+    providerGaps.length
+  ) {
     process.exit(1);
   }
   console.log("Every command the docs advertise runs, or matches the binary's own help.");
