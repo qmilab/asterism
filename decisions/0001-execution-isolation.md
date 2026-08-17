@@ -123,7 +123,7 @@ pass, on both.**
 | Boots under `(deny default)` | **Node ✓ Bun ✓** |
 | Workspace read + write inside the jail | **works, both** |
 | Read of a neighbouring directory in `$HOME` | **denied, both** |
-| Read of a path **outside** `$HOME` (`/private/tmp` **and** the real `$TMPDIR`) | **denied, both** |
+| Read outside `$HOME` — `/private/tmp`, the real `$TMPDIR`, `/private/var/tmp` | **denied, both** |
 | Read of a system path (`/etc/hosts`) | **allowed — by design** |
 | **Write** outside the workspace, in `$HOME` and outside it | **denied, both** |
 | Directory enumeration of `$HOME` | **denied, both** |
@@ -251,7 +251,9 @@ The profile that actually works, in full:
 (deny  file-read-data (subpath "/tmp"))
 (deny  file-read-data (subpath "/private/tmp"))
 (deny  file-read-data (subpath "/Volumes"))
-(deny  file-read-data (subpath "/private/var/folders"))   ; the real per-user $TMPDIR
+(deny  file-read-data (subpath "/private/var"))           ; $TMPDIR *and* /var/tmp
+(allow file-read-data (subpath "/private/var/db"))        ; …minus what the runtime needs
+(allow file-read-data (subpath "/private/var/select"))
 (allow file-read-data (subpath "<runtime dir>"))
 (allow file-read-data (subpath "<Asterism install dir>"))   ; the host's own code
 (allow file-read-data (subpath "<this agent's workspace>"))
@@ -266,12 +268,32 @@ the other, and the harness never noticed because its only escape probe was a
 sibling directory inside `$HOME`. Both runtimes still boot with the full deny list.
 
 **And `/tmp` is not where the temp files are.** `os.tmpdir()` on macOS returns
-`/var/folders/…`, whose real path is under **`/private/var/folders`** — a
-different root, holding every scratch file any program on the machine has
-written. A deny list covering `/tmp` and not that one still looks confined and
-is not. This is the same realpath fact as trap 1, applied to a second place; it
-was missed the first time precisely because knowing a fact is not the same as
-having enumerated where it applies.
+`/var/folders/…`, whose real path is under `/private/var/folders`; `/var/tmp` is a
+third, separate root again. **Three consecutive review rounds each found another
+one missing** — `/tmp`, then the `$TMPDIR` root, then `/private/var/tmp`. Adding
+leaves one at a time was losing to the problem, so the profile now denies
+**`/private/var` entire** and allows back only `db` and `select`, which is what the
+runtime actually needs. Measured on both runtimes.
+
+### The structural limit: seatbelt cannot express a closed read boundary
+
+The right answer to "which roots did you forget" is to stop enumerating. That was
+tried and **it does not work**: `(deny file-read-data (subpath "/"))` with the
+needed roots allowed back **fails to boot a JS runtime at all** — silently, with
+no stderr, the same failure as trap 2 — and stayed dead through three successive
+widenings of the allow-list.
+
+So the macOS tier is **unavoidably a deny-list, and therefore enumerative**. That
+is a real and permanent weakness of this tier, not a defect in the profile: its
+correctness depends on having listed every user-data root, and this record's own
+history is three rounds of evidence that such lists are gotten wrong.
+
+**A Linux `bubblewrap`/mount-namespace tier would be closed by construction** — the
+namespace is built from nothing and contains only what is mounted in, so a root
+nobody thought of is absent rather than readable. That is a reason to expect the
+Linux tier to be **stronger than the macOS one**, not merely different, and it
+should inform which platform the eventual build treats as the reference
+implementation.
 
 So state what the tier is, precisely: **no reads of user data anywhere outside the
 workspace; no writes anywhere but the workspace; no network; no exec beyond the
@@ -426,7 +448,9 @@ conditional security page is worse than an honest static one, and
 ## 8. What this does not decide
 
 - Linux (`bubblewrap` / Landlock) and Windows tiers — unmeasured. Only macOS
-  seatbelt was tested, on one machine.
+  seatbelt was tested, on one machine. Given the enumeration weakness above, the
+  Linux tier is the one worth measuring next, and possibly the one to treat as the
+  reference.
 - Whether the availability detector ships as an `asterism doctor`-style report.
 - Encryption at rest, and model trust — untouched by any tier here.
 - **How much further reads can be narrowed.** `/etc` and `/usr` stay readable in

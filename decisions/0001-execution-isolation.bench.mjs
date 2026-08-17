@@ -59,6 +59,10 @@ writeFileSync(outsideHome, "SECRET OUTSIDE HOME\n");
 // so a probe that only checks /private/tmp passes while it stays readable.
 const outsideTmpdir = join(realpathSync(tmpdir()), `asterism-spike-escape-${process.pid}.txt`);
 writeFileSync(outsideTmpdir, "SECRET IN TMPDIR\n");
+// A FOURTH: /private/var/tmp, the persistent temp root — a third distinct place,
+// found missing by a third review round. Probed so the deny is measured, not assumed.
+const outsideVarTmp = `/private/var/tmp/asterism-spike-escape-${process.pid}.txt`;
+writeFileSync(outsideVarTmp, "SECRET IN VAR TMP\n");
 
 const ms = (ns) => Number(ns) / 1e6;
 const pct = (sorted, p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
@@ -128,12 +132,19 @@ const home = realpathSync(homedir());
 // system paths (/usr, /etc, /System, /Library) stay readable, which is deliberate:
 // they are what the runtime needs to boot, and they are not the agent's secrets.
 //
-// `/private/var/folders` is the one most easily missed and among the most valuable:
-// it is where macOS puts the PER-USER temp dir that `os.tmpdir()` returns, so
-// leaving it out means every scratch file any program wrote stays readable while
-// the profile looks confined. `/tmp` is NOT the same place and covering it is not
-// enough. The realpath'd tmpdir is added too, for hosts where TMPDIR points
-// somewhere else entirely.
+// THREE separate review rounds each found another temp root missing here —
+// /tmp, then /private/var/folders (the per-user $TMPDIR os.tmpdir() returns),
+// then /private/var/tmp. Adding leaves one at a time was losing to the problem, so
+// the whole of `/private/var` is denied and only what the runtime genuinely needs
+// is allowed back below. That covers every one of those at once, and whatever else
+// lives under it that nobody has thought of.
+//
+// This SHAPE is forced by seatbelt, and it is the tier's structural weakness:
+// a closed boundary — `(deny file-read-data (subpath "/"))` with allows added back
+// — does not boot a JS runtime at all (measured, silently, three ways). So the
+// macOS tier is unavoidably a DENY-LIST and therefore enumerative. A Linux
+// mount-namespace tier would be closed by construction, which is a reason to
+// expect it to be stronger rather than merely different.
 const READ_DENY_ROOTS = [
   ...new Set([
     "/Users",
@@ -141,10 +152,14 @@ const READ_DENY_ROOTS = [
     "/tmp",
     "/private/tmp",
     "/Volumes",
-    "/private/var/folders",
-    realpathSync(tmpdir()),
+    "/private/var", // covers /private/var/tmp AND /private/var/folders ($TMPDIR)
+    realpathSync(tmpdir()), // for a host whose TMPDIR is somewhere else entirely
   ]),
 ];
+
+// Read-data the runtime needs back after the broad denies above. Emitted AFTER
+// them: a deny is only overridden by an allow at the same granularity (trap 2).
+const READ_ALLOW_ROOTS = ["/private/var/db", "/private/var/select"];
 
 /** The tier's profile, parameterised by which runtime binary hosts the tools. */
 function writeProfile(path, runtimePath) {
@@ -165,6 +180,7 @@ ${
         : READ_DENY_ROOTS.map((d) => `(deny file-read-data (subpath "${d}"))`).join("\n")
     }
 ${FALSIFY ? `(allow process-exec) ;; falsification run` : ""}
+${READ_ALLOW_ROOTS.map((a) => `(allow file-read-data (subpath "${a}"))`).join("\n")}
 (allow file-read-data (subpath "${runtimeDir}"))
 (allow file-read-data (subpath "${hostDir}"))
 (allow file-read-data (subpath "${workspace}"))
@@ -236,6 +252,8 @@ try { fs.readFileSync(${JSON.stringify(outsideHome)}); out.readOutsideHome = "RE
 // ...and the per-user $TMPDIR, which is a DIFFERENT root from /tmp.
 try { fs.readFileSync(${JSON.stringify(outsideTmpdir)}); out.readTmpdir = "READ SUCCEEDED"; }
   catch (e) { out.readTmpdir = e.code ?? String(e); }
+try { fs.readFileSync(${JSON.stringify(outsideVarTmp)}); out.readVarTmp = "READ SUCCEEDED"; }
+  catch (e) { out.readVarTmp = e.code ?? String(e); }
 // A system path SHOULD stay readable; the tier confines user data, not /etc.
 try { fs.readFileSync("/etc/hosts"); out.readSystem = "ok"; }
   catch (e) { out.readSystem = e.code ?? String(e); }
@@ -318,10 +336,12 @@ for (const runtime of sbAvailable ? RUNTIMES : []) {
     );
     record(
       t("the OS denies an escape OUTSIDE $HOME too"),
-      parsed.readOutsideHome !== "READ SUCCEEDED" && parsed.readTmpdir !== "READ SUCCEEDED"
+      parsed.readOutsideHome !== "READ SUCCEEDED" &&
+      parsed.readTmpdir !== "READ SUCCEEDED" &&
+      parsed.readVarTmp !== "READ SUCCEEDED"
         ? "PASS"
         : "FAIL",
-      `/private/tmp → ${parsed.readOutsideHome}; $TMPDIR → ${parsed.readTmpdir}`,
+      `/private/tmp → ${parsed.readOutsideHome}; $TMPDIR → ${parsed.readTmpdir}; /private/var/tmp → ${parsed.readVarTmp}`,
     );
     record(
       t("writes outside the workspace are denied"),
@@ -580,9 +600,10 @@ if (FALSIFY) {
 listener.close();
 try { rmSync(outsideHome, { force: true }); } catch {}
 try { rmSync(outsideTmpdir, { force: true }); } catch {}
+try { rmSync(outsideVarTmp, { force: true }); } catch {}
 // Under --falsify the child SUCCEEDS at these writes, so the harness must clean up
 // what its own escape probes created — otherwise a falsification run litters /tmp.
-for (const stray of [outsideHome + ".escape", outsideTmpdir + ".escape"]) {
+for (const stray of [outsideHome + ".escape", outsideTmpdir + ".escape", outsideVarTmp + ".escape"]) {
   try { rmSync(stray, { force: true }); } catch {}
 }
 rmSync(root, { recursive: true, force: true });
