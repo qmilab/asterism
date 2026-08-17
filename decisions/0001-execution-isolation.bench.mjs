@@ -54,6 +54,11 @@ writeFileSync(join(outside, "id_rsa"), "PRIVATE KEY MATERIAL\n");
 // look like a jail while /tmp stayed wide open.
 const outsideHome = `/private/tmp/asterism-spike-escape-${process.pid}.txt`;
 writeFileSync(outsideHome, "SECRET OUTSIDE HOME\n");
+// A THIRD target, in the real per-user $TMPDIR. It is a different root from /tmp
+// (`/private/var/folders/...` on macOS) and is where os.tmpdir() actually points,
+// so a probe that only checks /private/tmp passes while it stays readable.
+const outsideTmpdir = join(realpathSync(tmpdir()), `asterism-spike-escape-${process.pid}.txt`);
+writeFileSync(outsideTmpdir, "SECRET IN TMPDIR\n");
 
 const ms = (ns) => Number(ns) / 1e6;
 const pct = (sorted, p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
@@ -122,7 +127,24 @@ const home = realpathSync(homedir());
 // /tmp/whatever still succeeded. Every location that can hold USER DATA is denied;
 // system paths (/usr, /etc, /System, /Library) stay readable, which is deliberate:
 // they are what the runtime needs to boot, and they are not the agent's secrets.
-const READ_DENY_ROOTS = ["/Users", home, "/tmp", "/private/tmp", "/Volumes"];
+//
+// `/private/var/folders` is the one most easily missed and among the most valuable:
+// it is where macOS puts the PER-USER temp dir that `os.tmpdir()` returns, so
+// leaving it out means every scratch file any program wrote stays readable while
+// the profile looks confined. `/tmp` is NOT the same place and covering it is not
+// enough. The realpath'd tmpdir is added too, for hosts where TMPDIR points
+// somewhere else entirely.
+const READ_DENY_ROOTS = [
+  ...new Set([
+    "/Users",
+    home,
+    "/tmp",
+    "/private/tmp",
+    "/Volumes",
+    "/private/var/folders",
+    realpathSync(tmpdir()),
+  ]),
+];
 
 /** The tier's profile, parameterised by which runtime binary hosts the tools. */
 function writeProfile(path, runtimePath) {
@@ -211,6 +233,9 @@ try { fs.readFileSync(${JSON.stringify(join(outside, "id_rsa"))}); out.readOutsi
 // The escape that is NOT under $HOME — the case a $HOME-only deny would miss.
 try { fs.readFileSync(${JSON.stringify(outsideHome)}); out.readOutsideHome = "READ SUCCEEDED"; }
   catch (e) { out.readOutsideHome = e.code ?? String(e); }
+// ...and the per-user $TMPDIR, which is a DIFFERENT root from /tmp.
+try { fs.readFileSync(${JSON.stringify(outsideTmpdir)}); out.readTmpdir = "READ SUCCEEDED"; }
+  catch (e) { out.readTmpdir = e.code ?? String(e); }
 // A system path SHOULD stay readable; the tier confines user data, not /etc.
 try { fs.readFileSync("/etc/hosts"); out.readSystem = "ok"; }
   catch (e) { out.readSystem = e.code ?? String(e); }
@@ -293,8 +318,10 @@ for (const runtime of sbAvailable ? RUNTIMES : []) {
     );
     record(
       t("the OS denies an escape OUTSIDE $HOME too"),
-      parsed.readOutsideHome !== "READ SUCCEEDED" ? "PASS" : "FAIL",
-      `reading ${outsideHome} → ${parsed.readOutsideHome}`,
+      parsed.readOutsideHome !== "READ SUCCEEDED" && parsed.readTmpdir !== "READ SUCCEEDED"
+        ? "PASS"
+        : "FAIL",
+      `/private/tmp → ${parsed.readOutsideHome}; $TMPDIR → ${parsed.readTmpdir}`,
     );
     record(
       t("writes outside the workspace are denied"),
@@ -539,8 +566,23 @@ if (FALSIFY) {
     console.log(
       `\n✓ FALSIFIED CORRECTLY — all ${flipped.length} runtime/claim pairs fail once the capability is granted back. The checks are real.`,
     );
+  } else {
+    // A security harness that prints a failure and exits 0 cannot be used by
+    // anything — `node bench.mjs --falsify && ...` would treat a broken check as
+    // success. This is the skeleton of an acceptance test; it has to be scriptable.
+    process.exitCode = 1;
   }
+} else if (results.some((r) => r.verdict === "FAIL")) {
+  // Same rule for the normal run. In --falsify a FAIL is the DESIRED outcome, which
+  // is why the two modes decide the exit status differently.
+  process.exitCode = 1;
 }
 listener.close();
 try { rmSync(outsideHome, { force: true }); } catch {}
+try { rmSync(outsideTmpdir, { force: true }); } catch {}
+// Under --falsify the child SUCCEEDS at these writes, so the harness must clean up
+// what its own escape probes created — otherwise a falsification run litters /tmp.
+for (const stray of [outsideHome + ".escape", outsideTmpdir + ".escape"]) {
+  try { rmSync(stray, { force: true }); } catch {}
+}
 rmSync(root, { recursive: true, force: true });

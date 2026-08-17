@@ -123,7 +123,7 @@ pass, on both.**
 | Boots under `(deny default)` | **Node ✓ Bun ✓** |
 | Workspace read + write inside the jail | **works, both** |
 | Read of a neighbouring directory in `$HOME` | **denied, both** |
-| Read of a path **outside** `$HOME` (`/private/tmp/…`) | **denied, both** |
+| Read of a path **outside** `$HOME` (`/private/tmp` **and** the real `$TMPDIR`) | **denied, both** |
 | Read of a system path (`/etc/hosts`) | **allowed — by design** |
 | **Write** outside the workspace, in `$HOME` and outside it | **denied, both** |
 | Directory enumeration of `$HOME` | **denied, both** |
@@ -186,11 +186,22 @@ never made reads as one that passed**:
   The matrix is now derived from what the **record claims**, and a missing pair is
   a failed falsification. Verified by simulating both.
 
-**Every defect found across four review rounds was in this harness or in a
+It also **exits non-zero** when a required assertion is missing or inert, and when
+the normal run has any failure. A security harness that prints a failure and exits
+`0` cannot be composed with anything — and this file is meant to be the skeleton
+of an acceptance test, so it has to be scriptable.
+
+**Every defect found across five review rounds was in this harness or in a
 supporting claim, and none in the decision.** That is worth recording as a
 property of the work rather than a coincidence: the shape of the answer was
 reasoned from the code and held, while everything asserted rather than measured
 had to be corrected.
+
+The recurring failure was never a wrong belief — it was an **unenumerated** one.
+The realpath fact was known and written down as trap 1, then not applied to
+`/private/var/folders`. The missing-runtime hole was fixed for "one absent" and
+not for "none present". Each time the correction was narrower than the thing it
+was correcting.
 
 ### Five traps the harness found, each a design constraint
 
@@ -240,6 +251,7 @@ The profile that actually works, in full:
 (deny  file-read-data (subpath "/tmp"))
 (deny  file-read-data (subpath "/private/tmp"))
 (deny  file-read-data (subpath "/Volumes"))
+(deny  file-read-data (subpath "/private/var/folders"))   ; the real per-user $TMPDIR
 (allow file-read-data (subpath "<runtime dir>"))
 (allow file-read-data (subpath "<Asterism install dir>"))   ; the host's own code
 (allow file-read-data (subpath "<this agent's workspace>"))
@@ -252,6 +264,14 @@ exactly that.** It produced a profile that confined *writes* to the workspace
 while a read of `/tmp/anything` still succeeded — a jail on one axis, wide open on
 the other, and the harness never noticed because its only escape probe was a
 sibling directory inside `$HOME`. Both runtimes still boot with the full deny list.
+
+**And `/tmp` is not where the temp files are.** `os.tmpdir()` on macOS returns
+`/var/folders/…`, whose real path is under **`/private/var/folders`** — a
+different root, holding every scratch file any program on the machine has
+written. A deny list covering `/tmp` and not that one still looks confined and
+is not. This is the same realpath fact as trap 1, applied to a second place; it
+was missed the first time precisely because knowing a fact is not the same as
+having enumerated where it applies.
 
 So state what the tier is, precisely: **no reads of user data anywhere outside the
 workspace; no writes anywhere but the workspace; no network; no exec beyond the
