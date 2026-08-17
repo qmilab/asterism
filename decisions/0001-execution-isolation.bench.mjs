@@ -146,7 +146,11 @@ ${FALSIFY ? `(allow process-exec) ;; falsification run` : ""}
 (allow file-read-data (subpath "${runtimeDir}"))
 (allow file-read-data (subpath "${hostDir}"))
 (allow file-read-data (subpath "${workspace}"))
-(allow file-write* (subpath "${workspace}") (literal "/dev/null"))
+${
+      FALSIFY
+        ? "(allow file-write*) ;; falsification run"
+        : `(allow file-write* (subpath "${workspace}") (literal "/dev/null"))`
+    }
 ${FALSIFY ? "(allow network*) ;; falsification run" : "(deny network*)"}
 `,
   );
@@ -160,10 +164,23 @@ const bunPath = (() => {
   if (found.status !== 0) return null;
   try { return realpathSync(found.stdout.trim()); } catch { return null; }
 })();
+// The ADR's feasibility claim covers BOTH, so both are prerequisites of the
+// evidence — not "whatever this machine has". A missing one is reported as a
+// failure, rather than quietly narrowing what the harness claims to have shown.
+const REQUIRED_RUNTIMES = ["node", "bun"];
 const RUNTIMES = [
   { name: "node", path: execPath },
   ...(bunPath ? [{ name: "bun", path: bunPath }] : []),
 ];
+for (const required of REQUIRED_RUNTIMES) {
+  if (!RUNTIMES.some((r) => r.name === required)) {
+    record(
+      `prerequisite: ${required} is installed`,
+      "FAIL",
+      `not on PATH — the ADR's Node+Bun claim cannot be reproduced on this host`,
+    );
+  }
+}
 
 const allowProfile = join(root, "toolhost.sb");
 writeProfile(allowProfile, execPath);
@@ -203,8 +220,18 @@ try { fs.statSync(${JSON.stringify(join(outside, "id_rsa"))}); out.statOutside =
   catch (e) { out.statOutside = e.code ?? String(e); }
 try { out.listHome = "LISTED " + fs.readdirSync(process.env.HOME).length + " entries"; }
   catch (e) { out.listHome = e.code ?? String(e); }
+// The ADR claims writes are confined to the workspace. Writing only INSIDE it
+// proves the allow, never the deny — a profile that leaked file-write* would have
+// passed every assertion here. Both escape targets, inside $HOME and outside it.
+try { fs.writeFileSync(${JSON.stringify(join(outside, "escape.txt"))}, "x"); out.writeOutside = "WRITE SUCCEEDED"; }
+  catch (e) { out.writeOutside = e.code ?? String(e); }
+try { fs.writeFileSync(${JSON.stringify(outsideHome + ".escape")}, "x"); out.writeOutsideHome = "WRITE SUCCEEDED"; }
+  catch (e) { out.writeOutsideHome = e.code ?? String(e); }
 // A filesystem tool host has no business execing anything but its own runtime.
-try { require("node:child_process").execSync("/bin/echo x"); out.exec = "EXEC SUCCEEDED"; }
+// execFileSync, NOT execSync: execSync runs /bin/sh -c "...", so a denial there
+// only proves the SHELL could not start. This tests the stated property — a direct
+// exec of a non-runtime binary — with no shell in between.
+try { require("node:child_process").execFileSync("/bin/echo", ["x"]); out.exec = "EXEC SUCCEEDED"; }
   catch (e) { out.exec = e.code ?? String(e).slice(0, 30); }
 // Connect to a REAL listener the parent is running, and judge only on whether the
 // connection was ESTABLISHED. Inferring from errno is runtime-specific and wrong:
@@ -268,6 +295,13 @@ for (const runtime of sbAvailable ? RUNTIMES : []) {
       t("the OS denies an escape OUTSIDE $HOME too"),
       parsed.readOutsideHome !== "READ SUCCEEDED" ? "PASS" : "FAIL",
       `reading ${outsideHome} → ${parsed.readOutsideHome}`,
+    );
+    record(
+      t("writes outside the workspace are denied"),
+      parsed.writeOutside !== "WRITE SUCCEEDED" && parsed.writeOutsideHome !== "WRITE SUCCEEDED"
+        ? "PASS"
+        : "FAIL",
+      `inside $HOME → ${parsed.writeOutside}; outside $HOME → ${parsed.writeOutsideHome}`,
     );
     record(
       t("system paths stay readable (the tier confines user data, not /etc)"),
@@ -457,6 +491,7 @@ if (FALSIFY) {
   const mustFail = [
     "the OS denies the escape the kernel check",
     "the OS denies an escape OUTSIDE $HOME",
+    "writes outside the workspace are denied",
     "network is denied",
     "the tool host cannot exec",
     "directory enumeration outside the workspace is denied",
@@ -466,9 +501,19 @@ if (FALSIFY) {
   // per-claim result, the other runtime's failures alone satisfy a length test and
   // the run prints "FALSIFIED CORRECTLY" for assertions that never executed. An
   // absent pair is a FAILED falsification, not a missing row.
+  // The matrix is built from what the ADR CLAIMS, never from what this host happens
+  // to provide. Deriving it from `RUNTIMES` lets a machine without Bun — or without
+  // seatbelt at all — shrink the requirement to nothing and still reach the success
+  // branch: "all 0 pairs falsified". An absent prerequisite is a FAILED
+  // falsification, because the claim went untested.
   const expected = [];
-  for (const runtime of sbAvailable ? RUNTIMES : []) {
-    for (const claim of mustFail) expected.push({ runtime: runtime.name, claim });
+  for (const runtime of REQUIRED_RUNTIMES) {
+    for (const claim of mustFail) expected.push({ runtime, claim });
+  }
+  if (!sbAvailable) {
+    console.log(
+      "\n✗ NOT FALSIFIED — `sandbox-exec` is unavailable, so no sandbox assertion ran at all.",
+    );
   }
   const flipped = expected.map(({ runtime, claim }) => {
     const hit = results.find((r) => r.name.includes(`[${runtime}]`) && r.name.includes(claim));

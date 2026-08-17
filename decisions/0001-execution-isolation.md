@@ -125,6 +125,7 @@ pass, on both.**
 | Read of a neighbouring directory in `$HOME` | **denied, both** |
 | Read of a path **outside** `$HOME` (`/private/tmp/…`) | **denied, both** |
 | Read of a system path (`/etc/hosts`) | **allowed — by design** |
+| **Write** outside the workspace, in `$HOME` and outside it | **denied, both** |
 | Directory enumeration of `$HOME` | **denied, both** |
 | `stat` of a *known* outside path | **succeeds — published limitation** |
 | Network from the tool host | **denied, both** |
@@ -161,11 +162,35 @@ harness itself**, none of which a passing run would have revealed:
   as `undefined` rather than as a failure, so a mistyped assertion name would have
   been silently excluded from the matrix.
 
-All eight security assertions (four claims × two runtimes) now flip under
+All twelve security assertions (six claims × two runtimes) now flip under
 `--falsify` and pass without it. Two further claims are asserted but deliberately
-**outside** the falsification matrix, because they are not security properties:
-that the runtime boots, and that the published `stat` limitation still holds —
-the latter asserted so the record is known to be stale if it ever changes.
+**outside** the matrix, because they are not security properties: that the runtime
+boots, and that the published `stat` limitation still holds — the latter asserted
+so the record is known to be stale if it ever changes.
+
+Later rounds found three more, all of the same family — **an assertion that was
+never made reads as one that passed**:
+
+- **Write confinement was claimed and never tested.** The probe only wrote
+  *inside* the workspace, which proves the allow and not the deny, and `--falsify`
+  never granted writes back. A profile leaking `file-write*` would have passed
+  every assertion in the file.
+- **`execSync` starts `/bin/sh -c`**, so a denial proved only that the *shell*
+  could not start. Under a profile that permitted a non-runtime binary directly
+  while denying `sh`, the check still passed. It uses `execFileSync` now — the
+  stated property, with no shell in between.
+- **An absent prerequisite shrank the matrix instead of failing it.** The expected
+  pairs were derived from the runtimes the *host* happened to have, so a machine
+  without Bun quietly dropped six claims, and a machine without `sandbox-exec`
+  reached the success branch and printed *"all 0 runtime/claim pairs falsified"*.
+  The matrix is now derived from what the **record claims**, and a missing pair is
+  a failed falsification. Verified by simulating both.
+
+**Every defect found across four review rounds was in this harness or in a
+supporting claim, and none in the decision.** That is worth recording as a
+property of the work rather than a coincidence: the shape of the answer was
+reasoned from the code and held, while everything asserted rather than measured
+had to be corrected.
 
 ### Five traps the harness found, each a design constraint
 
