@@ -2,6 +2,30 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.8.0 — unreleased
+
+> These notes are written and reviewed ahead of the release. Every `@qmilab/asterism*` package is still at `0.7.0`, which remains the latest published version; this heading gets its date when the version bump and the `v0.8.0` tag land.
+
+### Changed
+
+- **An option Asterism does not recognize is now an error.** It used to be ignored — silently, and on all but a handful of commands. An ignored option is an instruction you gave and did not get, and what it fell back to varied by command in ways nobody should have to know:
+
+  - `asterism service uninstall writer --knid telegram` removed **every** service that agent had — `--kind` narrows, so ignoring it widened what was taken away — and reported success for each one.
+  - `asterism config unset --agnet work` cleared the install-wide default model instead of that one agent's override, and said it had worked. (`config set` was fixed in 0.5.0; the matching verb was not.)
+  - `asterism service install writer --knid telegram` installed a `serve` unit; `asterism serve writer --prot 8080` bound the default port and printed that URL as though it were the one asked for; `asterism new bot --trsut autonomous` created an agent at `propose`; a mistyped filter on `memory inspect` or `events tail` showed the unfiltered view.
+
+  Every command now names the option it does not take, and says what it does take — every command, that is, except the ones whose tail is text you wrote, which are unchanged and described below.
+
+  Two consequences worth knowing before you upgrade. **A script passing a stray option to Asterism will start failing** — that is the point, but it is a behaviour change, and the option named in the message is the one to remove. And **a mistyped option no longer swallows the value after it**: `--prot 8080` used to consume `8080` as well, so the complaint that came back was about a missing argument you had in fact typed.
+
+  Nothing changes for the text you write yourself. `handoff`, `artifact`, `summary`, `brief`, `objective add`, the `notes` verbs and `secrets add` take their tail exactly as typed — `asterism handoff writer researcher "--draft the proposal"` hands over precisely that — and everything after `--` on `asterism service install` still reaches the command the service runs, untouched.
+
+  `asterism run` is the one to know about, because it reads its task as ordinary arguments rather than as a verbatim tail. Put a task that begins with a dash after `--`: `asterism run writer -- --draft the proposal`. And unquoted, `asterism run writer --draft the Q3 proposal` used to hand the agent "Q3 proposal" — quietly losing both the verb and the word after it — where it now says which word it could not read.
+
+- **A named `trust` form is no longer dropped in favour of `--review`.** `asterism trust <agent> threshold --review` ran the standing-grant review and ignored the word `threshold` — and so did `show`, `revoke`, and, worst of the four, the level itself: `asterism trust bot autonomous --review` reviewed grants and **set no level at all**, reporting success. The positional form now decides, and an option belonging to a different form of the verb is refused by name. `asterism trust <agent> --review` on its own is unchanged.
+
+- **Each `dashboard` option is refused outside the mode that uses it.** The three modes use different options — attaching to a URL uses `--token`, `--headless` uses `--port`/`--host`, and the local terminal view uses neither — but only one of those rules was enforced. So `asterism dashboard --headless --token <t>` ran a console whose access token was *not* `<t>` (a headless console generates and prints its own, the way `serve` does), and `asterism dashboard <url> --port 4900` attached to the URL and dropped the port. Both now say which option does not belong and why.
+
 ## 0.7.0 — 2026-08-17
 
 Two ways to judge Asterism before you commit anything to it. It now runs with no account and no key anywhere — point it at a model already running on your own machine, and nothing an agent writes ever leaves it. And you can read precisely what its boundary does and does not hold: a published threat model that names the mechanism behind each claim and the test that proves it, and is as specific about the gaps as about the guarantees.

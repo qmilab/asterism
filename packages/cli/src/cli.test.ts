@@ -12,7 +12,7 @@ import type {
   RuntimeAdapter,
 } from "@qmilab/asterism-core";
 import { handleRequest } from "@qmilab/asterism-server";
-import type { RunningServer, ServeOptions } from "@qmilab/asterism-server";
+import type { RunningServer, ServeConsoleOptions, ServeOptions } from "@qmilab/asterism-server";
 import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { workspaceCapabilities } from "./capabilities.ts";
@@ -417,6 +417,32 @@ test("trust threshold rejects values that are not a positive whole number", asyn
   );
 });
 
+test("any named trust form wins over --review, rather than being dropped for it", async () => {
+  // `--review` selects the standing-grant review only when NO positional form was named.
+  // It used to be read first, so `trust cleaner threshold --review` quietly ran the grant
+  // review and the word the operator typed went nowhere. The LEVEL is a named form too,
+  // and was missed on the first pass — `trust cleaner autonomous --review` reviewed grants
+  // and set no level at all, silently. Every form now refuses the sibling's option.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "propose"], h.io);
+  for (const [form, label] of [
+    ["threshold", "trust threshold"],
+    ["show", "trust show"],
+    ["revoke", "trust revoke"],
+    ["autonomous", "trust"], // the level form — a positional like any other
+  ] as const) {
+    h.err.length = 0;
+    expect(await runCli(["trust", "cleaner", form, "--review"], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain(`asterism ${label} does not take --review.`);
+  }
+  // ...and the level was not quietly set on the way past.
+  expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("propose");
+  // The bare form still ratifies grants.
+  expect(await runCli(["trust", "cleaner", "--review"], h.io)).toBe(0);
+  expect(h.out.join("\n")).toContain("no capabilities have earned a standing grant yet");
+});
+
 test("trust threshold is scoped: one agent's bar never reaches another", async () => {
   const h = harness();
   await runCli(["init"], h.io);
@@ -668,6 +694,19 @@ test("memory inspect and events tail reject an empty --run value", async () => {
   h.err.length = 0;
   expect(await runCli(["events", "tail", "personal", "--run="], h.io)).toBe(1);
   expect(h.err.join("\n")).toContain("The --run option needs a value");
+});
+
+test("events tail --type narrows to one event type", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  await runCli(["trust", "personal", "autonomous"], h.io);
+  const all = await capture(["events", "tail", "personal"], h.io);
+  expect(all).toContain("agent.created");
+  expect(all).toContain("agent.trust_changed");
+  const filtered = await capture(["events", "tail", "personal", "--type", "agent.created"], h.io);
+  expect(filtered).toContain("agent.created");
+  expect(filtered).not.toContain("agent.trust_changed");
 });
 
 test("events tail rejects a non-numeric --limit", async () => {
@@ -1602,6 +1641,18 @@ function fakeRunningServer(): RunningServer {
   };
 }
 
+/** A terminal stand-in, so a `dashboard` test can get past the TTY check. */
+function fakeTerminal(): NonNullable<CliIO["terminal"]> {
+  return {
+    columns: 80,
+    rows: 24,
+    write: () => {},
+    setRawMode: () => {},
+    onKey: () => () => {},
+    onResize: () => () => {},
+  };
+}
+
 test("serve binds the named agent and exposes its endpoints", async () => {
   const h = harness();
   h.io.makeAdapter = () => ({ adapter: fakeAdapter });
@@ -1765,6 +1816,119 @@ test("serve rejects a non-numeric or out-of-range --port instead of binding the 
   // Out of range.
   expect(await runCli(["serve", "personal", "--port", "99999"], { ...h.io, ...serveOverrides })).toBe(1);
   expect(h.err.join("\n")).toContain("between 0 and 65535");
+  expect(started).toBe(false);
+});
+
+test("serve --host binds the address asked for, not the loopback default", async () => {
+  const h = harness();
+  h.io.makeAdapter = () => ({ adapter: fakeAdapter });
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: ServeOptions | undefined;
+  expect(
+    await runCli(["serve", "personal", "--host", "0.0.0.0", "--port", "9091"], {
+      ...h.io,
+      startServer: (options) => {
+        captured = options;
+        return fakeRunningServer();
+      },
+      waitForShutdown: () => Promise.resolve(),
+    }),
+  ).toBe(0);
+  expect(captured?.hostname).toBe("0.0.0.0");
+  expect(captured?.port).toBe(9091);
+});
+
+test("dashboard --headless binds the port and host asked for", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+
+  let captured: ServeConsoleOptions | undefined;
+  expect(
+    await runCli(["dashboard", "--headless", "--port", "4900", "--host", "0.0.0.0"], {
+      ...h.io,
+      startConsole: (options) => {
+        captured = options;
+        return fakeRunningServer();
+      },
+      waitForShutdown: () => Promise.resolve(),
+    }),
+  ).toBe(0);
+  expect(captured?.port).toBe(4900);
+  expect(captured?.hostname).toBe("0.0.0.0");
+});
+
+test("dashboard's value-bearing options are errors when given bare, not refusals", async () => {
+  // Each is DECLARED as value-bearing, so a bare one is "needs a value" — the message
+  // that says the option exists. An undeclared one would be refused by name instead.
+  const h = harness();
+  await runCli(["init"], h.io);
+  for (const flag of ["token", "port", "host"]) {
+    h.err.length = 0;
+    expect(await runCli(["dashboard", `--${flag}`], h.io)).toBe(1);
+    expect(h.err.join("\n")).toBe(`The --${flag} option needs a value.`);
+  }
+});
+
+test("each dashboard option is refused outside the mode that uses it", async () => {
+  // Three modes, each using a different subset: attaching to a URL uses `--token`;
+  // `--headless` uses `--port`/`--host`; the local terminal view uses neither. An option
+  // outside its mode was read and dropped — `--headless --token X` ran a console whose
+  // token was NOT X, and reported success.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  let started = false;
+  // Deliberately NO terminal: every refusal below fires before the mode branches, so a
+  // regression falls through to "needs an interactive terminal" and fails this test at
+  // once — where with a terminal it would attach the TUI to a URL nothing answers and
+  // hang until the client gave up.
+  const io = {
+    ...h.io,
+    startConsole: () => {
+      started = true;
+      return fakeRunningServer();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  };
+  const cases: [string[], string][] = [
+    // `--token` belongs to the attach-to-a-URL mode alone.
+    [["dashboard", "--token", "t"], "--token applies when you give a URL to attach to"],
+    [["dashboard", "--headless", "--token", "t"], "--token applies when you give a URL to attach to"],
+    // `--port`/`--host` belong to `--headless` alone; attaching binds nothing.
+    [["dashboard", "http://127.0.0.1:4832", "--token", "t", "--port", "4900"], "the URL already says where to attach"],
+    [["dashboard", "http://127.0.0.1:4832", "--token", "t", "--host", "0.0.0.0"], "the URL already says where to attach"],
+  ];
+  for (const [argv, expected] of cases) {
+    h.err.length = 0;
+    started = false;
+    expect({ argv, code: await runCli(argv, io) }).toEqual({ argv, code: 1 });
+    expect(h.err.join("\n")).toContain(expected);
+    expect(started).toBe(false);
+  }
+  // The combinations that DO belong to their mode still work.
+  expect(await runCli(["dashboard", "--headless", "--port", "4900", "--host", "0.0.0.0"], io)).toBe(0);
+  expect(started).toBe(true);
+});
+
+test("dashboard --port and --host are refused without --headless, rather than ignored", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  let started = false;
+  expect(
+    await runCli(["dashboard", "--port", "4900"], {
+      ...h.io,
+      terminal: fakeTerminal(),
+      startConsole: () => {
+        started = true;
+        return fakeRunningServer();
+      },
+      waitForShutdown: () => Promise.resolve(),
+    }),
+  ).toBe(1);
+  expect(h.err.join("\n")).toContain("apply to --headless only");
   expect(started).toBe(false);
 });
 
@@ -3274,6 +3438,33 @@ test("new --model pins the agent's model in the config file", async () => {
   });
 });
 
+test("every model coordinate is settable on `new` and on `config set`", async () => {
+  // All four together, both places: `--base-url` and `--api` had no test of their own,
+  // so a declaration that dropped either would have gone unnoticed until an operator
+  // pointing at a self-hosted endpoint found the option refused.
+  const h = harness();
+  await runCli(["init"], h.io);
+  const coords = ["--provider", "custom", "--base-url", "https://llm.internal/v1", "--api", "openai-completions"];
+  expect(await runCli(["new", "work", "--model", "local-7b", ...coords], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).agents).toEqual({
+    work: {
+      model: {
+        id: "local-7b",
+        provider: "custom",
+        baseUrl: "https://llm.internal/v1",
+        api: "openai-completions",
+      },
+    },
+  });
+  expect(await runCli(["config", "set", "local-13b", ...coords], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).model).toEqual({
+    id: "local-13b",
+    provider: "custom",
+    baseUrl: "https://llm.internal/v1",
+    api: "openai-completions",
+  });
+});
+
 test("run resolves each agent's own model through the adapter seam", async () => {
   const h = harness();
   // Capture the resolution context the run-bearing command hands the seam.
@@ -3810,6 +4001,41 @@ test("handoff over a connection returns the callee's output", async () => {
   const out = await capture(["handoff", "writer", "researcher", "summarize the notes"], io);
   // fakeAdapter resolves "hello from the agent" — the callee's output, crossed back.
   expect(out).toContain("hello from the agent");
+});
+
+test("a run task beginning with a dash reaches the agent verbatim, but a stray option is refused", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "autonomous"], h.io);
+  const io = { ...h.io, makeAdapter: () => ({ adapter: fakeAdapter }) };
+  // ONE quoted argument. `run` reads its task from the parsed positionals rather than a
+  // verbatim tail, so this is the token that decides whether refusing unknown options
+  // costs the operator their task. An option name has no spaces in it, so it does not.
+  expect(await runCli(["run", "writer", "--draft the Q3 proposal"], io)).toBe(0);
+  const store = openHomeStore(h);
+  try {
+    const writer = agentNamed(store, "writer");
+    expect(store.runs.list(writer.id).at(-1)?.input).toBe("--draft the Q3 proposal");
+  } finally {
+    store.close();
+  }
+  // Unquoted, the first word IS option-shaped — and taking it as task text would hand
+  // the agent "Q3 proposal", quietly missing the verb and the word after it.
+  h.err.length = 0;
+  expect(await runCli(["run", "writer", "--draft", "the", "Q3", "proposal"], io)).toBe(1);
+  expect(h.err.join("\n")).toContain("asterism run does not take --draft.");
+
+  // A single-word dash task has no space to disqualify it as an option name, so it IS
+  // refused — and `--` is what the reference tells the reader to reach for. Run the
+  // command the docs name rather than asserting the sentence that names it.
+  expect(await runCli(["run", "writer", "--fix"], io)).toBe(1);
+  expect(await runCli(["run", "writer", "--", "--fix", "the", "build"], io)).toBe(0);
+  const after = openHomeStore(h);
+  try {
+    expect(after.runs.list(agentNamed(after, "writer").id).at(-1)?.input).toBe("--fix the build");
+  } finally {
+    after.close();
+  }
 });
 
 test("a handoff task beginning with a dash reaches the callee verbatim (Codex P2)", async () => {

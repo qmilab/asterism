@@ -17,6 +17,25 @@ asterism <command> [options]
 argument, no workspace, bad value). Errors print to standard error; results
 print to standard output.
 
+**An option a command does not take is an error**, never something quietly
+ignored. The command names the option and shows what it does take, so a typo is
+never mistaken for a default you chose:
+
+```console
+$ asterism new writer --trsut autonomous
+asterism new does not take --trsut.
+Usage: asterism new <agent> [--soul <name|path>] [--role "<text>"] [--trust <level>]
+```
+
+Text you write yourself is untouched by this. [`handoff`](#handoff),
+[`artifact`](#artifact), [`summary`](#summary), [`brief`](#brief),
+[`objective add`](#objective), the [`notes`](#notes) verbs, and
+[`secrets add`](#secrets-add) take their tail exactly as typed, dashes and all, and
+everything after `--` on [`service install`](#service) reaches the command the
+service runs. [`run`](#run) is the one exception — it reads its task as ordinary
+arguments — so put a task that begins with a dash after `--`:
+`asterism run writer -- --draft the proposal`.
+
 Almost every command takes an agent by **name** and must be run inside an
 initialized workspace (the `.asterism/` home, discovered by walking up from the
 current directory). If no workspace is found, the command tells you to run

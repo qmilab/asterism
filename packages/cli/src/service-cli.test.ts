@@ -410,6 +410,28 @@ describe("asterism service", () => {
     expect(calls.some((c) => c.command === "systemctl" && c.args.includes("disable"))).toBe(true);
   });
 
+  test("--kind narrows status and uninstall to the one service named", async () => {
+    // The NARROWING direction, which is why an ignored `--kind` here is worse than one
+    // on install: absent, both verbs reach every kind the agent has. `service uninstall
+    // writer --knid telegram` stopped and removed all three, reporting success for each.
+    const io = baseIo({ platform: "linux", runCommand: makeRunner().run });
+    for (const kind of ["serve", "telegram", "discord"]) {
+      await run(io, ["service", "install", "writer", "--kind", kind]);
+    }
+
+    const status = await run(io, ["service", "status", "writer", "--kind", "telegram"]);
+    expect(status.code).toBe(0);
+    expect(status.text).toContain("writer (telegram)");
+    expect(status.text).not.toContain("writer (serve)");
+    expect(status.text).not.toContain("writer (discord)");
+
+    const removed = await run(io, ["service", "uninstall", "writer", "--kind", "telegram"]);
+    expect(removed.code).toBe(0);
+    expect(existsSync(paths("writer", "telegram").systemdUnit)).toBe(false);
+    expect(existsSync(paths("writer", "serve").systemdUnit)).toBe(true);
+    expect(existsSync(paths("writer", "discord").systemdUnit)).toBe(true);
+  });
+
   test("an unsupported platform declines and writes nothing", async () => {
     const { run: runner, calls } = makeRunner();
     const io = baseIo({ platform: "win32", runCommand: runner });

@@ -150,9 +150,15 @@ function sourceFiles() {
 /**
  * Every line inside a fenced block that invokes `asterism`. A `$ ` prompt is stripped,
  * as is a trailing ` # comment` — both are presentation, not part of the claim.
+ *
+ * A line already claimed as the OUTPUT of a prompted command above it is not an
+ * invocation, however much it looks like one. That is not hypothetical: the CLI refuses
+ * an option it does not take with `asterism <verb> does not take --x.`, which begins
+ * with the word this extractor keys on — so a page showing that refusal was read as
+ * documenting a synopsis, and the checker ran the error message as a command.
  */
-function extract(relPath) {
-  const text = readFileSync(join(ROOT, relPath), "utf8");
+function extract(relPath, base = ROOT) {
+  const text = readFileSync(join(base, relPath), "utf8");
   const found = [];
   let inFence = false;
   let section = "";
@@ -177,16 +183,18 @@ function extract(relPath) {
   // The lines a block prints beneath a prompted command are its EXPECTED OUTPUT — the
   // page's claim about what the reader will see. Attach them to the command above.
   const lines = text.split("\n");
+  const outputLines = new Set();
   for (const item of found) {
     if (!item.prompted) continue;
     for (let j = item.line; j < lines.length; j++) {
       const l = lines[j];
       if (l === undefined || /^\s*```/.test(l) || /^\s*\$\s/.test(l)) break;
       item.shown.push(l);
+      outputLines.add(j + 1); // `lines[j]` is the (j+1)-th line, 1-based
     }
     while (item.shown.length && item.shown[item.shown.length - 1].trim() === "") item.shown.pop();
   }
-  return found;
+  return found.filter((f) => f.prompted || !outputLines.has(f.line));
 }
 
 // ------------------------------------------------------------- classification
@@ -1525,6 +1533,49 @@ function report(total, tally, groups, coverageWork) {
       process.exit(1);
     }
     console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
+
+    // The extractor's own classifier, on the one page shape where the two classes are
+    // indistinguishable by their first word: the CLI refuses an unknown option with
+    // `asterism <verb> does not take --x.`, so a page showing that refusal has an OUTPUT
+    // line that opens exactly like a synopsis. Read as a synopsis it is run as a command,
+    // and the checker fails a page that is correct. Both a planted case and a control —
+    // an unprompted line in a block with no prompt at all is still a synopsis.
+    const exDir = mkdtempSync(join(tmpdir(), "asterism-extract-"));
+    try {
+      writeFileSync(
+        join(exDir, "page.md"),
+        [
+          "```console",
+          "$ asterism new writer --trsut autonomous",
+          "asterism new does not take --trsut.",
+          "Usage: asterism new <agent> [--soul <name|path>]",
+          "```",
+          "",
+          "```",
+          "asterism connections <agent>",
+          "```",
+          "",
+        ].join("\n"),
+      );
+      const got = extract("page.md", exDir).map((i) => i.command);
+      const want = ["asterism new writer --trsut autonomous", "asterism connections <agent>"];
+      if (JSON.stringify(got) !== JSON.stringify(want)) {
+        console.log("\nSELF-TEST FAILED: the extractor no longer tells output from an invocation:");
+        console.log(`  want: ${JSON.stringify(want)}`);
+        console.log(`  got:  ${JSON.stringify(got)}`);
+        process.exit(1);
+      }
+      // ...and the refusal is still ATTACHED to the command above it, which is what
+      // lets a documented refusal be checked byte for byte rather than merely excused.
+      const shown = extract("page.md", exDir)[0].shown.map((l) => l.trim());
+      if (shown[0] !== "asterism new does not take --trsut.") {
+        console.log(`\nSELF-TEST FAILED: the refusal was dropped instead of attached: ${JSON.stringify(shown)}`);
+        process.exit(1);
+      }
+      console.log("A shown refusal is read as output, not as a command, and a bare synopsis still is one.");
+    } finally {
+      rmSync(exDir, { recursive: true, force: true });
+    }
 
     // The other renderer, pinned the same way and for the same reason. These are not a
     // description of GitHub's algorithm — they are every heading in README.md paired with

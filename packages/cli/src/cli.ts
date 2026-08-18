@@ -103,7 +103,7 @@ import { DashboardClient } from "./dashboard/client.js";
 import { runDashboard } from "./dashboard/tui.js";
 import type { TerminalIO } from "./dashboard/tui.js";
 
-import { helpRequested, intFlag, parseArgs, stringFlag } from "./args.js";
+import { helpRequested, intFlag, parseArgs, stringFlag, undeclaredOptions } from "./args.js";
 import type { ParsedArgs } from "./args.js";
 import type { AsterismConfig, ModelSettings } from "./config.js";
 import { loadConfig, saveConfig } from "./config.js";
@@ -519,6 +519,41 @@ function noAgent(io: CliIO, name: string): number {
 }
 
 /**
+ * Refuse any option this verb does not take, naming it. Returns whether the args are
+ * clean, so a handler reads `if (!rejectUnknownFlags(...)) return 1;`.
+ *
+ * EVERY verb runs this, not only the ones whose flag widens something. An option the
+ * CLI ignores is an instruction the operator gave and did not get: `service uninstall
+ * writer --knid telegram` removed all three of that agent's services, and `config unset
+ * --agnet work` cleared the install-wide default instead of one agent's override — both
+ * reporting success. What a missing flag falls back to varies verb by verb and is not
+ * something an operator should have to know; that it was ignored at all is the defect.
+ *
+ * `allowed` is what THIS verb takes, which is not always what the parse declared: verbs
+ * that share one `parseArgs` call (`capabilities`, `api`, `trust`, `config`, whose
+ * declaration is the union of their subcommands') narrow to their own here. Naming the
+ * verb and its usage is the whole point of refusing at the call site rather than in the
+ * parser — `asterism config recall-budget does not take --agent` is a different sentence
+ * from the same complaint about `config set`.
+ *
+ * It runs before the usage check, so the message names the option that was wrong rather
+ * than the positional that looks missing because of it.
+ */
+function rejectUnknownFlags(
+  parsed: ParsedArgs,
+  allowed: readonly string[],
+  label: string,
+  usage: string,
+  io: CliIO,
+): boolean {
+  const unknown = undeclaredOptions(parsed, allowed);
+  if (unknown.length === 0) return true;
+  io.err(`asterism ${label} does not take ${unknown.join(", ")}.`);
+  io.err(usage);
+  return false;
+}
+
+/**
  * Build the run substrate from the IO's override or, lazily, from the resolved
  * model. The single seam either run-bearing command (`run`, `serve`) reaches the
  * model through, so the two cannot drift in how it is wired — the same reason the
@@ -607,12 +642,15 @@ async function resolveRecall(
 
 // --- init ------------------------------------------------------------------
 
+const INIT_USAGE = "Usage: asterism init";
+
 async function cmdInit(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.init!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, [], "init", INIT_USAGE, io)) return 1;
   try {
     const { home, created } = createHome(io.cwd);
     // Opening the store applies the schema, materializing the database file.
@@ -667,15 +705,20 @@ function describeModel(settings: ModelSettings): string {
 
 // --- new -------------------------------------------------------------------
 
+const NEW_FLAGS = ["soul", "role", "trust", ...MODEL_FLAGS] as const;
+const NEW_USAGE =
+  'Usage: asterism new <agent> [--soul <name|path>] [--role "<text>"] [--trust <level>]';
+
 async function cmdNew(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: NEW_FLAGS });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.new!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, NEW_FLAGS, "new", NEW_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err('Usage: asterism new <agent> [--soul <name|path>] [--role "<text>"] [--trust <level>]');
+    io.err(NEW_USAGE);
     return 1;
   }
   if (!isValidAgentName(name)) {
@@ -687,7 +730,7 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
   // A value-bearing flag given with no value parses as boolean `true`. Reject it
   // rather than silently falling back to a default — `new bot --trust` must not
   // quietly create a `propose` agent the user did not ask for.
-  for (const flag of ["soul", "role", "trust", ...MODEL_FLAGS] as const) {
+  for (const flag of NEW_FLAGS) {
     if (parsed.flags[flag] === true) {
       io.err(`The --${flag} option needs a value.`);
       return 1;
@@ -756,32 +799,57 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
 const TRUST_USAGE =
   "Usage: asterism trust <agent> <propose|notify|autonomous>  ·  --review  ·  show  ·  revoke <capability>  ·  threshold";
 
+/** The options `trust threshold` takes — the only `trust` verb with any. */
+const THRESHOLD_FLAGS = ["clean", "targets", "unset"] as const;
+
 async function cmdTrust(args: string[], io: CliIO): Promise<number> {
-  // `--unset` is boolean so `trust <agent> threshold --unset` never consumes a
-  // following token as its value; `--clean` / `--targets` carry the threshold values.
-  const parsed = parseArgs(args, ["help", "h", "review", "unset"]);
+  // The declaration is the union across every `trust` verb; each narrows to its own
+  // below. `--review` and `--unset` are boolean so `trust <agent> threshold --unset`
+  // never consumes a following token; `--clean` / `--targets` carry the values.
+  const parsed = parseArgs(args, { booleans: ["review", "unset"], values: ["clean", "targets"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.trust!);
     return 0;
+  }
+  // Refuse an option NO `trust` verb takes before reading the positionals: an option
+  // is never an agent name, so the usage line would send the operator looking for a
+  // missing agent instead of the option they misspelled. Each verb narrows further
+  // below — this only rules out what none of them takes.
+  if (!rejectUnknownFlags(parsed, ["review", ...THRESHOLD_FLAGS], "trust", TRUST_USAGE, io)) {
+    return 1;
   }
   const name = parsed.positionals[0];
   if (!name) {
     io.err(TRUST_USAGE);
     return 1;
   }
-  // `trust <agent> --review` ratifies EARNED per-capability standing grants; the
-  // positional forms set the whole-agent level (`<level>`) or manage standing
-  // (`show`, `revoke <capability>`, `threshold`). The level form is unchanged for
-  // back-compat.
-  if (parsed.flags.review === true) return cmdTrustReview(name, io);
+  // The positional form decides which verb this is; `--review` selects the standing-grant
+  // review only when no subcommand was named. Dispatching on the subcommand FIRST is what
+  // lets each one refuse an option that belongs to a sibling: `trust <agent> threshold
+  // --review` used to run the grant review and drop the word the operator typed.
+  //
+  // `trust <agent> --review` ratifies EARNED per-capability standing grants; the positional
+  // forms set the whole-agent level (`<level>`) or manage standing (`show`, `revoke
+  // <capability>`, `threshold`). The level form is unchanged for back-compat.
   const sub = parsed.positionals[1];
-  if (sub === "show") return cmdTrustShow(name, io);
-  if (sub === "revoke") return cmdTrustRevoke(name, parsed.positionals[2], io);
   if (sub === "threshold") return cmdTrustThreshold(name, parsed, io);
+  if (sub === "show" || sub === "revoke") {
+    if (!rejectUnknownFlags(parsed, [], `trust ${sub}`, TRUST_USAGE, io)) return 1;
+    return sub === "show" ? cmdTrustShow(name, io) : cmdTrustRevoke(name, parsed.positionals[2], io);
+  }
   if (!sub) {
+    if (parsed.flags.review === true) {
+      if (!rejectUnknownFlags(parsed, ["review"], "trust", TRUST_USAGE, io)) return 1;
+      return cmdTrustReview(name, io);
+    }
     io.err(TRUST_USAGE);
     return 1;
   }
+  // The level form takes no options at all — including `--review`, which names a
+  // different form of this verb. Reading it before the level was the same defect as
+  // reading it before `threshold`, one branch further down: `trust bot autonomous
+  // --review` ran the grant review and set no level at all. [Codex R2 P2]
+  if (!rejectUnknownFlags(parsed, [], "trust", TRUST_USAGE, io)) return 1;
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
@@ -882,6 +950,17 @@ async function cmdTrustShow(name: string, io: CliIO): Promise<number> {
  * track record review asks for; nothing auto-approves without a human grant.
  */
 function cmdTrustThreshold(name: string, parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (
+    !rejectUnknownFlags(
+      parsed,
+      THRESHOLD_FLAGS,
+      "trust threshold",
+      "Usage: asterism trust <agent> threshold [--clean <n>] [--targets <n>]  ·  --unset",
+      io,
+    )
+  ) {
+    return Promise.resolve(1);
+  }
   const cleanGiven = parsed.flags.clean !== undefined;
   const targetsGiven = parsed.flags.targets !== undefined;
   const unset = parsed.flags.unset === true;
@@ -997,8 +1076,8 @@ function cmdCapabilities(args: string[], io: CliIO): Promise<number> {
     return Promise.resolve(0);
   }
   // `--none` is the ONLY flag on any verb here, and it is boolean so it can never
-  // swallow a following key.
-  const parsed = parseArgs(args.slice(1), ["help", "h", "none"]);
+  // swallow a following key. Each verb narrows to its own share of that below.
+  const parsed = parseArgs(args.slice(1), { booleans: ["none"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.capabilities!);
     return Promise.resolve(0);
@@ -1010,32 +1089,6 @@ function cmdCapabilities(args: string[], io: CliIO): Promise<number> {
   io.err(`Unknown subcommand: capabilities ${sub}`);
   io.out(COMMAND_HELP.capabilities!);
   return Promise.resolve(1);
-}
-
-/**
- * Refuse any option this verb does not define, naming it. Returns whether the args are
- * clean.
- *
- * Every verb here is checked, not only the widening one, because `parseArgs` lets an
- * unrecognized `--flag` CONSUME the next token — so a mistyped option silently eats a
- * capability key. On `unset` that hands back everything (Codex R3); on `remove` it
- * leaves held a capability the operator asked to take away; on `set` it narrows further
- * than asked. Only the first is a grant, but none of the three is what was typed, and a
- * one-line refusal is cheaper than three different consolation prizes.
- */
-function rejectUnknownFlags(
-  parsed: ParsedArgs,
-  allowed: readonly string[],
-  label: string,
-  usage: string,
-  io: CliIO,
-): boolean {
-  const known = new Set([...allowed, "help", "h"]);
-  const unknown = Object.keys(parsed.flags).filter((f) => !known.has(f));
-  if (unknown.length === 0) return true;
-  io.err(`asterism ${label} does not take ${unknown.map((f) => `--${f}`).join(", ")}.`);
-  io.err(usage);
-  return false;
 }
 
 /**
@@ -1055,9 +1108,9 @@ function catalogKeys(io: CliIO, workspaceDir: string): readonly string[] | undef
 
 /** `asterism capabilities show <agent>` — what this agent holds, and whether it was narrowed. */
 function cmdCapabilitiesShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
-  // The option check runs FIRST everywhere here: an unrecognized flag consumes the next
-  // token, so the symptom is a missing agent or a missing key, and the generic usage
-  // line would send the operator looking for the wrong mistake.
+  // The option check runs FIRST everywhere here, as it does on every verb: the generic
+  // usage line names a positional, so an operator whose real mistake was a misspelled
+  // option would be sent looking for the wrong thing.
   if (!rejectUnknownFlags(parsed, [], "capabilities show", CAPABILITIES_USAGE, io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   if (!name || parsed.positionals.length > 1) {
@@ -1389,7 +1442,8 @@ function cmdApi(args: string[], io: CliIO): Promise<number> {
     io.out(COMMAND_HELP.api!);
     return Promise.resolve(0);
   }
-  const parsed = parseArgs(args.slice(1), ["help", "h"]);
+  // `--credential` belongs to `add` alone; `list` and `remove` narrow it away below.
+  const parsed = parseArgs(args.slice(1), { values: ["credential"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.api!);
     return Promise.resolve(0);
@@ -1403,13 +1457,14 @@ function cmdApi(args: string[], io: CliIO): Promise<number> {
 }
 
 /**
- * Refuse any option a verb here does not define, naming it — the same guard every
- * `capabilities` verb carries, and for the same reason: `parseArgs` lets an unrecognized
- * `--flag` CONSUME the following token, so a mistyped option silently eats a URL or a
- * name. Here the stakes are higher than there. `--credental https://…` would leave the
- * URL swallowed and `--credential` unset, so the usage line would send the operator
- * hunting a missing URL they had typed. It runs BEFORE each verb's usage check for
- * exactly that reason.
+ * Refuse any option a verb here does not define, naming it — the same guard every verb
+ * now carries, narrowed to one of the three `api` verbs so the message names it. The
+ * one `api` fact worth keeping: `--credential` belongs to `add` alone, so a `--credental`
+ * on it leaves the binding without the credential the operator meant to attach, and
+ * `list`/`remove` take no options at all.
+ *
+ * It runs BEFORE each verb's usage check, so the message names the option rather than
+ * a positional that only looks missing.
  */
 function rejectUnknownApiOptions(
   parsed: ParsedArgs,
@@ -1647,16 +1702,19 @@ async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
 
 // --- skill add -------------------------------------------------------------
 
+const SKILL_ADD_USAGE = "Usage: asterism skill add <agent> <file.md>";
+
 async function cmdSkillAdd(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.skill!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, [], "skill add", SKILL_ADD_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   const file = parsed.positionals[1];
   if (!name || !file) {
-    io.err("Usage: asterism skill add <agent> <file.md>");
+    io.err(SKILL_ADD_USAGE);
     return 1;
   }
   const sourcePath = resolvePath(io.cwd, file);
@@ -2082,19 +2140,27 @@ function reportHarvest(io: CliIO, harvest: HarvestSummary | undefined, name: str
   }
 }
 
+const RUN_USAGE = 'Usage: asterism run <agent> "<task>"';
+
 async function cmdRun(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.run!);
     return 0;
   }
+  // `run` takes no options, so anything flag-shaped here is either a typo or task text
+  // that needed quoting — and it is refused either way. Unlike `handoff` and the other
+  // exchange verbs, whose tail is taken RAW precisely so a dash-leading task survives,
+  // this one reads its task from the parsed positionals; a token eaten as a flag would
+  // hand the agent a shorter task than the operator typed, silently.
+  if (!rejectUnknownFlags(parsed, [], "run", RUN_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   // Join every remaining positional so an unquoted multi-word task
   // (`run agent fix the login bug`) is preserved in full, not silently
   // truncated to the first word.
   const task = parsed.positionals.slice(1).join(" ");
   if (!name || !task) {
-    io.err('Usage: asterism run <agent> "<task>"');
+    io.err(RUN_USAGE);
     return 1;
   }
 
@@ -2175,6 +2241,7 @@ async function cmdRun(args: string[], io: CliIO): Promise<number> {
 // --- collaboration (connect / connections / handoff) -----------------------
 
 /** One usage line per verb, so the refusal and the arity error cannot drift apart. */
+const CONNECTIONS_USAGE = "Usage: asterism connections <agent>";
 const CONNECT_USAGE = `Usage: asterism connect <from> <to> --mode <${CONNECTION_MODES.join("|")}>`;
 const DISCONNECT_USAGE = `Usage: asterism disconnect <from> <to> [--mode <${CONNECTION_MODES.join("|")}>]`;
 
@@ -2185,17 +2252,16 @@ const DISCONNECT_USAGE = `Usage: asterism disconnect <from> <to> [--mode <${CONN
  * surface only resolves the two named agents and reports.
  */
 function cmdConnect(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: ["mode"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.connect!);
     return Promise.resolve(0);
   }
-  // An unrecognized option is refused BEFORE anything is opened. `parseArgs` accepts any
-  // `--flag` and lets it consume the next token, so `--mdoe artifact-only` swallowed the
-  // mode and left `--mode` absent — which defaults to `handoff`, the BROADEST channel. A
-  // typo therefore granted more than was asked for and reported success (#139). Of every
-  // flag in this CLI, this was the one whose default widened a permission; the rest fall
-  // back to the narrow side (`--trust` to propose, `--allow` to a bot that answers nobody).
+  // An unrecognized option is refused BEFORE anything is opened. This was the first verb
+  // to carry the guard, because `--mdoe artifact-only` left `--mode` absent — which
+  // defaulted to `handoff`, the BROADEST channel. A typo therefore granted more than was
+  // asked for and reported success (#139). It is no longer the only verb that refuses,
+  // but it is still the one where being ignored granted something.
   if (
     !rejectUnknownFlags(parsed, ["mode"], "connect", CONNECT_USAGE, io)
   ) {
@@ -2276,14 +2342,14 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
  * withdrawn a channel that was still open.
  */
 function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: ["mode"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.disconnect!);
     return Promise.resolve(0);
   }
   // Same refusal as `connect`. Withdrawing fails safe on its own (an ignored `--mode`
-  // reads as "not named", which asks rather than guesses), but a mistyped option still
-  // eats the value the operator typed, so the two verbs answer identically.
+  // reads as "not named", which asks rather than guesses), but an ignored option is
+  // still an instruction that went nowhere, so the two verbs answer identically.
   if (!rejectUnknownFlags(parsed, ["mode"], "disconnect", DISCONNECT_USAGE, io)) {
     return Promise.resolve(1);
   }
@@ -2365,14 +2431,17 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
  * in); the registry lookup resolves the other party's name for display.
  */
 function cmdConnections(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.connections!);
     return Promise.resolve(0);
   }
+  if (!rejectUnknownFlags(parsed, [], "connections", CONNECTIONS_USAGE, io)) {
+    return Promise.resolve(1);
+  }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism connections <agent>");
+    io.err(CONNECTIONS_USAGE);
     return Promise.resolve(1);
   }
   return withHomeStore(io, (store) => {
@@ -2755,6 +2824,9 @@ function cmdBrief(args: string[], io: CliIO): Promise<number> {
   });
 }
 
+const UNBRIEF_USAGE = "Usage: asterism unbrief <from> <to>";
+const BRIEFS_USAGE = "Usage: asterism briefs <agent>";
+
 /**
  * `asterism unbrief <from> <to>` — end the standing brief on a channel, so it stops shaping
  * either agent's runs from their next run onward. Leaves the channel itself open.
@@ -2764,15 +2836,16 @@ function cmdBrief(args: string[], io: CliIO): Promise<number> {
  * (the verbatim tail rule would swallow it) is available.
  */
 function cmdUnbrief(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.unbrief!);
     return Promise.resolve(0);
   }
+  if (!rejectUnknownFlags(parsed, [], "unbrief", UNBRIEF_USAGE, io)) return Promise.resolve(1);
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
   if (!fromName || !toName) {
-    io.err("Usage: asterism unbrief <from> <to>");
+    io.err(UNBRIEF_USAGE);
     return Promise.resolve(1);
   }
   return withHomeStore(io, (store) => {
@@ -2806,14 +2879,15 @@ function cmdUnbrief(args: string[], io: CliIO): Promise<number> {
  * run is the narrower set, and the listing marks it.
  */
 function cmdBriefs(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.briefs!);
     return Promise.resolve(0);
   }
+  if (!rejectUnknownFlags(parsed, [], "briefs", BRIEFS_USAGE, io)) return Promise.resolve(1);
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism briefs <agent>");
+    io.err(BRIEFS_USAGE);
     return Promise.resolve(1);
   }
   return withHomeStore(io, (store) => {
@@ -2852,14 +2926,16 @@ function parseDelegationArgs(
   io: CliIO,
   verb: "delegate" | "undelegate" | "call",
 ): { parsedHelp: true } | number | { fromName: string; toName: string; endpoint: string } {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP[verb]!);
     return { parsedHelp: true };
   }
+  const usage = `Usage: asterism ${verb} <from> <to> <endpoint>`;
+  if (!rejectUnknownFlags(parsed, [], verb, usage, io)) return 1;
   const [fromName, toName, endpointArg] = parsed.positionals;
   if (!fromName || !toName || !endpointArg || parsed.positionals.length > 3) {
-    io.err(`Usage: asterism ${verb} <from> <to> <endpoint>`);
+    io.err(usage);
     return 1;
   }
   const endpoint = endpointArg.startsWith(CREDENTIAL_CAPABILITY_PREFIX)
@@ -3045,6 +3121,8 @@ function cmdCall(args: string[], io: CliIO): Promise<number> {
   });
 }
 
+const FETCH_USAGE = "Usage: asterism fetch <caller> <callee> <path>";
+
 /**
  * `asterism fetch <caller> <callee> <path>` — copy an artifact the callee produced into the
  * caller's workspace, under the CALLER's own destructive-action gate.
@@ -3072,14 +3150,15 @@ function cmdCall(args: string[], io: CliIO): Promise<number> {
  * [Codex review R2 P2.]
  */
 async function cmdFetch(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.fetch!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, [], "fetch", FETCH_USAGE, io)) return 1;
   const [fromName, toName, path] = parsed.positionals;
   if (!fromName || !toName || !path) {
-    io.err("Usage: asterism fetch <caller> <callee> <path>");
+    io.err(FETCH_USAGE);
     return 1;
   }
 
@@ -3221,14 +3300,17 @@ function resolveRunRef(store: AsterismStore, positionals: string[]): RunResoluti
   return { kind: "ok", agent: matches[0]!.agent, run: matches[0]!.run };
 }
 
+const CONFIRM_USAGE = "Usage: asterism confirm [<agent>] <run>";
+
 async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.confirm!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, [], "confirm", CONFIRM_USAGE, io)) return 1;
   if (parsed.positionals.length === 0) {
-    io.err("Usage: asterism confirm [<agent>] <run>");
+    io.err(CONFIRM_USAGE);
     return 1;
   }
 
@@ -3334,11 +3416,12 @@ async function cmdConfirm(args: string[], io: CliIO): Promise<number> {
 // --- list ------------------------------------------------------------------
 
 async function cmdList(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.list!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, [], "list", "Usage: asterism list", io)) return 1;
   return withHomeStore(io, (store) => {
     // Pair each agent with its last-run time for the roster's "last active"
     // line. Per-agent lookup is fine at this scale; the kernel does the scoping
@@ -3354,15 +3437,18 @@ async function cmdList(args: string[], io: CliIO): Promise<number> {
 
 // --- runs ------------------------------------------------------------------
 
+const RUNS_USAGE = "Usage: asterism runs <agent>";
+
 async function cmdRuns(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.runs!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, [], "runs", RUNS_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism runs <agent>");
+    io.err(RUNS_USAGE);
     return 1;
   }
   return withHomeStore(io, (store) => {
@@ -3375,22 +3461,25 @@ async function cmdRuns(args: string[], io: CliIO): Promise<number> {
 
 // --- memory inspect --------------------------------------------------------
 
+const MEMORY_FLAGS = ["type", "review-state", "run"] as const;
+const MEMORY_USAGE =
+  "Usage: asterism memory inspect <agent> [--type <type>] [--review-state <state>] [--run <run>]";
+
 async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: MEMORY_FLAGS });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.memory!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, MEMORY_FLAGS, "memory inspect", MEMORY_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err(
-      "Usage: asterism memory inspect <agent> [--type <type>] [--review-state <state>] [--run <run>]",
-    );
+    io.err(MEMORY_USAGE);
     return 1;
   }
   // A value-bearing flag given with no value parses as boolean `true`. Reject it
   // rather than silently dropping the filter and showing the unfiltered view.
-  for (const flag of ["type", "review-state", "run"] as const) {
+  for (const flag of MEMORY_FLAGS) {
     if (parsed.flags[flag] === true) {
       io.err(`The --${flag} option needs a value.`);
       return 1;
@@ -3452,22 +3541,29 @@ async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
 
 // --- events tail -----------------------------------------------------------
 
+const EVENTS_VALUE_FLAGS = ["limit", "type", "run", "since"] as const;
+const EVENTS_USAGE =
+  "Usage: asterism events tail <agent> [--limit <n>] [--type <type>] [--run <run>] [--since <id>] [--follow]";
+
 async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h", "follow"]);
+  const parsed = parseArgs(args, { booleans: ["follow"], values: EVENTS_VALUE_FLAGS });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.events!);
     return 0;
   }
+  if (
+    !rejectUnknownFlags(parsed, [...EVENTS_VALUE_FLAGS, "follow"], "events tail", EVENTS_USAGE, io)
+  ) {
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err(
-      "Usage: asterism events tail <agent> [--limit <n>] [--type <type>] [--run <run>] [--since <id>] [--follow]",
-    );
+    io.err(EVENTS_USAGE);
     return 1;
   }
   // A value-bearing flag given with no value parses as boolean `true`. Reject it
   // rather than silently dropping the filter. (`--follow` is a genuine boolean.)
-  for (const flag of ["limit", "type", "run", "since"] as const) {
+  for (const flag of EVENTS_VALUE_FLAGS) {
     if (parsed.flags[flag] === true) {
       io.err(`The --${flag} option needs a value.`);
       return 1;
@@ -3582,15 +3678,19 @@ async function followEvents(
 
 // --- reflect (review loop) / serve (local HTTP endpoint) -------------------
 
+const REFLECT_USAGE =
+  "Usage: asterism reflect <agent> --review   (or --propose to queue unattended)";
+
 async function cmdReflect(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h", "review", "propose"]);
+  const parsed = parseArgs(args, { booleans: ["review", "propose"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.reflect!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, ["review", "propose"], "reflect", REFLECT_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism reflect <agent> --review   (or --propose to queue unattended)");
+    io.err(REFLECT_USAGE);
     return 1;
   }
   const review = parsed.flags.review === true;
@@ -4273,6 +4373,8 @@ function hasSettings(settings: ModelSettings | undefined): settings is ModelSett
   return settings !== undefined && Object.keys(settings).length > 0;
 }
 
+const TRACE_USAGE = "Usage: asterism trace <agent>";
+
 /**
  * `asterism trace <agent>` — render the agent's recorded cognition trace as a Lodestar
  * trust report. Only meaningful for an agent opted into a cognition provider (`config
@@ -4283,14 +4385,15 @@ function hasSettings(settings: ModelSettings | undefined): settings is ModelSett
  * Lodestar into the default path until this command actually runs.
  */
 async function cmdTrace(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, {});
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.trace!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, [], "trace", TRACE_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism trace <agent>");
+    io.err(TRACE_USAGE);
     return 1;
   }
   return withHomeStore(io, async (store, home) => {
@@ -4325,17 +4428,37 @@ async function cmdTrace(args: string[], io: CliIO): Promise<number> {
   });
 }
 
+const RECALL_BUDGET_USAGE =
+  "Usage: asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>";
+const WORLD_FACT_CAP_USAGE =
+  "Usage: asterism config world-fact-cap <agent> <n>  ·  --unset  ·  --default <n>";
+
+/**
+ * The usage line for the `config` verb itself. It names the subcommands rather than
+ * their arguments — seven of them, each with its own shape — and points at the help
+ * for those; every subcommand carries its own usage line for its own refusals.
+ */
+const CONFIG_USAGE =
+  "Usage: asterism config  ·  set  ·  unset  ·  recall-budget  ·  world-fact-cap  ·  " +
+  "recall-provider  ·  cognition-provider  ·  cognition-capture  " +
+  "(`asterism config --help` for what each takes)";
+
 async function cmdConfig(args: string[], io: CliIO): Promise<number> {
-  // `--unset` and `--default` are booleans here so `config recall-budget <agent> --unset`
-  // and `config recall-budget --default <n>` never consume a following token as a value
-  // (the budget `<n>` must stay a positional).
-  const parsed = parseArgs(args, ["help", "h", "unset", "default"]);
+  // One parse serves every `config` subcommand, so the declaration is the union of what
+  // they take and each narrows to its own share below. `--unset` and `--default` are
+  // booleans here so `config recall-budget <agent> --unset` and `config recall-budget
+  // --default <n>` never consume a following token as a value (the budget `<n>` must
+  // stay a positional).
+  const parsed = parseArgs(args, {
+    booleans: ["unset", "default"],
+    values: ["agent", ...MODEL_FLAGS],
+  });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.config!);
     return 0;
   }
   const sub = parsed.positionals[0];
-  if (sub === undefined || sub === "show") return cmdConfigShow(io);
+  if (sub === undefined || sub === "show") return cmdConfigShow(parsed, io);
   if (sub === "set") return cmdConfigSet(parsed, io);
   if (sub === "unset") return cmdConfigUnset(parsed, io);
   if (sub === "recall-budget") return cmdConfigRecallBudget(parsed, io);
@@ -4349,7 +4472,8 @@ async function cmdConfig(args: string[], io: CliIO): Promise<number> {
 }
 
 /** `asterism config` / `config show` — the effective configuration, per agent. */
-function cmdConfigShow(io: CliIO): Promise<number> {
+function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownFlags(parsed, [], "config", CONFIG_USAGE, io)) return Promise.resolve(1);
   return withHomeStore(io, (store, home) => {
     const config = loadConfig(home);
     io.out(`Configuration  (${configPath(home)})`);
@@ -4568,6 +4692,9 @@ function hasNumericValueFlag(parsed: ParsedArgs): boolean {
  * effective-value resolution — this surface only parses, calls, and formats.
  */
 function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownFlags(parsed, ["unset", "default"], "config recall-budget", RECALL_BUDGET_USAGE, io)) {
+    return Promise.resolve(1);
+  }
   // `--default` operates on the INSTALL-WIDE default (no agent), which sits between the
   // kernel constant and a per-agent override; otherwise it's a per-agent setting. Route on
   // the flag being DEFINED, not `=== true`: the parser records `--default 30` as `true` (it
@@ -4577,7 +4704,7 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
 
   const agentName = parsed.positionals[1];
   if (!agentName) {
-    io.err("Usage: asterism config recall-budget <agent> <n>  ·  --unset  ·  --default <n>");
+    io.err(RECALL_BUDGET_USAGE);
     return Promise.resolve(1);
   }
   const unset = parsed.flags.unset === true;
@@ -4701,6 +4828,9 @@ function cmdConfigInstallRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<nu
  * install-wide `--default` tier (dispatched to {@link cmdConfigInstallWorldFactCap}).
  */
 function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownFlags(parsed, ["unset", "default"], "config world-fact-cap", WORLD_FACT_CAP_USAGE, io)) {
+    return Promise.resolve(1);
+  }
   // `--default` operates on the INSTALL-WIDE default (no agent), which sits between the
   // kernel constant and a per-agent override; otherwise it's a per-agent setting. Route on
   // the flag being DEFINED, not `=== true`: the parser records `--default 30` as `true` (it
@@ -4710,7 +4840,7 @@ function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
 
   const agentName = parsed.positionals[1];
   if (!agentName) {
-    io.err("Usage: asterism config world-fact-cap <agent> <n>  ·  --unset  ·  --default <n>");
+    io.err(WORLD_FACT_CAP_USAGE);
     return Promise.resolve(1);
   }
   const unset = parsed.flags.unset === true;
@@ -4828,6 +4958,8 @@ function cmdConfigInstallWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<nu
 /** How the default (unset) recall ranker is described in CLI output. */
 const DEFAULT_RECALL_PROVIDER_LABEL = "keyword (built-in)";
 
+const RECALL_PROVIDER_USAGE = `Usage: asterism config recall-provider <agent> ${RECALL_PROVIDER_IDS.join("|")}  ·  --unset`;
+
 /**
  * `asterism config recall-provider <agent> [local]` / `--unset` — opt an agent into a
  * recall provider, or read the current one. `local` selects local-embeddings recall
@@ -4838,9 +4970,12 @@ const DEFAULT_RECALL_PROVIDER_LABEL = "keyword (built-in)";
  * for an opted-in agent.
  */
 function cmdConfigRecallProvider(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (!rejectUnknownFlags(parsed, ["unset"], "config recall-provider", RECALL_PROVIDER_USAGE, io)) {
+    return Promise.resolve(1);
+  }
   const agentName = parsed.positionals[1];
   if (!agentName) {
-    io.err(`Usage: asterism config recall-provider <agent> ${RECALL_PROVIDER_IDS.join("|")}  ·  --unset`);
+    io.err(RECALL_PROVIDER_USAGE);
     return Promise.resolve(1);
   }
   const unset = parsed.flags.unset === true;
@@ -4898,6 +5033,10 @@ function cmdConfigRecallProvider(parsed: ParsedArgs, io: CliIO): Promise<number>
 /** How the default (unset) cognition provider is described in CLI output. */
 const DEFAULT_COGNITION_PROVIDER_LABEL = "none (no trace)";
 
+const COGNITION_PROVIDER_USAGE = `Usage: asterism config cognition-provider <agent> ${COGNITION_PROVIDER_IDS.join("|")}  ·  --unset`;
+const COGNITION_CAPTURE_USAGE =
+  "Usage: asterism config cognition-capture <agent> content|references  ·  --unset";
+
 /**
  * `asterism config cognition-provider <agent> [lodestar]` / `--unset` — opt an agent
  * into a cognition provider that records an auditable trace of its runs, or read the
@@ -4909,11 +5048,14 @@ const DEFAULT_COGNITION_PROVIDER_LABEL = "none (no trace)";
  * wrapper — that happens at run time, only for an opted-in agent.
  */
 function cmdConfigCognitionProvider(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (
+    !rejectUnknownFlags(parsed, ["unset"], "config cognition-provider", COGNITION_PROVIDER_USAGE, io)
+  ) {
+    return Promise.resolve(1);
+  }
   const agentName = parsed.positionals[1];
   if (!agentName) {
-    io.err(
-      `Usage: asterism config cognition-provider <agent> ${COGNITION_PROVIDER_IDS.join("|")}  ·  --unset`,
-    );
+    io.err(COGNITION_PROVIDER_USAGE);
     return Promise.resolve(1);
   }
   const unset = parsed.flags.unset === true;
@@ -4978,9 +5120,14 @@ function cmdConfigCognitionProvider(parsed: ParsedArgs, io: CliIO): Promise<numb
  * (agentId-scoped); this surface only parses, calls, and formats.
  */
 function cmdConfigCognitionCapture(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  if (
+    !rejectUnknownFlags(parsed, ["unset"], "config cognition-capture", COGNITION_CAPTURE_USAGE, io)
+  ) {
+    return Promise.resolve(1);
+  }
   const agentName = parsed.positionals[1];
   if (!agentName) {
-    io.err("Usage: asterism config cognition-capture <agent> content|references  ·  --unset");
+    io.err(COGNITION_CAPTURE_USAGE);
     return Promise.resolve(1);
   }
   const unset = parsed.flags.unset === true;
@@ -5035,20 +5182,16 @@ function cmdConfigCognitionCapture(parsed: ParsedArgs, io: CliIO): Promise<numbe
   });
 }
 
+const CONFIG_SET_USAGE =
+  "Usage: asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]";
+const CONFIG_UNSET_USAGE = "Usage: asterism config unset [--agent <name>]";
+
 /** `asterism config set <id> [flags] [--agent <name>]` — write a default or override. */
 function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // A mistyped `--agent` does not fail closed: it leaves `--agent` absent, and an absent
   // `--agent` means the INSTALL-WIDE default. So `config set <model> --agnet work` retuned
   // every agent rather than the one named, and said it had succeeded (#139).
-  if (
-    !rejectUnknownFlags(
-      parsed,
-      ["agent", ...MODEL_FLAGS],
-      "config set",
-      "Usage: asterism config set <model-id> [--provider <name>] [--base-url <url>] [--api <protocol>] [--agent <name>]",
-      io,
-    )
-  ) {
+  if (!rejectUnknownFlags(parsed, ["agent", ...MODEL_FLAGS], "config set", CONFIG_SET_USAGE, io)) {
     return Promise.resolve(1);
   }
   for (const flag of ["agent", ...MODEL_FLAGS] as const) {
@@ -5095,6 +5238,13 @@ function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
 
 /** `asterism config unset [--agent <name>]` — clear a default or override. */
 function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
+  // The same fail-open shape `config set` carries, and for the same reason: an absent
+  // `--agent` means the INSTALL-WIDE default, so `config unset --agnet work` cleared the
+  // default model for every agent instead of one agent's override — and said it had
+  // succeeded. #139 fixed the setter and left this one; #142 closed it.
+  if (!rejectUnknownFlags(parsed, ["agent"], "config unset", CONFIG_UNSET_USAGE, io)) {
+    return Promise.resolve(1);
+  }
   if (parsed.flags.agent === true) {
     io.err("The --agent option needs a value.");
     return Promise.resolve(1);
@@ -5126,15 +5276,20 @@ function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
   });
 }
 
+const SERVE_USAGE = "Usage: asterism serve <agent> [--port <n>] [--host <addr>]";
+
 async function cmdServe(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: ["port", "host"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.serve!);
     return 0;
   }
+  // A mistyped `--port` used to bind the DEFAULT port and print that URL as if it were
+  // the one asked for — the same silent substitution the bad-VALUE check below refuses.
+  if (!rejectUnknownFlags(parsed, ["port", "host"], "serve", SERVE_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism serve <agent> [--port <n>] [--host <addr>]");
+    io.err(SERVE_USAGE);
     return 1;
   }
   // A value-bearing flag given with no value parses as boolean `true`. Reject it
@@ -5276,12 +5431,22 @@ const NO_TERMINAL =
  * The TUI holds no behavior of its own: every action is one call to the console, the
  * same kernel-backed surface the CLI uses, so it inherits the exact guarantees.
  */
+const DASHBOARD_FLAGS = ["token", "port", "host", "headless"] as const;
+const DASHBOARD_USAGE =
+  "Usage: asterism dashboard [<url>] [--token <token>] [--headless] [--port <n>] [--host <addr>]";
+
 async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h", "headless"]);
+  const parsed = parseArgs(args, {
+    booleans: ["headless"],
+    values: ["token", "port", "host"],
+  });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.dashboard!);
     return 0;
   }
+  // Refused before the terminal check, so a mistyped `--headless` is named as the
+  // mistake rather than reported as "this needs a TTY" — which is true, and useless.
+  if (!rejectUnknownFlags(parsed, DASHBOARD_FLAGS, "dashboard", DASHBOARD_USAGE, io)) return 1;
   for (const flag of ["token", "port", "host"] as const) {
     if (parsed.flags[flag] === true) {
       io.err(`The --${flag} option needs a value.`);
@@ -5299,6 +5464,30 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
       io.err("The --port option must be a whole number between 0 and 65535.");
       return 1;
     }
+  }
+
+  // Each of the three modes above uses a DIFFERENT subset of these options, so an option
+  // that belongs to a sibling mode is refused here rather than accepted and dropped —
+  // the whole point of #142, applied to the modes of one verb instead of to its verbs.
+  // Only one third of this was enforced: `--port`/`--host` outside `--headless`, and only
+  // in local mode. [Codex R2 P3, plus the `--token` half it did not name.]
+  //
+  // `--token` names the credential to attach to a REMOTE console. Neither local mode has
+  // anything to authenticate TO — the console mints and prints its own access token —
+  // so a `--token` there was read and never used.
+  if (urlArg === undefined && tokenFlag !== undefined) {
+    io.err("--token applies when you give a URL to attach to; a local console prints its own access token.");
+    return 1;
+  }
+  // `--port`/`--host` say where a `--headless` console LISTENS. Attaching to a URL binds
+  // nothing at all, and the local terminal view binds a loopback port of its own choosing.
+  if (!headless && (port !== undefined || host !== undefined)) {
+    io.err(
+      urlArg !== undefined
+        ? "--port and --host apply to --headless only; the URL already says where to attach."
+        : "--port and --host apply to --headless only; the local dashboard binds an ephemeral loopback port.",
+    );
+    return 1;
   }
 
   // Remote client mode: a URL was given ⇒ pure client, no local store or server.
@@ -5334,10 +5523,6 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
   }
   if (!io.startConsole) {
     io.err("The dashboard console is not available in this embedding.");
-    return 1;
-  }
-  if (!headless && (port !== undefined || host !== undefined)) {
-    io.err("--port and --host apply to --headless only; the local dashboard binds an ephemeral loopback port.");
     return 1;
   }
   const startConsole = io.startConsole;
@@ -5460,15 +5645,19 @@ function parseAllowList(value: string | undefined): string[] {
     .filter((s) => s.length > 0);
 }
 
+const TELEGRAM_USAGE =
+  "Usage: asterism channel telegram <agent> [--allow <chat-id>[,<chat-id>...]]";
+
 async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: ["allow"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.channel!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, ["allow"], "channel telegram", TELEGRAM_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism channel telegram <agent> [--allow <chat-id>[,<chat-id>...]]");
+    io.err(TELEGRAM_USAGE);
     return 1;
   }
   // A value-bearing flag given bare parses as boolean `true`; reject it rather than
@@ -5575,15 +5764,19 @@ const DISCORD_TOKEN_ENV = "ASTERISM_DISCORD_TOKEN";
 /** The env var holding a comma-separated allow-list, combined with `--allow`. */
 const DISCORD_ALLOW_ENV = "ASTERISM_DISCORD_ALLOW";
 
+const DISCORD_USAGE =
+  "Usage: asterism channel discord <agent> [--allow <channel-id>[,<channel-id>...]]";
+
 async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: ["allow"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.channel!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, ["allow"], "channel discord", DISCORD_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism channel discord <agent> [--allow <channel-id>[,<channel-id>...]]");
+    io.err(DISCORD_USAGE);
     return 1;
   }
   // A value-bearing flag given bare parses as boolean `true`; reject it rather than
@@ -5702,6 +5895,13 @@ async function cmdChannel(rest: string[], io: CliIO): Promise<number> {
 }
 
 // --- service (keep an agent's long-lived command running as an OS service) --
+
+const SERVICE_INSTALL_USAGE =
+  "Usage: asterism service install <agent> [--kind serve|telegram|discord] [--capture-env] [-- <args>]";
+const SERVICE_STATUS_USAGE =
+  "Usage: asterism service status <agent> [--kind serve|telegram|discord]";
+const SERVICE_UNINSTALL_USAGE =
+  "Usage: asterism service uninstall <agent> [--kind serve|telegram|discord]";
 
 /** Where this install keeps the per-service wrapper, env file, and log. */
 function configHomeDir(io: CliIO): string {
@@ -5968,16 +6168,19 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
   const head = sep === -1 ? args : args.slice(0, sep);
   const passthrough = sep === -1 ? [] : args.slice(sep + 1);
 
-  const parsed = parseArgs(head, ["help", "h", "capture-env"]);
+  const parsed = parseArgs(head, { booleans: ["capture-env"], values: ["kind"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.service!);
     return 0;
   }
+  // Only `head` was parsed, so this refuses options meant for `service install` alone —
+  // whatever follows `--` is the supervised command's business and never reaches here.
+  if (!rejectUnknownFlags(parsed, ["kind", "capture-env"], "service install", SERVICE_INSTALL_USAGE, io)) {
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err(
-      "Usage: asterism service install <agent> [--kind serve|telegram|discord] [--capture-env] [-- <args>]",
-    );
+    io.err(SERVICE_INSTALL_USAGE);
     return 1;
   }
   const captureEnv = parsed.flags["capture-env"] === true;
@@ -6148,14 +6351,15 @@ async function serviceState(
 }
 
 async function cmdServiceStatus(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: ["kind"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.service!);
     return 0;
   }
+  if (!rejectUnknownFlags(parsed, ["kind"], "service status", SERVICE_STATUS_USAGE, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism service status <agent> [--kind serve|telegram|discord]");
+    io.err(SERVICE_STATUS_USAGE);
     return 1;
   }
   // With no --kind, status reports across every kind; with one, only that kind.
@@ -6204,14 +6408,20 @@ async function cmdServiceStatus(args: string[], io: CliIO): Promise<number> {
 }
 
 async function cmdServiceUninstall(args: string[], io: CliIO): Promise<number> {
-  const parsed = parseArgs(args, ["help", "h"]);
+  const parsed = parseArgs(args, { values: ["kind"] });
   if (helpRequested(parsed)) {
     io.out(COMMAND_HELP.service!);
     return 0;
   }
+  // `--kind` NARROWS here, so ignoring a mistyped one widened the blast radius: absent,
+  // it removes every service the agent has. `service uninstall writer --knid telegram`
+  // stopped and unregistered all three, and reported success for each.
+  if (!rejectUnknownFlags(parsed, ["kind"], "service uninstall", SERVICE_UNINSTALL_USAGE, io)) {
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (!name) {
-    io.err("Usage: asterism service uninstall <agent> [--kind serve|telegram|discord]");
+    io.err(SERVICE_UNINSTALL_USAGE);
     return 1;
   }
   let filterKind: ServiceKind | undefined;
