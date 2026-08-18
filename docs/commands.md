@@ -27,10 +27,14 @@ asterism new does not take --trsut.
 Usage: asterism new <agent> [--soul <name|path>] [--role "<text>"] [--trust <level>]
 ```
 
-Text you write yourself is untouched by this. A quoted task, objective, brief,
-note, or secret that begins with a dash is passed through exactly as typed, and
+Text you write yourself is untouched by this. [`handoff`](#handoff),
+[`artifact`](#artifact), [`summary`](#summary), [`brief`](#brief),
+[`objective add`](#objective), the [`notes`](#notes) verbs, and
+[`secrets add`](#secrets-add) take their tail exactly as typed, dashes and all, and
 everything after `--` on [`service install`](#service) reaches the command the
-service runs.
+service runs. [`run`](#run) is the one exception — it reads its task as ordinary
+arguments — so put a task that begins with a dash after `--`:
+`asterism run writer -- --draft the proposal`.
 
 Almost every command takes an agent by **name** and must be run inside an
 initialized workspace (the `.asterism/` home, discovered by walking up from the

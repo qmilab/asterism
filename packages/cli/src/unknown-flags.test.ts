@@ -77,6 +77,53 @@ async function advertisedVerbs(cwd: string): Promise<string[]> {
 }
 
 /**
+ * The flags one invocation's own synopsis advertises.
+ *
+ * Refusing what a command does not take is only half a claim; the other half is that it
+ * still takes everything it advertises, and a declaration that drops a flag breaks that
+ * silently — the flag simply starts being refused. Deriving the list from the binary's
+ * own synopsis covers every documented flag, where a hand-written list covers the ones
+ * whoever wrote it remembered.
+ *
+ * Which line belongs to which invocation follows the same rule the verb derivation uses:
+ * the first BARE word in the remainder is the subcommand the line is about, and its
+ * absence means the line is about the head verb. Matching on prefix alone instead reads
+ * every `asterism config <sub>` line as a line about bare `config`, and then demands
+ * that `config` accept `--provider`.
+ */
+function synopsisFlags(helpText: string, invocation: string): { flags: string[]; named: boolean } {
+  const lines = helpText.split("\n");
+  const end = lines.findIndex((l) => l.trim() === "");
+  const synopsis = lines.slice(0, end === -1 ? lines.length : end);
+  const [head, sub] = invocation.split(" ");
+  const flags: string[] = [];
+  let taking = false;
+  let named = false;
+  for (const line of synopsis) {
+    const m = line.match(new RegExp(`^asterism\\s+${head}\\b(.*)$`));
+    if (m) {
+      const lineSub = m[1]!.trim().split(/\s+/).find((t) => /^[a-z][\w-]*$/.test(t));
+      taking = lineSub === sub;
+      if (taking) named = true;
+    } else if (line.startsWith("asterism ")) taking = false;
+    else if (!/^\s/.test(line)) taking = false; // an indented line continues the one above
+    if (taking) flags.push(...(line.match(/--[a-z][\w-]*/g) ?? []));
+  }
+  return { flags: [...new Set(flags)], named };
+}
+
+/**
+ * Invocations no synopsis line names, so the check above has nothing to derive from.
+ * Both are the chat channels, whose one synopsis covers the pair as
+ * `asterism channel <telegram|discord> <agent> [--allow …]`. Their `--allow` is covered
+ * by `outbound-surfaces.test.ts`, which types it end to end on both.
+ *
+ * Recorded rather than skipped quietly, and checked in both directions below — a
+ * synopsis rewritten to name them must shrink this list.
+ */
+const NO_SYNOPSIS_OF_ITS_OWN = ["channel discord", "channel telegram"];
+
+/**
  * The verbs that take their tail RAW and so cannot refuse a flag-shaped token — it is
  * the operator's own text, and eating it would hand an agent a different task than the
  * one typed. None of them reaches `parseArgs` at all.
@@ -150,6 +197,28 @@ describe("every advertised verb refuses an option it does not take", () => {
       }
     }
     expect(stale.join("\n")).toBe("");
+  });
+
+  test("every flag a verb's own synopsis advertises is still accepted by it", async () => {
+    const verbs = await advertisedVerbs(cwd);
+    const refused: string[] = [];
+    const unnamed: string[] = [];
+    let typed = 0;
+    for (const verb of verbs) {
+      const path = verb.split(" ");
+      const { flags, named } = synopsisFlags(await helpText(cwd, path), verb);
+      if (!named) unnamed.push(verb);
+      for (const flag of flags) {
+        typed++;
+        const { text } = await run(cwd, [...path, flag]);
+        if (text.includes(`does not take ${flag}`)) refused.push(`  asterism ${verb} ${flag}`);
+      }
+    }
+    expect(refused.join("\n")).toBe("");
+    // Enough flags to be a real sweep, not a derivation that quietly found nothing.
+    expect(typed).toBeGreaterThan(40);
+    // And what it could NOT derive is named, not silently dropped.
+    expect(unnamed.sort()).toEqual(NO_SYNOPSIS_OF_ITS_OWN);
   });
 
   test("the refusal comes before the usage complaint, so it names the real mistake", async () => {

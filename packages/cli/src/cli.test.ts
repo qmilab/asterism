@@ -3974,10 +3974,22 @@ test("a run task beginning with a dash reaches the agent verbatim, but a stray o
     store.close();
   }
   // Unquoted, the first word IS option-shaped — and taking it as task text would hand
-  // the agent "the Q3 proposal", quietly missing the verb.
+  // the agent "Q3 proposal", quietly missing the verb and the word after it.
   h.err.length = 0;
   expect(await runCli(["run", "writer", "--draft", "the", "Q3", "proposal"], io)).toBe(1);
   expect(h.err.join("\n")).toContain("asterism run does not take --draft.");
+
+  // A single-word dash task has no space to disqualify it as an option name, so it IS
+  // refused — and `--` is what the reference tells the reader to reach for. Run the
+  // command the docs name rather than asserting the sentence that names it.
+  expect(await runCli(["run", "writer", "--fix"], io)).toBe(1);
+  expect(await runCli(["run", "writer", "--", "--fix", "the", "build"], io)).toBe(0);
+  const after = openHomeStore(h);
+  try {
+    expect(after.runs.list(agentNamed(after, "writer").id).at(-1)?.input).toBe("--fix the build");
+  } finally {
+    after.close();
+  }
 });
 
 test("a handoff task beginning with a dash reaches the callee verbatim (Codex P2)", async () => {
