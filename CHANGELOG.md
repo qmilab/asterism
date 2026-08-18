@@ -24,7 +24,7 @@ All notable changes to Asterism are documented here. Versions follow [SemVer](ht
 
 - **A named `trust` form is no longer dropped in favour of `--review`.** `asterism trust <agent> threshold --review` ran the standing-grant review and ignored the word `threshold` — and so did `show`, `revoke`, and, worst of the four, the level itself: `asterism trust bot autonomous --review` reviewed grants and **set no level at all**, reporting success. The positional form now decides, and an option belonging to a different form of the verb is refused by name. `asterism trust <agent> --review` on its own is unchanged.
 
-- **Each `dashboard` option is refused outside the mode that uses it.** The three modes use different options — attaching to a URL uses `--token`, `--headless` uses `--port`/`--host`, and the local terminal view uses neither — but only one of those rules was enforced. So `asterism dashboard --headless --token <t>` ran a console whose access token was *not* `<t>` (a headless console mints and prints its own), and `asterism dashboard <url> --port 4900` attached to the URL and dropped the port. Both now say which option does not belong and why.
+- **Each `dashboard` option is refused outside the mode that uses it.** The three modes use different options — attaching to a URL uses `--token`, `--headless` uses `--port`/`--host`, and the local terminal view uses neither — but only one of those rules was enforced. So `asterism dashboard --headless --token <t>` ran a console whose access token was *not* `<t>` (a headless console generates and prints its own, the way `serve` does), and `asterism dashboard <url> --port 4900` attached to the URL and dropped the port. Both now say which option does not belong and why.
 
 ## 0.7.0 — 2026-08-17
 
