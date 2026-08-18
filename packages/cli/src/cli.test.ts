@@ -417,22 +417,27 @@ test("trust threshold rejects values that are not a positive whole number", asyn
   );
 });
 
-test("a named trust subcommand wins over --review, rather than being dropped for it", async () => {
-  // `--review` selects the standing-grant review only when no subcommand was named.
-  // It used to be read first, so `trust cleaner threshold --review` quietly ran the
-  // grant review and the word the operator typed went nowhere. Each verb now refuses
-  // the sibling's option by name.
+test("any named trust form wins over --review, rather than being dropped for it", async () => {
+  // `--review` selects the standing-grant review only when NO positional form was named.
+  // It used to be read first, so `trust cleaner threshold --review` quietly ran the grant
+  // review and the word the operator typed went nowhere. The LEVEL is a named form too,
+  // and was missed on the first pass — `trust cleaner autonomous --review` reviewed grants
+  // and set no level at all, silently. Every form now refuses the sibling's option.
   const h = harness();
   await runCli(["init"], h.io);
-  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
-  for (const [sub, label] of [
+  await runCli(["new", "cleaner", "--trust", "propose"], h.io);
+  for (const [form, label] of [
     ["threshold", "trust threshold"],
     ["show", "trust show"],
+    ["revoke", "trust revoke"],
+    ["autonomous", "trust"], // the level form — a positional like any other
   ] as const) {
     h.err.length = 0;
-    expect(await runCli(["trust", "cleaner", sub, "--review"], h.io)).toBe(1);
+    expect(await runCli(["trust", "cleaner", form, "--review"], h.io)).toBe(1);
     expect(h.err.join("\n")).toContain(`asterism ${label} does not take --review.`);
   }
+  // ...and the level was not quietly set on the way past.
+  expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("propose");
   // The bare form still ratifies grants.
   expect(await runCli(["trust", "cleaner", "--review"], h.io)).toBe(0);
   expect(h.out.join("\n")).toContain("no capabilities have earned a standing grant yet");
@@ -1865,6 +1870,47 @@ test("dashboard's value-bearing options are errors when given bare, not refusals
     expect(await runCli(["dashboard", `--${flag}`], h.io)).toBe(1);
     expect(h.err.join("\n")).toBe(`The --${flag} option needs a value.`);
   }
+});
+
+test("each dashboard option is refused outside the mode that uses it", async () => {
+  // Three modes, each using a different subset: attaching to a URL uses `--token`;
+  // `--headless` uses `--port`/`--host`; the local terminal view uses neither. An option
+  // outside its mode was read and dropped — `--headless --token X` ran a console whose
+  // token was NOT X, and reported success.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  let started = false;
+  // Deliberately NO terminal: every refusal below fires before the mode branches, so a
+  // regression falls through to "needs an interactive terminal" and fails this test at
+  // once — where with a terminal it would attach the TUI to a URL nothing answers and
+  // hang until the client gave up.
+  const io = {
+    ...h.io,
+    startConsole: () => {
+      started = true;
+      return fakeRunningServer();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  };
+  const cases: [string[], string][] = [
+    // `--token` belongs to the attach-to-a-URL mode alone.
+    [["dashboard", "--token", "t"], "--token applies when you give a URL to attach to"],
+    [["dashboard", "--headless", "--token", "t"], "--token applies when you give a URL to attach to"],
+    // `--port`/`--host` belong to `--headless` alone; attaching binds nothing.
+    [["dashboard", "http://127.0.0.1:4832", "--token", "t", "--port", "4900"], "the URL already says where to attach"],
+    [["dashboard", "http://127.0.0.1:4832", "--token", "t", "--host", "0.0.0.0"], "the URL already says where to attach"],
+  ];
+  for (const [argv, expected] of cases) {
+    h.err.length = 0;
+    started = false;
+    expect({ argv, code: await runCli(argv, io) }).toEqual({ argv, code: 1 });
+    expect(h.err.join("\n")).toContain(expected);
+    expect(started).toBe(false);
+  }
+  // The combinations that DO belong to their mode still work.
+  expect(await runCli(["dashboard", "--headless", "--port", "4900", "--host", "0.0.0.0"], io)).toBe(0);
+  expect(started).toBe(true);
 });
 
 test("dashboard --port and --host are refused without --headless, rather than ignored", async () => {

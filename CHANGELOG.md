@@ -22,7 +22,9 @@ All notable changes to Asterism are documented here. Versions follow [SemVer](ht
 
   `asterism run` is the one to know about, because it reads its task as ordinary arguments rather than as a verbatim tail. Put a task that begins with a dash after `--`: `asterism run writer -- --draft the proposal`. And unquoted, `asterism run writer --draft the Q3 proposal` used to hand the agent "Q3 proposal" — quietly losing both the verb and the word after it — where it now says which word it could not read.
 
-- **A named `trust` subcommand is no longer dropped in favour of `--review`.** `asterism trust <agent> threshold --review` ran the standing-grant review and ignored the word `threshold`; the same for `show` and `revoke`. The subcommand now decides, and the option that belongs to a different form of the verb is refused by name. `asterism trust <agent> --review` on its own is unchanged.
+- **A named `trust` form is no longer dropped in favour of `--review`.** `asterism trust <agent> threshold --review` ran the standing-grant review and ignored the word `threshold` — and so did `show`, `revoke`, and, worst of the four, the level itself: `asterism trust bot autonomous --review` reviewed grants and **set no level at all**, reporting success. The positional form now decides, and an option belonging to a different form of the verb is refused by name. `asterism trust <agent> --review` on its own is unchanged.
+
+- **Each `dashboard` option is refused outside the mode that uses it.** The three modes use different options — attaching to a URL uses `--token`, `--headless` uses `--port`/`--host`, and the local terminal view uses neither — but only one of those rules was enforced. So `asterism dashboard --headless --token <t>` ran a console whose access token was *not* `<t>` (a headless console mints and prints its own), and `asterism dashboard <url> --port 4900` attached to the URL and dropped the port. Both now say which option does not belong and why.
 
 ## 0.7.0 — 2026-08-17
 

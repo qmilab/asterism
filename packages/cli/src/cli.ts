@@ -837,15 +837,18 @@ async function cmdTrust(args: string[], io: CliIO): Promise<number> {
     if (!rejectUnknownFlags(parsed, [], `trust ${sub}`, TRUST_USAGE, io)) return 1;
     return sub === "show" ? cmdTrustShow(name, io) : cmdTrustRevoke(name, parsed.positionals[2], io);
   }
-  if (parsed.flags.review === true) {
-    if (!rejectUnknownFlags(parsed, ["review"], "trust", TRUST_USAGE, io)) return 1;
-    return cmdTrustReview(name, io);
-  }
   if (!sub) {
+    if (parsed.flags.review === true) {
+      if (!rejectUnknownFlags(parsed, ["review"], "trust", TRUST_USAGE, io)) return 1;
+      return cmdTrustReview(name, io);
+    }
     io.err(TRUST_USAGE);
     return 1;
   }
-  // The level form takes no options at all.
+  // The level form takes no options at all — including `--review`, which names a
+  // different form of this verb. Reading it before the level was the same defect as
+  // reading it before `threshold`, one branch further down: `trust bot autonomous
+  // --review` ran the grant review and set no level at all. [Codex R2 P2]
   if (!rejectUnknownFlags(parsed, [], "trust", TRUST_USAGE, io)) return 1;
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
@@ -5463,6 +5466,30 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
     }
   }
 
+  // Each of the three modes above uses a DIFFERENT subset of these options, so an option
+  // that belongs to a sibling mode is refused here rather than accepted and dropped —
+  // the whole point of #142, applied to the modes of one verb instead of to its verbs.
+  // Only one third of this was enforced: `--port`/`--host` outside `--headless`, and only
+  // in local mode. [Codex R2 P3, plus the `--token` half it did not name.]
+  //
+  // `--token` names the credential to attach to a REMOTE console. Neither local mode has
+  // anything to authenticate TO — the console mints and prints its own access token —
+  // so a `--token` there was read and never used.
+  if (urlArg === undefined && tokenFlag !== undefined) {
+    io.err("--token applies when you give a URL to attach to; a local console prints its own access token.");
+    return 1;
+  }
+  // `--port`/`--host` say where a `--headless` console LISTENS. Attaching to a URL binds
+  // nothing at all, and the local terminal view binds a loopback port of its own choosing.
+  if (!headless && (port !== undefined || host !== undefined)) {
+    io.err(
+      urlArg !== undefined
+        ? "--port and --host apply to --headless only; the URL already says where to attach."
+        : "--port and --host apply to --headless only; the local dashboard binds an ephemeral loopback port.",
+    );
+    return 1;
+  }
+
   // Remote client mode: a URL was given ⇒ pure client, no local store or server.
   if (urlArg !== undefined) {
     if (headless) {
@@ -5496,10 +5523,6 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
   }
   if (!io.startConsole) {
     io.err("The dashboard console is not available in this embedding.");
-    return 1;
-  }
-  if (!headless && (port !== undefined || host !== undefined)) {
-    io.err("--port and --host apply to --headless only; the local dashboard binds an ephemeral loopback port.");
     return 1;
   }
   const startConsole = io.startConsole;
