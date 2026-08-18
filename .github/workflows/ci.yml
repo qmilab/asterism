@@ -96,10 +96,11 @@ jobs:
       - run: bun run verify:node
       - run: bun run verify:deno
 
-      # Every command the docs advertise, typed at the shipped binary; every internal doc
-      # link; and the command reference's claim to document EVERY command. The self-test
-      # runs first and plants known-bad commands, so a green docs check means the checker
-      # can still tell a broken page from a working one rather than passing vacuously.
+      # Every command the docs advertise, typed at the shipped binary; every internal link
+      # in `docs/` and the repo-root markdown, headings included; and the command
+      # reference's claim to document EVERY command. The self-test runs first and plants
+      # known-bad commands AND known-bad links, so a green docs check means the checker can
+      # still tell a broken page from a working one rather than passing vacuously.
       - run: bun run check:docs:self-test
       - run: bun run check:docs
 
@@ -122,10 +123,19 @@ jobs:
   #
   # This does NOT duplicate `check:docs`. That check types the commands the pages advertise
   # at the real binary and never builds the site; and where the two do overlap, on internal
-  # links, they see different things. `check:docs` matches link targets with `[a-z0-9-]+\.md`
-  # — LOWERCASE only — so a broken link to an upper-case filename (`./SECURITY-NOPE.md`) is
-  # invisible to it and it still reports "Every internal doc link resolves". `--strict` fails
-  # on it. Verified both ways by planting one. Neither check subsumes the other; run both.
+  # links, they still see different things — but not the way this comment used to say. It
+  # claimed `check:docs` was the weaker of the two on links because its matcher was
+  # lower-case only. That matcher is gone: `check:docs` now resolves every internal link on
+  # disk, README and the root markdown included, and fails on a missing `#fragment`.
+  #
+  # What each one alone would miss, both measured by planting one:
+  #   `--strict`     never reads README (`docs_dir: docs`), so README's ~56 internal links
+  #                  are invisible to it; and it logs a MISSING ANCHOR at INFO, so a dead
+  #                  `#fragment` does not fail the build at all.
+  #   `check:docs`   resolves against the FILESYSTEM, not the site, so it cannot know that
+  #                  a `docs/` page linking to a repo file outside `docs/` resolves here and
+  #                  404s once published. `--strict` knows what is in the site and catches it.
+  # Neither check subsumes the other; run both.
   #
   # Separate job because it shares nothing with the test matrix — no Bun, no Node, no
   # native addon — so it runs in parallel instead of adding a minute to both legs.
