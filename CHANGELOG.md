@@ -2,9 +2,9 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## 0.8.0 — unreleased
+## 0.8.0 — 2026-08-18
 
-> These notes are written and reviewed ahead of the release. Every `@qmilab/asterism*` package is still at `0.7.0`, which remains the latest published version; this heading gets its date when the version bump and the `v0.8.0` tag land.
+An option you typed is not discarded in silence. Asterism used to accept any `--flag`, record it, and move on — so a misspelling went nowhere, and on a handful of commands that meant doing something other than what you asked for while reporting success: removing every one of an agent's services rather than the one named, clearing the install-wide default model rather than one agent's override, setting no autonomy level at all. A misspelled option is now an error that names itself, and so are two options that contradict each other. The text you write yourself — a task, an objective, a brief, a note, a secret — is untouched.
 
 ### Changed
 
