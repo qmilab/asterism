@@ -1398,6 +1398,18 @@ the kernel store, scoped to each agent.
 provider settings. So an environment variable overrides the saved default, and an
 agent's own model overrides everything.
 
+**A value and `--unset` are two different instructions**, so giving both is an
+error rather than a silent choice between them — on every setting above, and on
+[`trust <agent> threshold`](#trust):
+
+```console
+$ asterism config recall-budget writer 30 --unset
+Give either a recall budget or --unset, not both.
+```
+
+(`config cognition-capture <agent> references --unset` is the one exception:
+`references` names exactly what `--unset` does, so the two agree.)
+
 ```console
 $ asterism config set gpt-4o-mini --provider openai
 Set the model for the install default: gpt-4o-mini (provider: openai).
