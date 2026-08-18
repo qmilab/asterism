@@ -2,6 +2,26 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.8.0 — unreleased
+
+> These notes are written and reviewed ahead of the release. Every `@qmilab/asterism*` package is still at `0.7.0`, which remains the latest published version; this heading gets its date when the version bump and the `v0.8.0` tag land.
+
+### Changed
+
+- **An option Asterism does not recognize is now an error.** It used to be ignored — silently, and on all but a handful of commands. An ignored option is an instruction you gave and did not get, and what it fell back to varied by command in ways nobody should have to know:
+
+  - `asterism service uninstall writer --knid telegram` removed **every** service that agent had — `--kind` narrows, so ignoring it widened what was taken away — and reported success for each one.
+  - `asterism config unset --agnet work` cleared the install-wide default model instead of that one agent's override, and said it had worked. (`config set` was fixed in 0.5.0; the matching verb was not.)
+  - `asterism service install writer --knid telegram` installed a `serve` unit; `asterism serve writer --prot 8080` bound the default port and printed that URL as though it were the one asked for; `asterism new bot --trsut autonomous` created an agent at `propose`; a mistyped filter on `memory inspect` or `events tail` showed the unfiltered view.
+
+  Every command now names the option it does not take, and says what it does take — every command, that is, except the ones whose tail is text you wrote, which are unchanged and described below.
+
+  Two consequences worth knowing before you upgrade. **A script passing a stray option to Asterism will start failing** — that is the point, but it is a behaviour change, and the option named in the message is the one to remove. And **a mistyped option no longer swallows the value after it**: `--prot 8080` used to consume `8080` as well, so the complaint that came back was about a missing argument you had in fact typed.
+
+  Nothing changes for the text you write yourself. A quoted task, objective, brief, note or secret that begins with a dash is still taken verbatim — `asterism run writer "--draft the proposal"` and `asterism handoff writer researcher "--draft the proposal"` both pass exactly that through — and everything after `--` on `asterism service install` still reaches the command the service runs, untouched. Unquoted is where it changes: `asterism run writer --draft the Q3 proposal` used to hand the agent "Q3 proposal", quietly losing both the verb and the word after it, and now says which word it could not read.
+
+- **A named `trust` subcommand is no longer dropped in favour of `--review`.** `asterism trust <agent> threshold --review` ran the standing-grant review and ignored the word `threshold`; the same for `show` and `revoke`. The subcommand now decides, and the option that belongs to a different form of the verb is refused by name. `asterism trust <agent> --review` on its own is unchanged.
+
 ## 0.7.0 — 2026-08-17
 
 Two ways to judge Asterism before you commit anything to it. It now runs with no account and no key anywhere — point it at a model already running on your own machine, and nothing an agent writes ever leaves it. And you can read precisely what its boundary does and does not hold: a published threat model that names the mechanism behind each claim and the test that proves it, and is as specific about the gaps as about the guarantees.
