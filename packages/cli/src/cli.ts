@@ -519,6 +519,28 @@ function noAgent(io: CliIO, name: string): number {
 }
 
 /**
+ * Refuse a setting given BOTH as a value and as `--unset`, naming both halves.
+ *
+ * Every setter here tested `--unset` first and returned, so the value never reached the
+ * setter: `config recall-budget writer 30 --unset` cleared the budget, said "had no recall
+ * budget set", and exited 0. The 30 was an instruction the operator gave and did not get —
+ * the same defect as an ignored option (#142), one level in, except that here BOTH options
+ * are ones the verb takes and they simply disagree.
+ *
+ * Picking a winner is the thing to avoid, whichever way it leans. `--unset` winning is not
+ * safer for being narrower; it is just as silent, and the operator finds out at the next
+ * run that framed itself with a budget they thought they had changed.
+ *
+ * Worded from the same template as `capabilities set`'s long-standing refusal of keys
+ * alongside `--none`, so the surface answers one situation one way — only the noun varies,
+ * which is the part that is genuinely per-verb.
+ */
+function rejectValueWithUnset(what: string, io: CliIO): number {
+  io.err(`Give either ${what} or --unset, not both.`);
+  return 1;
+}
+
+/**
  * Refuse any option this verb does not take, naming it. Returns whether the args are
  * clean, so a handler reads `if (!rejectUnknownFlags(...)) return 1;`.
  *
@@ -964,6 +986,9 @@ function cmdTrustThreshold(name: string, parsed: ParsedArgs, io: CliIO): Promise
   const cleanGiven = parsed.flags.clean !== undefined;
   const targetsGiven = parsed.flags.targets !== undefined;
   const unset = parsed.flags.unset === true;
+  if (unset && (cleanGiven || targetsGiven)) {
+    return Promise.resolve(rejectValueWithUnset("a new earning bar (--clean / --targets)", io));
+  }
   const DEFAULTS = describeEarningBar(DEFAULT_STANDING_POLICY);
 
   return withHomeStore(io, (store) => {
@@ -4713,6 +4738,11 @@ function cmdConfigRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // positional — the user's intended (invalid) budget. Catch it so it is rejected rather
   // than vanishing into the read-only "show" path as a silent no-op.
   const negativeValue = hasNumericValueFlag(parsed);
+  // An invalid value counts as a value: `-5 --unset` is two instructions, and answering
+  // the number alone would hide the half the operator is more likely to have meant.
+  if (unset && (valueRaw !== undefined || negativeValue)) {
+    return Promise.resolve(rejectValueWithUnset("a recall budget", io));
+  }
   const CONSTANT = DEFAULT_RECALL_BUDGET.maxMemories;
 
   return withHomeStore(io, (store) => {
@@ -4783,6 +4813,9 @@ function cmdConfigInstallRecallBudget(parsed: ParsedArgs, io: CliIO): Promise<nu
   const valueRaw =
     typeof parsed.flags.default === "string" ? parsed.flags.default : parsed.positionals[1];
   const negativeValue = hasNumericValueFlag(parsed);
+  if (unset && (valueRaw !== undefined || negativeValue)) {
+    return Promise.resolve(rejectValueWithUnset("a recall budget", io));
+  }
   const CONSTANT = DEFAULT_RECALL_BUDGET.maxMemories;
 
   return withHomeStore(io, (store) => {
@@ -4849,6 +4882,9 @@ function cmdConfigWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // a positional — catch it as an invalid value rather than letting it fall through to the
   // read-only "show" path as a silent no-op (same edge as `cmdConfigRecallBudget`).
   const negativeValue = hasNumericValueFlag(parsed);
+  if (unset && (valueRaw !== undefined || negativeValue)) {
+    return Promise.resolve(rejectValueWithUnset("a world-fact cap", io));
+  }
   const CONSTANT = DEFAULT_WORLD_FACT_CAP;
 
   return withHomeStore(io, (store) => {
@@ -4920,6 +4956,9 @@ function cmdConfigInstallWorldFactCap(parsed: ParsedArgs, io: CliIO): Promise<nu
   const valueRaw =
     typeof parsed.flags.default === "string" ? parsed.flags.default : parsed.positionals[1];
   const negativeValue = hasNumericValueFlag(parsed);
+  if (unset && (valueRaw !== undefined || negativeValue)) {
+    return Promise.resolve(rejectValueWithUnset("a world-fact cap", io));
+  }
   const CONSTANT = DEFAULT_WORLD_FACT_CAP;
 
   return withHomeStore(io, (store) => {
@@ -4980,6 +5019,9 @@ function cmdConfigRecallProvider(parsed: ParsedArgs, io: CliIO): Promise<number>
   }
   const unset = parsed.flags.unset === true;
   const valueRaw = parsed.positionals[2];
+  if (unset && valueRaw !== undefined) {
+    return Promise.resolve(rejectValueWithUnset("a recall provider", io));
+  }
 
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, agentName);
@@ -5060,6 +5102,9 @@ function cmdConfigCognitionProvider(parsed: ParsedArgs, io: CliIO): Promise<numb
   }
   const unset = parsed.flags.unset === true;
   const valueRaw = parsed.positionals[2];
+  if (unset && valueRaw !== undefined) {
+    return Promise.resolve(rejectValueWithUnset("a cognition provider", io));
+  }
 
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, agentName);
@@ -5132,6 +5177,12 @@ function cmdConfigCognitionCapture(parsed: ParsedArgs, io: CliIO): Promise<numbe
   }
   const unset = parsed.flags.unset === true;
   const valueRaw = parsed.positionals[2];
+  // `references` and `--unset` are two spellings of the same outcome, so together they
+  // are redundant rather than contradictory and stay accepted. `content --unset` asks for
+  // two different things, and used to quietly get the second.
+  if (unset && valueRaw !== undefined && valueRaw !== "references") {
+    return Promise.resolve(rejectValueWithUnset("a capture mode", io));
+  }
 
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, agentName);

@@ -2736,6 +2736,77 @@ test("config recall-budget rejects values that are not a positive whole number",
   }
 });
 
+test("a value and --unset together are refused, on every setter that takes both", async () => {
+  // `--unset` was tested first and returned, so the value never reached the setter:
+  // `config recall-budget personal 30 --unset` cleared the budget, said "had no recall
+  // budget set", and exited 0. Both options are ones the verb takes; they simply disagree,
+  // and picking a winner silently is the defect however narrow the winner is.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal", "--trust", "autonomous"], h.io);
+  // Something is SET on each one first, so a refusal that quietly cleared anyway would
+  // show up as a changed value rather than passing on the message alone.
+  await runCli(["config", "recall-budget", "personal", "7"], h.io);
+  await runCli(["config", "world-fact-cap", "personal", "9"], h.io);
+  await runCli(["config", "recall-provider", "personal", "local"], h.io);
+  await runCli(["config", "cognition-provider", "personal", "lodestar"], h.io);
+  await runCli(["config", "cognition-capture", "personal", "content"], h.io);
+  await runCli(["config", "recall-budget", "--default", "11"], h.io);
+  await runCli(["config", "world-fact-cap", "--default", "13"], h.io);
+  await runCli(["trust", "personal", "threshold", "--clean", "5"], h.io);
+
+  const conflicts: [string[], string][] = [
+    [["config", "recall-budget", "personal", "30", "--unset"], "a recall budget"],
+    [["config", "world-fact-cap", "personal", "30", "--unset"], "a world-fact cap"],
+    [["config", "recall-provider", "personal", "local", "--unset"], "a recall provider"],
+    [["config", "cognition-provider", "personal", "lodestar", "--unset"], "a cognition provider"],
+    [["config", "cognition-capture", "personal", "content", "--unset"], "a capture mode"],
+    [["config", "recall-budget", "--default", "30", "--unset"], "a recall budget"],
+    [["config", "world-fact-cap", "--default", "30", "--unset"], "a world-fact cap"],
+    [["trust", "personal", "threshold", "--clean", "5", "--unset"], "a new earning bar (--clean / --targets)"],
+    // An invalid value is still a value: answering the number alone would hide the half
+    // the operator is more likely to have meant.
+    [["config", "recall-budget", "personal", "-5", "--unset"], "a recall budget"],
+  ];
+  for (const [argv, what] of conflicts) {
+    h.err.length = 0;
+    expect({ argv, code: await runCli(argv, h.io) }).toEqual({ argv, code: 1 });
+    expect(h.err.join("\n")).toBe(`Give either ${what} or --unset, not both.`);
+  }
+
+  // Nothing was cleared on the way past — every setting is still what it was.
+  const store = openHomeStore(h);
+  try {
+    const id = agentNamed(store, "personal").id;
+    expect(store.agentSettings.getRecallBudget(id)).toBe(7);
+    expect(store.agentSettings.getWorldFactCap(id)).toBe(9);
+    expect(store.agentSettings.getRecallProvider(id)).toBe("local");
+    expect(store.agentSettings.getCognitionProvider(id)).toBe("lodestar");
+    expect(store.agentSettings.getCognitionCapture(id)).toBe("content");
+    expect(store.installSettings.getRecallBudget()).toBe(11);
+    expect(store.installSettings.getWorldFactCap()).toBe(13);
+    expect(store.agentSettings.getStandingThresholds(id).minCleanExecutions).toBe(5);
+  } finally {
+    store.close();
+  }
+});
+
+test("`references` alongside --unset is redundant, not contradictory, and stays accepted", async () => {
+  // The two are spellings of the same outcome — the kernel stores the baseline as NULL —
+  // so refusing them together would be a rule with no defect behind it.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "personal"], h.io);
+  await runCli(["config", "cognition-capture", "personal", "content"], h.io);
+  expect(await runCli(["config", "cognition-capture", "personal", "references", "--unset"], h.io)).toBe(0);
+  const store = openHomeStore(h);
+  try {
+    expect(store.agentSettings.getCognitionCapture(agentNamed(store, "personal").id)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
 test("config recall-budget --unset clears the override, then is a no-op", async () => {
   const h = harness();
   await runCli(["init"], h.io);
