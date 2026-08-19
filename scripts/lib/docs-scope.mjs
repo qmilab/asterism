@@ -64,19 +64,29 @@ export function readSiteConfig(configText) {
       }
       const raw = dir[1].trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");
       if (!raw) refuse("mkdocs.yml declares `docs_dir` with no value.");
-      // An ABSOLUTE `docs_dir` is legal for mkdocs and unusable here: every path this
-      // module compares against comes from `git ls-files` and is repo-relative, so an
-      // absolute prefix would match nothing and quietly call every page unpublished —
-      // which is not an error anywhere downstream, just every link on the site judged by
-      // GitHub's slug rule. Refuse instead; a silent wrong answer is the failure mode this
-      // whole module exists to remove.
-      if (raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw)) {
+      docsDir = raw.replace(/^\.\//, "").replace(/\/+$/, "");
+      // `docs_dir` must name a SUBDIRECTORY of the repo, because everything here compares
+      // paths that came from `git ls-files` and are repo-relative. mkdocs accepts more than
+      // that — an absolute path, `.` for the repo root, a `..` escape — and every one of
+      // those makes the prefix test below match NOTHING. That is not an error anywhere
+      // downstream: it is "no page is published", which reads as every link on the site
+      // being judged by GitHub's slug rule while the pass goes on reporting that they all
+      // resolve. A silent wrong answer is the failure mode this module exists to remove, so
+      // the shapes this reader cannot compare are refused by name.
+      //
+      // ⚠ The first version of this refused only a leading `/`, which is how three of the
+      // four shapes got through: `.`, `./` (which the trailing-slash strip turns into an
+      // empty string), and `../docs` all produced "nothing is published", silently.
+      const bad =
+        docsDir === "" || docsDir === "." ? "the repo root" : docsDir.split("/").includes("..") ? "a path with a `..` segment" : raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw) ? "an absolute path" : "";
+      if (bad) {
         refuse(
-          `mkdocs.yml gives an absolute \`docs_dir\` (${raw}), and everything here compares` +
-            ` repo-relative paths from git. Teach scripts/lib/docs-scope.mjs before using one.`,
+          `mkdocs.yml gives \`docs_dir: ${raw}\` — ${bad}. Everything here compares repo-relative\n` +
+            `paths from git, so this reader can only handle a subdirectory of the repo; anything\n` +
+            `else silently makes every page unpublished, which is worse than stopping.\n` +
+            `Teach scripts/lib/docs-scope.mjs before using one.`,
         );
       }
-      docsDir = raw.replace(/^\.\//, "").replace(/\/+$/, "");
       continue;
     }
     const ex = /^exclude_docs:\s*(.*)$/.exec(line);

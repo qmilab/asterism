@@ -1404,6 +1404,36 @@ function report(total, tally, groups, coverageWork) {
     if (readSiteConfig("site_name: X\n").docsDir !== "docs") {
       scopeFailures.push("  a config with no `docs_dir` did not fall back to mkdocs' own default");
     }
+    // The shapes this reader REFUSES, each spawned because refusing is `process.exit(2)`.
+    // Every one of them makes the prefix test match nothing, which is not an error anywhere
+    // downstream — it is "no page is published", and the pass goes on reporting that every
+    // link resolves while judging the whole site by the wrong renderer. Refusing is only
+    // worth anything if it happens, so it is run rather than read.
+    //
+    // ⚠ This list is the second version. The first refused a leading `/` alone, and `.`,
+    // `./` and `../docs` all walked through it silently — a correction landing narrower
+    // than the thing it corrected.
+    const MUST_REFUSE = [
+      ["docs_dir: .", "the repo root"],
+      ["docs_dir: ./", "the repo root, spelled with a trailing slash"],
+      ["docs_dir: ../docs", "a path above the repo"],
+      ["docs_dir: /abs/docs", "an absolute path"],
+      ["docs_dir: docs\ndocs_dir: pages", "two `docs_dir` keys"],
+      ["exclude_docs: [a, b]", "an inline YAML collection"],
+    ];
+    for (const [text, why] of MUST_REFUSE) {
+      let refused = false;
+      try {
+        execFileSync(
+          process.execPath,
+          ["-e", `import(${JSON.stringify(join(ROOT, "scripts/lib/docs-scope.mjs"))}).then((m) => m.readSiteConfig(process.argv[1]))`, text],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd: ROOT },
+        );
+      } catch (err) {
+        refused = err.status === 2;
+      }
+      if (!refused) scopeFailures.push(`  a config naming ${why} was accepted instead of refused`);
+    }
     // …and the excluder is consulted, not merely parsed. `mkdocs-parity-check --self-test`
     // is what proves this predicate agrees with the library mkdocs reads these with; this
     // only proves the wiring exists without needing a Python interpreter to say so.
