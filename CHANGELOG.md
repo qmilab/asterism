@@ -2,9 +2,7 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## 0.8.1 — unreleased
-
-> These notes are written and reviewed ahead of the release. Every `@qmilab/asterism*` package is still at `0.8.0`, which remains the latest published version; this heading gets its date when the version bump and the `v0.8.1` tag land.
+## 0.8.1 — 2026-08-19
 
 Corrections to what Asterism tells you about itself, in the two places you are most likely to read before anything works: the page npm shows for the package you install, and the line a command prints when you have typed it wrong. Nothing about how Asterism behaves changes.
 
