@@ -4653,7 +4653,7 @@ test("fetch shows help and rejects an incomplete invocation", async () => {
   // Missing the path (and missing the callee) are usage errors, not silent no-ops.
   expect(await runCli(["fetch", "writer", "helper"], h.io)).toBe(1);
   expect(await runCli(["fetch", "writer"], h.io)).toBe(1);
-  expect(h.err.join("\n")).toMatch(/Usage: asterism fetch <caller> <callee> <path>/);
+  expect(h.err.join("\n")).toMatch(/Usage: asterism fetch <from> <to> <path>/);
 });
 
 test("fetch reports an unknown agent on either side", async () => {

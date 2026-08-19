@@ -16,21 +16,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runCli } from "./cli.ts";
-import type { CliIO } from "./cli.ts";
+import { advertisedVerbs as deriveVerbs, makeRunner } from "./cli-surface.test-support.ts";
 
 /** The option no command takes, typed at every verb. */
 const BOGUS = "--nosuchflag";
 
-function makeIo(cwd: string): CliIO {
-  return { cwd, env: {}, out: () => {}, err: () => {} };
-}
-
 async function run(cwd: string, argv: string[]): Promise<{ code: number; text: string }> {
-  const lines: string[] = [];
-  const io: CliIO = { ...makeIo(cwd), out: (t) => lines.push(t), err: (t) => lines.push(t) };
-  const code = await runCli(argv, io);
-  return { code, text: lines.join("\n") };
+  return makeRunner(cwd)(argv);
 }
 
 /** The `Commands:` block of `asterism --help`, which is the advertised surface. */
@@ -39,41 +31,13 @@ async function helpText(cwd: string, verb: readonly string[]): Promise<string> {
 }
 
 /**
- * Every invocation `asterism --help` advertises, plus the sibling subcommands each
- * verb's OWN help lists — so `config unset` and `service uninstall`, which the root
- * help never names, are covered too.
- *
- * Root form: a `Commands:` line is two-space indented, and a bare lower-case second
- * word IS a subcommand by construction (`capabilities show <agent>`) where a
- * placeholder is not (`run <agent> "<task>"`).
- *
- * Per-verb form: a synopsis line begins `asterism <verb> …`; the subcommand is the
- * first token after the verb when that token is a bare word (`config set <model-id>`),
- * or the second when the first is a placeholder (`trust <agent> threshold`). Reading
- * past that would mistake a VALUE for a verb — `config recall-provider <agent> local`.
+ * Every invocation the binary's own help advertises. Derived in
+ * `cli-surface.test-support.ts`, because `usage-lines.test.ts` needs the same list and
+ * two copies of a derivation are two things to get wrong. The assertions that keep it
+ * honest are below, where they always were.
  */
 async function advertisedVerbs(cwd: string): Promise<string[]> {
-  const root = await helpText(cwd, []);
-  const block = root.split(/^Commands:$/m)[1]?.split(/^\S/m)[0] ?? "";
-  const verbs = new Set<string>();
-  const heads = new Set<string>();
-  for (const line of block.split("\n")) {
-    const m = line.match(/^ {2}([a-z][\w-]*)(?:\s+([a-z][\w-]*))?/);
-    if (!m) continue;
-    heads.add(m[1]!);
-    verbs.add(m[2] ? `${m[1]} ${m[2]}` : m[1]!);
-  }
-  const isWord = (t: string | undefined): boolean => t !== undefined && /^[a-z][\w-]*$/.test(t);
-  for (const head of heads) {
-    for (const line of (await helpText(cwd, [head])).split("\n")) {
-      const m = line.match(new RegExp(`^asterism\\s+${head}\\s+(.*)$`));
-      if (!m) continue;
-      const [first, second] = m[1]!.trim().split(/\s+/);
-      const sub = isWord(first) ? first : isWord(second) ? second : undefined;
-      if (sub) verbs.add(`${head} ${sub}`);
-    }
-  }
-  return [...verbs].sort();
+  return deriveVerbs(makeRunner(cwd));
 }
 
 /**

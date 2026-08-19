@@ -6,6 +6,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 site/
+# `bun pm pack` output — the release checklist runs it against packages/cli to confirm
+# every `workspace:*` dep resolved to a concrete version, and it drops the tarball in place.
+*.tgz
 
 # local runtime state & secrets
 .asterism/

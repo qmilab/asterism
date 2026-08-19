@@ -39,7 +39,7 @@ afterEach(() => {
   a.close();
   b.close();
   // Remove the whole temp dir, WAL and shm sidecars included — a stray database
-  // file is what `scripts/no-db-artifacts.mjs` exists to catch.
+  // file is what `scripts/no-tracked-artifacts.mjs` exists to catch.
   rmSync(dir, { recursive: true, force: true });
 });
 

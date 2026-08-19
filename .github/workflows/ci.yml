@@ -44,9 +44,14 @@ jobs:
       - uses: actions/checkout@v5
 
       # No dependencies needed, and it reads only the first bytes of each tracked file,
-      # so it is the fastest thing here — run it before anything is installed.
-      - name: No committed database artifacts
-        run: node scripts/no-db-artifacts.mjs
+      # so it is the fastest thing here — run it before anything is installed. The self-test
+      # goes first, as it does for the docs gates: a check that has stopped being able to
+      # refuse anything passes exactly as loudly as one with nothing to refuse.
+      - name: Artifact check can still refuse (self-test)
+        run: node scripts/no-tracked-artifacts.mjs --self-test
+
+      - name: No committed build or database artifacts
+        run: node scripts/no-tracked-artifacts.mjs
 
       - uses: oven-sh/setup-bun@v2
         with:
