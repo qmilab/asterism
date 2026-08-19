@@ -2,6 +2,23 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.8.1 — unreleased
+
+> These notes are written and reviewed ahead of the release. Every `@qmilab/asterism*` package is still at `0.8.0`, which remains the latest published version; this heading gets its date when the version bump and the `v0.8.1` tag land.
+
+Corrections to what Asterism tells you about itself, in the two places you are most likely to read before anything works: the page npm shows for the package you install, and the line a command prints when you have typed it wrong. Nothing about how Asterism behaves changes.
+
+### Fixed
+
+- **The npm page for `@qmilab/asterism` disagreed with the product in four ways.** It is the page you read before deciding to install anything, and it sat outside every check this repo runs — the docs gates covered `docs/` and the top-level `README.md`, and nothing covered the READMEs npm publishes. All four are corrected, and those pages are now inside the same gates:
+
+  - The quickstart typed `asterism secrets add client GITHUB_TOKEN` and left the value to be entered. There is no prompt: that line **exited 1** as printed, on the third step of the page. It now shows a value.
+  - "At every level, destructive actions … pause for your explicit confirmation" is not true at `propose`, where nothing is asked because nothing is attempted — the action is withheld and you are handed the plan instead. `notify` and `autonomous` are the levels that stop and ask. (0.5.0 corrected this same sentence elsewhere; this was one more copy of it, on the page with the widest readership.)
+  - The list of tools an agent can be given named three of the nine the CLI ships.
+  - `@qmilab/asterism-adapter-lodestar` was published with no README at all, so its npm page carried a one-line description and nothing else.
+
+- **`asterism fetch` called its two agents something its own help never did.** The usage line said `<caller> <callee>` where `asterism fetch --help`, [the command reference](https://qmilab.com/asterism/docs/commands/#fetch) and every other exchange verb say `<from> <to>` — so the two surfaces you have just read disagreed at exactly the moment you were already looking something up. Both spellings always worked; this is what the line says. `asterism config set` had a sharper version of the same problem, printing two different usage lines depending on which mistake you made — one calling `--provider`'s value `<p>`, the other `<name>`.
+
 ## 0.8.0 — 2026-08-18
 
 An option you typed is not discarded in silence. Asterism used to accept any `--flag`, record it, and move on — so a misspelling went nowhere, and on a handful of commands that meant doing something other than what you asked for while reporting success: removing every one of an agent's services rather than the one named, clearing the install-wide default model rather than one agent's override, setting no autonomy level at all. A misspelled option is now an error that names itself, and so are two options that contradict each other. The text you write yourself — a task, an objective, a brief, a note, a secret — is untouched.

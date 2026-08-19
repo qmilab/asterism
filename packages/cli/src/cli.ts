@@ -2760,8 +2760,8 @@ async function cmdArtifact(args: string[], io: CliIO): Promise<number> {
 // --- summary ---------------------------------------------------------------
 
 /**
- * `asterism summary <caller> <callee> ["<focus>"]` — read a curated extract of what the
- * callee already knows, over a `read-summary` connection (Phase 3 · T2b).
+ * `asterism summary <from> <to> ["<focus>"]` — read a curated extract of what the callee
+ * (`<to>`) already knows, over a `read-summary` connection (Phase 3 · T2b).
  *
  * The one PULL in the collaboration surface: the callee runs NOTHING. Look at what this
  * command does not do — no `prepareExchange`, so no adapter is resolved, no recall provider is
@@ -3077,8 +3077,8 @@ function cmdUndelegate(args: string[], io: CliIO): Promise<number> {
 }
 
 /**
- * `asterism call <caller> <callee> <endpoint>` — ask the callee to use one of its own tools
- * and hand back what came out.
+ * `asterism call <from> <to> <endpoint>` — ask the callee (`<to>`) to use one of its own
+ * tools and hand back what came out.
  *
  * The caller supplies nothing but the choice. The address, the credential and the request
  * are all the callee's, the call runs under the callee's gate, and what crosses is the
@@ -3146,11 +3146,11 @@ function cmdCall(args: string[], io: CliIO): Promise<number> {
   });
 }
 
-const FETCH_USAGE = "Usage: asterism fetch <caller> <callee> <path>";
+const FETCH_USAGE = "Usage: asterism fetch <from> <to> <path>";
 
 /**
- * `asterism fetch <caller> <callee> <path>` — copy an artifact the callee produced into the
- * caller's workspace, under the CALLER's own destructive-action gate.
+ * `asterism fetch <from> <to> <path>` — copy an artifact the callee (`<to>`) produced into
+ * the caller's (`<from>`) workspace, under the CALLER's own destructive-action gate.
  *
  * The completion of the `artifact-only` mode: the exchange hands back a list of what the
  * callee made, and this is how the operator turns one of those references into the actual
@@ -5257,10 +5257,11 @@ function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   const positionalId = parsed.positionals[1];
   if (positionalId !== undefined) settings.id = positionalId;
   if (!hasSettings(settings)) {
-    io.err(
-      "Usage: asterism config set <model-id> [--provider <p>] [--base-url <url>] " +
-        "[--api <protocol>] [--agent <name>]",
-    );
+    // The same constant the option refusal above prints. A second copy of this line drifted
+    // from it — it named `--provider`'s value `<p>` where the constant, the help and the docs
+    // all say `<name>` — so the operator met two spellings of one flag depending on which
+    // mistake they made.
+    io.err(CONFIG_SET_USAGE);
     return Promise.resolve(1);
   }
   const agentName = stringFlag(parsed.flags.agent);
