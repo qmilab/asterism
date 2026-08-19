@@ -49,9 +49,11 @@ jobs:
       # Pinned in requirements-docs.txt, shared with the PR gate in ci.yml so the build
       # that is gated and the build that is deployed are the same build.
       - run: pip install -r requirements-docs.txt
-      # `--strict` turns MkDocs' warnings — an unresolvable internal link, a nav entry
-      # pointing at a page that does not exist — into a failed build. Without it those
-      # deploy silently, and the first person to find them is a reader.
+      # `--strict` turns MkDocs' warnings into a failed build. Without it they deploy
+      # silently and the first person to find them is a reader. WHICH defects are warnings
+      # is not restated here — `mkdocs.yml`'s `validation:` block sets all seven and records
+      # the exit code each was measured at, and this comment used to name two of them as
+      # though that were the list.
       - run: mkdocs build --strict --site-dir _site/docs
       # Land the landing page at the /asterism/ root, next to /asterism/docs/.
       # README.md is a maintainer note, not a published asset — drop it.

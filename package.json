@@ -19,6 +19,8 @@
     "check:docs:self-test": "tsc -b && node scripts/docs-commands-check.mjs --self-test",
     "check:safety-case": "node scripts/safety-case-check.mjs",
     "check:safety-case:self-test": "node scripts/safety-case-check.mjs --self-test",
+    "check:mkdocs-parity": "node scripts/mkdocs-parity-check.mjs",
+    "check:mkdocs-parity:self-test": "node scripts/mkdocs-parity-check.mjs --self-test",
     "verify:node": "tsc -b && node scripts/node-acceptance.mjs",
     "verify:deno": "tsc -b && deno run -A scripts/deno-acceptance.mjs",
     "asterism": "bun run packages/cli/src/bin.ts"

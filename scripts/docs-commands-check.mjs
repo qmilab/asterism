@@ -9,7 +9,8 @@
 // perform, and a refusal advertising `api remove <agent> <a> <b>` when `api remove`
 // takes one name. A documentation page is nothing but such sentences.
 //
-// It pulls every fenced `asterism …` invocation out of docs/ and README.md and sorts
+// It pulls every fenced `asterism …` invocation out of the markdown a USER meets — the
+// published site, the repo's front page, and every package README npm ships — and sorts
 // each into one of two claims, both checked against the real `packages/cli/dist/bin.js`:
 //
 //   SYNOPSIS  an unprompted line carrying placeholders (`<agent>`, `[--flag]`) claims
@@ -38,8 +39,12 @@
 // did not: it substituted whitespace singly where Python-Markdown collapses a run, so an
 // em-dash heading came out with a double hyphen. It then reported four correct links as
 // dead, and they were "fixed" to match the checker — breaking them on the published site
-// while CI called them green. `--self-test` now pins the port against known-good pairs,
-// because a wrong anchor helper is worse than no anchor helper: it certifies the damage.
+// while CI called them green. A wrong anchor helper is worse than no anchor helper: it
+// certifies the damage. So the port lives in `lib/anchors.mjs` and is verified against the
+// renderer rather than pinned by eye — `check:mkdocs-parity` renders every published page
+// with the site's own Python-Markdown and compares every id. `--self-test` here keeps a
+// handful of pairs for the cases an eyeball gets wrong, so a local run still says
+// something without an interpreter.
 //
 // The link pass RESOLVES targets rather than recognising them. The version before this one
 // matched them with `[a-z0-9-]+\.md` and still printed "Every internal doc link resolves" —
@@ -47,17 +52,28 @@
 // filename, any `./docs/…` link, any image, any raw HTML `href`, or any of the 56 internal
 // links in README, and it counted a `# comment` inside a fenced block as a heading, which
 // minted 25 anchors this repo's pages do not have and made links into them report as good.
-// `mkdocs --strict` backstops only part of that: it never reads README (`docs_dir: docs`),
-// and it logs a MISSING ANCHOR at INFO, so a dead `#fragment` does not fail the build.
-// Measured, both of them, by planting one of each. What the pass claims is now what it did.
+// It now reads every markdown file this repo TRACKS, with each link judged by the renderer
+// that serves the page making it. `mkdocs --strict` still backstops only part of that: it
+// never reads README (`docs_dir: docs`), so README's links are invisible to it. Measured by
+// planting one of each. What the pass claims is now what it did.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines } from "./lib/anchors.mjs";
+import {
+  ROOT,
+  siteDir,
+  isPublished,
+  trackedMarkdown,
+  userFacingMarkdown,
+  publishedPages,
+  publishedPredicate,
+  publishedPackages,
+  publishedPackagesWithoutReadme,
+  readSiteConfig,
+} from "./lib/docs-scope.mjs";
 const BIN = join(ROOT, "packages", "cli", "dist", "bin.js");
 const CORE = join(ROOT, "packages", "core", "dist", "index.js");
 const MODEL_CONFIG_DIST = join(ROOT, "packages", "cli", "dist", "model-config.js");
@@ -93,39 +109,6 @@ function preflight() {
   }
 }
 
-/** The directory this checker assumes mkdocs publishes. Asserted below, not guessed. */
-const SITE_DIR = "docs";
-
-/**
- * Three separate things here read `docs/` as "the pages mkdocs publishes": which files
- * the command pass extracts from, which files the link pass reads, and — since anchors
- * are resolved by the renderer that serves the page — WHICH ANCHOR RULE a link gets.
- *
- * None of them asks `mkdocs.yml`. If `docs_dir` ever moves, all three go on being sure
- * about a directory that is no longer the site, and the anchor rule is the one that goes
- * wrong quietly: every published page would be judged by GitHub's slug rule instead of
- * mkdocs', and the pass would keep reporting that every link resolves.
- *
- * Deriving the value into all three is a bigger change than this is worth while the
- * answer is `docs`. Making the assumption LOUD is not: an assumption a checker cannot
- * state is the same defect as a claim it cannot check, which is the whole subject of
- * this file.
- */
-function assertSiteDir() {
-  const config = readFileSync(join(ROOT, "mkdocs.yml"), "utf8");
-  const declared = /^docs_dir:\s*(\S+)\s*$/m.exec(config)?.[1]?.replace(/^["']|["']$/g, "");
-  // Absent is not a mismatch: mkdocs defaults `docs_dir` to `docs`, which is what we assume.
-  if (declared !== undefined && declared !== SITE_DIR) {
-    console.error(
-      `mkdocs.yml publishes '${declared}', and this checker assumes '${SITE_DIR}'.\n` +
-        `Three things depend on it: which files the command pass extracts from, which\n` +
-        `files the link pass reads, and which anchor rule each link is judged by — a\n` +
-        `page on the site uses mkdocs' slugs, anything else uses GitHub's.\n` +
-        `Point SITE_DIR at '${declared}' (and re-check anchorRuleFor) before this can run.`,
-    );
-    process.exit(2);
-  }
-}
 const SELF_TEST = process.argv.includes("--self-test");
 /**
  * Report where a page's pasted OUTPUT no longer matches what the binary prints. Not a
@@ -138,13 +121,16 @@ const HOME = ".asterism";
 
 // ---------------------------------------------------------------- extraction
 
-/** Source files whose fenced blocks are checked. */
+/**
+ * Source files whose fenced blocks are checked: the markdown a USER meets — the site, the
+ * repo's front page, and every package README npm publishes. Derived in one place
+ * (`lib/docs-scope.mjs`) rather than spelled out here, because this was the first of four
+ * hand-written answers to "which markdown counts" and the smallest of them: `docs/` plus
+ * README, which left the nine commands in `packages/cli/README.md` — the page npm shows
+ * for the thing people install — typed by nothing.
+ */
 function sourceFiles() {
-  const docs = readdirSync(join(ROOT, SITE_DIR))
-    .filter((f) => f.endsWith(".md"))
-    .sort()
-    .map((f) => join(SITE_DIR, f));
-  return [...docs, "README.md"];
+  return userFacingMarkdown();
 }
 
 /**
@@ -683,125 +669,11 @@ function checkCommandCoverage(work) {
   const verbs = new Set(
     [...block.matchAll(/^\s{2}([a-z][\w-]*)/gm)].map((m) => m[1]),
   );
-  const reference = readFileSync(join(ROOT, "docs", "commands.md"), "utf8");
+  const reference = readFileSync(join(ROOT, siteDir(), "commands.md"), "utf8");
   const documented = new Set(
     [...reference.matchAll(/^##\s+`([a-z][\w-]*)/gm)].map((m) => m[1]),
   );
   return [...verbs].filter((v) => !documented.has(v)).sort();
-}
-
-/**
- * Heading → anchor, mirroring Python-Markdown's `toc` slugify, which is what builds the
- * published site (`mkdocs.yml` configures no other). Ported line for line:
- *
- *   value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode()
- *   value = re.sub(r'[^\w\s-]', '', value).strip().lower()
- *   return re.sub(r'[-\s]+', '-', value)
- *
- * The last line is the one that matters and the one an eyeball reimplementation gets
- * wrong: `+` COLLAPSES a run. `## handoff — hand over a task` drops the em dash, leaving
- * two spaces, which collapse to ONE hyphen — `#handoff-hand-over-a-task`. A version of
- * this that substituted `\s` singly produced a double hyphen, declared the correct links
- * dead, and the links were then "fixed" to match the checker. An anchor checker that
- * disagrees with the site is worse than none: it certifies the breakage.
- */
-function anchorOf(heading) {
-  const text = heading
-    .replace(/^#+\s*/, "")
-    .replace(/`/g, "")
-    .normalize("NFKD")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[^\x00-\x7F]/g, "");
-  return text
-    .replace(/[^\w\s-]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/[-\s]+/g, "-");
-}
-
-/**
- * The lines of a page that become anchors on the site — which is NOT every line starting
- * with `#`. A `# comment` inside a fenced block is shell, and the renderer emits no id for
- * it: checked against Python-Markdown with `pymdownx.superfences` loaded, the extension
- * `mkdocs.yml` actually configures, where the same input yields ids with the fence
- * extension absent and none with it present. Counting them minted 25 anchors this repo's
- * pages do not have (`#on-the-host`, `#openai_api_key`, …), each of which would have let a
- * link to a section that does not exist report as resolved.
- */
-function* headingLines(text) {
-  let inFence = false;
-  for (const line of text.split("\n")) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (!inFence && /^#{1,6}\s/.test(line)) yield line;
-  }
-}
-
-/**
- * Heading → anchor the way GITHUB does it, which is not the way the site does it.
- *
- * The difference is the one this file has been burned by before, in the other direction:
- * Python-Markdown collapses a run of spaces to a single hyphen, GitHub replaces each
- * space one for one. So `## Contributing & security` is `#contributing-security` on the
- * site and `#contributing--security` on GitHub, because dropping the `&` leaves two
- * spaces. Thirteen headings in this repo's root markdown differ between the two rules.
- *
- * Taken from GitHub's own rendering of this repo rather than from a description of the
- * algorithm — see GITHUB_ANCHOR_PAIRS in the self-test, which pins every anchor GitHub
- * emits for README. Duplicates get `-1`, `-2` here, not the `_1` Python-Markdown uses.
- */
-function githubAnchorOf(heading) {
-  return heading
-    .replace(/^#+\s*/, "")
-    .replace(/`/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
-    .replace(/\s/g, "-");
-}
-
-/**
- * Which anchor rule serves a link — decided by where the link is CLICKED, which is where
- * the page MAKING it is published, not by the page it points at.
- *
- * A `docs/` page is published on the site, so a `docs/` → `docs/` fragment must be the
- * anchor mkdocs emits: a GitHub-only form is dead for every reader of the published page,
- * and `mkdocs --strict` will not say so, because it logs a missing anchor at INFO. Every
- * other combination is only ever followed on GitHub — the repo root is not on the site at
- * all (`docs_dir: docs`), and a `docs/` page pointing outside `docs/` has already left it.
- *
- * The first version of this keyed on the TARGET and accepted EITHER rule for a `docs/`
- * page, reasoning that both renderers serve it. Both do render it — but a link is
- * followed in one place, and accepting the union let a fragment that is dead on the
- * published site pass as resolved. Reachable somewhere is not the same as reachable from
- * the page that makes the claim.
- */
-function anchorRuleFor(sourceRel, targetRel) {
-  const inDocs = (p) => p.startsWith(`${SITE_DIR}/`) || p.startsWith(`${SITE_DIR}${sep}`);
-  return inDocs(sourceRel) && inDocs(targetRel)
-    ? { slug: anchorOf, joiner: "_", name: "mkdocs" }
-    : { slug: githubAnchorOf, joiner: "-", name: "github" };
-}
-
-/**
- * A page's anchors under one rule. Each renderer also guarantees ids are UNIQUE — a
- * repeated heading gets a suffix, `_1`/`_2` under Python-Markdown and `-1`/`-2` under
- * GitHub. Verified against both renderers, not assumed. This repo has no duplicate
- * heading today, which is exactly why it is worth handling now: the first one added would
- * otherwise have its correct link reported dead, and this pass has already taught us once
- * that a link declared dead gets "fixed" to agree with the checker.
- */
-function anchorsOf(text, { slug, joiner }) {
-  const ids = new Set();
-  for (const line of headingLines(text)) {
-    const base = slug(line);
-    let id = base;
-    for (let n = 1; ids.has(id); n++) id = `${base}${joiner}${n}`;
-    ids.add(id);
-  }
-  return ids;
 }
 
 /** Anything carrying a URI scheme (or protocol-relative) is not this repo's to resolve. */
@@ -943,37 +815,21 @@ function* internalLinks(text) {
 }
 
 /**
- * The markdown this repo publishes: `docs/` and the repo root. Derived from git rather
- * than a readdir, because the root also holds a contributor's PRIVATE notes — `ROADMAP.md`
- * and friends are gitignored — and a gate that fails on files the repo does not ship is a
- * gate people learn to skip.
+ * EVERY markdown file this repo ships, not just the published ones. A dead cross-reference
+ * fails a reader wherever it is written, and the set this pass used to read — `docs/` plus
+ * the repo root — left eleven tracked files out on the reasoning that their links "resolve
+ * against a different base". Two of those eleven carry an internal link today
+ * (`decisions/README.md`, `.github/PULL_REQUEST_TEMPLATE.md`), and both resolve on disk,
+ * which is what GitHub serves them from.
  *
- * Deliberately not a package's own README, nor `decisions/`: their relative links resolve
- * against a different base (npm renders the package README against GitHub), and a claim
- * this pass cannot check is a claim it must not make. The report names the set it read.
+ * The base question is real but belongs to the ANCHOR RULE, which asks `isPublished` per
+ * file rather than trimming the corpus: a page on the site is judged by mkdocs' slugs and
+ * everything else by GitHub's. The one case that stays genuinely undecidable is a package
+ * README's relative link as NPM renders it — npm rewrites those against the repo — and this
+ * pass says what it checked rather than pretending otherwise.
  */
 function linkSourceFiles() {
-  let tracked;
-  try {
-    tracked = execFileSync("git", ["ls-files", "-z", "--", "*.md"], {
-      cwd: ROOT,
-      encoding: "utf8",
-    });
-  } catch (err) {
-    // Not a fallback — a readdir here would gate on a contributor's private notes, and
-    // an empty list would let this pass report a green zero over nothing at all. Say why
-    // it stopped, because `spawnSync git ENOENT` reads like a broken checkout.
-    console.error(
-      "The link pass lists the markdown this repo ships by asking git, and git did not" +
-        ` answer here (${err.message}). Run this from a git checkout with git available.`,
-    );
-    process.exit(2);
-  }
-  return tracked
-    .split("\0")
-    .filter(Boolean)
-    .filter((p) => p.startsWith(`${SITE_DIR}/`) || !p.includes("/"))
-    .sort();
+  return trackedMarkdown();
 }
 
 /**
@@ -1046,7 +902,7 @@ function checkLinks(root = ROOT, files = linkSourceFiles()) {
  * named IN it, not left for a section further down to quietly contradict.
  */
 function linkSummary({ links, files, broken, unchecked }) {
-  const where = `internal links in the ${files} docs/ and root markdown files`;
+  const where = `internal links in the ${files} markdown files this repo tracks`;
   if (unchecked.length === 0) {
     return `Every one of the ${links} ${where} resolves, headings included.`;
   }
@@ -1069,6 +925,19 @@ function linkSummary({ links, files, broken, unchecked }) {
  * Returns a list of failures; empty means the pass sees exactly what it should.
  */
 function probeLinkFixture() {
+  // The fixture's paths spell `docs/` out, because half of these cases turn on whether a
+  // page is PUBLISHED and reading `${SITE}/site.md#a-b` twenty times would obscure the one
+  // thing each line is about. That makes the literal a dependency, so it is stated here
+  // rather than left to be discovered: move `docs_dir` and the four quadrant cases below
+  // silently change quadrant, which shows up as a planted link going uncaught — a real
+  // failure with a misleading explanation. Say the actual cause instead.
+  if (siteDir() !== "docs") {
+    return [
+      `  this fixture's paths assume the site publishes 'docs/', and mkdocs.yml now says` +
+        ` '${siteDir()}'. Rename the docs/ paths in PLANTED and CONTROLS to match; the cases` +
+        ` that turn on published-vs-not are the four quadrant ones and the two after them.`,
+    ];
+  }
   // Each planted target names the blind spot it covers; every one of these was invisible
   // to the `[a-z0-9-]+\.md`, `docs/`-only matcher this replaced — except the first two,
   // which it did catch and which are here so a rewrite cannot lose them.
@@ -1499,7 +1368,12 @@ function report(total, tally, groups, coverageWork) {
   const accounted =
     tally.ran + tally.synopsis + tally.skipped + tally.excused + tally.documented + groups.failures.length;
   console.log(
-    `\n${total} invocations in docs/ and README.md — ` +
+    `\n${total} invocations in ${
+      SELF_TEST
+        ? "the planted fixture"
+        : `the ${sourceFiles().length} pages a user meets (the site, the repo's front page,` +
+          ` every package README npm publishes)`
+    } — ` +
       `${tally.ran} ran, ${tally.synopsis} synopsis matched --help, ` +
       `${tally.documented} refused exactly as documented, ` +
       `${tally.excused} refused for a named reason, ${tally.skipped} skipped, ` +
@@ -1511,12 +1385,130 @@ function report(total, tally, groups, coverageWork) {
   }
 
   if (SELF_TEST) {
+    // Which markdown each pass reads is a DERIVED answer now, and a derivation nothing can
+    // kill is the defect this slice exists to remove: the assertion it replaces could be
+    // deleted outright and leave this self-test at exit 0. So each pass's scope is asserted
+    // here in terms of the thing it is derived FROM, and each assertion fails if the
+    // derivation is replaced by the constant it used to be.
+    const scopeFailures = [];
+
+    // `docs_dir` is READ. A reader that returned "docs" regardless would pass every other
+    // check in this file, because "docs" is the right answer for this repo.
+    const plantedConfig = readSiteConfig(["site_name: X", "docs_dir: pages", "exclude_docs: |", "  internal/", ""].join("\n"));
+    if (plantedConfig.docsDir !== "pages") {
+      scopeFailures.push(`  a config declaring \`docs_dir: pages\` was read as '${plantedConfig.docsDir}'`);
+    }
+    if (JSON.stringify(plantedConfig.exclude) !== JSON.stringify(["internal/"])) {
+      scopeFailures.push(`  a block-scalar \`exclude_docs\` was read as ${JSON.stringify(plantedConfig.exclude)}`);
+    }
+    if (readSiteConfig("site_name: X\n").docsDir !== "docs") {
+      scopeFailures.push("  a config with no `docs_dir` did not fall back to mkdocs' own default");
+    }
+    // …and the excluder is consulted, not merely parsed. `mkdocs-parity-check --self-test`
+    // is what proves this predicate agrees with the library mkdocs reads these with; this
+    // only proves the wiring exists without needing a Python interpreter to say so.
+    const plantedPublished = publishedPredicate(plantedConfig);
+    for (const [rel, want] of [
+      ["pages/index.md", true],
+      ["pages/internal/note.md", false],
+      ["pages/deep/internal/note.md", false],
+      ["docs/index.md", false],
+    ]) {
+      if (plantedPublished(rel) !== want) {
+        scopeFailures.push(`  under \`docs_dir: pages\` + \`internal/\`, ${rel} should be ${want ? "" : "un"}published`);
+      }
+    }
+
+    // The three above are pure functions, and a caller that never asks them would pass all
+    // of them. So: what this repo's checkers actually use must equal what this repo's own
+    // config parses to — which is what fails if `siteDir()` or the cached config is
+    // replaced by the constant that happens to be right today.
+    const real = readSiteConfig(readFileSync(join(ROOT, "mkdocs.yml"), "utf8"));
+    if (siteDir() !== real.docsDir) {
+      scopeFailures.push(`  siteDir() is '${siteDir()}' where mkdocs.yml declares '${real.docsDir}'`);
+    }
+    const fromConfig = publishedPredicate(real);
+    for (const rel of trackedMarkdown()) {
+      if (isPublished(rel) !== fromConfig(rel)) {
+        scopeFailures.push(`  isPublished(${rel}) does not agree with mkdocs.yml as parsed`);
+      }
+    }
+    // And the ANCHOR RULE asks that question rather than matching a path prefix. The two
+    // differ on exactly one shape — a page inside `docs_dir` that `exclude_docs` removes —
+    // which is unpublished, so its links are followed on GitHub and nowhere else.
+    const excludedPage = `${real.docsDir}/${(real.exclude[0] ?? "internal/").replace(/\/$/, "")}/page.md`;
+    if (!fromConfig(excludedPage) && anchorRuleFor(excludedPage, excludedPage).name !== "github") {
+      scopeFailures.push(
+        `  the anchor rule judges ${excludedPage} by mkdocs' slugs, and \`exclude_docs\` keeps it off the site`,
+      );
+    }
+
+    // The link pass reads EVERY tracked markdown file. Narrow it back to `docs/` and the
+    // root — the set it had — and this count no longer matches.
+    const tracked = trackedMarkdown();
+    const readByLinkPass = checkLinks(ROOT, linkSourceFiles()).files;
+    if (readByLinkPass !== tracked.length) {
+      scopeFailures.push(
+        `  the link pass read ${readByLinkPass} files where this repo tracks ${tracked.length} markdown files`,
+      );
+    }
+
+    // The command pass reads the pages a USER meets. Restated here from the manifests
+    // rather than read back from the function under test, so this is a second derivation
+    // and not the same one agreeing with itself — and asserted to be NON-EMPTY, because a
+    // derivation that finds nothing would otherwise satisfy every `includes` below.
+    const read = sourceFiles();
+    const shipsToNpm = tracked.filter((rel) => {
+      if (!rel.endsWith("/README.md")) return false;
+      const manifest = join(ROOT, rel.replace(/README\.md$/, "package.json"));
+      return existsSync(manifest) && JSON.parse(readFileSync(manifest, "utf8")).private !== true;
+    });
+    const shouldRead = [...new Set(["README.md", ...publishedPages(), ...shipsToNpm])];
+    if (shipsToNpm.length === 0) {
+      scopeFailures.push("  no package README was found beside a published manifest, so this proves nothing");
+    }
+    for (const page of shouldRead) {
+      if (!read.includes(page)) scopeFailures.push(`  the command pass does not read ${page}`);
+    }
+
+    // Which packages npm publishes is derived here from each manifest's `private` flag, and
+    // it decides which READMEs the command pass reads. The only other enumeration of that
+    // same set in this repo is `release.yml`, which spells it out by hand in two `for pkg
+    // in …` loops — so comparing the two is both how this derivation is proved right and
+    // how a package missing from the release loops (added to the workspace, never
+    // published) would be noticed. Neither list is trusted; they are made to agree.
+    const releaseYml = readFileSync(join(ROOT, ".github", "workflows", "release.yml"), "utf8");
+    const loops = [...releaseYml.matchAll(/^\s*for pkg in ([^;]+); do\s*$/gm)].map((m) => m[1].trim().split(/\s+/));
+    if (loops.length === 0) {
+      scopeFailures.push("  release.yml no longer spells its package list out in a `for pkg in …` loop");
+    }
+    const derived = publishedPackages().map((d) => d.replace(/^packages\//, "")).sort();
+    loops.forEach((loop, i) => {
+      const listed = [...loop].sort();
+      const missing = derived.filter((p) => !listed.includes(p));
+      const extra = listed.filter((p) => !derived.includes(p));
+      for (const p of missing) scopeFailures.push(`  release.yml loop ${i + 1} never publishes packages/${p}`);
+      for (const p of extra) scopeFailures.push(`  release.yml loop ${i + 1} publishes packages/${p}, which is not a package this repo publishes`);
+    });
+
+    if (scopeFailures.length) {
+      console.log("\nSELF-TEST FAILED: a pass is no longer reading the set it says it reads:");
+      for (const f of scopeFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      `Both passes read a DERIVED set: ${tracked.length} tracked files for links,` +
+        ` ${sourceFiles().length} user-facing pages for commands, and \`docs_dir\` comes from mkdocs.yml.`,
+    );
+
     // The anchor port is checked against pinned pairs taken from a real
     // Python-Markdown `slugify` run, because getting it wrong is SILENT and worse than
     // having no checker: an anchor helper that disagrees with the site reports the
     // correct links as dead, and "fixing" them to agree breaks the published page.
     // Every pair below has an em dash or punctuation — the cases an eyeball
-    // reimplementation gets wrong.
+    // reimplementation gets wrong. This is the cheap, interpreter-free half; the thorough
+    // half is `check:mkdocs-parity`, which renders every published page with the site's own
+    // Python-Markdown and compares every id it emits, pinning nothing.
     const ANCHOR_PAIRS = [
       ["## `handoff` — hand over a task", "handoff-hand-over-a-task"],
       ["### Earned autonomy — per-capability grants", "earned-autonomy-per-capability-grants"],
@@ -1603,9 +1595,29 @@ function report(total, tally, groups, coverageWork) {
       }
       process.exit(1);
     }
+    // "Every id GitHub emits for README" was a completeness claim about a list of ten,
+    // true only for as long as README had ten headings. The pins cannot be re-derived here
+    // — GitHub's slugger has no local implementation and fetching it would put the network
+    // inside a gate — so the claim is made checkable the other way: a heading with no pin
+    // fails, and whoever adds one re-reads the id off GitHub's own rendering with
+    // `curl https://github.com/qmilab/asterism | grep 'id="user-content-'`.
+    const pinned = new Set(GITHUB_ANCHOR_PAIRS.map(([h]) => h));
+    const unpinned = [...headingLines(readFileSync(join(ROOT, "README.md"), "utf8"))].filter(
+      (h) => !pinned.has(h.trimEnd()),
+    );
+    if (unpinned.length) {
+      console.log(
+        `\nSELF-TEST FAILED: ${unpinned.length} README heading(s) the GitHub anchor port is not` +
+          ` pinned against. These ids cannot be derived locally — read each one off GitHub's own` +
+          ` rendering (\`curl https://github.com/qmilab/asterism | grep 'id="user-content-'\`) and` +
+          ` add the pair:`,
+      );
+      for (const h of unpinned) console.log(`  ${h.trim()}   → githubAnchorOf gives '${githubAnchorOf(h)}'`);
+      process.exit(1);
+    }
     console.log(
-      `GitHub anchor slugify matches every id GitHub emits for README` +
-        ` (${GITHUB_ANCHOR_PAIRS.length} headings).`,
+      `GitHub anchor slugify matches all ${GITHUB_ANCHOR_PAIRS.length} ids GitHub emits for README,` +
+        ` which is every heading it has. Pinned by hand, not derived — see the note above.`,
     );
 
     // Pinning the slugify is not the same as exercising the pass that uses it, and until
@@ -1652,8 +1664,8 @@ function report(total, tally, groups, coverageWork) {
   const undocumented = SELF_TEST ? [] : checkCommandCoverage(coverageWork);
   if (undocumented.length) {
     console.log(
-      `\nUNDOCUMENTED COMMANDS (${undocumented.length}) — \`docs/commands.md\` claims to` +
-        ` document every command, and has no section for:`,
+      `\nUNDOCUMENTED COMMANDS (${undocumented.length}) — \`${join(siteDir(), "commands.md")}\` claims` +
+        ` to document every command, and has no section for:`,
     );
     for (const v of undocumented) console.log(`  asterism ${v}`);
   } else if (!SELF_TEST) {
@@ -1675,11 +1687,25 @@ function report(total, tally, groups, coverageWork) {
     for (const u of links.unchecked) console.log(`  ${u}`);
   }
 
+  // A published package with NO README is the one gap the scope rule above cannot see: a
+  // set built from the files that exist can never notice a file that does not, so a blank
+  // npm page for something people install would just be one fewer page to check.
+  const readmeless = SELF_TEST ? [] : publishedPackagesWithoutReadme();
+  if (readmeless.length) {
+    console.log(
+      `\nPUBLISHED PACKAGES WITH NO README (${readmeless.length}) — npm renders a package's page` +
+        ` from its README, and shows only the one-line description without one:`,
+    );
+    for (const dir of readmeless) console.log(`  ${dir}`);
+  } else if (!SELF_TEST) {
+    console.log("Every package this repo publishes to npm has a README, and it is checked above.");
+  }
+
   const providerGaps = SELF_TEST ? [] : checkProviderCoverage();
   if (providerGaps.length) {
     console.log(
-      `\nPROVIDER TABLE OUT OF DATE (${providerGaps.length}) — \`docs/models.md\` claims to list` +
-        " every built-in provider and the variable it reads:",
+      `\nPROVIDER TABLE OUT OF DATE (${providerGaps.length}) — \`${join(siteDir(), "models.md")}\` claims` +
+        ` to list every built-in provider and the variable it reads:`,
     );
     for (const g of providerGaps) console.log(`  ${g}`);
   } else if (!SELF_TEST) {
@@ -1691,11 +1717,14 @@ function report(total, tally, groups, coverageWork) {
     groups.failures.length ||
     links.broken.length ||
     undocumented.length ||
+    readmeless.length ||
     providerGaps.length
   ) {
     process.exit(1);
   }
-  console.log("Every command the docs advertise runs, or matches the binary's own help.");
+  console.log(
+    `Every command those ${sourceFiles().length} pages advertise runs, or matches the binary's own help.`,
+  );
 }
 
 /**
@@ -1709,8 +1738,9 @@ function report(total, tally, groups, coverageWork) {
  * hand-maintained list would just move the staleness.
  */
 function checkProviderCoverage() {
-  const page = join(ROOT, "docs", "models.md");
-  if (!existsSync(page)) return ["docs/models.md is missing"];
+  const rel = join(siteDir(), "models.md");
+  const page = join(ROOT, rel);
+  if (!existsSync(page)) return [`${rel} is missing`];
   const text = readFileSync(page, "utf8");
   const { PROVIDER_DEFAULTS, providerKeyEnvVar } = MODEL_CONFIG;
 
@@ -1781,7 +1811,6 @@ function plantedFailures() {
 }
 
 preflight();
-assertSiteDir();
 try {
   ({ AsterismStore, CONNECTION_MODES } = await import(CORE));
   MODEL_CONFIG = await import(MODEL_CONFIG_DIST);

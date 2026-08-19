@@ -27,6 +27,39 @@ extra_css:
 exclude_docs: |
   internal/
 
+# What a broken cross-reference COSTS the build. mkdocs ships most of these at INFO,
+# which means a dead link is a line in a log nobody reads and the build still succeeds —
+# and with `--strict` gating every pull request, "succeeds" is the whole signal. Each key
+# below was measured by planting exactly one defect and building twice: five of the seven
+# went from exit 0 to exit 1, and the two already at `warn` by default are named anyway so
+# the set is the config's own statement rather than something to look up.
+#
+#   links.anchors             a `#fragment` naming no heading on the target page.  0 → 1
+#   links.absolute_links      a `/absolute/path` link, which 404s once published.   0 → 1
+#   links.unrecognized_links  a link mkdocs cannot resolve to a page at all.        0 → 1
+#   nav.omitted_files         a page in docs/ that no nav entry reaches.            0 → 1
+#   nav.absolute_links        a nav entry given as an absolute path.                0 → 1
+#   links.not_found           a link to a page that does not exist.       already 1, pinned
+#   nav.not_found             a nav entry naming a page that does not exist.        likewise
+#
+# `check:docs` covers the same ground from the other side — it reads README and the rest of
+# the repo's markdown, which mkdocs never sees — but only mkdocs knows what is IN the site,
+# which is what makes a docs/ page's link to a repo file outside docs/ resolve here and 404
+# there. Neither subsumes the other; both run in CI.
+#
+# A page that genuinely belongs outside the navigation is declared, not excused: add it to
+# `not_in_nav` (mkdocs' own escape hatch) rather than turning `omitted_files` back down.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
 nav:
   - Home: index.md
   - Getting started:

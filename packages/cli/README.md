@@ -14,7 +14,7 @@ asterism new writer  --soul casual-helper       --trust autonomous
 asterism new client  --soul careful-consultant  --trust propose
 
 # give each agent its own secrets and skills
-asterism secrets add client GITHUB_TOKEN
+asterism secrets add client GITHUB_TOKEN ghp_example_token   # value: inline, piped, or from $GITHUB_TOKEN
 # a skill is just a markdown file you write
 echo "# Blog writer: tighten drafts, keep the author's voice" > blog-writer.md
 asterism skill   add writer blog-writer.md
@@ -41,9 +41,9 @@ Every agent gets one of three trust levels:
 - **`notify`** — acts automatically inside its workspace, then surfaces each action prominently for after-the-fact review. It does **not** ask first.
 - **`autonomous`** — acts freely inside its workspace, recording everything to its event log.
 
-At every level, destructive actions (deleting files, force-pushes, spending money, irreversible external calls) pause for your explicit confirmation.
+One rule overrides all three. A **destructive** action — deleting files, force-pushes, spending money, irreversible external calls — never happens without you, whatever the agent's trust level, unless you have specifically allowed that capability for it. At `notify` and `autonomous` the run stops and asks; a `propose` agent does not take one at all, and hands you the plan instead.
 
-The gate acts on an agent's *tools*. The shipped CLI registers a default catalog of workspace-scoped file tools — `read_file`, `write_file`, `delete_file` — behind it, so with a configured model an ordinary write runs under `autonomous` while a deletion pauses regardless of trust level. The acceptance test (`bun test packages/cli/src/acceptance.test.ts`) verifies all five claims, and `catalog.test.ts` drives the shipped tools directly.
+The gate acts on an agent's *tools*. The shipped CLI registers a default catalog of workspace-scoped file tools behind it — read-only `read_file`/`list_dir`/`stat`/`find`, the writes `write_file`/`append_file`/`mkdir`/`move`, and `delete_file` — so with a configured model an ordinary edit runs under `autonomous` while a deletion pauses. The acceptance test (`bun test packages/cli/src/acceptance.test.ts`) verifies all five claims, and `catalog.test.ts` drives the shipped tools directly.
 
 ## Learning you can review
 
