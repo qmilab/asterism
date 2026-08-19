@@ -126,16 +126,22 @@ jobs:
   # links, they still see different things — but not the way this comment used to say. It
   # claimed `check:docs` was the weaker of the two on links because its matcher was
   # lower-case only. That matcher is gone: `check:docs` now resolves every internal link on
-  # disk, README and the root markdown included, and fails on a missing `#fragment`.
+  # disk, across every markdown file this repo tracks, and fails on a missing `#fragment`.
   #
   # What each one alone would miss, both measured by planting one:
   #   `--strict`     never reads README (`docs_dir: docs`), so README's ~56 internal links
-  #                  are invisible to it; and it logs a MISSING ANCHOR at INFO, so a dead
-  #                  `#fragment` does not fail the build at all.
+  #                  are invisible to it.
   #   `check:docs`   resolves against the FILESYSTEM, not the site, so it cannot know that
   #                  a `docs/` page linking to a repo file outside `docs/` resolves here and
   #                  404s once published. `--strict` knows what is in the site and catches it.
   # Neither check subsumes the other; run both.
+  #
+  # ⚠ This comment used to record a third fact — that `--strict` logs a MISSING ANCHOR at
+  # INFO, so a dead `#fragment` did not fail the build at all. That was true and is no
+  # longer: `mkdocs.yml` now carries a `validation:` block raising anchors, absolute links,
+  # unrecognized links and orphaned nav entries to warnings, which `--strict` turns into a
+  # failed build. Five defect shapes that used to build clean now do not; the block itself
+  # lists all seven with the exit codes each was measured at.
   #
   # Separate job because it shares nothing with the test matrix — no Bun, no Node, no
   # native addon — so it runs in parallel instead of adding a minute to both legs.
@@ -150,7 +156,25 @@ jobs:
           # pinned (requirements-docs.txt); the interpreter minor is not worth a second
           # pin to keep current.
           python-version: '3.x'
+      # The parity check below is a Node script. Pinned at the declared floor rather than
+      # left to whatever the runner image ships, so this job never becomes the one place
+      # something is exercised on a version the product does not claim to support. No
+      # `bun install` and no native addon here — it reads files and shells out to Python.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.19'
       - run: pip install -r requirements-docs.txt
       # Same command docs.yml deploys with, `--strict` included, so a page that would fail
       # the deploy fails here instead — while it is still a pull request.
       - run: mkdocs build --strict --site-dir _site/docs
+
+      # The JS checkers carry a model of this site — which directory it publishes, which
+      # pages survive `exclude_docs`, and the anchor Python-Markdown emits for each heading
+      # — and a wrong model does not merely miss a dead link, it reports a LIVE one as dead,
+      # which is how a correct link once got "fixed" into a 404. This job is the only place
+      # with the renderer to check that against, and it is the PINNED one the site is built
+      # with, so the comparison is against what ships. Self-test first, same reason as the
+      # checks above: it plants a port carrying the historical bug and a scope rule blind to
+      # `exclude_docs`, so a green comparison cannot be vacuous.
+      - run: node scripts/mkdocs-parity-check.mjs --self-test
+      - run: node scripts/mkdocs-parity-check.mjs

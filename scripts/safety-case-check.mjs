@@ -34,29 +34,29 @@
 // instrument certifies damage. Requiring an exact title and a pinned file means the only
 // way to green is to open the real test.
 
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { ROOT, siteDir, trackedMarkdown } from "./lib/docs-scope.mjs";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SELF_TEST = process.argv.includes("--self-test");
 
 // ------------------------------------------------------------------ the corpus
 
 /**
- * Pages whose Evidence blocks are checked. Derived by reading the directory, not by
- * listing pages here — a hand-maintained list is a completeness claim, and this repo has
- * already paid for one of those. `SECURITY.md` is included because it is the front door
- * the threat model is linked from and may grow citations of its own.
+ * Pages whose Evidence blocks are checked: every markdown file this repo ships.
+ *
+ * This used to be `readdir("docs")` plus README and SECURITY — derived for the directory
+ * part, but still a hand-maintained list of two for the rest, and a third answer to "which
+ * markdown counts" alongside the two in `docs-commands-check`. An Evidence block is a
+ * citation wherever it is written, and this check costs one pass over a file that has none,
+ * so there is no set of files worth carving out. `decisions/`, the CHANGELOG and the
+ * contributor docs carry no citations today; if one grows a claim, it is checked the day
+ * it is written rather than the day someone remembers to widen a list.
  */
 function sourcePages() {
-  const docs = readdirSync(join(ROOT, "docs"))
-    .filter((f) => f.endsWith(".md"))
-    .sort()
-    .map((f) => join("docs", f));
-  return [...docs, "README.md", "SECURITY.md"].filter((p) => existsSync(join(ROOT, p)));
+  return trackedMarkdown();
 }
 
 // --------------------------------------------------------------- citation parse
@@ -320,9 +320,15 @@ function report(pages, citations, findings, malformed, corpus) {
     console.error(`      ${f.detail}`);
   }
   const bad = findings.length + malformed.length;
+  // Two numbers, because they answer different questions and the old sentence conflated
+  // them: how many pages CARRY a citation, and how many were READ looking for one. A
+  // single count reads as the first while being the second, which is how a page nobody
+  // scanned looks identical to a page with nothing to prove.
+  const carrying = new Set(citations.map((c) => c.page)).size;
   const summary =
-    `${citations.length} citation${citations.length === 1 ? "" : "s"} across ${pages.length} page` +
-    `${pages.length === 1 ? "" : "s"}, checked against ${corpus.total} executed test` +
+    `${citations.length} citation${citations.length === 1 ? "" : "s"} on ${carrying} of the ` +
+    `${pages.length} markdown file${pages.length === 1 ? "" : "s"} this repo tracks, checked against ` +
+    `${corpus.total} executed test` +
     `${corpus.total === 1 ? "" : "s"}` +
     (corpus.excluded ? ` (${corpus.excluded} skipped or failed, not usable as evidence)` : "");
   if (bad) {
@@ -472,7 +478,7 @@ function selfTest() {
   console.log(`  ${brokenSaysSo ? "✓" : "✗"} an unreadable report indicts the PARSER, not the citations`);
 
   // --- half 2: the real page, really parsed, with a real defect planted in a copy.
-  const realPage = join("docs", "threat-model.md");
+  const realPage = join(siteDir(), "threat-model.md");
   if (existsSync(join(ROOT, realPage))) {
     const original = readFileSync(join(ROOT, realPage), "utf8");
     const first = EVIDENCE_ITEM.exec(original.split("\n").find((l) => EVIDENCE_ITEM.test(l)) ?? "");
