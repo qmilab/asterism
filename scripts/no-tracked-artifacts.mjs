@@ -209,8 +209,15 @@ function selfTest() {
     // check leaves the prefix answering for both halves.
     "paths.gz": gzipSync(Buffer.from(`package/package.json\n`.repeat(64))),
   };
-  for (const [name, bytes] of Object.entries({ ...offenders, ...controls })) write(name, bytes);
-  git("add", "-A");
+  const planted = Object.entries({ ...offenders, ...controls });
+  for (const [name, bytes] of planted) write(name, bytes);
+  // `-f` and explicit paths, not `add -A`. A machine-local `core.excludesFile` — `*.tgz` and
+  // `*.log` are ordinary entries in one — silently skips `store.log` and both tarball
+  // controls, and then this self-test either fails for a reason that is not about the
+  // checker or, worse, passes without having exercised the controls at all. Naming the
+  // paths also means a fixture that failed to be written is an error here rather than a
+  // quietly smaller test. [Codex review R1 P2.]
+  git("add", "-f", "--", ...planted.map(([name]) => name));
 
   const failures = [];
   const runHere = () =>

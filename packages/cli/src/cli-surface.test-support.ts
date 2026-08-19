@@ -10,12 +10,34 @@
 
 import { runCli } from "./cli.ts";
 import type { CliIO } from "./cli.ts";
+import { findHome } from "./paths.ts";
 
 /** One CLI invocation: its exit code and everything it printed, out and err interleaved. */
 export type Run = (argv: string[]) => Promise<{ code: number; text: string }>;
 
-/** Runs the CLI in `cwd`. */
+/**
+ * Runs the CLI in `cwd`, with an empty environment and NO workspace in reach.
+ *
+ * Both callers sweep every advertised verb with malformed arguments, which means typing at
+ * commands that write files, install services and bind ports. What keeps that harmless is
+ * that none of them can find a store: they fail at `withHomeStore` before doing anything.
+ *
+ * That is a precondition, not a property of `cwd` being fresh — `findHome` walks UP the way
+ * git finds a repository root, so an `asterism init` run once in `/tmp` (or any ancestor of
+ * the system temp directory) would put a live install in reach of every probe. It is checked
+ * here rather than assumed, because the failure it prevents is a sweep quietly acting on a
+ * real workspace, not a test going red. A test that genuinely wants a workspace should build
+ * its own IO rather than loosen this.
+ */
 export function makeRunner(cwd: string): Run {
+  const inherited = findHome(cwd);
+  if (inherited !== undefined) {
+    throw new Error(
+      `Refusing to sweep the CLI from ${cwd}: an Asterism workspace at ${inherited} is in ` +
+        `reach of every probe, so a malformed invocation could act on a real install. ` +
+        `Remove it, or point TMPDIR somewhere without one above it.`,
+    );
+  }
   return async (argv) => {
     const lines: string[] = [];
     const io: CliIO = { cwd, env: {}, out: (t) => lines.push(t), err: (t) => lines.push(t) };
