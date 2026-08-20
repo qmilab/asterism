@@ -1282,10 +1282,12 @@ proposals on the spot (which needs a
 
 At a terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`, on **standard
 error**. With nobody to ask — piped, launched from a scheduler, or with standard
-error redirected somewhere you would not see the question — nothing is ever
-accepted, and a pile already **queued** by `--propose` is left **untouched** (with
-a note to review it in a terminal) rather than silently rejected, since rejecting a
-queued proposal is a durable choice. Either way, nothing is written without you.
+error redirected somewhere you would not see the question — it does not decide on
+your behalf: a pile already **queued** by `--propose` is left **untouched** (since
+rejecting a queued proposal is a durable choice), and there is no live pass either,
+so no model is called for proposals nobody can answer for. Both say to come back at
+a terminal, or to use `--propose`, which is the mode built to run unattended.
+Nothing is ever written without you.
 
 ```console
 $ asterism reflect writer --review

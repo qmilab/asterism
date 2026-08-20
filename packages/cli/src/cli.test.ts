@@ -1234,12 +1234,29 @@ test("reflect proposes typed memories and persists only what the human accepts",
 test("reflect saves nothing without an explicit accept (the safe default)", async () => {
   const h = harness();
   await withFinishedRun(h);
+  let proposed = 0;
   h.io.makeReflectionProvider = () => ({
     provider: fakeReflection([{ memoryType: "semantic", content: "a fact", confidence: 0.8 }]),
   });
-  // No reviewer injected: every proposal must be rejected, nothing persisted.
+  // A reviewer IS present and declines: every proposal is rejected, nothing persisted.
+  h.io.review = () => ({ kind: "reject" });
   const out = await capture(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("0 saved");
+  expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
+
+  // With NOBODY to decide, it does not reject on their behalf and report it — it says so
+  // and stops, before asking the model for proposals nobody will answer for (#172).
+  delete h.io.review;
+  h.io.makeReflectionProvider = () => {
+    proposed++;
+    return { provider: fakeReflection([{ memoryType: "semantic", content: "a fact", confidence: 0.8 }]) };
+  };
+  const unattended = await capture(["reflect", "personal", "--review"], h.io);
+  expect(unattended).toContain("nobody here to review");
+  expect(unattended).toContain("--propose");
+  expect(unattended).not.toContain("0 saved");
+  // The provider is built (so a missing model is still diagnosed) but never asked.
+  expect(proposed).toBe(1);
   expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
 });
 

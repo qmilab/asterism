@@ -111,11 +111,9 @@ const io: CliIO = {
   // instead. The proposal text is already printed by the command, so this only collects
   // the decision.
   //
-  // The LIVE path (no queue) still runs without a reviewer and rejects everything.
-  // Harmless to the pile — a live reject persists nothing — but not free: it builds a
-  // model, pays for a call whose output is then discarded, and prints a summary of
-  // decisions nobody made. Pre-existing and unchanged here; the same shape `trust
-  // --review` stopped doing, and worth closing the same way.
+  // The LIVE path refuses too, for the same reason with a different cost: a live reject
+  // persists nothing, but reaching it means building a model and paying for a call whose
+  // every answer is then discarded, and ending on a summary of decisions nobody made.
   ...(interactive
     ? {
         review: async (): Promise<ReviewDecision> => {

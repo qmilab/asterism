@@ -4192,6 +4192,23 @@ async function reviewLive(
   }
   const provider = made.provider;
 
+  // No reviewer wired ⇒ nobody to decide, so every proposal would be rejected and the
+  // command would end by reporting decisions nobody took — the queue drain's refusal, and
+  // `trust --review`'s, applied to the last surface that still did it (#172).
+  //
+  // The position is chosen, not incidental. AFTER the cheap "nothing to reflect on" test,
+  // so an agent with no runs is told that rather than sent to find a terminal it does not
+  // need. AFTER the provider build, which is client construction and makes no request, so
+  // a scripted session still gets the "no model configured" diagnostic and its exit 1
+  // rather than having it hidden behind this. And BEFORE the first proposal, which is the
+  // paid call — a session that can decide nothing must not buy answers it will discard.
+  if (!io.review) {
+    io.out(`${name} has a run to reflect on, but there is nobody here to review what it proposes.`);
+    io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal, or`);
+    io.out(`\`asterism reflect ${name} --propose\` to queue proposals for review later.`);
+    return 0;
+  }
+
   const memCode = await reviewMemoryLive(io, store, agent, name, target, provider);
   const objCode = await reviewObjectiveLive(io, store, agent, name, target, provider);
   // Either section failing (a model error) surfaces as a non-zero exit; both clean ⇒ 0.
