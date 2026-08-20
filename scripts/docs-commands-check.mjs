@@ -2237,6 +2237,34 @@ function report(total, tally, groups, coverageWork) {
     if (right.checked === 0) {
       linkFailures.push("  the real root page resolved zero links against its own derived prefix");
     }
+    // A landing directory with more than one page, and two of them sharing a basename —
+    // reachable because git's `landing/*.html` pathspec matches NESTED paths. Basename
+    // matching resolved `/asterism/` to whichever sorted first and reported a correct
+    // `/asterism/blog/post.html` as broken.
+    // In git's order, which sorts a nested page BEFORE the root one — so the first entry is
+    // not the directory every page shares, and taking it whole gets the root wrong.
+    const nested = [
+      ["landing/blog/index.html", "<h2 id=y>y</h2>"],
+      ["landing/blog/post.html", "<h2 id=x>x</h2>"],
+      ["landing/index.html", '<a href="/asterism/blog/post.html">a</a><a href="/asterism/blog/">b</a>'],
+    ];
+    const nestedResult = checkLandingLinks(nested, realPublished);
+    if (nestedResult.broken.length !== 0 || nestedResult.checked !== 2) {
+      linkFailures.push(
+        `  a nested landing page: ${nestedResult.broken.length} broken / ${nestedResult.checked} checked,` +
+          ` wanted 0 / 2 — ${JSON.stringify(nestedResult.broken)}`,
+      );
+    }
+    // …and a fragment must be read from the page the URL names, not from one that merely
+    // shares its filename.
+    const wrongPage = checkLandingLinks(
+      [["landing/index.html", '<a href="/asterism/blog/#x">a</a>'], ["landing/blog/index.html", "<h2 id=y>y</h2>"]],
+      realPublished,
+    );
+    if (wrongPage.broken.length !== 1) {
+      linkFailures.push("  a fragment was resolved against the wrong landing page");
+    }
+
     const wrong = checkLandingLinks(realPages, realPublished, { docsPrefix: "/elsewhere/docs/", siteRoot: "/elsewhere/" });
     if (wrong.checked !== 0) {
       linkFailures.push(`  a wrong prefix over the real page still checked ${wrong.checked} links`);
@@ -2951,6 +2979,32 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
   return gaps;
 }
 
+/** The deepest directory every one of these paths sits under. */
+function commonDirectory(paths) {
+  const split = paths.map((p) => p.split("/").slice(0, -1));
+  const first = split[0] ?? [];
+  let n = first.length;
+  for (const parts of split) {
+    let i = 0;
+    while (i < n && parts[i] === first[i]) i++;
+    n = i;
+  }
+  return first.slice(0, n).join("/");
+}
+
+/**
+ * A URL path under the site's root → the landing page that serves it, or undefined.
+ *
+ * `<root>/x/` is served by `<dir>/x/index.html`, `<root>/x.html` by `<dir>/x.html`, and
+ * `<root>/` by `<dir>/index.html` — the same directory-URL shapes mkdocs uses, applied to
+ * a directory copied verbatim rather than rendered.
+ */
+function landingPageFor(dir, pages, pathPart) {
+  const rel = pathPart.replace(/^\/+/, "").replace(/\/$/, "");
+  const candidates = rel === "" ? ["index.html"] : [rel, `${rel}/index.html`, `${rel}.html`];
+  return candidates.map((c) => `${dir}/${c}`).find((c) => pages.includes(c));
+}
+
 /** Every `id` an HTML page gives an element, for resolving a link's `#fragment`. */
 function idsIn(text) {
   return new Set(
@@ -2999,7 +3053,12 @@ function checkLandingLinks(
   const offSite = [];
   let checked = 0;
   const landingPages = pages.map(([rel]) => rel);
-  const landingIndex = landingPages.find((p) => p.endsWith("/index.html")) ?? landingPages[0];
+  const bodyOf = new Map(pages);
+  // The directory the workflow copies into the artifact ROOT, derived from the pages
+  // themselves so a caller can plant its own. Everything under it is served at the same
+  // path beneath the site's root, which is what makes the mapping below exact.
+  const landingRoot = commonDirectory(landingPages);
+  const landingIndex = `${landingRoot}/index.html`;
 
   for (const [rel, text] of pages) {
     // `<a href>` only. A `<link rel="icon" href="/favicon.svg">` is an ASSET request, served
@@ -3021,11 +3080,17 @@ function checkLandingLinks(
         continue;
       }
       const [pathPart, fragment] = href.slice(siteRoot.length).split("#");
-      const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
-      // Which landing page does this URL name? A bare `/asterism/` names the index; a
-      // basename names the sibling with that filename.
-      const wanted = bare === "" || bare === "index" ? basename(landingIndex) : pathPart.replace(/\/$/, "");
-      const landingTarget = landingPages.find((page) => basename(page) === wanted);
+      // Which landing page does this URL name? The directory is copied into the artifact
+      // ROOT, so a path under the site's root IS the path under that directory — an exact
+      // mapping, not a name match.
+      //
+      // ⚠ Matching on BASENAME was wrong, and quietly: git's `landing/*.html` pathspec
+      // matches nested paths (measured), so `landing/blog/index.html` can exist alongside
+      // `landing/index.html`. `/asterism/` would then have resolved to whichever sorted
+      // first — checking a fragment against the wrong page's ids — and
+      // `/asterism/blog/post.html` would have matched no basename at all and been reported
+      // broken on a correct link.
+      const landingTarget = landingPageFor(landingRoot, landingPages, pathPart);
       if (landingTarget) {
         // ⚠ THIS PAGE is tested first, and the ordering is the point. `index.html` is also
         // the basename of `landing/index.html`, so with the sibling lookup first the site's
@@ -3035,13 +3100,17 @@ function checkLandingLinks(
         // never match, so this ordering was never exercised by it.
         if (landingTarget !== rel) checked++;
         if (fragment) {
-          const body = landingTarget === rel ? text : readFileSync(join(ROOT, landingTarget), "utf8");
+          // From the CORPUS, not from disk: `pages` already holds every landing page's
+          // text, and re-reading meant this could only ever run against files that exist —
+          // so a planted fixture could not exercise it at all.
+          const body = bodyOf.get(landingTarget) ?? "";
           const where = landingTarget === rel ? "this page" : landingTarget;
           if (!idsIn(body).has(fragment)) broken.push(`${at}  ${href} — ${where} has no element with that id`);
         }
         continue;
       }
       checked++;
+      const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
       // mkdocs' directory URLs: `<site_url>x/` is built from `<docs_dir>/x.md`, and
       // `<site_url>` itself from `<docs_dir>/index.md`. The URL segment and the source
       // directory are two different names, so the served path is translated rather than
