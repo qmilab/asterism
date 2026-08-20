@@ -132,7 +132,7 @@ import {
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import type { ModelResolutionContext } from "./model-config.js";
-import { providerAuthPlan, resolveModelConfig } from "./model-config.js";
+import { modelIdSource, providerAuthPlan, resolveModelConfig } from "./model-config.js";
 import {
   isServiceKind,
   launchdLabel,
@@ -4617,17 +4617,13 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
       io.out("  (no agents yet)");
     } else {
       for (const agent of agents) {
-        const override = config.agents?.[agent.name]?.model;
         const { model } = resolveModelConfig(io.env, { config, agentName: agent.name });
         const resolved = model ? `${model.id} (provider: ${model.provider})` : "(no model — set one)";
-        // Name the source of the resolved id — the headline coordinate.
-        const source = hasSettings(override) && override.id !== undefined
-          ? "agent override"
-          : envIsSet(io.env, "ASTERISM_MODEL_ID")
-            ? "environment"
-            : config.model?.id !== undefined
-              ? "install default"
-              : "unset";
+        // Name the source of the resolved id — the headline coordinate. Asked of the
+        // resolver's own layers, not re-derived here: each clause of the hand-written
+        // version tested `!== undefined` on its layer, so an empty stored id credited a
+        // layer that supplied nothing while resolution used the one below it (#174).
+        const source = modelIdSource(io.env, { config, agentName: agent.name }) ?? "unset";
         io.out(`  ${agent.name}  →  ${resolved}  [${source}]`);
       }
     }

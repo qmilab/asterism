@@ -384,6 +384,51 @@ function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
   return out;
 }
 
+/** Where a resolved coordinate came from, named as `config show` reports it. */
+export type ModelSource = "install default" | "environment" | "agent override";
+
+/**
+ * The layers resolution draws on, LOW → HIGH precedence, each named.
+ *
+ * Shared by {@link resolveModelConfig} and {@link modelIdSource} so the value a surface
+ * shows and the source it credits are read off ONE list. Restating the layering was how
+ * `config show` came to label an agent `[agent override]` whose override supplied
+ * nothing: the label tested `override.id !== undefined`, which an empty stored id
+ * satisfies, while resolution had already dropped it (#174).
+ */
+function modelLayers(
+  env: Env,
+  context: ModelResolutionContext,
+): { source: ModelSource; settings: ModelSettings }[] {
+  const { config, agentName } = context;
+  return [
+    { source: "install default", settings: config?.model ?? {} },
+    { source: "environment", settings: settingsFromEnv(env) },
+    {
+      source: "agent override",
+      settings: (agentName ? config?.agents?.[agentName]?.model : undefined) ?? {},
+    },
+  ];
+}
+
+/**
+ * Which layer supplies the model id that {@link resolveModelConfig} will use, or
+ * undefined when none does. The headline coordinate, so it is the one `config show`
+ * names — asked of the layers rather than re-derived beside them.
+ */
+export function modelIdSource(
+  env: Env,
+  context: ModelResolutionContext = {},
+): ModelSource | undefined {
+  let found: ModelSource | undefined;
+  // Low → high, so the last layer that supplies an id is the one that wins — the same
+  // order `mergeSettings` overwrites in.
+  for (const layer of modelLayers(env, context)) {
+    if (withoutEmptyFields(layer.settings).id !== undefined) found = layer.source;
+  }
+  return found;
+}
+
 /**
  * Resolve the model config from the config file, environment, and a per-agent
  * override, then apply provider defaults. See the module header for the
@@ -392,14 +437,7 @@ function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
  * environment-only resolution.
  */
 export function resolveModelConfig(env: Env, context: ModelResolutionContext = {}): ModelConfigResult {
-  const { config, agentName } = context;
-  const agentSettings = agentName ? config?.agents?.[agentName]?.model : undefined;
-  // Low → high precedence: install default, environment, per-agent override.
-  const merged = mergeSettings([
-    config?.model ?? {},
-    settingsFromEnv(env),
-    agentSettings ?? {},
-  ]);
+  const merged = mergeSettings(modelLayers(env, context).map((l) => l.settings));
 
   const id = merged.id;
   if (!id) {

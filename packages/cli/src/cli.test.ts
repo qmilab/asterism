@@ -18,7 +18,7 @@ import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/ast
 import { workspaceCapabilities } from "./capabilities.ts";
 import { runCli } from "./cli.ts";
 import type { CliIO, ReviewDecision, ReviewItem } from "./cli.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, saveConfig } from "./config.ts";
 import type { ModelResolutionContext } from "./model-config.ts";
 import { dbPath, HOME_DIR_NAME } from "./paths.ts";
 import { VERSION } from "./version.ts";
@@ -2909,6 +2909,30 @@ test("config show reports an environment override only when it supplies somethin
   const real = await capture(["config", "show"], h.io);
   expect(real).toContain("Environment override");
   expect(real).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
+});
+
+test("config show credits the layer that supplies the model, on a config an older version damaged", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "bot", "--trust", "propose"], h.io);
+  await runCli(["new", "other", "--trust", "propose"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+  // What `new bot --model ""` wrote before this release refused it. The empty override no
+  // longer shadows the default — and the label must not credit it either, or the same
+  // command reports a model and a source that disagree about where it came from.
+  const home = homeOf(h);
+  const damaged = loadConfig(home);
+  damaged.agents = { bot: { model: { id: "" } } };
+  saveConfig(home, damaged);
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("bot  →  llama3.2 (provider: ollama)  [install default]");
+  expect(shown).toContain("other  →  llama3.2 (provider: ollama)  [install default]");
+  // A REAL override is still credited, so the label has not simply stopped naming one.
+  // (The provider still comes from the install default — the override names only an id,
+  // and the merge is field-wise.)
+  await runCli(["config", "set", "gpt-4o", "--agent", "bot"], h.io);
+  expect(await capture(["config", "show"], h.io)).toContain("bot  →  gpt-4o (provider: ollama)  [agent override]");
 });
 
 test("config show calls the embeddings endpoint configured on exactly the terms the runtime does", async () => {

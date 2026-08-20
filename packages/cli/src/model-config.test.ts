@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import type { AsterismConfig } from "./config.ts";
 import {
   isLoopbackUrl,
+  modelIdSource,
   needsNoApiKey,
   NO_API_KEY_PLACEHOLDER,
   PROVIDER_DEFAULTS,
@@ -647,4 +648,34 @@ test("an empty stored provider does not discard the endpoint of the layer below"
   const { model } = resolveModelConfig({}, { config: stored, agentName: "bot" });
   expect(model?.baseUrl).toBe("http://127.0.0.1:8080/v1");
   expect(model?.provider).toBe("openai");
+});
+
+test("the source of the resolved model id is read off the layers that resolve it", () => {
+  const config: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "gpt-4o" } } },
+  };
+  expect(modelIdSource({}, {})).toBeUndefined();
+  expect(modelIdSource({}, { config })).toBe("install default");
+  expect(modelIdSource({ ASTERISM_MODEL_ID: "claude-opus-4-8" }, { config })).toBe("environment");
+  expect(modelIdSource({}, { config, agentName: "bot" })).toBe("agent override");
+  // Highest precedence wins even with every layer set.
+  expect(modelIdSource({ ASTERISM_MODEL_ID: "x" }, { config, agentName: "bot" })).toBe("agent override");
+  // An agent with no override of its own falls to the layer that does supply one.
+  expect(modelIdSource({}, { config, agentName: "other" })).toBe("install default");
+});
+
+test("a layer that supplies an EMPTY id is not credited with the resolved one", () => {
+  // The label and the value have to agree, and they did not: `override.id !== undefined`
+  // is satisfied by `""`, so an agent whose override was written by `new bot --model ""`
+  // was reported as running on its own override while resolution used the install default.
+  const damaged: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "" } } },
+  };
+  expect(modelIdSource({}, { config: damaged, agentName: "bot" })).toBe("install default");
+  expect(resolveModelConfig({}, { config: damaged, agentName: "bot" }).model?.id).toBe("llama3.2");
+  // Same for the environment layer and for the install default itself.
+  expect(modelIdSource({ ASTERISM_MODEL_ID: "" }, { config: damaged })).toBe("install default");
+  expect(modelIdSource({}, { config: { model: { id: "" } } })).toBeUndefined();
 });
