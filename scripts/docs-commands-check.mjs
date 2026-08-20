@@ -230,6 +230,11 @@ function terminalBlocks(text, isHtml) {
     blocks.push({
       tag,
       className,
+      // The highest-specificity source there is: an inline declaration beats every rule in
+      // the stylesheet. Not read until now, so `style="white-space: normal"` on a block the
+      // stylesheet preserves would have passed — the false-pass direction this check exists
+      // for — and `style="white-space: pre"` on one it does not would have been reported.
+      inlineStyle: attrOf(m[2], "style") ?? "",
       startLine: text.slice(0, m.index).split("\n").length,
       // Inline markup inside a terminal block is presentation (a `<span class="comment">`
       // around a shell comment); the command is what is left once it is gone.
@@ -2304,6 +2309,22 @@ function report(total, tally, groups, coverageWork) {
         true,
       ],
       // Two rules at the SAME specificity: the later one renders.
+      // An INLINE declaration outranks the whole stylesheet, in both directions.
+      [
+        "an inline `normal` on a block the stylesheet preserves",
+        styled("pre") + '<div class="x__terminal" style="white-space: normal">a\nb</div>',
+        true,
+      ],
+      [
+        "an inline `pre` on a block the stylesheet collapses",
+        styled("normal") + '<div class="x__terminal" style="white-space: pre">a\nb</div>',
+        false,
+      ],
+      [
+        "an inline style that says nothing about white-space",
+        styled("normal") + '<div class="x__terminal" style="color: red">a\nb</div>',
+        true,
+      ],
       [
         "two class rules at equal specificity, the later collapsing",
         "<style>.x__terminal { white-space: pre; } .x__terminal { white-space: normal; }</style>" + twoLine,
@@ -3161,7 +3182,8 @@ function checkTerminalRendering(
     for (const block of terminalBlocks(text, true)) {
       if (!block.text.includes("\n")) continue; // a one-line block cannot lose a line break
       const classes = block.className.trim().split(/\s+/).filter(Boolean);
-      const declared = whiteSpaceFor(styles, classes, block.tag);
+      const inline = [...block.inlineStyle.matchAll(/white-space:\s*([a-z-]+)/gi)].pop()?.[1]?.toLowerCase();
+      const declared = inline ?? whiteSpaceFor(styles, classes, block.tag);
       // Declaring nothing is fine for a `<pre>` and only for a `<pre>`: it gets
       // `white-space: pre` from the browser's own stylesheet, where a `<div>` gets
       // `normal` and collapses. But that default is only a default — `pre { white-space:
