@@ -1324,16 +1324,33 @@ test("reflect saves nothing without an explicit accept (the safe default)", asyn
   // With NOBODY to decide, it does not reject on their behalf and report it — it says so
   // and stops, before asking the model for proposals nobody will answer for (#172).
   delete h.io.review;
+  let built = 0;
   h.io.makeReflectionProvider = () => {
-    proposed++;
-    return { provider: fakeReflection([{ memoryType: "semantic", content: "a fact", confidence: 0.8 }]) };
+    built++;
+    return {
+      provider: {
+        async reflect(input) {
+          proposed++;
+          return [
+            {
+              memoryType: "semantic" as const,
+              content: "a fact",
+              confidence: 0.8,
+              sourceRunId: input.transcript.runId,
+            },
+          ];
+        },
+      },
+    };
   };
   const unattended = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(unattended).toContain("nobody here to review");
   expect(unattended).toContain("--propose");
   expect(unattended).not.toContain("0 saved");
-  // The provider is built (so a missing model is still diagnosed) but never asked.
-  expect(proposed).toBe(1);
+  // The provider is BUILT — so a missing model is still diagnosed and still exits 1 —
+  // and then never ASKED, which is the part that costs money.
+  expect(built).toBe(1);
+  expect(proposed).toBe(0);
   expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
 });
 
