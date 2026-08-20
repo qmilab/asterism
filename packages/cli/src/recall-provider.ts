@@ -42,7 +42,7 @@ export interface BuildRecallOptions {
 /**
  * Build the local embeddings recall provider from the environment, or return a
  * `reason` naming what to set. Requires both an endpoint URL and a model
- * ({@link configuredEmbeddingVars}); either missing is a misconfiguration (an agent opted
+ * ({@link embeddingEndpoint}); either missing is a misconfiguration (an agent opted
  * in with nowhere to embed), so the caller hard-fails rather than silently using keyword
  * ranking.
  */

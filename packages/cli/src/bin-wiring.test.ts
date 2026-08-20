@@ -75,15 +75,24 @@ test("the binary reads the terminal in exactly one other place, and it is not a 
 });
 
 test("the only hook that asks without checking first is the one whose absence changes nothing", () => {
-  // `confirm` is wired unconditionally because absence and a declined answer are the
-  // same outcome: the kernel pauses either way. Every other `ask` call sits inside a
-  // conditional wiring. If a new unconditional hook starts asking, this fails.
-  const literal = source.slice(source.indexOf("const io: CliIO = {"));
-  const unconditional = literal
-    .split(/\.\.\.\(/)
-    .slice(0, 1)
-    .join("");
-  expect(unconditional).toContain("await ask(");
-  expect(unconditional).toContain("confirm:");
-  expect(unconditional).not.toContain("askSecret(");
+  // `confirm` is wired unconditionally because absence and a declined answer are the same
+  // outcome: the kernel pauses either way. Every OTHER call sits inside a conditional
+  // wiring, and a new unconditional hook that starts asking must fail this.
+  //
+  // The first version kept only the text before the first spread, so a hook added anywhere
+  // after it — beside `startServer`, say — could have called `ask()` and passed. Every
+  // region outside a wiring is checked now, not the first one.
+  const literal = code.slice(code.indexOf("const io: CliIO = {"));
+  // Split on each `...(cond ? {…} : {}),` and keep what is NOT inside one. The bodies are
+  // the conditional wirings; everything between them is unconditional.
+  const outside = literal.split(/\.\.\.\([^?]+?\?[\s\S]*?\s*: \{\}\),/).join("\n");
+  // A split that matched nothing would leave the whole literal here and pass vacuously;
+  // one that matched everything would leave nothing and pass just as vacuously.
+  expect(outside.length).toBeLessThan(literal.length);
+  expect(outside).toContain("confirm:");
+  expect(outside).toContain("startServer:"); // a region AFTER the first wiring is included
+  // Exactly one unconditional `ask`, and it is the one in `confirm`.
+  expect([...outside.matchAll(/\bask\(/g)]).toHaveLength(1);
+  expect([...outside.matchAll(/askSecret\(/g)]).toHaveLength(0);
+  expect(outside.slice(outside.indexOf("confirm:"), outside.indexOf("readStdin"))).toContain("await ask(");
 });

@@ -36,7 +36,6 @@
 
 import {
   bearerToken,
-  DEFAULT_HOSTNAME,
   resolveBindHost,
   fail,
   json,

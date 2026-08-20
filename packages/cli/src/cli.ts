@@ -977,32 +977,37 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
     }
     const review = io.reviewGrant;
 
-    io.out(
+    // The walk goes to STDERR, where the question is asked. Splitting them was the mirror
+    // of the bug this release fixes: with the prompt on stderr and the evidence on stdout,
+    // `trust bot --review > out.txt` at a terminal asked the operator to grant a permanent
+    // auto-approve for a destructive capability whose NAME had gone into the file. Only
+    // the closing count is the command's result. This loop runs only with a reviewer
+    // wired (refused above otherwise), so nothing scripted moves.
+    io.err(
       `Reviewing ${candidates.length} earned ${candidates.length === 1 ? "capability" : "capabilities"} for ${name}.`,
     );
-    io.out("Granting one lets that capability act without pausing for you — until a");
-    io.out("regression takes it back. Nothing is granted unless you accept it.");
+    io.err("Granting one lets that capability act without pausing for you — until a");
+    io.err("regression takes it back. Nothing is granted unless you accept it.");
 
     let granted = 0;
     let declined = 0;
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i]!;
-      io.out("");
-      io.out(`(${i + 1}/${candidates.length}) ${c.capability}`);
-      io.out(`  ${c.basis}`);
+      io.err("");
+      io.err(`(${i + 1}/${candidates.length}) ${c.capability}`);
+      io.err(`  ${c.basis}`);
 
       const accept = await review({ index: i + 1, total: candidates.length, capability: c.capability, basis: c.basis });
       if (!accept) {
         declined++;
-        io.out("  ✗ left gated");
+        io.err("  ✗ left gated");
         continue;
       }
       store.setCapabilityStanding(agent.id, c.capability, "standing-grant", c.basis);
       granted++;
-      io.out("  ✓ granted — acts without pausing from now on");
+      io.err("  ✓ granted — acts without pausing from now on");
     }
 
-    io.out("");
     io.out(`Done — ${granted} granted, ${declined} left gated.`);
     return 0;
   });
@@ -3943,6 +3948,15 @@ async function driveReviewLoop(
   accept: (i: number, content: string, edited: boolean) => DrainOutcome,
   warnEditRescreen = false,
 ): Promise<ReviewCounts> {
+  // The whole walk is written to STDERR, where the question is asked.
+  //
+  // Splitting them was the mirror of the bug this release fixes: moving the prompt to
+  // stderr and leaving the proposal on stdout meant `reflect writer --review > out.txt`
+  // at a terminal asked for a decision about text that had gone into the file. A
+  // question you can see about something you cannot is no better than one you cannot
+  // see. This loop runs ONLY with a reviewer wired — both callers refuse without one —
+  // so nothing scripted is moved; the closing summary stays on stdout, as the result.
+  //
   // Absent reviewer ⇒ reject everything: nothing is accepted without an explicit yes.
   const review = io.review ?? ((): ReviewDecision => ({ kind: "reject" }));
   const counts: ReviewCounts = { accepted: 0, rejected: 0, blocked: 0, errored: 0, stale: 0 };
@@ -3950,23 +3964,23 @@ async function driveReviewLoop(
   const recordReject = (i: number, emptyEdit: boolean): void => {
     if (reject(i) === "stale") {
       counts.stale++;
-      io.out("  · already reviewed elsewhere — skipped");
+      io.err("  · already reviewed elsewhere — skipped");
     } else {
       counts.rejected++;
-      io.out(emptyEdit ? "  ✗ rejected (empty after edit)" : "  ✗ rejected");
+      io.err(emptyEdit ? "  ✗ rejected (empty after edit)" : "  ✗ rejected");
     }
   };
   for (let i = 0; i < total; i++) {
     const v = view(i);
 
-    io.out("");
-    io.out(
+    io.err("");
+    io.err(
       `(${i + 1}/${total}) ${v.label}` +
         (v.confidence !== undefined ? ` · confidence ${v.confidence}` : ""),
     );
-    io.out(`  ${v.content}`);
+    io.err(`  ${v.content}`);
     if (v.findings.length > 0) {
-      io.out(
+      io.err(
         `  ⚠ the memory firewall flagged this (${v.findings
           .map((f) => f.rule)
           .join(", ")}) — edit to remove the flagged content, or reject it.`,
@@ -3999,7 +4013,7 @@ async function driveReviewLoop(
     if (edited && warnEditRescreen) {
       const editVerdict = screenMemory(content);
       if (!editVerdict.ok) {
-        io.out(
+        io.err(
           `  ⚠ your edit still trips the memory firewall (${editVerdict.findings
             .map((f) => f.rule)
             .join(", ")}).`,
@@ -4011,22 +4025,22 @@ async function driveReviewLoop(
       // poisoned write regardless of approval — caught below and counted, not fatal.
       if (accept(i, content, edited) === "stale") {
         counts.stale++;
-        io.out("  · already reviewed elsewhere — skipped");
+        io.err("  · already reviewed elsewhere — skipped");
       } else {
         counts.accepted++;
-        io.out(edited ? "  ✓ saved (edited)" : "  ✓ saved");
+        io.err(edited ? "  ✓ saved (edited)" : "  ✓ saved");
       }
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
         counts.blocked++;
-        io.out(
+        io.err(
           `  ⛔ blocked by the memory firewall — not saved (${err.findings
             .map((f) => f.rule)
             .join(", ")})`,
         );
       } else {
         counts.errored++;
-        io.out(`  ⛔ could not save: ${errorMessage(err)}`);
+        io.err(`  ⛔ could not save: ${errorMessage(err)}`);
       }
     }
   }
@@ -4070,10 +4084,11 @@ async function reviewQueueDrain(
     return 0;
   }
 
-  io.out(
+  // The preamble to a question goes where the question goes — see `driveReviewLoop`.
+  io.err(
     `Reviewing ${queued.length} queued ${queued.length === 1 ? "memory" : "memories"} for ${name}.`,
   );
-  io.out("These were proposed unattended; nothing is active unless you accept it.");
+  io.err("These were proposed unattended; nothing is active unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,
@@ -4130,10 +4145,10 @@ async function reviewObjectiveQueueDrain(
     return 0;
   }
 
-  io.out(
+  io.err(
     `Reviewing ${queued.length} queued ${queued.length === 1 ? "objective" : "objectives"} for ${name}.`,
   );
-  io.out("These were proposed unattended; nothing frames a run unless you accept it.");
+  io.err("These were proposed unattended; nothing frames a run unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,
@@ -4243,13 +4258,13 @@ async function reviewMemoryLive(
     return 0;
   }
 
-  io.out(
+  io.err(
     `Reviewing ${usable.length} proposed ${usable.length === 1 ? "memory" : "memories"} for ${name} (from run ${shortId(target.id)}).`,
   );
   if (ignored > 0) {
-    io.out(`(Ignored ${ignored} proposal(s) with a non-reviewable memory type.)`);
+    io.err(`(Ignored ${ignored} proposal(s) with a non-reviewable memory type.)`);
   }
-  io.out("Nothing is saved unless you accept it.");
+  io.err("Nothing is saved unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,
@@ -4310,10 +4325,10 @@ async function reviewObjectiveLive(
     return 0;
   }
 
-  io.out(
+  io.err(
     `Reviewing ${usable.length} proposed ${usable.length === 1 ? "objective" : "objectives"} for ${name} (from run ${shortId(target.id)}).`,
   );
-  io.out("Nothing frames a run unless you accept it.");
+  io.err("Nothing frames a run unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,

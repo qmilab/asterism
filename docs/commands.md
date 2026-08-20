@@ -173,7 +173,7 @@ another capability, and never carries to another agent.
 
 | Form | What it does |
 |---|---|
-| `trust <agent> --review` | Review the capabilities the agent has earned the right to act on without pausing. You grant or decline each; nothing is granted without your yes. Needs a terminal to ask at — with nobody to ask it names how many are waiting and stops, leaving them to be decided later. |
+| `trust <agent> --review` | Review the capabilities the agent has earned the right to act on without pausing. You grant or decline each; nothing is granted without your yes. The review — each capability, its evidence, and the question — is written to standard error, so redirecting the output leaves what you are deciding about on screen; only the closing count is on standard out. Needs a terminal to ask at: with nobody to ask, it names how many are waiting and stops, leaving them to be decided later. |
 | `trust <agent> show` | Show the agent's level, which capabilities now act without pausing, and its earning bar. |
 | `trust <agent> revoke <capability>` | Take a grant back — the capability pauses for your confirmation again. |
 | `trust <agent> threshold [--clean <n>] [--targets <n>]` | Tune how much clean track record review asks for before it proposes a grant: how many confirmed executions (`--clean`), across how many different targets (`--targets`). Set either or both; leave the other as it is. |
@@ -1280,8 +1280,10 @@ drafted. Otherwise it looks over the agent's latest completed run and drafts new
 proposals on the spot (which needs a
 [configured model](./installation.md#configuring-a-model)).
 
-At a terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`, on **standard
-error**. With nobody to ask — piped, launched from a scheduler, or with standard
+At a terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`. The whole
+review — each proposal, its warnings, and the question about it — goes to
+**standard error**, so redirecting the command's output does not take the thing
+you are deciding about with it; only the closing count is on standard out. With nobody to ask — piped, launched from a scheduler, or with standard
 error redirected somewhere you would not see the question — it does not decide on
 your behalf: a pile already **queued** by `--propose` is left **untouched** (since
 rejecting a queued proposal is a durable choice), and there is no live pass either,
