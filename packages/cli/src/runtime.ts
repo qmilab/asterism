@@ -40,16 +40,16 @@ export async function ask(question: string): Promise<string | undefined> {
 /**
  * Ask for a secret VALUE at the terminal, without echoing what is typed.
  *
- * This is the one value path that leaves no trace outside the process: an inline
- * argument is visible in shell history and in `ps` output for as long as the command
- * runs, and an environment variable is readable by every child process. Typing it here
- * avoids both.
+ * This path leaves the value nowhere but this process: an inline argument is visible in
+ * shell history and in `ps` output for as long as the command runs, and an environment
+ * variable is readable by every child process. Typing it here avoids both. (A pipe can
+ * be equally clean, but only when whatever feeds it is — a file or an `echo` is not.)
  *
  * Returns undefined unless stdin AND stderr are both terminals — the same
  * non-interactive signal the two helpers above use, widened by one end because this is
  * the only one of the three that has to be SEEN before it can be answered.
  *
- * Two mechanics that are not obvious:
+ * Three mechanics that are not obvious:
  *
  * - Readline's echo is sent to a sink that discards it, and the question is written to
  *   STDERR by this function instead. That keeps the typed characters off the screen, and
@@ -58,6 +58,8 @@ export async function ask(question: string): Promise<string | undefined> {
  *   leave the CLI awaiting an answer that cannot arrive, and the process would exit 0
  *   having stored nothing. Racing the answer against `close` turns that into undefined,
  *   which the caller reports.
+ * - Readline's line history is switched off, so the answer is not retained in a buffer
+ *   after it has been handed back.
  */
 export async function askSecret(question: string): Promise<string | undefined> {
   // Both ends: something to read the answer from, and somewhere the question can be seen.
@@ -68,7 +70,16 @@ export async function askSecret(question: string): Promise<string | undefined> {
       done();
     },
   });
-  const rl = createInterface({ input: process.stdin, output: sink, terminal: true });
+  // `historySize: 0` because readline otherwise keeps every answered line in an
+  // in-memory `history` array — measured: the typed credential sat there in plaintext
+  // for the rest of the process. Nothing here needs recall, and a masked prompt has
+  // nothing useful to recall anyway.
+  const rl = createInterface({
+    input: process.stdin,
+    output: sink,
+    terminal: true,
+    historySize: 0,
+  });
   try {
     process.stderr.write(`${question} `);
     const closed = new Promise<undefined>((resolve) => rl.once("close", () => resolve(undefined)));

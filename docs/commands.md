@@ -281,10 +281,14 @@ The value is resolved in this order:
 4. otherwise you are asked for it, when there is a terminal to answer at.
 
 The prompt comes last because it is the only one of the four that cannot run
-unattended — and it is the only one that leaves the value out of your shell history
-and out of the process list, so it is the one to prefer when you are typing the
-command yourself. Nothing you type is echoed, and answering with a blank line stores
-nothing rather than storing an empty credential.
+unattended. It is the one to prefer when you are typing the command yourself: an
+inline value is recorded in your shell history and is visible in `ps` output for as
+long as the command runs, and an environment variable is readable by every child
+process. A pipe avoids both, but only if whatever feeds it does — `cat token.txt`
+leaves the value in a file, and `echo …` puts it back in your history, where
+`pass show …` or another secret manager leaves it in neither. Nothing you type at the
+prompt is echoed, and answering with a blank line stores nothing rather than storing
+an empty credential.
 
 The inline value is taken **verbatim** — a value beginning with a dash
 (`-----BEGIN…`) is stored as given, not parsed as an option. So are the environment
