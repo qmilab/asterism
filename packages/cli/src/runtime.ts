@@ -68,9 +68,15 @@ export function hasAskableTerminal(
  * human declining to answer, which is exactly what undefined already means.
  *
  * Narrow on purpose: only `ABORT_ERR`. Any other rejection is a real failure and must
- * not be quietly turned into a decline.
+ * not be quietly turned into a decline — reading one as "the human said no" would hide
+ * a bug behind the safest-looking outcome there is.
+ *
+ * Exported only so both branches can be pinned. No stream a test can build makes
+ * readline reject with anything else (a destroyed input emits an unhandled `error`
+ * event instead, measured), so through `ask` the widening `catch (…) => undefined`
+ * would be indistinguishable from this one.
  */
-function noAnswerOnEof(err: unknown): undefined {
+export function noAnswerOnEof(err: unknown): undefined {
   if ((err as { code?: unknown } | null)?.code === "ABORT_ERR") return undefined;
   throw err;
 }

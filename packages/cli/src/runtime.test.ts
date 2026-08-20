@@ -10,7 +10,13 @@
 import { expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 
-import { ask, hasAskableTerminal, INTERACTIVE_STREAMS, type AskStreams } from "./runtime.ts";
+import {
+  ask,
+  hasAskableTerminal,
+  INTERACTIVE_STREAMS,
+  noAnswerOnEof,
+  type AskStreams,
+} from "./runtime.ts";
 
 /** A fake terminal end: a real stream, with `isTTY` as the caller wants it. */
 function fakeTty(isTTY: boolean): PassThrough & { isTTY?: boolean } {
@@ -93,4 +99,15 @@ test("an input stream that ends without an answer is no answer, not a wait", asy
   const answered = ask("Confirm destructive action 'file.delete'? [y/N]", streams);
   (streams.input as PassThrough).end();
   expect(await answered).toBeUndefined();
+});
+
+test("only a terminal EOF is read as a decline; anything else is still a failure", () => {
+  // Ctrl-D rejects the pending question as well as closing it, and unhandled that killed
+  // the process with a Node stack trace. Reading EVERY rejection as a decline would hide
+  // a real failure behind the safest-looking outcome there is, so the catch is narrow —
+  // and both halves are pinned, because through `ask` they look identical.
+  expect(noAnswerOnEof(Object.assign(new Error("Aborted with Ctrl+D"), { code: "ABORT_ERR" }))).toBeUndefined();
+  expect(() => noAnswerOnEof(new Error("boom"))).toThrow("boom");
+  expect(() => noAnswerOnEof(Object.assign(new Error("nope"), { code: "EPIPE" }))).toThrow("nope");
+  expect(() => noAnswerOnEof(undefined)).toThrow();
 });
