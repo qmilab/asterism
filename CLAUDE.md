@@ -183,11 +183,17 @@ asterism serve <agent>                               start the local HTTP endpoi
 
 Phase 0 is "done" when this runs clean and proves all five claims:
 
+Type it one line at a time rather than pasting the block: three of these wait for you —
+the secret prompt, the destructive-action confirmation, and the review — and a pasted
+block would feed the next command to whichever one is waiting.
+
 ```bash
 asterism init
+asterism config set llama3.2 --provider ollama  # any model; a local one needs no API key
 asterism new personal --soul casual-helper      --trust autonomous
 asterism new work     --soul careful-consultant --trust propose
-asterism secrets add work GITHUB_TOKEN
+asterism secrets add work GITHUB_TOKEN          # prompts at the terminal; nothing is echoed
+echo "# Blog style: sentence-case headings, active voice" > blog-writer.md
 asterism skill   add personal blog-writer.md
 asterism run personal "update my blog draft and delete the generated files in dist/"
 asterism run work     "summarize the client meeting and propose a cleanup of the notes folder"

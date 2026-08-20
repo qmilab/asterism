@@ -237,6 +237,16 @@ const EXCUSED = [
     "needs-token",
     "needs a third-party chat token",
   ],
+  // `secrets add` with no value asks for one, and this refusal is what it prints when
+  // there is no terminal to ask at. Every command here runs with its stdin on a pipe,
+  // so the prompt is the one documented value path a checker can never take. Narrow on
+  // purpose: it matches only the non-interactive refusal, so a `secrets add` example
+  // that is wrong for any OTHER reason still fails.
+  [
+    /^No value for \S+\. Pass it inline,/,
+    "needs-terminal",
+    "the value would be typed at a terminal, and a checker's stdin is a pipe",
+  ],
   [
     /^No (run|objective) matching "/,
     "illustrative-id",
@@ -267,7 +277,27 @@ function cleanEnv() {
   for (const key of Object.keys(env)) {
     if (/API_KEY$|^ASTERISM_(MODEL|RECALL|TELEGRAM|DISCORD|HTTP)_/.test(key)) delete env[key];
   }
+  // …and every variable a documented example would read as its own credential value.
+  // `secrets add <agent> <KEY>` with no inline value falls back to `$KEY`, so a machine
+  // exporting one of these (GITHUB_TOKEN is on most machines that use `gh`) turns an
+  // example that should be excused — there is no terminal here to type at — into one
+  // that quietly SUCCEEDS. Both are green, so the drift is invisible, and the example
+  // means something different per machine. Derived from the pages rather than named,
+  // because the set that matters is exactly the keys the docs use.
+  for (const key of documentedSecretKeys()) delete env[key];
   return env;
+}
+
+/** Every `<KEY>` a documented `secrets add` names, across the pages this checker reads. */
+function documentedSecretKeys() {
+  const keys = new Set();
+  for (const rel of sourceFiles()) {
+    for (const { command } of extract(rel)) {
+      const m = /^asterism\s+secrets\s+add\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(command);
+      if (m) keys.add(m[1]);
+    }
+  }
+  return keys;
 }
 const ENV = cleanEnv();
 

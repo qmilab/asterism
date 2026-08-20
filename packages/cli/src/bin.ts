@@ -25,7 +25,7 @@ import type { CliIO, ReviewDecision, TransitionDecision } from "./cli.js";
 import { artifactFetchHost, workspaceCapabilities } from "./capabilities.js";
 import { outboundHost } from "./outbound.js";
 import { createNodeTerminal } from "./dashboard/terminal-node.js";
-import { ask, readPipedStdin } from "./runtime.js";
+import { ask, askSecret, readPipedStdin } from "./runtime.js";
 import type { Action } from "@qmilab/asterism-core";
 
 const io: CliIO = {
@@ -71,6 +71,20 @@ const io: CliIO = {
   // Only consume stdin when it is piped (see `readPipedStdin`): the value is
   // returned VERBATIM so a piped secret is stored exactly as given.
   readStdin: readPipedStdin,
+  // `secrets add` with no value anywhere else: ask for one at the terminal, echoing
+  // nothing. Wired ONLY when there is a terminal, like `review` below — the field's
+  // ABSENCE is what the command reads as "no one is here to type it", and it must not be
+  // present in a piped session where `readPipedStdin` has already consumed stdin.
+  //
+  // BOTH ends are required, not just stdin. The question goes to stderr (so it survives
+  // `> file` on the output, and so it is never mistaken for the command's result), which
+  // means a redirected stderr is a session with somewhere to read from and nowhere to
+  // ask: measured, `secrets add work KEY 2>log` on a terminal put the question in the
+  // file and waited for an answer with a blank screen. Refusing with the three scripted
+  // ways is the better end to that.
+  ...(process.stdin.isTTY && process.stderr.isTTY
+    ? { promptSecret: (key: string) => askSecret(`Value for ${key} (not echoed):`) }
+    : {}),
   // `reflect --review`: the kernel proposes typed memories and prints each one; the
   // human decides its fate here. Wired ONLY when stdin is a TTY — a piped/redirected
   // session has no human to decide, and the field's ABSENCE is what the command reads as

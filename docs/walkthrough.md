@@ -27,7 +27,7 @@ The five claims:
 asterism init
 asterism new personal --soul casual-helper      --trust autonomous
 asterism new work     --soul careful-consultant --trust propose
-asterism secrets add work GITHUB_TOKEN ghp_example_token   # value: inline, piped, or from $GITHUB_TOKEN
+asterism secrets add work GITHUB_TOKEN ghp_example_token   # value: inline, piped, from $GITHUB_TOKEN — or omit it and be prompted
 
 # a skill is just a markdown file you write
 echo "# Blog writer: tighten drafts, keep the author's voice" > blog-writer.md

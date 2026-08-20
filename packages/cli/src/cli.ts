@@ -32,6 +32,7 @@ import {
   DEFAULT_STANDING_POLICY,
   DEFAULT_WORLD_FACT_CAP,
   executeRun,
+  isReservedSecretKey,
   MEMORY_TYPES,
   MemoryFirewallError,
   performArtifactExchange,
@@ -267,6 +268,19 @@ export interface CliIO {
   fetchHost?: ArtifactFetchHost;
   /** Read piped standard input (for `secrets add` without an inline value). */
   readStdin?: () => Promise<string | undefined>;
+  /**
+   * Ask a human to type a secret VALUE, without echoing it (for `secrets add` when no
+   * value was found any other way). Absent ⇒ there is no terminal, and that ABSENCE is
+   * the non-interactive signal — the same shape as `review`. It has to be the presence
+   * of this field rather than a return value, because "a human was asked and declined"
+   * and "no one could be asked" are different facts and the command says different
+   * things about them.
+   *
+   * Wired last on purpose. It is the only value path that puts nothing in shell history
+   * and nothing in the process list, but it also cannot run unattended, so every
+   * scripted path (inline, environment, pipe) must win over it.
+   */
+  promptSecret?: (key: string) => Promise<string | undefined>;
   /**
    * Build the run adapter. Absent ⇒ the default wiring resolves the model from the
    * config file, the environment, and the agent's own override (the `context`).
@@ -1688,6 +1702,16 @@ function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
 
 // --- secrets add -----------------------------------------------------------
 
+/**
+ * A value from a source that merely EXISTS rather than one the operator typed — the
+ * environment, a pipe. Empty means nothing was supplied, so the caller moves on to the
+ * next source; an empty inline argument is not run through this, because typing one is
+ * a statement and looking past it would substitute a value the operator never named.
+ */
+function ambientValue(value: string | undefined): string | undefined {
+  return value !== undefined && value.length > 0 ? value : undefined;
+}
+
 async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
   if (args[0] === "--help" || args[0] === "-h") {
     io.out(COMMAND_HELP.secrets!);
@@ -1703,23 +1727,58 @@ async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
     io.err("Usage: asterism secrets add <agent> <KEY> [value]");
     return 1;
   }
-  // Value precedence: inline argument, then the matching environment variable,
-  // then piped standard input. Never echoed back, whichever path it came from.
-  let value = args[2] ?? io.env[key];
-  if (value === undefined && io.readStdin) {
-    value = await io.readStdin();
-  }
-  if (value === undefined || value.length === 0) {
-    io.err(
-      `No value for ${key}. Pass it inline, set $${key} in the environment, or pipe it on stdin.`,
-    );
-    return 1;
-  }
-  const secretValue = value;
-  return withHomeStore(io, (store) => {
+  // Nothing is ASKED FOR until the write is known to be possible. Everything below the
+  // lookups can prompt a human for secret material, and a secret typed at a prompt
+  // cannot be untyped — so a missing workspace (`withHomeStore`), an agent that does not
+  // exist, and a key the kernel will refuse are all settled first. Before the prompt
+  // existed this ordering did not matter: every path was free, and failing after reading
+  // an environment variable costs nobody anything.
+  return withHomeStore(io, async (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);
-    store.addCredential(agent.id, key, secretValue);
+    // The kernel owns this rule and enforces it again on the write below; this asks it
+    // the question early rather than restating it, so that the one case where a human
+    // would be asked to type a secret the kernel is certain to reject cannot arise.
+    if (isReservedSecretKey(key)) {
+      io.err(`The secret key "${key}" is reserved for internal use.`);
+      return 1;
+    }
+    // Value precedence: inline argument, then the matching environment variable, then
+    // piped standard input, then — only when a human is at a terminal — a prompt. Never
+    // echoed back, whichever path it came from. The prompt is last because it is the one
+    // path that cannot run unattended.
+    //
+    // An INLINE value is taken exactly as typed, empty included: it is a thing you put on
+    // this command line, and looking elsewhere for a value you have just given would
+    // store something you never named — `secrets add work KEY "$TYPO"` expanding to
+    // nothing must not quietly fall through to `$KEY`. The environment and a pipe are
+    // ambient rather than typed, so an empty one has supplied NOTHING and the next source
+    // is tried. Without that, a shell that cleared a token with `export KEY=` was refused
+    // at a terminal without being asked, and advised to set the variable it had just
+    // cleared.
+    let value = args[2] ?? ambientValue(io.env[key]);
+    if (value === undefined && io.readStdin) {
+      value = ambientValue(await io.readStdin());
+    }
+    // Held rather than re-tested: after the await, this is the record of whether a human
+    // was actually asked, which is what decides WHICH refusal below is true.
+    const prompt = value === undefined ? io.promptSecret : undefined;
+    if (prompt) {
+      // Trimmed, unlike every other path: whitespace around a line typed blind cannot be
+      // SEEN, so the person typing it cannot check it. A value that must keep its
+      // whitespace (PEM material, a deliberately padded token) is one to pipe in, where
+      // it round-trips byte for byte.
+      value = (await prompt(key))?.trim();
+    }
+    if (value === undefined || value.length === 0) {
+      io.err(
+        prompt
+          ? `No value for ${key} — nothing was typed, so nothing was stored.`
+          : `No value for ${key}. Pass it inline, set $${key} in the environment, or pipe it on stdin.`,
+      );
+      return 1;
+    }
+    store.addCredential(agent.id, key, value);
     io.out(`Stored credential ${key} for agent ${name}.`);
     return 0;
   });

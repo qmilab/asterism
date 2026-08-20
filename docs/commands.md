@@ -277,10 +277,24 @@ The value is resolved in this order:
 
 1. the inline `[value]` argument, if given;
 2. otherwise the environment variable of the same name as `KEY`;
-3. otherwise standard input, if piped.
+3. otherwise standard input, if piped;
+4. otherwise you are asked for it, when there is a terminal to answer at.
+
+The prompt comes last because it is the only one of the four that cannot run
+unattended. It is the one to prefer when you are typing the command yourself: an
+inline value is recorded in your shell history and is visible in `ps` output for as
+long as the command runs, and an environment variable is readable by every child
+process. A pipe avoids both, but only if whatever feeds it does — `cat token.txt`
+leaves the value in a file, and `echo …` puts it back in your history, where
+`pass show …` or another secret manager leaves it in neither. Nothing you type at the
+prompt is echoed, and answering with a blank line stores nothing rather than storing
+an empty credential.
 
 The inline value is taken **verbatim** — a value beginning with a dash
-(`-----BEGIN…`) is stored as given, not parsed as an option.
+(`-----BEGIN…`) is stored as given, not parsed as an option. So are the environment
+and piped values. A value typed at the prompt is trimmed, because whitespace around a
+line you cannot see is whitespace you cannot check; pipe a value whose leading or
+trailing whitespace matters.
 
 ```console
 $ asterism secrets add work GITHUB_TOKEN ghp_xxx
@@ -292,6 +306,11 @@ Stored credential GITHUB_TOKEN for agent work.
 
 # piped (nothing echoed)
 $ cat token.txt | asterism secrets add work GITHUB_TOKEN
+Stored credential GITHUB_TOKEN for agent work.
+
+# omitted at a terminal — asked for, and nothing echoed
+$ asterism secrets add work GITHUB_TOKEN
+Value for GITHUB_TOKEN (not echoed):
 Stored credential GITHUB_TOKEN for agent work.
 ```
 
