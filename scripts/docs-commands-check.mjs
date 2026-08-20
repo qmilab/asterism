@@ -198,10 +198,14 @@ function terminalBlocks(text, isHtml) {
   // silently unchecked rather than loudly wrong" — and then the same reasoning was not
   // applied here, one function away. A single-quoted block is worse still: `blocklessPages`
   // cannot see it, because a block WAS found, so every command in it is dropped in silence.
-  const open = /<(div|pre)\b[^>]*class=("([^"]*terminal[^"]*)"|'([^']*terminal[^']*)')[^>]*>/gi;
+  // All THREE attribute forms HTML permits — double-quoted, single-quoted, and unquoted.
+  // Two of the three were added only after each was found missing in turn, which is the
+  // argument for taking the third now rather than a fourth time: every miss here is silent,
+  // because `blocklessPages` sees a block was found and says nothing.
+  const open = /<(div|pre)\b[^>]*\sclass=("([^"]*terminal[^"]*)"|'([^']*terminal[^']*)'|([^\s"'=<>`]*terminal[^\s"'=<>`]*))[^>]*>/gi;
   for (const m of text.matchAll(open)) {
     const tag = m[1].toLowerCase();
-    const className = m[3] ?? m[4] ?? "";
+    const className = m[3] ?? m[4] ?? m[5] ?? "";
     const from = m.index + m[0].length;
     // The end is found by MATCHING tags, not by taking the first `</div>`. A non-greedy
     // `([\s\S]*?)<\/(?:div|pre)>` ends at the first close of either kind, so one nested
@@ -2154,6 +2158,7 @@ function report(total, tally, groups, coverageWork) {
       ['<a href="logo.png">a</a>', "a relative asset", 0, 0],
       ['<a href="#top">a</a>', "an in-page anchor", 0, 0],
       ["<a href='/asterism/docs/nosuchpage/'>a</a>", "a SINGLE-quoted href at a URL nothing builds", 1, 0],
+      ["<a href=/asterism/docs/nosuchpage/>a</a>", "an UNQUOTED href at a URL nothing builds", 1, 0],
       ["<a href='/asterism/docs/walkthrough/'>a</a>", "a single-quoted href that resolves", 0, 0],
       ['<a data-href="/asterism/docs/nosuchpage/" href="/asterism/docs/walkthrough/">a</a>', "a `data-href` beside a real one — only the real one is a link", 0, 0],
       ['<link rel="icon" href="/favicon.svg" />', "a favicon, which is an asset and not a link", 0, 0],
@@ -2232,7 +2237,14 @@ function report(total, tally, groups, coverageWork) {
       ["a multi-line <pre> with no white-space rule at all", styled(null) + '<pre class="x__terminal">a\nb</pre>', false],
       // …but the browser's default for `<pre>` is only a default. Exempting the tag
       // outright would let this check pass the exact defect it exists for.
-      ["a <pre> the page's own CSS collapses", styled("normal") + '<pre class="x__terminal">a\nb</pre>', true],
+      ["a <pre> the page's own CSS collapses by class", styled("normal") + '<pre class="x__terminal">a\nb</pre>', true],
+      // …and by ELEMENT, which is the form that actually reads naturally and which the
+      // first version of this missed: a compound naming no class was rejected outright.
+      ["a <pre> collapsed by a bare `pre` rule", "<style>pre { white-space: normal; }</style>" + '<pre class="x__terminal">a\nb</pre>', true],
+      ["a <div> collapsed by a bare `*` rule", "<style>* { white-space: normal; }</style>" + twoLine, true],
+      ["a <div> rescued by a bare `div` rule", "<style>div { white-space: pre; }</style>" + twoLine, false],
+      // An element name that is not this element's must still not apply.
+      ["a `span` rule that cannot reach a <div>", "<style>span { white-space: pre; }</style>" + twoLine, true],
       ["a <pre> the page re-declares as `pre`", styled("pre") + '<pre class="x__terminal">a\nb</pre>', false],
       // A statement at-rule ends in `;` and has no block. Read as a rule it swallows the
       // NEXT selector, so one `@import` at the top of a stylesheet hid everything below it.
@@ -2417,6 +2429,7 @@ function report(total, tally, groups, coverageWork) {
           "<H2>Shouting</H2>",
           "<div class='x__terminal'>asterism new writer",
           "asterism memory inspect writer</div>",
+          "<div class=x__terminal>asterism events tail writer</div>",
           "",
         ].join("\n"),
       );
@@ -2424,6 +2437,7 @@ function report(total, tally, groups, coverageWork) {
       const quotedWant = [
         { command: "asterism new writer", section: "## Shouting" },
         { command: "asterism memory inspect writer", section: "## Shouting" },
+        { command: "asterism events tail writer", section: "## Shouting" },
       ];
       if (JSON.stringify(quoted) !== JSON.stringify(quotedWant)) {
         console.log("\nSELF-TEST FAILED: a single-quoted class or an uppercase heading was not read:");
@@ -2865,8 +2879,8 @@ function checkLandingLinks(
     // `data-href=`, because `-` is not a word character — which would report an author's
     // private attribute as a page link. A single-quoted `href` is the mirror failure and
     // the worse one, since an unmatched link is silently unchecked rather than loudly wrong.
-    for (const m of text.matchAll(/<a\b[^>]*?[\s"']href=("([^"]*)"|'([^']*)')/gi)) {
-      const href = decodeEntities(m[2] ?? m[3] ?? "");
+    for (const m of text.matchAll(/<a\b[^>]*?\shref=("([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi)) {
+      const href = decodeEntities(m[2] ?? m[3] ?? m[4] ?? "");
       if (EXTERNAL_TARGET.test(href) || href.startsWith("mailto:") || href.startsWith("#")) continue;
       if (!href.startsWith("/")) continue; // a relative asset (logo.png) — not a page link
       const line = text.slice(0, m.index).split("\n").length;
@@ -2980,9 +2994,14 @@ function selectorApplies(selectorList, classes, tag) {
     const last = compounds[compounds.length - 1] ?? "";
     if (!last || /[:[#]/.test(last)) return false; // a condition this cannot evaluate
     const named = [...last.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
-    if (named.length === 0) return false;
     const element = last.replace(/\.[\w-]+/g, "").trim();
     if (element && element !== "*" && element !== tag) return false;
+    // ⚠ A compound naming NO class still applies: `pre { white-space: normal }` and
+    // `* { … }` are ordinary CSS, and requiring a class here missed both. That mattered
+    // exactly where this check is load-bearing — `pre { white-space: normal }` collapses a
+    // `<pre>` whose tag is otherwise the reason it is exempt — and the fixture agreed with
+    // the mistake by using the class form of the same rule.
+    if (named.length === 0 && !element) return false; // an empty compound constrains nothing
     // Every class the compound demands must be on the element — `.a.b` does not apply to
     // an element carrying only `a`.
     return named.every((name) => classes.includes(name));
