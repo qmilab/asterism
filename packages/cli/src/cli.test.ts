@@ -592,6 +592,39 @@ test("a value typed at the prompt is trimmed, where a piped one is not", async (
   }
 });
 
+test("nothing is asked for when the write could never have happened", async () => {
+  // A secret typed at a prompt cannot be untyped, so every reason this command is going
+  // to fail has to be settled before a human is asked for one. Each of these failed
+  // identically before the prompt existed, when asking cost nothing.
+  const cases = [
+    { why: "no workspace", init: false, args: ["work", "GITHUB_TOKEN"], says: "No Asterism workspace found" },
+    { why: "unknown agent", init: true, args: ["nosuchagent", "GITHUB_TOKEN"], says: 'No agent named "nosuchagent"' },
+    {
+      why: "kernel-reserved key",
+      init: true,
+      args: ["work", "__asterism.action_fingerprint_key"],
+      says: "reserved for internal use",
+    },
+  ];
+  for (const c of cases) {
+    const h = harness();
+    if (c.init) {
+      await runCli(["init"], h.io);
+      await runCli(["new", "work"], h.io);
+    }
+    let asked = 0;
+    h.io.promptSecret = async () => {
+      asked += 1;
+      return "typed-for-nothing";
+    };
+    expect(await runCli(["secrets", "add", ...c.args], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain(c.says);
+    // The claim, and the one that regressed when the prompt was added: not merely that
+    // it failed, but that it failed without asking anyone to type a secret.
+    expect(asked).toBe(0);
+  }
+});
+
 test("secrets add reports when no value is available", async () => {
   const h = harness();
   await runCli(["init"], h.io);
