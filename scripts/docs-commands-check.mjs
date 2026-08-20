@@ -61,7 +61,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve, relative, sep } from "node:path";
+import { join, dirname, resolve, relative, sep, basename } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import {
   ROOT,
@@ -277,7 +277,14 @@ function decodeEntities(text) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
-    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    // NUMERIC references, decimal and hex. An editor that writes `&#x27;` or `&#62;` where
+    // another writes `&apos;` or `&gt;` is producing the same page, and leaving the literal
+    // entity in an extracted command means typing it at the binary and reporting a docs
+    // failure on correct copy. The named list alone was narrower than this comment claimed.
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#[xX]([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
     .replace(/&amp;/g, "&");
 }
 
@@ -288,9 +295,13 @@ function decodeEntities(text) {
  * class the page uses" far more often than it means "this page shows no commands".
  */
 function blocklessPages() {
-  return publishedLandingPages().filter(
-    (rel) => terminalBlocks(readFileSync(join(ROOT, rel), "utf8"), true).length === 0,
-  );
+  const pages = publishedLandingPages();
+  const withBlocks = pages.filter((rel) => terminalBlocks(readFileSync(join(ROOT, rel), "utf8"), true).length > 0);
+  // A page with no commands on it is ordinary — a 404, a privacy note, a redirect stub —
+  // and failing the build for one would be this check inventing work. What is NOT ordinary
+  // is EVERY page losing its blocks at once, which is what a renamed class looks like and
+  // what this exists to catch. So the report is about the set, not each page.
+  return withBlocks.length === 0 ? pages : [];
 }
 
 /**
@@ -1992,9 +2003,12 @@ function report(total, tally, groups, coverageWork) {
     }
     for (const page of shouldReadHtml) {
       if (!read.includes(page)) scopeFailures.push(`  the command pass does not read ${page}`);
-      if (terminalBlocks(readFileSync(join(ROOT, page), "utf8"), true).length === 0) {
-        scopeFailures.push(`  ${page} is read, but no terminal block was found in it — it is checked for nothing`);
-      }
+    }
+    // At least one of them must yield a block. Per-page would be the wrong rule here for
+    // the same reason `blocklessPages` no longer uses it: a 404 or a privacy page carries
+    // no commands and is not a defect. Every page losing its blocks at once is.
+    if (!shouldReadHtml.some((page) => terminalBlocks(readFileSync(join(ROOT, page), "utf8"), true).length > 0)) {
+      scopeFailures.push("  not one page published at the site's root yielded a terminal block — they are checked for nothing");
     }
 
     if (scopeFailures.length) {
@@ -2053,6 +2067,10 @@ function report(total, tally, groups, coverageWork) {
       // Casing and nested markup: a page marking its catalog up either way would silently
       // drop below the two-name threshold and stop being covered at all.
       ["names all nine in UPPERCASE tags", nine.map((n) => `<CODE>${n}</CODE>`).join(" "), false],
+      // ⚠ The line above passes whether nine names are found or ZERO — `< 2` short-circuits
+      // to "not reported" either way. Only a PARTIAL count distinguishes them, so dropping
+      // the `i` flag from `codeSpans` survived the case written to require it.
+      ["names eight in UPPERCASE tags", nine.slice(0, 8).map((n) => `<CODE>${n}</CODE>`).join(" "), true],
       ["names all nine with markup inside the span", nine.map((n) => `<code><b>${n}</b></code>`).join(" "), false],
       ["names three with markup inside the span", nine.slice(0, 3).map((n) => `<code><b>${n}</b></code>`).join(" "), true],
       ["names one, in passing", `a read like ${span(nine[0])} is not an inventory`, false],
@@ -2195,7 +2213,10 @@ function report(total, tally, groups, coverageWork) {
     ];
     const linkFailures = [];
     for (const [html, why, wantBroken, wantOffSite, wantChecked] of linkFixture) {
-      const got = checkLandingLinks([["<planted>", html]]);
+      // Named as the real index would be: with `<planted>` the basename lookups below can
+      // never match, which is exactly why the self-link case passed while the code counted
+      // it. A fixture whose name makes the branch unreachable proves nothing about it.
+      const got = checkLandingLinks([["landing/index.html", html]]);
       if (wantChecked !== undefined && got.checked !== wantChecked) {
         linkFailures.push(`  ${why}: counted ${got.checked} links checked, wanted ${wantChecked}`);
       }
@@ -2222,10 +2243,14 @@ function report(total, tally, groups, coverageWork) {
     }
     // …and everything it could not check is ACCOUNTED FOR rather than dropped, which is
     // what makes `checked === 0` at the call site a reliable signal that the prefix moved.
-    if (wrong.offSite.length !== right.checked + right.offSite.length) {
+    // Everything the wrong prefix could not check must be ACCOUNTED FOR, which is what
+    // makes `checked === 0` a reliable signal. Stated as "no fewer than", because a
+    // self-link lands in neither pile under the right prefix and would otherwise make this
+    // fail — with a message about a moved prefix — the day the page gains a `back to top`.
+    if (wrong.offSite.length < right.checked + right.offSite.length) {
       linkFailures.push(
-        `  under a wrong prefix ${wrong.offSite.length} links were set aside, where the page has` +
-          ` ${right.checked + right.offSite.length} absolute links in all`,
+        `  under a wrong prefix only ${wrong.offSite.length} links were set aside, where the page` +
+          ` resolved ${right.checked} and set aside ${right.offSite.length} under the right one`,
       );
     }
 
@@ -2470,7 +2495,11 @@ function report(total, tally, groups, coverageWork) {
           // `&gt;` and then `>`, turning text a page displays into a redirection the
           // checker runs. Without this line the ordering comment above `decodeEntities`
           // was a claim nothing could kill.
-          "asterism notes set writer sigil &quot;&amp;gt; means redirect&quot;</div>",
+          "asterism notes set writer sigil &quot;&amp;gt; means redirect&quot;",
+          // NUMERIC references, decimal and hex — the same page, written by a different
+          // editor. Left undecoded these reach the binary as literal `&#62;` text and are
+          // reported as a docs failure on correct copy.
+          "asterism run writer &#x27;tidy&#x27; &#62; out.txt</div>",
           "<h2>Later</h2>",
           '<pre class="terminal">$ asterism memory inspect writer</pre>',
           "",
@@ -2538,7 +2567,8 @@ function report(total, tally, groups, coverageWork) {
         { line: 2, command: "asterism new writer --trust autonomous", section: "## Quickstart" },
         { line: 4, command: 'asterism run writer "tidy posts/" > out.txt', section: "## Quickstart" },
         { line: 5, command: 'asterism notes set writer sigil "&gt; means redirect"', section: "## Quickstart" },
-        { line: 7, command: "asterism memory inspect writer", section: "## Later" },
+        { line: 6, command: "asterism run writer 'tidy' > out.txt", section: "## Quickstart" },
+        { line: 8, command: "asterism memory inspect writer", section: "## Later" },
       ];
       const htmlGot = html.map((i) => ({ line: i.line, command: i.command, section: i.section }));
       if (JSON.stringify(htmlGot) !== JSON.stringify(htmlWant)) {
@@ -2771,9 +2801,9 @@ function report(total, tally, groups, coverageWork) {
   const blockless = SELF_TEST ? [] : blocklessPages();
   if (blockless.length) {
     console.log(
-      `\nNO TERMINAL BLOCK FOUND (${blockless.length}) — this page is published at the site's root` +
-        ` and its commands are read from an element whose class names a terminal; nothing here` +
-        ` matched, so this page is being checked for nothing:`,
+      `\nNO TERMINAL BLOCK FOUND ON ANY PAGE (${blockless.length}) — commands are read from an` +
+        ` element whose class names a terminal, and not one page published at the site's root has` +
+        ` one. A renamed class looks exactly like this, and so does a checker reading nothing:`,
     );
     for (const rel of blockless) console.log(`  ${rel}`);
   }
@@ -2991,30 +3021,23 @@ function checkLandingLinks(
         continue;
       }
       const [pathPart, fragment] = href.slice(siteRoot.length).split("#");
-      // A SIBLING page served from the same directory as this one — `landing/*.html` is a
-      // list, not a single file. Resolved against that list rather than translated into
-      // markdown mkdocs never built: `/asterism/pricing.html` would otherwise be looked up
-      // as `pricing.md`, reported broken, and fail CI on a correct link the day a second
-      // landing page exists.
-      const sibling = landingPages.find((p) => p.split("/").pop() === pathPart.replace(/\/$/, ""));
-      if (sibling) {
-        checked++;
-        if (fragment) {
-          const ids = idsIn(readFileSync(join(ROOT, sibling), "utf8"));
-          if (!ids.has(fragment)) broken.push(`${at}  ${href} — ${sibling} has no element with that id`);
-        }
-        continue;
-      }
       const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
-      // "This page itself" only when it IS this page: read from a sibling, `/asterism/`
-      // names the index, whose ids are not this page's.
-      if ((bare === "" || bare === "index") && rel === landingIndex) {
-        // This page itself — NOT counted as a link resolved. `checked === 0` is the only
-        // tripwire for a moved site, and counting self-links would let a page whose in-site
-        // links are all `/asterism/` satisfy it while resolving nothing.
+      // Which landing page does this URL name? A bare `/asterism/` names the index; a
+      // basename names the sibling with that filename.
+      const wanted = bare === "" || bare === "index" ? basename(landingIndex) : pathPart.replace(/\/$/, "");
+      const landingTarget = landingPages.find((page) => basename(page) === wanted);
+      if (landingTarget) {
+        // ⚠ THIS PAGE is tested first, and the ordering is the point. `index.html` is also
+        // the basename of `landing/index.html`, so with the sibling lookup first the site's
+        // own root link counted as a link RESOLVED — satisfying the `checked === 0`
+        // tripwire it is specifically not allowed to satisfy. The fixture that claimed
+        // otherwise was vacuous: its planted page is named `<planted>`, whose basename can
+        // never match, so this ordering was never exercised by it.
+        if (landingTarget !== rel) checked++;
         if (fragment) {
-          const ids = idsIn(text);
-          if (!ids.has(fragment)) broken.push(`${at}  ${href} — this page has no element with that id`);
+          const body = landingTarget === rel ? text : readFileSync(join(ROOT, landingTarget), "utf8");
+          const where = landingTarget === rel ? "this page" : landingTarget;
+          if (!idsIn(body).has(fragment)) broken.push(`${at}  ${href} — ${where} has no element with that id`);
         }
         continue;
       }

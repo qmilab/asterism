@@ -554,8 +554,8 @@ asterism run <agent> "<task>"
 Put an agent to work on a task, framed by its role, character, skills, and the
 memories it has accepted. What it may do on its own depends on its
 [trust level](./concepts.md#trust-levels); nothing destructive happens without
-you at any of them — `notify` and `autonomous` stop and ask, and `propose` does
-not take the action at all.
+you at any of them, under
+[the destructive-action gate](./concepts.md#the-destructive-action-gate).
 
 Requires a [configured model](./installation.md#configuring-a-model). The task
 can be quoted or left as trailing words — both are preserved in full.
