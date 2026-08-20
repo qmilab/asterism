@@ -1964,7 +1964,13 @@ function report(total, tally, groups, coverageWork) {
           "<h2>Quickstart</h2>",
           '<div class="asterism__terminal">asterism new writer --trust autonomous',
           '<span class="comment"># a comment is presentation</span>',
-          "asterism run writer &quot;tidy posts/&quot; &gt; out.txt</div>",
+          "asterism run writer &quot;tidy posts/&quot; &gt; out.txt",
+          // `&amp;gt;` is the escaping of the literal TEXT `&gt;`, and it is the one shape
+          // that tells the decoding order apart: decode `&amp;` first and this becomes
+          // `&gt;` and then `>`, turning text a page displays into a redirection the
+          // checker runs. Without this line the ordering comment above `decodeEntities`
+          // was a claim nothing could kill.
+          "asterism notes set writer sigil &quot;&amp;gt; means redirect&quot;</div>",
           "<h2>Later</h2>",
           '<pre class="terminal">$ asterism memory inspect writer</pre>',
           "",
@@ -1976,7 +1982,8 @@ function report(total, tally, groups, coverageWork) {
         // shape that makes line numbers easy to get wrong by one.
         { line: 2, command: "asterism new writer --trust autonomous", section: "## Quickstart" },
         { line: 4, command: 'asterism run writer "tidy posts/" > out.txt', section: "## Quickstart" },
-        { line: 6, command: "asterism memory inspect writer", section: "## Later" },
+        { line: 5, command: 'asterism notes set writer sigil "&gt; means redirect"', section: "## Quickstart" },
+        { line: 7, command: "asterism memory inspect writer", section: "## Later" },
       ];
       const htmlGot = html.map((i) => ({ line: i.line, command: i.command, section: i.section }));
       if (JSON.stringify(htmlGot) !== JSON.stringify(htmlWant)) {
