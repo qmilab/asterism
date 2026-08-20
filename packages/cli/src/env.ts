@@ -45,3 +45,30 @@ export function envValue(env: Env, name: string): string | undefined {
 export function envIsSet(env: Env, name: string): boolean {
   return envValue(env, name) !== undefined;
 }
+
+/** The pair of variables that configure a local embeddings endpoint. Declared once. */
+export const EMBED_ENDPOINT_VARS = [
+  "ASTERISM_RECALL_EMBED_URL",
+  "ASTERISM_RECALL_EMBED_MODEL",
+] as const;
+
+/**
+ * The local embeddings endpoint {@link EMBED_ENDPOINT_VARS} configures, or undefined
+ * when it does not — which takes BOTH variables carrying something.
+ *
+ * It lives here rather than beside the builder that consumes it because `config show`
+ * needs the same answer, and `recall-provider.ts` is imported LAZILY on purpose: an
+ * install that never opts in must not load the embeddings package. Two readings of one
+ * question is what this used to be — `config show` filtered the two names on "is it
+ * set", so either variable alone printed "local-embeddings endpoint configured" while a
+ * run on an opted-in agent refused with "the endpoint is not configured". One install,
+ * two answers, which is the whole of #174.
+ *
+ * Trimmed, unlike {@link ambientValue} — a whitespace-only URL is not an endpoint, where
+ * a whitespace-padded credential may well be a credential.
+ */
+export function embeddingEndpoint(env: Env): { url: string; model: string } | undefined {
+  const url = env.ASTERISM_RECALL_EMBED_URL?.trim();
+  const model = env.ASTERISM_RECALL_EMBED_MODEL?.trim();
+  return url && model ? { url, model } : undefined;
+}

@@ -2911,17 +2911,35 @@ test("config show reports an environment override only when it supplies somethin
   expect(real).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
 });
 
-test("config show does not call an empty embeddings endpoint configured", async () => {
-  const env: Record<string, string | undefined> = { ASTERISM_RECALL_EMBED_URL: "" };
+test("config show calls the embeddings endpoint configured on exactly the terms the runtime does", async () => {
+  const env: Record<string, string | undefined> = {};
   const h = harness(env);
   await runCli(["init"], h.io);
   await runCli(["new", "writer", "--trust", "propose"], h.io);
-  // `buildEmbeddingRecallProvider` requires a non-empty URL and refuses the run without
-  // one, so reporting it here as configured would contradict the runtime.
-  expect(await capture(["config", "show"], h.io)).not.toContain("local-embeddings endpoint configured");
+  const shown = async (): Promise<boolean> =>
+    (await capture(["config", "show"], h.io)).includes("local-embeddings endpoint configured");
+
+  // `buildEmbeddingRecallProvider` needs BOTH, trimmed, and refuses the run otherwise —
+  // so every case below is what it would do, not a second opinion about it. Reporting a
+  // half-configured endpoint as configured is the same one-install-two-answers shape as
+  // the model override (#174): the line said configured, the run said not configured.
+  expect(await shown()).toBe(false);
 
   env.ASTERISM_RECALL_EMBED_URL = "http://localhost:11434/v1/embeddings";
-  expect(await capture(["config", "show"], h.io)).toContain("local-embeddings endpoint configured");
+  expect(await shown()).toBe(false); // the URL alone is not an endpoint
+  env.ASTERISM_RECALL_EMBED_MODEL = "";
+  expect(await shown()).toBe(false); // …nor with the model emptied
+  env.ASTERISM_RECALL_EMBED_MODEL = "   ";
+  expect(await shown()).toBe(false); // …nor whitespace, which the builder trims away
+
+  env.ASTERISM_RECALL_EMBED_MODEL = "nomic-embed-text";
+  expect(await shown()).toBe(true); // both, and only then
+  // Named, so a report that says "configured" without saying what would fail.
+  const both = await capture(["config", "show"], h.io);
+  expect(both).toContain("ASTERISM_RECALL_EMBED_URL, ASTERISM_RECALL_EMBED_MODEL");
+
+  env.ASTERISM_RECALL_EMBED_URL = "";
+  expect(await shown()).toBe(false); // and it goes back when either is cleared
 });
 
 test("config recall-budget sets a per-agent budget, persisted in the kernel store", async () => {

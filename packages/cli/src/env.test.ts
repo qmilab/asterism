@@ -5,7 +5,13 @@
 
 import { expect, test } from "bun:test";
 
-import { ambientValue, envIsSet, envValue } from "./env.ts";
+import {
+  ambientValue,
+  EMBED_ENDPOINT_VARS,
+  embeddingEndpoint,
+  envIsSet,
+  envValue,
+} from "./env.ts";
 
 test("an ambient value that is empty has supplied nothing", () => {
   expect(ambientValue("ghp_token")).toBe("ghp_token");
@@ -37,4 +43,28 @@ test("reporting a variable as set and reading its value cannot disagree", () => 
   }
   expect(envIsSet({ K: "" }, "K")).toBe(false);
   expect(envIsSet({ K: "x" }, "K")).toBe(true);
+});
+
+test("an embeddings endpoint needs both variables, trimmed", () => {
+  // The one answer `config show` reports and `buildEmbeddingRecallProvider` builds from.
+  // Either alone used to read as "configured" on the reporting side while the builder
+  // refused the run — the same one-install-two-answers shape as the model override.
+  expect(embeddingEndpoint({})).toBeUndefined();
+  expect(embeddingEndpoint({ ASTERISM_RECALL_EMBED_URL: "http://x/v1/embeddings" })).toBeUndefined();
+  expect(embeddingEndpoint({ ASTERISM_RECALL_EMBED_MODEL: "nomic" })).toBeUndefined();
+  expect(
+    embeddingEndpoint({ ASTERISM_RECALL_EMBED_URL: "http://x/v1/embeddings", ASTERISM_RECALL_EMBED_MODEL: "" }),
+  ).toBeUndefined();
+  // Trimmed here, unlike an ambient credential: whitespace is not a URL or a model name.
+  expect(
+    embeddingEndpoint({ ASTERISM_RECALL_EMBED_URL: "  ", ASTERISM_RECALL_EMBED_MODEL: "nomic" }),
+  ).toBeUndefined();
+  expect(
+    embeddingEndpoint({
+      ASTERISM_RECALL_EMBED_URL: " http://x/v1/embeddings ",
+      ASTERISM_RECALL_EMBED_MODEL: " nomic ",
+    }),
+  ).toEqual({ url: "http://x/v1/embeddings", model: "nomic" });
+  // The names the reporting surface prints come from the same module, not a second list.
+  expect([...EMBED_ENDPOINT_VARS]).toEqual(["ASTERISM_RECALL_EMBED_URL", "ASTERISM_RECALL_EMBED_MODEL"]);
 });

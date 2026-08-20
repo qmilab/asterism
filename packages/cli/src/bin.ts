@@ -108,8 +108,14 @@ const io: CliIO = {
   // command reads as "non-interactive". This matters for the persisted queue: there, a
   // reject is a durable transition, so a default-reject in a non-interactive session
   // would wipe the pile; omitting `review` makes the queue drain refuse to run unattended
-  // instead (the live path's reject is ephemeral, so it stays harmless either way). The
-  // proposal text is already printed by the command, so this only collects the decision.
+  // instead. The proposal text is already printed by the command, so this only collects
+  // the decision.
+  //
+  // The LIVE path (no queue) still runs without a reviewer and rejects everything.
+  // Harmless to the pile — a live reject persists nothing — but not free: it builds a
+  // model, pays for a call whose output is then discarded, and prints a summary of
+  // decisions nobody made. Pre-existing and unchanged here; the same shape `trust
+  // --review` stopped doing, and worth closing the same way.
   ...(interactive
     ? {
         review: async (): Promise<ReviewDecision> => {

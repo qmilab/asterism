@@ -21,6 +21,17 @@ import { fileURLToPath } from "node:url";
 
 const source = readFileSync(fileURLToPath(new URL("./bin.ts", import.meta.url)), "utf8");
 
+/**
+ * `bin.ts` with its comment lines dropped — the file is commented in `//` lines only, so
+ * this is exact. Counted against the CODE, because the counts below are about how many
+ * places DECIDE something; prose that names a function is not one of them, and a check
+ * that a comment can break is a check people learn to edit around.
+ */
+const code = source
+  .split("\n")
+  .filter((line) => !line.trim().startsWith("//"))
+  .join("\n");
+
 /** The `...(COND ? {…} : {})` conditional wirings in the `CliIO` literal, in order. */
 function conditionalWirings(): { condition: string; body: string }[] {
   const out: { condition: string; body: string }[] = [];
@@ -57,10 +68,10 @@ test("the binary reads the terminal in exactly one other place, and it is not a 
   // which is the shape the bug had: `ask()` gated on stdin while the question went to
   // stdout. `readPipedStdin` keeps its own stdin test — it asks nothing — but it lives
   // in `runtime.ts`, not here.
-  const reads = [...source.matchAll(/process\.(stdin|stdout|stderr)\.isTTY/g)];
+  const reads = [...code.matchAll(/process\.(stdin|stdout|stderr)\.isTTY/g)];
   expect(reads).toHaveLength(2);
-  expect(source).toContain("const interactive = hasAskableTerminal();");
-  expect([...source.matchAll(/hasAskableTerminal\(/g)]).toHaveLength(1);
+  expect(code).toContain("const interactive = hasAskableTerminal();");
+  expect([...code.matchAll(/hasAskableTerminal\(/g)]).toHaveLength(1);
 });
 
 test("the only hook that asks without checking first is the one whose absence changes nothing", () => {

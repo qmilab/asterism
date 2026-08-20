@@ -108,7 +108,7 @@ import { helpRequested, intFlag, parseArgs, stringFlag, undeclaredOptions } from
 import type { ParsedArgs } from "./args.js";
 import type { AsterismConfig, ModelSettings } from "./config.js";
 import { loadConfig, saveConfig } from "./config.js";
-import { ambientValue, envIsSet, envValue } from "./env.js";
+import { ambientValue, EMBED_ENDPOINT_VARS, embeddingEndpoint, envIsSet, envValue } from "./env.js";
 import {
   formatActionSummary,
   formatAgentList,
@@ -4760,11 +4760,12 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
             : `  ${agent.name}  →  ${DEFAULT_RECALL_PROVIDER_LABEL}  [default]`,
         );
       }
-      // `buildEmbeddingRecallProvider` requires both to be non-empty and refuses the run
-      // otherwise, so an empty one is not a configured endpoint here either.
-      const embedSet = ["ASTERISM_RECALL_EMBED_URL", "ASTERISM_RECALL_EMBED_MODEL"].filter((k) =>
-        envIsSet(io.env, k),
-      );
+      // Asked of the module that BUILDS the endpoint, not restated here. This line used
+      // to filter the two names on "is it set", so either variable alone reported the
+      // endpoint configured while a run on an opted-in agent refused with "the endpoint is
+      // not configured" — one install, two answers, which is the shape #174 exists to
+      // remove. It needs BOTH, and it trims.
+      const embedSet = embeddingEndpoint(io.env) ? EMBED_ENDPOINT_VARS : [];
       if (embedSet.length > 0) {
         io.out(`  (local-embeddings endpoint configured: ${embedSet.join(", ")})`);
       }

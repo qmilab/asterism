@@ -22,6 +22,10 @@ Two ways Asterism could act on something you had not said. A question it needed 
 
   An emptied API key variable is likewise a cleared key rather than a credential to send, and `asterism service install --capture-env` no longer captures a blank value into a service's environment file while reporting that nothing is missing.
 
+  `asterism config show` also stopped calling a *half*-configured local-embeddings endpoint configured. It reported one whenever either of `ASTERISM_RECALL_EMBED_URL` / `ASTERISM_RECALL_EMBED_MODEL` was set, where a run on an agent using that provider needs both and refuses without them — so the line said configured and the run said not configured. Both surfaces now read the same answer.
+
+- **An install already damaged by an earlier version recovers on its own.** The refusals above stop a config file from being written with an empty coordinate in it, but they do nothing for one that already has one — and 0.9.0 would happily write it. An empty value read from the config file is now ignored the same way, so the layer below it shows through: an install whose default was left as `{"provider": ""}` works again, and an agent created with `--model ""` runs on the install default instead of being unable to run at all. Nothing is refused on load, so `asterism config unset` still works on such a file, and `asterism config show` displays the model that will actually be used.
+
 - **An option given an empty value is now the same error as an option given no value.** 0.8.0 made a misspelled option an error and an option with its value left off an error; an option given an *empty* value still fell through as if it were a real one. `--provider ""` is what `--provider "$VAR"` expands to when the variable is unset, and what each command did with it varied:
 
   - `asterism config set gpt-4o --provider ""` wrote `"provider": ""` into the config file, after which `config show` displayed `(provider: )` and every run failed with advice naming an untypeable command.
@@ -31,7 +35,7 @@ Two ways Asterism could act on something you had not said. A question it needed 
   - `asterism new bot --soul ""` took the empty path as a soul directory, and `asterism channel telegram a --allow ""` started the bot with no allow-list where you had named one.
   - `asterism connect a b --mode ""` and `asterism service status a --kind ""` did stop, but with `Unknown connection mode ""` and `Unknown service kind ""` — describing what the variable expanded to rather than the mistake you made.
 
-  Every option that already refused a missing value now refuses an empty one, in the same words. Clearing something you have set is still `asterism config unset` or the command's own `--unset`, which say so.
+  Every option that already refused a missing value now refuses an empty one, in the same words — one rule with no exceptions to remember, including the one case where nothing unsafe was happening: `asterism new bot --role ""` used to create an agent with no role, which is what omitting `--role` does. It now says the option needs a value, so `--role "$ROLE"` with an unset variable stops rather than quietly doing something else. Clearing something you have set is still `asterism config unset` or the command's own `--unset`, which say so.
 
 - **An option that carries nothing is now named before a missing argument is.** `asterism new --soul` reported the usage line, sending you to look for the agent name you had not typed yet rather than at the option that was wrong. It now names the option, which is the rule a misspelled option has followed since 0.8.0.
 

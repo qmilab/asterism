@@ -600,3 +600,51 @@ test("an empty API key variable is a cleared key, not a credential to send", () 
   );
   expect(providerAuthPlan({ OPENAI_API_KEY: "" }, model).satisfied).toBe(false);
 });
+
+test("an empty coordinate already ON DISK is not a coordinate either", async () => {
+  // The input boundaries refuse to write one now, but a config file written by an
+  // earlier version still holds what they used to accept. Without normalizing on read,
+  // an install damaged by 0.9.0's `config set gpt-4o --provider ""` went on producing the
+  // untypeable `--provider  --base-url <url>` that #174 exists to remove.
+  const stored: AsterismConfig = {
+    model: { id: "llama3.2", provider: "", baseUrl: "", api: "" },
+  };
+  const { model, reason } = resolveModelConfig({}, { config: stored });
+  expect(reason).toBeUndefined();
+  expect(model).toEqual({
+    provider: "openai",
+    id: "llama3.2",
+    baseUrl: PROVIDER_DEFAULTS.openai!.baseUrl,
+  });
+});
+
+test("an empty per-agent override does not shadow the install default", async () => {
+  // What `new bot --model ""` wrote. The override is the more specific layer, so an empty
+  // id there disabled that agent for good: no install-wide `config set` reached it.
+  const stored: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "" } } },
+  };
+  const { model } = resolveModelConfig({}, { config: stored, agentName: "bot" });
+  expect(model?.id).toBe("llama3.2");
+  expect(model?.provider).toBe("ollama");
+  // And a real override still wins, so the layer has not simply been switched off.
+  const real: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "gpt-4o", provider: "openai" } } },
+  };
+  expect(resolveModelConfig({}, { config: real, agentName: "bot" }).model?.id).toBe("gpt-4o");
+});
+
+test("an empty stored provider does not discard the endpoint of the layer below", async () => {
+  // `mergeSettings` drops a lower layer's baseUrl when a higher one names a DIFFERENT
+  // provider. An empty provider is not a different provider, and reading it as one would
+  // throw away a custom endpoint on its way past.
+  const stored: AsterismConfig = {
+    model: { id: "local-13b", provider: "openai", baseUrl: "http://127.0.0.1:8080/v1" },
+    agents: { bot: { model: { provider: "" } } },
+  };
+  const { model } = resolveModelConfig({}, { config: stored, agentName: "bot" });
+  expect(model?.baseUrl).toBe("http://127.0.0.1:8080/v1");
+  expect(model?.provider).toBe("openai");
+});

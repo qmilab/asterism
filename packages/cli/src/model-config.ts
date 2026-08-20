@@ -301,10 +301,11 @@ export function providerAuthPlan(
  * The model coordinates carried by the ASTERISM_MODEL_* environment variables.
  *
  * Read through {@link envValue}, so a variable that exists and holds nothing supplies
- * nothing and the layer below shows through. Read as merely-defined, `ASTERISM_MODEL_ID=`
- * silently disabled a working configured model that `config show` went on displaying, and
- * `ASTERISM_MODEL_PROVIDER=` reached the "no endpoint" message below with an empty
- * provider name — which then suggested a command nobody could type (#174).
+ * nothing. Read as merely-defined, `ASTERISM_MODEL_ID=` silently disabled a working
+ * configured model that `config show` went on displaying (#174). {@link mergeSettings}
+ * drops an empty field from every layer, so this is belt as well as braces — but the
+ * question `config show` asks about the environment is answered by the same rule, and
+ * having it stated where the variables are read is what keeps the two agreeing.
  */
 function settingsFromEnv(env: Env): ModelSettings {
   const s: ModelSettings = {};
@@ -317,6 +318,29 @@ function settingsFromEnv(env: Env): ModelSettings {
   const api = envValue(env, "ASTERISM_MODEL_API");
   if (api !== undefined) s.api = api;
   return s;
+}
+
+/**
+ * One layer with its EMPTY fields dropped, so an empty coordinate is not a coordinate
+ * wherever it came from.
+ *
+ * The input boundaries refuse to create one — `config set` and `new` refuse an option
+ * given `""` (#174), and an emptied environment variable supplies nothing. But a config
+ * file written by an earlier version still holds what those used to accept, and nothing
+ * on read normalized it: `{"model":{"provider":""}}` went on producing
+ * `(provider: )` from `config show` and an untypeable `--provider  --base-url <url>`
+ * from `run`, and a per-agent `{"model":{"id":""}}` went on shadowing a perfectly good
+ * install default with nothing. Refusing to LOAD such a file would strand the operator —
+ * `config unset` reads it too — so it is normalized here instead, and `config show` then
+ * displays the layer that will actually be used.
+ */
+function withoutEmptyFields(layer: ModelSettings): ModelSettings {
+  const out: ModelSettings = {};
+  if (layer.id !== undefined && layer.id !== "") out.id = layer.id;
+  if (layer.provider !== undefined && layer.provider !== "") out.provider = layer.provider;
+  if (layer.baseUrl !== undefined && layer.baseUrl !== "") out.baseUrl = layer.baseUrl;
+  if (layer.api !== undefined && layer.api !== "") out.api = layer.api;
+  return out;
 }
 
 /**
@@ -338,7 +362,11 @@ function settingsFromEnv(env: Env): ModelSettings {
  */
 function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
   const out: ModelSettings = {};
-  for (const layer of layers) {
+  for (const raw of layers) {
+    // An empty field is dropped BEFORE the provider-change rule below reads it, so a
+    // stored `"provider": ""` cannot count as naming a different provider and discard a
+    // lower layer's endpoint on its way past.
+    const layer = withoutEmptyFields(raw);
     if (layer.id !== undefined) out.id = layer.id;
     if (layer.provider !== undefined) {
       // The provider the accumulated endpoint belongs to: the last explicit one,

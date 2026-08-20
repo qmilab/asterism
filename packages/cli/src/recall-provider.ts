@@ -20,6 +20,8 @@
 import { EmbeddingRecallProvider, createHttpEmbedder } from "@qmilab/asterism-recall-local";
 import type { RecallProvider } from "@qmilab/asterism-core";
 
+import { embeddingEndpoint } from "./env.js";
+
 export interface RecallProviderResult {
   provider?: RecallProvider;
   /** When `provider` is absent, a user-facing explanation of what to configure. */
@@ -39,17 +41,19 @@ export interface BuildRecallOptions {
 
 /**
  * Build the local embeddings recall provider from the environment, or return a
- * `reason` naming what to set. Requires both an endpoint URL and a model; either
- * missing is a misconfiguration (an agent opted in with nowhere to embed), so the
- * caller hard-fails rather than silently using keyword ranking.
+ * `reason` naming what to set. Requires both an endpoint URL and a model
+ * ({@link configuredEmbeddingVars}); either missing is a misconfiguration (an agent opted
+ * in with nowhere to embed), so the caller hard-fails rather than silently using keyword
+ * ranking.
  */
 export function buildEmbeddingRecallProvider(
   env: Env,
   options: BuildRecallOptions = {},
 ): RecallProviderResult {
-  const url = env.ASTERISM_RECALL_EMBED_URL?.trim();
-  const model = env.ASTERISM_RECALL_EMBED_MODEL?.trim();
-  if (!url || !model) {
+  // The same resolution `config show` reports from, so the two surfaces cannot disagree
+  // about what a configured endpoint is.
+  const endpoint = embeddingEndpoint(env);
+  if (!endpoint) {
     return {
       reason:
         "This agent is set to use local-embeddings recall, but the endpoint is not configured. " +
@@ -60,8 +64,8 @@ export function buildEmbeddingRecallProvider(
   }
   const apiKey = env.ASTERISM_RECALL_EMBED_KEY?.trim();
   const embedder = createHttpEmbedder({
-    url,
-    model,
+    url: endpoint.url,
+    model: endpoint.model,
     ...(apiKey ? { apiKey } : {}),
   });
   return {
