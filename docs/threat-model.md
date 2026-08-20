@@ -246,8 +246,9 @@ only what the operator already ratified. An artifact exchange carries a
 references-only manifest — paths and sizes, not file bytes — with secret-shaped
 paths redacted. Shared context flowing *into* an agent is screened first,
 because it is the one thing in the prompt the agent did not author. A delegated
-tool call always pauses for confirmation, at every level, and earned autonomy
-cannot buy it out.
+tool call is never taken on an agent's own authority: at `notify` and
+`autonomous` it pauses for confirmation, under `propose` the callee cannot serve
+it at all and it is withheld, and earned autonomy buys out neither.
 
 See [Working together](./collaboration.md) for the modes themselves.
 

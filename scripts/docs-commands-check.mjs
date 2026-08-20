@@ -9,9 +9,10 @@
 // perform, and a refusal advertising `api remove <agent> <a> <b>` when `api remove`
 // takes one name. A documentation page is nothing but such sentences.
 //
-// It pulls every fenced `asterism …` invocation out of the markdown a USER meets — the
-// published site, the repo's front page, and every package README npm ships — and sorts
-// each into one of two claims, both checked against the real `packages/cli/dist/bin.js`:
+// It pulls every `asterism …` invocation out of the terminal blocks of every page a USER
+// meets — the published site and its landing page, the repo's front page, and every package
+// README npm ships — and sorts each into one of two claims, both checked against the real
+// `packages/cli/dist/bin.js`:
 //
 //   SYNOPSIS  an unprompted line carrying placeholders (`<agent>`, `[--flag]`) claims
 //             a GRAMMAR. Its command path must be one the binary accepts, and every
@@ -61,13 +62,15 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, relative, sep } from "node:path";
-import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines } from "./lib/anchors.mjs";
+import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import {
   ROOT,
   siteDir,
   isPublished,
   trackedMarkdown,
   userFacingMarkdown,
+  userFacingPages,
+  publishedLandingPages,
   publishedPages,
   publishedPredicate,
   publishedPackages,
@@ -77,6 +80,7 @@ import {
 const BIN = join(ROOT, "packages", "cli", "dist", "bin.js");
 const CORE = join(ROOT, "packages", "core", "dist", "index.js");
 const MODEL_CONFIG_DIST = join(ROOT, "packages", "cli", "dist", "model-config.js");
+const CAPABILITIES_DIST = join(ROOT, "packages", "cli", "dist", "capabilities.js");
 
 /**
  * This checker types commands at the BUILT CLI, so it needs `dist/` — and it reaches into
@@ -91,12 +95,15 @@ let AsterismStore;
 let CONNECTION_MODES;
 /** The shipped provider table, so the docs check derives it rather than restating it. */
 let MODEL_CONFIG;
+/** The shipped tool catalog, for the same reason: nine names, derived from the nine built. */
+let CAPABILITIES;
 
 function preflight() {
   const missing = [
     [BIN, "packages/cli/dist/bin.js"],
     [CORE, "packages/core/dist/index.js"],
     [MODEL_CONFIG_DIST, "packages/cli/dist/model-config.js"],
+    [CAPABILITIES_DIST, "packages/cli/dist/capabilities.js"],
   ].filter(([abs]) => !existsSync(abs));
   if (missing.length) {
     console.error(
@@ -122,15 +129,96 @@ const HOME = ".asterism";
 // ---------------------------------------------------------------- extraction
 
 /**
- * Source files whose fenced blocks are checked: the markdown a USER meets — the site, the
- * repo's front page, and every package README npm publishes. Derived in one place
- * (`lib/docs-scope.mjs`) rather than spelled out here, because this was the first of four
- * hand-written answers to "which markdown counts" and the smallest of them: `docs/` plus
- * README, which left the nine commands in `packages/cli/README.md` — the page npm shows
- * for the thing people install — typed by nothing.
+ * Source files whose terminal blocks are checked: every page a USER meets — the site, its
+ * landing page, the repo's front page, and every package README npm publishes. Derived in
+ * one place (`lib/docs-scope.mjs`) rather than spelled out here, because this was the first
+ * of four hand-written answers to "which markdown counts" and the smallest of them: `docs/`
+ * plus README, which left the nine commands in `packages/cli/README.md` — the page npm
+ * shows for the thing people install — typed by nothing.
+ *
+ * The landing page is the clause that was missing after that: it is HTML, so no filter
+ * built on `*.md` could reach it. Nothing typed a line of its quickstart, and it named three
+ * of the nine catalog tools and misdescribed the destructive gate — eight releases after
+ * both were corrected on the pages that were inside.
  */
 function sourceFiles() {
-  return userFacingMarkdown();
+  return userFacingPages();
+}
+
+/**
+ * One page → the text of each block a reader is meant to read as a terminal, plus the line
+ * the block starts on. Markdown fences it; the landing page is hand-written HTML and marks
+ * the same thing with a class, so the two are read here and everything downstream sees one
+ * shape.
+ *
+ * The HTML half is deliberately narrow. It looks for the class the page's own stylesheet
+ * renders as a terminal, and a page whose blocks it cannot find is REPORTED (see
+ * `blocklessPages`) rather than counted as a page with no commands — a reader that silently
+ * finds nothing is the failure this whole file has paid for twice, and here it would read as
+ * "the landing page advertises no commands", which is the opposite of true.
+ */
+function terminalBlocks(text, isHtml) {
+  const blocks = [];
+  if (!isHtml) {
+    const lines = text.split("\n");
+    let open = null;
+    lines.forEach((raw, i) => {
+      if (!/^\s*```/.test(raw)) return;
+      if (open === null) open = i + 1;
+      else {
+        blocks.push({ startLine: open + 1, text: lines.slice(open, i).join("\n") });
+        open = null;
+      }
+    });
+    // An UNCLOSED fence runs to the end of the file, which is what the line-at-a-time
+    // reader this replaced did. Dropping it instead would silently stop checking every
+    // command below a stray ``` — the reading-nothing failure, arriving as a green.
+    if (open !== null) blocks.push({ startLine: open + 1, text: lines.slice(open).join("\n") });
+    return blocks;
+  }
+  // A class token CONTAINING `terminal`, not equal to it: the page's own is
+  // `asterism__terminal`, and `\bterminal\b` does not match after an underscore — which is
+  // how the first version of this read the landing page as having no commands at all.
+  for (const m of text.matchAll(/<(?:div|pre)\b[^>]*class="([^"]*terminal[^"]*)"[^>]*>([\s\S]*?)<\/(?:div|pre)>/gi)) {
+    blocks.push({
+      className: m[1],
+      startLine: text.slice(0, m.index).split("\n").length,
+      // Inline markup inside a terminal block is presentation (a `<span class="comment">`
+      // around a shell comment); the command is what is left once it is gone.
+      text: decodeEntities(m[2].replace(/<[^>]+>/g, "")),
+    });
+  }
+  return blocks;
+}
+
+/**
+ * The five entities an HTML page must escape. Written out rather than pulled from a
+ * library: a terminal block holds `>` redirections and `&&`, and getting those two back
+ * wrong turns a correct command into one the checker then reports as broken.
+ *
+ * `&amp;` is decoded LAST and that is not a style choice: decoded first, `&amp;gt;` — the
+ * escaping of the literal text `&gt;` — would become `&gt;` and then `>`, silently turning
+ * text a page shows into a redirection the checker runs.
+ */
+function decodeEntities(text) {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * A page in the corpus whose markup this extractor found no terminal block in at all. For
+ * markdown that is ordinary — most pages have no fenced block — so only the HTML pages are
+ * reported, because there the answer "none" means "the class this looks for is not the
+ * class the page uses" far more often than it means "this page shows no commands".
+ */
+function blocklessPages() {
+  return publishedLandingPages().filter(
+    (rel) => terminalBlocks(readFileSync(join(ROOT, rel), "utf8"), true).length === 0,
+  );
 }
 
 /**
@@ -145,42 +233,75 @@ function sourceFiles() {
  */
 function extract(relPath, base = ROOT) {
   const text = readFileSync(join(base, relPath), "utf8");
+  const isHtml = /\.html?$/.test(relPath);
+  const sectionAt = sectionIndex(text, isHtml);
   const found = [];
-  let inFence = false;
-  let section = "";
-  text.split("\n").forEach((raw, i) => {
-    if (/^\s*```/.test(raw)) {
-      inFence = !inFence;
-      return;
+
+  for (const block of terminalBlocks(text, isHtml)) {
+    const lines = block.text.split("\n");
+    const items = [];
+    lines.forEach((raw, i) => {
+      const trimmed = raw.trim();
+      // A `$ ` prompt marks a line the reader is meant to TYPE; its absence, in a block
+      // that carries placeholders, marks a grammar. That distinction is the classifier.
+      const prompted = /^\$\s+/.test(trimmed);
+      let s = trimmed.replace(/^\$\s+/, "");
+      if (!/^asterism\s/.test(s)) return;
+      // A trailing comment is prose. Only strip ` #` with surrounding space, so a
+      // `#fragment` inside a URL or a quoted task survives.
+      s = s.replace(/\s+#\s.*$/, "").trim();
+      const line = block.startLine + i;
+      items.push({ file: relPath, line, command: s, prompted, shown: [], section: sectionAt(line), at: i });
+    });
+
+    // The lines a block prints beneath a prompted command are its EXPECTED OUTPUT — the
+    // page's claim about what the reader will see. Attach them to the command above.
+    const outputLines = new Set();
+    for (const item of items) {
+      if (!item.prompted) continue;
+      for (let j = item.at + 1; j < lines.length; j++) {
+        if (/^\s*\$\s/.test(lines[j])) break;
+        item.shown.push(lines[j]);
+        outputLines.add(j);
+      }
+      while (item.shown.length && item.shown[item.shown.length - 1].trim() === "") item.shown.pop();
     }
-    if (!inFence && /^##\s/.test(raw)) section = raw.trim();
-    if (!inFence) return;
-    const trimmed = raw.trim();
-    // A `$ ` prompt marks a line the reader is meant to TYPE; its absence, in a block
-    // that carries placeholders, marks a grammar. That distinction is the classifier.
-    const prompted = /^\$\s+/.test(trimmed);
-    let s = trimmed.replace(/^\$\s+/, "");
-    if (!/^asterism\s/.test(s)) return;
-    // A trailing comment is prose. Only strip ` #` with surrounding space, so a
-    // `#fragment` inside a URL or a quoted task survives.
-    s = s.replace(/\s+#\s.*$/, "").trim();
-    found.push({ file: relPath, line: i + 1, command: s, prompted, shown: [], section });
-  });
-  // The lines a block prints beneath a prompted command are its EXPECTED OUTPUT — the
-  // page's claim about what the reader will see. Attach them to the command above.
-  const lines = text.split("\n");
-  const outputLines = new Set();
-  for (const item of found) {
-    if (!item.prompted) continue;
-    for (let j = item.line; j < lines.length; j++) {
-      const l = lines[j];
-      if (l === undefined || /^\s*```/.test(l) || /^\s*\$\s/.test(l)) break;
-      item.shown.push(l);
-      outputLines.add(j + 1); // `lines[j]` is the (j+1)-th line, 1-based
+    for (const item of items) {
+      if (item.prompted || !outputLines.has(item.at)) {
+        delete item.at;
+        found.push(item);
+      }
     }
-    while (item.shown.length && item.shown[item.shown.length - 1].trim() === "") item.shown.pop();
   }
-  return found.filter((f) => f.prompted || !outputLines.has(f.line));
+  return found;
+}
+
+/**
+ * Line number → the heading its command sits under, so a reference page's sections stay
+ * independent snippets rather than one transcript. A heading inside a terminal block is
+ * not a heading: `## ` is also how a shell comment starts.
+ */
+function sectionIndex(text, isHtml) {
+  const marks = [];
+  if (isHtml) {
+    for (const m of text.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/g)) {
+      marks.push([text.slice(0, m.index).split("\n").length, `## ${decodeEntities(m[1].replace(/<[^>]+>/g, "")).trim()}`]);
+    }
+  } else {
+    let inFence = false;
+    text.split("\n").forEach((raw, i) => {
+      if (/^\s*```/.test(raw)) inFence = !inFence;
+      else if (!inFence && /^##\s/.test(raw)) marks.push([i + 1, raw.trim()]);
+    });
+  }
+  return (line) => {
+    let section = "";
+    for (const [at, title] of marks) {
+      if (at > line) break;
+      section = title;
+    }
+    return section;
+  };
 }
 
 // ------------------------------------------------------------- classification
@@ -663,7 +784,7 @@ function checkSynopsis(work, scratch, command) {
   return { ok: true, exact: norm(both).includes(norm(command)), leftover };
 }
 
-function runCommand(work, command) {
+function runCommand(work, command, timeout = 30_000) {
   try {
     const stdout = execFileSync(process.execPath, [BIN, ...argvOf(command)], {
       cwd: work,
@@ -671,16 +792,35 @@ function runCommand(work, command) {
       input: "",
       env: ENV,
       stdio: ["pipe", "pipe", "pipe"],
-      timeout: 30_000,
+      timeout,
     });
-    return { code: 0, stdout, stderr: "" };
+    return { code: 0, stdout, stderr: "", timedOut: false };
   } catch (e) {
+    // A command KILLED for running past the timeout never exited, so it has no exit code:
+    // `e.status` is null and `e.signal` names the signal. Folding that into `-1` alongside
+    // a real non-zero exit is how a killed command came to be reported as a PASS — with
+    // the strongest classification this file has. A page that documents its command's
+    // successful output ("Disconnected writer → researcher") matches the partial stdout the
+    // kill left behind, so the run lands under "refused exactly as the page documents" and
+    // the gate goes green over a command that never finished. Seen in a real report,
+    // under load, on `docs/commands.md`'s `disconnect` example.
     return {
       code: e.status ?? -1,
       stdout: e.stdout?.toString() ?? "",
       stderr: e.stderr?.toString() ?? "",
+      timedOut: neverExited(e),
     };
   }
+}
+
+/**
+ * Did the child never exit on its own? A process KILLED for running past the timeout has no
+ * exit code at all — `status` is null and `signal` names what killed it — where a process
+ * that ran and failed has a number and no signal. Its own function because the whole defect
+ * was folding the two into one `-1`.
+ */
+function neverExited(err) {
+  return err.status === null && err.signal != null;
 }
 
 // ---------------------------------------------------------------------- main
@@ -1294,6 +1434,16 @@ function main() {
           if (born) seedRecords(work, born[1], liveAgents(work), opensOwnChannels);
           continue;
         }
+        if (result.timedOut) {
+          // Before any excuse or documented-refusal match, because both of those read the
+          // output a kill left behind as though the command had finished and said it.
+          failures.push({
+            ...item,
+            why: "killed for running past the timeout — it never finished, so nothing it printed is a result",
+            detail: (result.stderr || result.stdout).trim().split("\n")[0] ?? "(no output)",
+          });
+          continue;
+        }
         const first = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
         // A page may DOCUMENT a refusal — "here is what happens with no connection".
         // Then the claim under test is not that the command succeeds but that it fails
@@ -1401,8 +1551,8 @@ function report(total, tally, groups, coverageWork) {
     `\n${total} invocations in ${
       SELF_TEST
         ? "the planted fixture"
-        : `the ${sourceFiles().length} pages a user meets (the site, the repo's front page,` +
-          ` every package README npm publishes)`
+        : `the ${sourceFiles().length} pages a user meets (the site, its landing page,` +
+          ` the repo's front page, every package README npm publishes)`
     } — ` +
       `${tally.ran} ran, ${tally.synopsis} synopsis matched --help, ` +
       `${tally.documented} refused exactly as documented, ` +
@@ -1551,11 +1701,6 @@ function report(total, tally, groups, coverageWork) {
       for (const p of extra) scopeFailures.push(`  release.yml loop ${i + 1} publishes packages/${p}, which is not a package this repo publishes`);
     });
 
-    if (scopeFailures.length) {
-      console.log("\nSELF-TEST FAILED: a pass is no longer reading the set it says it reads:");
-      for (const f of scopeFailures) console.log(f);
-      process.exit(1);
-    }
     console.log(
       `Both passes read a DERIVED set: ${tracked.length} tracked files for links,` +
         ` ${sourceFiles().length} user-facing pages for commands, and \`docs_dir\` comes from mkdocs.yml.`,
@@ -1585,6 +1730,189 @@ function report(total, tally, groups, coverageWork) {
       process.exit(1);
     }
     console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
+
+    // The landing page is HTML, so it could not be in any set built from `*.md` — which is
+    // how it came to name three of the nine catalog tools and say an agent pauses "at every
+    // level", eight releases after both were corrected elsewhere. Asserted from a second
+    // derivation (the workflow line that publishes it) rather than read back from the
+    // function under test, and asserted NON-EMPTY, because a clause that finds nothing
+    // would satisfy every `includes` above without reading a page.
+    const landing = publishedLandingPages();
+    if (landing.length === 0) {
+      scopeFailures.push("  no page is published at the site's root, so the HTML half proves nothing");
+    }
+    for (const page of landing) {
+      if (!read.includes(page)) scopeFailures.push(`  the command pass does not read ${page}`);
+      if (terminalBlocks(readFileSync(join(ROOT, page), "utf8"), true).length === 0) {
+        scopeFailures.push(`  ${page} is read, but no terminal block was found in it — it is checked for nothing`);
+      }
+    }
+
+    if (scopeFailures.length) {
+      console.log("\nSELF-TEST FAILED: a pass is no longer reading the set it says it reads:");
+      for (const f of scopeFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      `The site's root page is derived from the workflow that publishes it: ${landing.join(", ")}.`,
+    );
+
+    // The tool-catalog rule, planted in BOTH directions. The direction that matters most is
+    // the negative one: four of the nine names — `find`, `stat`, `move`, `mkdir` — are
+    // ordinary English words, so a pass that counted prose instead of code spans would
+    // report a defect on pages that are correct, and this check would become work to
+    // suppress rather than work to do.
+    const nine = catalogToolNames();
+    const span = (n) => `\`${n}\``;
+    const CATALOG_CASES = [
+      ["names all nine", nine.map(span).join(" "), false],
+      ["names all nine as HTML", nine.map((n) => `<code>${n}</code>`).join(" "), false],
+      ["names one, in passing", `a read like ${span(nine[0])} is not an inventory`, false],
+      ["names none", "no tools here at all", false],
+      ["names the words in prose", `you can find and move and stat and mkdir things`, false],
+      ["names three", nine.slice(0, 3).map(span).join(" "), true],
+      ["names two", nine.slice(0, 2).map(span).join(" "), true],
+      ["names eight", nine.slice(0, 8).map(span).join(" "), true],
+      ["names eight as HTML", nine.slice(0, 8).map((n) => `<code>${n}</code>`).join(" "), true],
+    ];
+    const catalogFailures = [];
+    for (const [why, text, shouldReport] of CATALOG_CASES) {
+      const reported = checkToolCatalog([["<planted>", text]]).length > 0;
+      if (reported !== shouldReport) {
+        catalogFailures.push(`  a page that ${why} was ${reported ? "reported" : "passed"}, and should not have been`);
+      }
+    }
+    if (catalogFailures.length) {
+      console.log("\nSELF-TEST FAILED: the tool-catalog rule does not hold:");
+      for (const f of catalogFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      `The tool-catalog rule fires on a page naming 2–${nine.length - 1} of ${nine.length} tools` +
+        ` in code spans, and on nothing else — prose mentions included.`,
+    );
+
+    // A command KILLED for running past the timeout must be told apart from one that ran
+    // and failed. Folding both into `-1` is how a real report came to file a killed
+    // `disconnect` under "refused exactly as the page documents" — the strongest
+    // classification here — because the partial stdout the kill left behind was the success
+    // line the page shows. The gate went green over a command that never finished.
+    //
+    // Proved against a REAL killed child rather than a hand-made error object, because the
+    // fragile half is Node's contract, not the comparison. No `asterism` verb serves as the
+    // fixture: `runCommand` closes stdin, and both blocking verbs (`serve`,
+    // `events tail --follow`) shut down cleanly on EOF, so a slow machine — not a hung
+    // command — is what reaches the timeout.
+    const killShapes = [];
+    const spin = 'const t = Date.now(); while (Date.now() - t < 5000) {}';
+    try {
+      execFileSync(process.execPath, ["-e", `console.log("partial output"); ${spin}`], {
+        encoding: "utf8",
+        timeout: 300,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      killShapes.push("  a child killed at its timeout did not throw at all");
+    } catch (e) {
+      if (!neverExited(e)) {
+        killShapes.push(`  a child killed at its timeout was not recognised (status ${JSON.stringify(e.status)}, signal ${JSON.stringify(e.signal)})`);
+      }
+      if (!String(e.stdout ?? "").includes("partial output")) {
+        killShapes.push("  the fixture printed nothing before being killed, so it does not exercise the case at all");
+      }
+    }
+    // The control, and the direction that matters more: a child that RAN and failed must
+    // never be called killed, or every documented refusal in the corpus becomes a failure.
+    try {
+      execFileSync(process.execPath, ["-e", 'process.exit(3)'], { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+      killShapes.push("  a child exiting 3 did not throw");
+    } catch (e) {
+      if (neverExited(e)) killShapes.push("  a child that exited 3 on its own was reported as killed");
+    }
+    if (killShapes.length) {
+      console.log("\nSELF-TEST FAILED: a killed command is not told apart from one that exited:");
+      for (const f of killShapes) console.log(f);
+      process.exit(1);
+    }
+    console.log("A command killed for running past the timeout is told apart from one that exited and failed.");
+
+    // The root page's links, planted in both directions. It found nothing wrong on the real
+    // page, so the only evidence it works at all is here — and the negative cases matter as
+    // much: a pass that reported the org site's own links would be unfixable from this repo.
+    const linkFixture = [
+      ['<a href="/asterism/docs/walkthrough/">a</a>', "a page mkdocs builds", 0, 0],
+      ['<a href="/asterism/docs/">a</a>', "the docs index", 0, 0],
+      ['<a href="/asterism/">a</a>', "the root page itself", 0, 0],
+      ['<a href="/asterism/docs/nosuchpage/">a</a>', "a page nothing builds", 1, 0],
+      ['<a href="/asterism/docs/walkthrough/#claim-1-separate-memory">a</a>', "a heading that exists", 0, 0],
+      ['<a href="/asterism/docs/walkthrough/#no-such-heading">a</a>', "a heading that does not", 1, 0],
+      ['<a href="/manifesto">a</a>', "a page on the org site", 0, 1],
+      ['<a href="https://github.com/qmilab/asterism">a</a>', "an external link", 0, 0],
+      ['<a href="logo.png">a</a>', "a relative asset", 0, 0],
+      ['<a href="#top">a</a>', "an in-page anchor", 0, 0],
+      ['<link rel="icon" href="/favicon.svg" />', "a favicon, which is an asset and not a link", 0, 0],
+      ['<link rel="stylesheet" href="/asterism/docs/nosuchpage/" />', "a stylesheet at a URL no page builds", 0, 0],
+    ];
+    const linkFailures = [];
+    for (const [html, why, wantBroken, wantOffSite] of linkFixture) {
+      const got = checkLandingLinks([["<planted>", html]]);
+      if (got.broken.length !== wantBroken || got.offSite.length !== wantOffSite) {
+        linkFailures.push(
+          `  ${why}: ${got.broken.length} broken / ${got.offSite.length} undecidable,` +
+            ` wanted ${wantBroken} / ${wantOffSite}`,
+        );
+      }
+    }
+    // …and the anchor half must be judged by the SITE's renderer. `## Claim 1 — separate
+    // memory` slugs differently under GitHub's rule (which keeps no em dash and joins with
+    // `-`), so a pass using the wrong one would pass the fixture above and fail the site.
+    if (!anchorsOf("## Claim 1 — separate memory\n", MKDOCS_RULE).has("claim-1-separate-memory")) {
+      linkFailures.push("  the fixture's own anchor is not what the site's renderer emits — it proves nothing");
+    }
+    if (linkFailures.length) {
+      console.log("\nSELF-TEST FAILED: the root page's link rule does not hold:");
+      for (const f of linkFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      "A link from the root page into this site is resolved against the pages mkdocs builds;" +
+        " one into the org site is named undecidable rather than guessed at.",
+    );
+
+    // The rendering rule, planted in both directions. The defect it exists to catch was
+    // published and survived every text-level check, so the negative direction — a block
+    // that DOES declare a preserving `white-space` must not be reported — is what keeps it
+    // from becoming noise the next person suppresses.
+    // The class must satisfy `terminalBlocks`' own rule, or the block is never found and
+    // every case below passes for the wrong reason — which is what the first version of
+    // this fixture did, using a class named `t`.
+    const styled = (ws) => `<style>.x__terminal { ${ws ? `white-space: ${ws};` : ""} color: red; }</style>`;
+    const twoLine = '<div class="x__terminal">asterism new writer\nasterism run writer "x"</div>';
+    const oneLine = '<div class="x__terminal">asterism new writer</div>';
+    const RENDER_CASES = [
+      ["a multi-line block with no white-space rule", styled(null) + twoLine, true],
+      ["a multi-line block set to `normal`", styled("normal") + twoLine, true],
+      ["a multi-line block set to `pre-line`, which eats the column alignment", styled("pre-line") + twoLine, true],
+      ["a multi-line block set to `pre`", styled("pre") + twoLine, false],
+      ["a multi-line block set to `pre-wrap`", styled("pre-wrap") + twoLine, false],
+      ["a multi-line block set to `break-spaces`", styled("break-spaces") + twoLine, false],
+      ["a ONE-line block with no white-space rule, which cannot lose a break", styled(null) + oneLine, false],
+    ];
+    const renderFailures = [];
+    for (const [why, html, shouldReport] of RENDER_CASES) {
+      const reported = checkTerminalRendering([["<planted>", html]]).length > 0;
+      if (reported !== shouldReport) {
+        renderFailures.push(`  ${why} was ${reported ? "reported" : "passed"}, and should not have been`);
+      }
+    }
+    if (renderFailures.length) {
+      console.log("\nSELF-TEST FAILED: the terminal-rendering rule does not hold:");
+      for (const f of renderFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      "A multi-line terminal block is reported unless its class is given a `white-space`" +
+        " that keeps both the lines and the column alignment.",
+    );
 
     // The extractor's own classifier, on the one page shape where the two classes are
     // indistinguishable by their first word: the CLI refuses an unknown option with
@@ -1625,6 +1953,56 @@ function report(total, tally, groups, coverageWork) {
         process.exit(1);
       }
       console.log("A shown refusal is read as output, not as a command, and a bare synopsis still is one.");
+
+      // The HTML half of the extractor, on the shapes that made it wrong once and would
+      // make it wrong silently again. Entities matter as much as the class: a terminal
+      // block holds `>` redirections and quoted tasks, so decoding them wrong turns a
+      // correct command into one this then reports as broken.
+      writeFileSync(
+        join(exDir, "page.html"),
+        [
+          "<h2>Quickstart</h2>",
+          '<div class="asterism__terminal">asterism new writer --trust autonomous',
+          '<span class="comment"># a comment is presentation</span>',
+          "asterism run writer &quot;tidy posts/&quot; &gt; out.txt</div>",
+          "<h2>Later</h2>",
+          '<pre class="terminal">$ asterism memory inspect writer</pre>',
+          "",
+        ].join("\n"),
+      );
+      const html = extract("page.html", exDir);
+      const htmlWant = [
+        // The opening tag shares its line with the first command, which is exactly the
+        // shape that makes line numbers easy to get wrong by one.
+        { line: 2, command: "asterism new writer --trust autonomous", section: "## Quickstart" },
+        { line: 4, command: 'asterism run writer "tidy posts/" > out.txt', section: "## Quickstart" },
+        { line: 6, command: "asterism memory inspect writer", section: "## Later" },
+      ];
+      const htmlGot = html.map((i) => ({ line: i.line, command: i.command, section: i.section }));
+      if (JSON.stringify(htmlGot) !== JSON.stringify(htmlWant)) {
+        console.log("\nSELF-TEST FAILED: the HTML extractor does not read a terminal block as one:");
+        console.log(`  want: ${JSON.stringify(htmlWant, null, 2)}`);
+        console.log(`  got:  ${JSON.stringify(htmlGot, null, 2)}`);
+        process.exit(1);
+      }
+      // …and the same page with the class renamed yields NOTHING, which is the state
+      // `blocklessPages` exists to report rather than count as "this page has no commands".
+      writeFileSync(
+        join(exDir, "moved.html"),
+        '<div class="asterism__console">asterism new writer --trust autonomous</div>\n',
+      );
+      if (extract("moved.html", exDir).length !== 0) {
+        console.log("\nSELF-TEST FAILED: a block whose class names no terminal was read as one anyway.");
+        process.exit(1);
+      }
+      if (terminalBlocks(readFileSync(join(exDir, "moved.html"), "utf8"), true).length !== 0) {
+        console.log("\nSELF-TEST FAILED: terminalBlocks found a block where the class does not name a terminal.");
+        process.exit(1);
+      }
+      console.log(
+        "The HTML extractor reads a terminal block, decodes its entities, keeps its line" +
+          " numbers, and finds nothing when the class it keys on is gone.",
+      );
     } finally {
       rmSync(exDir, { recursive: true, force: true });
     }
@@ -1772,13 +2150,72 @@ function report(total, tally, groups, coverageWork) {
     console.log("Every built-in provider appears in the models page, with the key it reads.");
   }
 
+  const catalogGaps = SELF_TEST ? [] : checkToolCatalog();
+  if (catalogGaps.length) {
+    console.log(
+      `\nPARTIAL TOOL CATALOG (${catalogGaps.length}) — a page presenting the tools an agent is` +
+        ` given names some of them and not the rest:`,
+    );
+    for (const g of catalogGaps) console.log(`  ${g}`);
+  } else if (!SELF_TEST) {
+    console.log(
+      `Every page naming a catalog tool names all ${catalogToolNames().length} the CLI ships.`,
+    );
+  }
+
+  // A page in the corpus whose terminal blocks this could not find at all. Reported rather
+  // than counted as zero: for the HTML half the answer "no commands" is far more often "the
+  // markup changed" than it is true, and a checker reading nothing while printing a green
+  // total is the exact failure this file has now paid for twice.
+  const landingLinks = SELF_TEST ? { broken: [], offSite: [], checked: 0 } : checkLandingLinks();
+  if (landingLinks.broken.length) {
+    console.log(`\nBROKEN LINKS ON THE SITE'S ROOT PAGE (${landingLinks.broken.length}):`);
+    for (const b of landingLinks.broken) console.log(`  ${b}`);
+  } else if (!SELF_TEST) {
+    console.log(
+      `All ${landingLinks.checked} links from the site's root page into this site resolve to a` +
+        ` page mkdocs builds, headings included.`,
+    );
+  }
+  if (landingLinks.offSite.length) {
+    console.log(
+      `\nLINKS FROM THE ROOT PAGE THIS PASS CANNOT DECIDE (${landingLinks.offSite.length}):`,
+    );
+    for (const u of landingLinks.offSite) console.log(`  ${u}`);
+  }
+
+  const renderGaps = SELF_TEST ? [] : checkTerminalRendering();
+  if (renderGaps.length) {
+    console.log(
+      `\nTERMINAL BLOCK RENDERS AS ONE PARAGRAPH (${renderGaps.length}) — its lines are` +
+        ` correct and its markup collapses them:`,
+    );
+    for (const g of renderGaps) console.log(`  ${g}`);
+  } else if (!SELF_TEST) {
+    console.log("Every multi-line terminal block on the site's root page keeps its line breaks.");
+  }
+
+  const blockless = SELF_TEST ? [] : blocklessPages();
+  if (blockless.length) {
+    console.log(
+      `\nNO TERMINAL BLOCK FOUND (${blockless.length}) — this page is published at the site's root` +
+        ` and its commands are read from an element whose class names a terminal; nothing here` +
+        ` matched, so this page is being checked for nothing:`,
+    );
+    for (const rel of blockless) console.log(`  ${rel}`);
+  }
+
   rmSync(coverageWork, { recursive: true, force: true });
   if (
     groups.failures.length ||
     links.broken.length ||
     undocumented.length ||
     readmeless.length ||
-    providerGaps.length
+    providerGaps.length ||
+    catalogGaps.length ||
+    landingLinks.broken.length ||
+    renderGaps.length ||
+    blockless.length
   ) {
     process.exit(1);
   }
@@ -1840,6 +2277,187 @@ function checkProviderCoverage() {
 }
 
 /**
+ * The shipped tool catalog, as names — the nine tools the CLI registers behind the gate.
+ * Derived from the module that builds them, so a tool added or removed moves this set
+ * without anyone remembering to.
+ */
+function catalogToolNames() {
+  // The workspace path is closed over, never read, at build time; any path gives the same
+  // nine names, which is the whole reason this is a safe thing to ask at check time.
+  return CAPABILITIES.workspaceCapabilities(ROOT).map((c) => c.tool.name);
+}
+
+/**
+ * The names a page presents as CODE — backticks in markdown, `<code>` in HTML.
+ *
+ * Code spans, not prose, and that is the load-bearing half. Four of the nine catalog tools
+ * — `find`, `stat`, `move` and `mkdir` — are ordinary English words, and `list_dir` sits a
+ * hyphen away from ordinary phrasing. A pass that counted the word "find" would report a
+ * defect on every page that says "find your agent's memory", which is a checker that
+ * manufactures work. A page naming a tool as a tool marks it up as one.
+ */
+function codeSpans(text) {
+  const spans = new Set();
+  for (const m of text.matchAll(/`([^`\n]+)`/g)) spans.add(m[1]);
+  for (const m of text.matchAll(/<code[^>]*>([^<]+)<\/code>/g)) spans.add(decodeEntities(m[1]).trim());
+  return spans;
+}
+
+/**
+ * `README.md`, the npm page and three doc pages each present the catalog as the set of
+ * tools an agent is given — "a default catalog of workspace-scoped file tools" followed by
+ * a list. That is a completeness claim about a table in the code, and it is the claim the
+ * npm README got wrong in #164 by naming three of nine.
+ *
+ * The rule is membership, not prose shape: a page naming TWO or more catalog tools must
+ * name all of them. Two is not arbitrary — it is where the measurement puts the line. Every
+ * user-facing page today names either nine or none, and the one page that named a strict
+ * subset named three; nothing anywhere in the repo sits between two and eight. So the rule
+ * fires on nothing that is correct, and a page that drifts to a subset is caught at the
+ * first tool it drops.
+ *
+ * A single mention is left alone deliberately: `decisions/0001-execution-isolation.md` names
+ * `stat` once, in passing, as an example of a read — that is a reference to one tool, not an
+ * inventory of the catalog. (It is outside this corpus anyway; the threshold is what makes
+ * the rule honest rather than the scope.)
+ *
+ * The CHANGELOG names all nine and must never be retro-edited, so it would eventually be
+ * forced out of compliance as the catalog grows. It is excluded by the SCOPE rule — it is
+ * not a page a user meets — rather than by an exception written here, which is the point of
+ * the scope rule existing.
+ */
+function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")])) {
+  const names = catalogToolNames();
+  const gaps = [];
+  for (const [rel, text] of pages) {
+    const spans = codeSpans(text);
+    const named = names.filter((n) => spans.has(n));
+    if (named.length < 2 || named.length === names.length) continue;
+    gaps.push(
+      `${rel} — names ${named.length} of the ${names.length} tools the CLI ships, missing: ` +
+        names.filter((n) => !named.includes(n)).join(", "),
+    );
+  }
+  return gaps;
+}
+
+/**
+ * Every link on the site's root page that points INTO this site, resolved against the pages
+ * mkdocs actually builds.
+ *
+ * The markdown link pass cannot see these: they are `href` attributes, and they are absolute
+ * SITE paths (`/asterism/docs/walkthrough/`) rather than the repo-relative `./x.md` a
+ * markdown page uses. Same failure if one goes wrong — a 404 — on the page that gets there
+ * first.
+ *
+ * Three destinations, told apart rather than lumped together:
+ *
+ *   - `/asterism/docs/<page>/` — this repo's. Resolved to a published page, and its `#anchor`
+ *     is judged by the site's own renderer, because that is what serves it.
+ *   - `/asterism/` and `/asterism/index.html` — this page itself.
+ *   - anything else beginning `/` — the ORG site (`/`, `/manifesto`, `/lodestar/`), which
+ *     lives in another repo. Counted and named as undecidable rather than guessed at, the
+ *     way the markdown pass already treats a link it cannot follow. Guessing here would
+ *     either invent failures or, worse, report a green over links nothing looked at.
+ */
+function checkLandingLinks(
+  pages = publishedLandingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]),
+  published = new Set(publishedPages()),
+) {
+  const siteRoot = "/asterism/";
+  const broken = [];
+  const offSite = [];
+  let checked = 0;
+
+  for (const [rel, text] of pages) {
+    // `<a href>` only. A `<link rel="icon" href="/favicon.svg">` is an ASSET request, served
+    // by whoever owns the apex, and listing eleven of those as links-we-cannot-decide buries
+    // the eight navigation links that genuinely are.
+    for (const m of text.matchAll(/<a\b[^>]*?\bhref="([^"]+)"/gi)) {
+      const href = decodeEntities(m[1]);
+      if (EXTERNAL_TARGET.test(href) || href.startsWith("mailto:") || href.startsWith("#")) continue;
+      if (!href.startsWith("/")) continue; // a relative asset (logo.png) — not a page link
+      const line = text.slice(0, m.index).split("\n").length;
+      const at = `${rel}:${line}`;
+      if (!href.startsWith(siteRoot)) {
+        offSite.push(`${at}  ${href} — served by the org site, which is not in this repo`);
+        continue;
+      }
+      const [pathPart, fragment] = href.slice(siteRoot.length).split("#");
+      const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
+      checked++;
+      if (bare === "" || bare === "index") continue; // this page itself
+      // mkdocs' directory URLs: `/asterism/docs/x/` is built from `docs/x.md`, and
+      // `/asterism/docs/` from `docs/index.md`.
+      const candidates = [`${bare}.md`, `${bare}/index.md`];
+      const target = candidates.find((c) => published.has(c));
+      if (!target) {
+        broken.push(`${at}  ${href} — no published page builds that URL`);
+        continue;
+      }
+      if (fragment) {
+        // Judged by the site's renderer, because a site URL is only ever served by it.
+        const ids = anchorsOf(readFileSync(join(ROOT, target), "utf8"), MKDOCS_RULE);
+        if (!ids.has(fragment)) broken.push(`${at}  ${href} — ${target} has no heading with that id`);
+      }
+    }
+  }
+  return { broken, offSite, checked };
+}
+
+/**
+ * A multi-line terminal block whose class does not preserve newlines.
+ *
+ * This is the one defect on the site's root page that no check of its CONTENT could ever
+ * see, and it is the one that shipped: `.asterism__terminal` is a `<div>` and carried
+ * `overflow-x: auto` but no `white-space`, so every newline in the quickstart collapsed to
+ * a space and eleven commands rendered as a single run-on paragraph. Every text-level
+ * check read the page as correct — the commands were all there, in order, and the new
+ * command pass typed all nine of them at the binary and they all ran. What the reader met
+ * was unreadable and uncopyable.
+ *
+ * So the check is structural rather than visual: a block this file has already decided is a
+ * terminal, whose text spans more than one line, must be given a `white-space` that keeps
+ * those lines apart. `pre-line` is not enough — it preserves newlines but collapses runs of
+ * spaces, and these blocks align flags in columns.
+ *
+ * It reads the page's own inline `<style>`, which is where the CSS is by design: the landing
+ * page is deliberately self-contained (see `landing/README.md` — linking the apex's
+ * hash-named stylesheet would break on every org-site rebuild). If that ever stops being
+ * true this stops being able to answer, so it says which rule it could not find rather than
+ * passing quietly.
+ */
+function checkTerminalRendering(
+  pages = publishedLandingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]),
+) {
+  const gaps = [];
+  for (const [rel, text] of pages) {
+    const styles = [...text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join("\n");
+    for (const block of terminalBlocks(text, true)) {
+      if (!block.text.includes("\n")) continue; // a one-line block cannot lose a line break
+      const classes = block.className.trim().split(/\s+/).filter(Boolean);
+      const preserved = classes.some((cls) => {
+        // The declaration for this class, anywhere in the page's own CSS.
+        const rule = new RegExp(`\\.${cls.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b[^{}]*\\{([^}]*)\\}`, "g");
+        for (const m of styles.matchAll(rule)) {
+          const ws = /white-space:\s*([a-z-]+)/.exec(m[1]);
+          if (ws && ["pre", "pre-wrap", "break-spaces"].includes(ws[1])) return true;
+        }
+        return false;
+      });
+      if (!preserved) {
+        gaps.push(
+          `${rel}:${block.startLine} — a ${block.text.split("\n").length}-line terminal block in` +
+            ` \`${block.className}\`, and nothing in the page's CSS gives that class a` +
+            ` \`white-space\` that keeps the lines apart. It renders as one paragraph.`,
+        );
+      }
+    }
+  }
+  return gaps;
+}
+
+/**
  * The falsification. One planted line per defect class this exists to catch — if a
  * clean run cannot be told apart from a broken one, the clean run proves nothing.
  */
@@ -1874,6 +2492,7 @@ preflight();
 try {
   ({ AsterismStore, CONNECTION_MODES } = await import(CORE));
   MODEL_CONFIG = await import(MODEL_CONFIG_DIST);
+  CAPABILITIES = await import(CAPABILITIES_DIST);
 } catch (err) {
   // Present but unloadable — the classic case is a `better-sqlite3` built for a different
   // Node ABI. Name the cause; the raw error alone sends people hunting a code regression.
