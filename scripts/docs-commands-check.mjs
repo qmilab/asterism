@@ -198,14 +198,10 @@ function terminalBlocks(text, isHtml) {
   // silently unchecked rather than loudly wrong" — and then the same reasoning was not
   // applied here, one function away. A single-quoted block is worse still: `blocklessPages`
   // cannot see it, because a block WAS found, so every command in it is dropped in silence.
-  // All THREE attribute forms HTML permits — double-quoted, single-quoted, and unquoted.
-  // Two of the three were added only after each was found missing in turn, which is the
-  // argument for taking the third now rather than a fourth time: every miss here is silent,
-  // because `blocklessPages` sees a block was found and says nothing.
-  const open = /<(div|pre)\b[^>]*\sclass=("([^"]*terminal[^"]*)"|'([^']*terminal[^']*)'|([^\s"'=<>`]*terminal[^\s"'=<>`]*))[^>]*>/gi;
-  for (const m of text.matchAll(open)) {
+  for (const m of text.matchAll(/<(div|pre)\b([^>]*)>/gi)) {
     const tag = m[1].toLowerCase();
-    const className = m[3] ?? m[4] ?? m[5] ?? "";
+    const className = attrOf(m[2], "class");
+    if (className === undefined || !className.includes("terminal")) continue;
     const from = m.index + m[0].length;
     // The end is found by MATCHING tags, not by taking the first `</div>`. A non-greedy
     // `([\s\S]*?)<\/(?:div|pre)>` ends at the first close of either kind, so one nested
@@ -241,6 +237,25 @@ function terminalBlocks(text, isHtml) {
     });
   }
   return blocks;
+}
+
+/**
+ * The value of one attribute of an open tag, in ANY of the three forms HTML permits it to
+ * be written: double-quoted, single-quoted, or unquoted.
+ *
+ * ONE function, because doing it per-matcher went wrong four times in a row. Round two
+ * taught `href=` single quotes; round three taught `class=` the same thing one function
+ * away; round four found `id=` and `<code>` still untaught after a commit that claimed to
+ * take "the third attribute form, before it is found a third time". Every miss is silent —
+ * a block that is not found is a block `blocklessPages` reports nothing about — so the way
+ * to stop paying for it is to have one place that knows.
+ *
+ * `(^|\s)` before the name is load-bearing too: `\bid=` also matches `data-id=`, because a
+ * hyphen is not a word character, and that made a dead in-page link resolve.
+ */
+function attrOf(attrs, name) {
+  const m = new RegExp(`(^|\\s)${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s"'=<>\`]+))`, "i").exec(attrs);
+  return m ? decodeEntities(m[3] ?? m[4] ?? m[5] ?? "") : undefined;
 }
 
 /**
@@ -2030,6 +2045,11 @@ function report(total, tally, groups, coverageWork) {
     const CATALOG_CASES = [
       ["names all nine", nine.map(span).join(" "), false],
       ["names all nine as HTML", nine.map((n) => `<code>${n}</code>`).join(" "), false],
+      // Casing and nested markup: a page marking its catalog up either way would silently
+      // drop below the two-name threshold and stop being covered at all.
+      ["names all nine in UPPERCASE tags", nine.map((n) => `<CODE>${n}</CODE>`).join(" "), false],
+      ["names all nine with markup inside the span", nine.map((n) => `<code><b>${n}</b></code>`).join(" "), false],
+      ["names three with markup inside the span", nine.slice(0, 3).map((n) => `<code><b>${n}</b></code>`).join(" "), true],
       ["names one, in passing", `a read like ${span(nine[0])} is not an inventory`, false],
       ["names none", "no tools here at all", false],
       ["names the words in prose", `you can find and move and stat and mkdir things`, false],
@@ -2150,6 +2170,8 @@ function report(total, tally, groups, coverageWork) {
       ['<a href="/asterism/">a</a><a href="/asterism/index.html">b</a>', "only self-links", 0, 0, 0],
       ['<a href="/asterism/#quickstart">a</a><h2 id="quickstart">q</h2>', "a self-link to an id the page has", 0, 0],
       ['<a href="/asterism/#nowhere">a</a><h2 id="quickstart">q</h2>', "a self-link to an id the page has not", 1, 0],
+      ['<a href="/asterism/#quickstart">a</a><h2 id=quickstart>q</h2>', "a self-link to an UNQUOTED id", 0, 0],
+      ['<a href="/asterism/#quickstart">a</a><div data-id="quickstart">q</div>', "a `data-id`, which is not an id", 1, 0],
       ['<a href="/asterism/docs/nosuchpage/">a</a>', "a page nothing builds", 1, 0],
       ['<a href="/asterism/docs/walkthrough/#claim-1-separate-memory">a</a>', "a heading that exists", 0, 0],
       ['<a href="/asterism/docs/walkthrough/#no-such-heading">a</a>', "a heading that does not", 1, 0],
@@ -2159,6 +2181,8 @@ function report(total, tally, groups, coverageWork) {
       ['<a href="#top">a</a>', "an in-page anchor", 0, 0],
       ["<a href='/asterism/docs/nosuchpage/'>a</a>", "a SINGLE-quoted href at a URL nothing builds", 1, 0],
       ["<a href=/asterism/docs/nosuchpage/>a</a>", "an UNQUOTED href at a URL nothing builds", 1, 0],
+      ['<a HREF="/asterism/docs/nosuchpage/">a</a>', "an UPPERCASE attribute name", 1, 0],
+      ['<a data-href="/asterism/docs/nosuchpage/">a</a>', "a `data-href` alone, which is not a link", 0, 0],
       ["<a href='/asterism/docs/walkthrough/'>a</a>", "a single-quoted href that resolves", 0, 0],
       ['<a data-href="/asterism/docs/nosuchpage/" href="/asterism/docs/walkthrough/">a</a>', "a `data-href` beside a real one — only the real one is a link", 0, 0],
       ['<link rel="icon" href="/favicon.svg" />', "a favicon, which is an asset and not a link", 0, 0],
@@ -2245,6 +2269,46 @@ function report(total, tally, groups, coverageWork) {
       ["a <div> rescued by a bare `div` rule", "<style>div { white-space: pre; }</style>" + twoLine, false],
       // An element name that is not this element's must still not apply.
       ["a `span` rule that cannot reach a <div>", "<style>span { white-space: pre; }</style>" + twoLine, true],
+      // SPECIFICITY, not document order. A class outranks a type, so a later `pre`/`div`
+      // rule does not undo an earlier class rule — resolving by order alone got this wrong
+      // in BOTH directions, and only became reachable once element selectors were
+      // evaluated at all.
+      [
+        "a class rule for `pre` followed by a bare `pre` rule that would undo it",
+        "<style>.x__terminal { white-space: pre; } pre { white-space: normal; }</style>" +
+          '<pre class="x__terminal">a\nb</pre>',
+        false,
+      ],
+      [
+        "a class rule for `normal` that a later bare `div` rule cannot override",
+        "<style>.x__terminal { white-space: normal; } div { white-space: pre; }</style>" + twoLine,
+        true,
+      ],
+      // A type selector is case-insensitive in HTML; a class selector is not.
+      [
+        "an UPPERCASE type selector that collapses the block",
+        "<style>PRE { white-space: normal; }</style>" + '<pre class="x__terminal">a\nb</pre>',
+        true,
+      ],
+      // An ancestor constraint cannot be evaluated from the block alone, and treating the
+      // rightmost compound as the whole selector said it applied.
+      [
+        "a rule constrained by an ancestor this cannot see",
+        "<style>.wrapper .x__terminal { white-space: pre; }</style>" + twoLine,
+        true,
+      ],
+      // …and the same shape spelled with a child combinator.
+      [
+        "a rule constrained by a parent this cannot see",
+        "<style>.wrapper > .x__terminal { white-space: pre; }</style>" + twoLine,
+        true,
+      ],
+      // Two rules at the SAME specificity: the later one renders.
+      [
+        "two class rules at equal specificity, the later collapsing",
+        "<style>.x__terminal { white-space: pre; } .x__terminal { white-space: normal; }</style>" + twoLine,
+        true,
+      ],
       ["a <pre> the page re-declares as `pre`", styled("pre") + '<pre class="x__terminal">a\nb</pre>', false],
       // A statement at-rule ends in `;` and has no block. Read as a rule it swallows the
       // NEXT selector, so one `@import` at the top of a stylesheet hid everything below it.
@@ -2788,7 +2852,13 @@ function catalogToolNames() {
 function codeSpans(text) {
   const spans = new Set();
   for (const m of text.matchAll(/`([^`\n]+)`/g)) spans.add(m[1]);
-  for (const m of text.matchAll(/<code[^>]*>([^<]+)<\/code>/g)) spans.add(decodeEntities(m[1]).trim());
+  // `gi` like every other HTML matcher here, and tolerant of markup nested inside — a name
+  // wrapped in `<code><b>read_file</b></code>` is still the page naming that tool. Without
+  // either, a page marking its catalog up that way silently drops below the two-name
+  // threshold and stops being covered at all.
+  for (const m of text.matchAll(/<code\b[^>]*>([\s\S]*?)<\/code>/gi)) {
+    spans.add(decodeEntities(m[1].replace(/<[^>]+>/g, "")).trim());
+  }
   return spans;
 }
 
@@ -2828,6 +2898,13 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
     );
   }
   return gaps;
+}
+
+/** Every `id` an HTML page gives an element, for resolving a link's `#fragment`. */
+function idsIn(text) {
+  return new Set(
+    [...text.matchAll(/<[a-zA-Z][^>]*>/g)].map((m) => attrOf(m[0], "id")).filter((v) => v !== undefined),
+  );
 }
 
 /** `site_url` → the two prefixes the root page's links are read against. */
@@ -2870,6 +2947,8 @@ function checkLandingLinks(
   const broken = [];
   const offSite = [];
   let checked = 0;
+  const landingPages = pages.map(([rel]) => rel);
+  const landingIndex = landingPages.find((p) => p.endsWith("/index.html")) ?? landingPages[0];
 
   for (const [rel, text] of pages) {
     // `<a href>` only. A `<link rel="icon" href="/favicon.svg">` is an ASSET request, served
@@ -2879,8 +2958,9 @@ function checkLandingLinks(
     // `data-href=`, because `-` is not a word character — which would report an author's
     // private attribute as a page link. A single-quoted `href` is the mirror failure and
     // the worse one, since an unmatched link is silently unchecked rather than loudly wrong.
-    for (const m of text.matchAll(/<a\b[^>]*?\shref=("([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi)) {
-      const href = decodeEntities(m[2] ?? m[3] ?? m[4] ?? "");
+    for (const m of text.matchAll(/<a\b([^>]*)>/gi)) {
+      const href = attrOf(m[1], "href");
+      if (href === undefined) continue;
       if (EXTERNAL_TARGET.test(href) || href.startsWith("mailto:") || href.startsWith("#")) continue;
       if (!href.startsWith("/")) continue; // a relative asset (logo.png) — not a page link
       const line = text.slice(0, m.index).split("\n").length;
@@ -2890,13 +2970,29 @@ function checkLandingLinks(
         continue;
       }
       const [pathPart, fragment] = href.slice(siteRoot.length).split("#");
+      // A SIBLING page served from the same directory as this one — `landing/*.html` is a
+      // list, not a single file. Resolved against that list rather than translated into
+      // markdown mkdocs never built: `/asterism/pricing.html` would otherwise be looked up
+      // as `pricing.md`, reported broken, and fail CI on a correct link the day a second
+      // landing page exists.
+      const sibling = landingPages.find((p) => p.split("/").pop() === pathPart.replace(/\/$/, ""));
+      if (sibling) {
+        checked++;
+        if (fragment) {
+          const ids = idsIn(readFileSync(join(ROOT, sibling), "utf8"));
+          if (!ids.has(fragment)) broken.push(`${at}  ${href} — ${sibling} has no element with that id`);
+        }
+        continue;
+      }
       const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
-      if (bare === "" || bare === "index") {
+      // "This page itself" only when it IS this page: read from a sibling, `/asterism/`
+      // names the index, whose ids are not this page's.
+      if ((bare === "" || bare === "index") && rel === landingIndex) {
         // This page itself — NOT counted as a link resolved. `checked === 0` is the only
         // tripwire for a moved site, and counting self-links would let a page whose in-site
         // links are all `/asterism/` satisfy it while resolving nothing.
         if (fragment) {
-          const ids = new Set([...text.matchAll(/\bid=("([^"]*)"|'([^']*)')/gi)].map((h) => h[2] ?? h[3]));
+          const ids = idsIn(text);
           if (!ids.has(fragment)) broken.push(`${at}  ${href} — this page has no element with that id`);
         }
         continue;
@@ -2952,9 +3048,10 @@ const PRESERVING = new Set(["pre", "pre-wrap", "break-spaces"]);
  * is skipped rather than guessed at, which keeps the failure on the side of reporting.
  */
 function whiteSpaceFor(css, classes, tag) {
-  let value = "";
+  let winner = null; // { spec: [classes, types], order, value }
   const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
   let i = 0;
+  let order = 0;
   while (i < text.length) {
     const open = text.indexOf("{", i);
     if (open === -1) break;
@@ -2977,35 +3074,60 @@ function whiteSpaceFor(css, classes, tag) {
     }
     // An at-rule's whole block is skipped: `@media`/`@supports` declarations are
     // conditional, and the question here is what the page renders as by default.
-    if (!selectorList.startsWith("@") && selectorApplies(selectorList, classes, tag)) {
-      // Last declaration wins, which is what the cascade does among rules of equal
-      // specificity — so a later `white-space: normal` correctly undoes an earlier `pre`.
-      for (const m of text.slice(open + 1, j - 1).matchAll(/white-space:\s*([a-z-]+)/g)) value = m[1];
+    if (!selectorList.startsWith("@")) {
+      let declared = "";
+      for (const m of text.slice(open + 1, j - 1).matchAll(/white-space:\s*([a-z-]+)/gi)) declared = m[1].toLowerCase();
+      if (declared) {
+        order++;
+        for (const spec of applicableSpecificities(selectorList, classes, tag)) {
+          if (!winner || beats(spec, order, winner)) winner = { spec, order, value: declared };
+        }
+      }
     }
     i = j;
   }
-  return value;
+  return winner ? winner.value : "";
 }
 
-/** Does any selector in this list apply to an element with these classes and this tag? */
-function selectorApplies(selectorList, classes, tag) {
-  return selectorList.split(",").some((selector) => {
-    const compounds = selector.trim().split(/[\s>+~]+/).filter(Boolean);
-    const last = compounds[compounds.length - 1] ?? "";
-    if (!last || /[:[#]/.test(last)) return false; // a condition this cannot evaluate
-    const named = [...last.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
-    const element = last.replace(/\.[\w-]+/g, "").trim();
-    if (element && element !== "*" && element !== tag) return false;
-    // ⚠ A compound naming NO class still applies: `pre { white-space: normal }` and
-    // `* { … }` are ordinary CSS, and requiring a class here missed both. That mattered
-    // exactly where this check is load-bearing — `pre { white-space: normal }` collapses a
-    // `<pre>` whose tag is otherwise the reason it is exempt — and the fixture agreed with
-    // the mistake by using the class form of the same rule.
-    if (named.length === 0 && !element) return false; // an empty compound constrains nothing
-    // Every class the compound demands must be on the element — `.a.b` does not apply to
-    // an element carrying only `a`.
-    return named.every((name) => classes.includes(name));
-  });
+/** Does (spec, order) win over the current best? More specific first, then later in the file. */
+function beats([classesA, typesA], order, { spec: [classesB, typesB], order: orderB }) {
+  if (classesA !== classesB) return classesA > classesB;
+  if (typesA !== typesB) return typesA > typesB;
+  return order >= orderB;
+}
+
+/**
+ * Every specificity at which this selector list applies to an element with these classes
+ * and this tag — empty when it does not apply at all.
+ *
+ * Specificity is why this returns a weight rather than a boolean. The cascade is not
+ * document order: `.terminal { white-space: pre }` beats a later `pre { white-space:
+ * normal }`, because a class outranks a type. Resolving by order alone got both directions
+ * wrong — reporting a page that renders correctly, and passing one the browser collapses,
+ * which is the shipped defect this check exists for. It only became reachable when
+ * element-only selectors started being evaluated, one commit earlier.
+ *
+ * Only a SINGLE compound is evaluated. `.wrapper .terminal { … }` applies to this block
+ * only if an ancestor carries `.wrapper`, which nothing here can know — and treating the
+ * rightmost compound as the whole selector said it applies. Anything with a combinator is
+ * therefore not evaluated, which keeps the failure on the side of reporting, the same
+ * stance taken for a pseudo-class, an attribute or an id.
+ */
+function applicableSpecificities(selectorList, classes, tag) {
+  const out = [];
+  for (const selector of selectorList.split(",")) {
+    const compound = selector.trim();
+    if (!compound || /[\s>+~]/.test(compound)) continue; // an ancestor constraint this cannot evaluate
+    if (/[:[#]/.test(compound)) continue; // a condition this cannot evaluate
+    const named = [...compound.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+    const element = compound.replace(/\.[\w-]+/g, "").trim();
+    // A type selector is case-INSENSITIVE in HTML, where a class selector is not.
+    if (element && element !== "*" && element.toLowerCase() !== tag) continue;
+    if (named.length === 0 && !element) continue; // an empty compound constrains nothing
+    if (!named.every((name) => classes.includes(name))) continue;
+    out.push([named.length, element && element !== "*" ? 1 : 0]);
+  }
+  return out;
 }
 
 /**
