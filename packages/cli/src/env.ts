@@ -31,35 +31,35 @@ export function ambientValue(value: string | undefined): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
 }
 
-/** An environment variable's value, with a present-but-empty one read as unset. */
-export function envValue(env: Env, name: string): string | undefined {
-  return ambientValue(env[name]);
-}
-
 /**
- * An environment variable's value when it carries TEXT — the raw value, returned only if
- * it is not blank. The reading for a COORDINATE (a model id, an endpoint) or an
- * infrastructure CREDENTIAL (an API key), where whitespace on its own is never what was
- * meant and is usually what a copy-paste left behind.
+ * The text an environment variable carries, TRIMMED — or undefined when it carries none.
  *
- * Distinct from {@link envValue}, which an agent-scoped secret uses: padding on a
- * credential the operator supplied may be load-bearing, and it is theirs to decide. The
- * difference is only about whether anything is THERE — what is returned, sent or written
- * is the value exactly as given, padding included.
+ * The reading for a COORDINATE (a model id, an endpoint, a provider name) and for an
+ * infrastructure CREDENTIAL (an API key, a chat bot token): whitespace on its own is never
+ * what was meant, and whitespace on the END is what a copy-paste or a here-doc leaves
+ * behind. Trimming it is the difference between a key that works and an opaque
+ * invalid-header error at the first request.
+ *
+ * Deliberately NOT the reading for a value the operator supplied as an agent's own secret
+ * (see {@link ambientValue}): padding there may be load-bearing, and it is theirs to
+ * decide. Those are the only two rules in this module, and each is named for the question
+ * it answers. There WAS a third — an untrimmed `envIsSet`, used by one reporting line
+ * while every consumer moved to this one — and it did exactly what a second rule always
+ * does: `config show` called a whitespace-only `ASTERISM_MODEL_ID` an active override
+ * while the resolver ignored it. One install, two answers, in the fix for that (#174).
  */
 export function envText(env: Env, name: string): string | undefined {
-  const raw = env[name];
-  return raw !== undefined && raw.trim().length > 0 ? raw : undefined;
+  const trimmed = env[name]?.trim();
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : undefined;
 }
 
 /**
- * Whether an environment variable supplies anything. Derived from {@link envValue}
- * rather than testing `undefined` separately, so a surface that REPORTS a variable as
- * set and the code that USES it can never disagree about what "set" means — which is
- * the whole of #174.
+ * Whether a variable carries any text. Derived from {@link envText} rather than asked
+ * again, so a surface that REPORTS a variable as set and the code that USES it cannot
+ * answer differently.
  */
-export function envIsSet(env: Env, name: string): boolean {
-  return envValue(env, name) !== undefined;
+export function suppliesText(env: Env, name: string): boolean {
+  return envText(env, name) !== undefined;
 }
 
 /** The pair of variables that configure a local embeddings endpoint. Declared once. */
@@ -84,9 +84,9 @@ export const EMBED_ENDPOINT_VARS = [
  * a whitespace-padded credential may well be a credential.
  */
 export function embeddingEndpoint(env: Env): { url: string; model: string } | undefined {
-  const url = env.ASTERISM_RECALL_EMBED_URL?.trim();
-  const model = env.ASTERISM_RECALL_EMBED_MODEL?.trim();
-  return url && model ? { url, model } : undefined;
+  const url = envText(env, "ASTERISM_RECALL_EMBED_URL");
+  const model = envText(env, "ASTERISM_RECALL_EMBED_MODEL");
+  return url !== undefined && model !== undefined ? { url, model } : undefined;
 }
 
 /**
@@ -104,20 +104,3 @@ export function missingEmbeddingVars(env: Env): string[] {
   return EMBED_ENDPOINT_VARS.filter((k) => !supplied.includes(k));
 }
 
-/**
- * Whether a variable supplies TEXT — present, and not only whitespace.
- *
- * Stricter than {@link envIsSet}, and only for deciding whether a value exists at all:
- * whatever is written or sent stays verbatim, padding included. It exists because the
- * readers on the other side of a service's env file trim before testing —
- * `resolveHttpToken` does — so capturing `ASTERISM_HTTP_TOKEN="  "` reported a token
- * captured, wrote a blank one into the file, and left the service minting a different
- * token that every client pinned to the "captured" one is then rejected by. One install,
- * two answers, narrowed to whitespace.
- *
- * NOT the rule for a credential VALUE an operator typed or piped (see
- * {@link ambientValue}): padding there may be load-bearing, and it is theirs to decide.
- */
-export function suppliesText(env: Env, name: string): boolean {
-  return envText(env, name) !== undefined;
-}

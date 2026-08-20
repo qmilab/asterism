@@ -698,6 +698,11 @@ test("a coordinate or key made of whitespace supplies nothing, from the environm
   const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o" });
   expect(resolveProviderAuth({ OPENAI_API_KEY: " " }, model!).apiKey).toBeUndefined();
   expect(providerAuthPlan({ OPENAI_API_KEY: "\n" }, model).satisfied).toBe(false);
-  // A key with padding AROUND something is still a key, and is sent exactly as given.
-  expect(resolveProviderAuth({ OPENAI_API_KEY: " sk-real " }, model!).apiKey).toBe(" sk-real ");
+  // A key with padding around something is still a key — and the padding goes, because a
+  // newline on the end of a pasted key is the mistake this reading exists to forgive, not
+  // part of the credential. (An AGENT's own secret keeps its padding; that is `secrets
+  // add`'s rule, and a different question — see `env.ts`.)
+  expect(resolveProviderAuth({ OPENAI_API_KEY: " sk-real " }, model!).apiKey).toBe("sk-real");
+  expect(resolveProviderAuth({ OPENAI_API_KEY: "sk-abc\n" }, model!).apiKey).toBe("sk-abc");
+  expect(resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o\n" }).model?.id).toBe("gpt-4o");
 });

@@ -9,9 +9,7 @@ import {
   ambientValue,
   EMBED_ENDPOINT_VARS,
   embeddingEndpoint,
-  envIsSet,
   envText,
-  envValue,
   missingEmbeddingVars,
   suppliesText,
 } from "./env.ts";
@@ -22,30 +20,32 @@ test("an ambient value that is empty has supplied nothing", () => {
   expect(ambientValue(undefined)).toBeUndefined();
 });
 
-test("whitespace is a value — it is something the operator put there", () => {
-  // Only EMPTY means "nothing supplied". A padded token is a real credential shape, and
-  // trimming an ambient value here would change what a pipe stores byte for byte.
+test("whitespace is a value the operator supplied — for a secret, which is theirs", () => {
+  // Only EMPTY means "nothing supplied" to `ambientValue`. A padded token is a real
+  // credential shape, and trimming here would change what a pipe stores byte for byte.
   expect(ambientValue(" ")).toBe(" ");
-  expect(envValue({ K: "\n" }, "K")).toBe("\n");
+  expect(ambientValue("\n")).toBe("\n");
 });
 
 test("an exported-but-empty variable reads as unset, an absent one the same way", () => {
   const env = { EMPTY: "", REAL: "llama3.2" };
-  expect(envValue(env, "EMPTY")).toBeUndefined();
-  expect(envValue(env, "REAL")).toBe("llama3.2");
-  expect(envValue(env, "NEVER_SET")).toBeUndefined();
+  expect(envText(env, "EMPTY")).toBeUndefined();
+  expect(envText(env, "REAL")).toBe("llama3.2");
+  expect(envText(env, "NEVER_SET")).toBeUndefined();
 });
 
 test("reporting a variable as set and reading its value cannot disagree", () => {
   // The whole of #174 was two answers to one question: `config show` said the override
-  // was set while the resolver read nothing from it. `envIsSet` is derived from
-  // `envValue` rather than testing `undefined` on its own, so there is one answer.
-  for (const raw of [undefined, "", " ", "x"]) {
+  // was set while the resolver read nothing from it. It happened a second time, in the
+  // fix, when one reporting line kept an untrimmed rule of its own after every consumer
+  // moved to the trimming one — so there is now exactly one, and this is it.
+  for (const raw of [undefined, "", " ", "\t", "x", " x "]) {
     const env = raw === undefined ? {} : { K: raw };
-    expect(envIsSet(env, "K")).toBe(envValue(env, "K") !== undefined);
+    expect(suppliesText(env, "K")).toBe(envText(env, "K") !== undefined);
   }
-  expect(envIsSet({ K: "" }, "K")).toBe(false);
-  expect(envIsSet({ K: "x" }, "K")).toBe(true);
+  expect(suppliesText({ K: "" }, "K")).toBe(false);
+  expect(suppliesText({ K: "  " }, "K")).toBe(false);
+  expect(suppliesText({ K: "x" }, "K")).toBe(true);
 });
 
 test("an embeddings endpoint needs both variables, trimmed", () => {
@@ -72,12 +72,12 @@ test("an embeddings endpoint needs both variables, trimmed", () => {
   expect([...EMBED_ENDPOINT_VARS]).toEqual(["ASTERISM_RECALL_EMBED_URL", "ASTERISM_RECALL_EMBED_MODEL"]);
 });
 
-test("whitespace supplies no TEXT, even though it is a value", () => {
-  // Two questions, deliberately different. `envIsSet` asks whether the operator put
-  // something there — a padded credential is a credential. `suppliesText` asks whether
-  // there is anything to hand on, which is what a service env file needs to know,
-  // because every reader on the other side of it trims before testing.
-  expect(envIsSet({ K: "  " }, "K")).toBe(true);
+test("whitespace supplies no TEXT, even though it is something the operator typed", () => {
+  // The two questions, side by side. `ambientValue` asks whether the operator supplied
+  // something — a padded secret is a secret, and its padding is theirs. `suppliesText`
+  // asks whether there is text to hand on, which is what a service env file, a model
+  // coordinate and an infrastructure credential all need to know.
+  expect(ambientValue("  ")).toBe("  ");
   expect(suppliesText({ K: "  " }, "K")).toBe(false);
   expect(suppliesText({ K: "" }, "K")).toBe(false);
   expect(suppliesText({}, "K")).toBe(false);
@@ -106,17 +106,17 @@ test("a half-configured embeddings endpoint names what is still missing", () => 
   ).toEqual(["ASTERISM_RECALL_EMBED_MODEL"]);
 });
 
-test("envText and envValue answer two different questions on purpose", () => {
-  // `envValue`: did the operator put something there? Padding on an agent-scoped secret
-  // may be load-bearing, and it is theirs. `envText`: is there anything to USE? A model
-  // id or an API key made of spaces is what a copy-paste left, never what was meant.
-  expect(envValue({ K: "  " }, "K")).toBe("  ");
+test("the two rules answer two different questions, and there is no third", () => {
+  // `ambientValue`: did the operator supply something? Padding on an agent's own secret
+  // may be load-bearing, and it is theirs. `envText`: is there text to USE? A model id or
+  // an API key made of spaces is what a copy-paste left, never what was meant — and the
+  // newline on the END of a pasted key is the same mistake, so it goes too.
+  expect(ambientValue("  ")).toBe("  ");
   expect(envText({ K: "  " }, "K")).toBeUndefined();
   expect(envText({ K: "\n" }, "K")).toBeUndefined();
   expect(envText({ K: "" }, "K")).toBeUndefined();
   expect(envText({}, "K")).toBeUndefined();
-  // Whatever IS there comes back exactly as given — the rule decides presence, not shape.
-  expect(envText({ K: " sk-padded " }, "K")).toBe(" sk-padded ");
+  expect(envText({ K: " sk-padded\n" }, "K")).toBe("sk-padded");
   // `suppliesText` is derived from it, so the two cannot answer differently.
   for (const raw of [undefined, "", " ", "\t", "x", " x "]) {
     const env = raw === undefined ? {} : { K: raw };

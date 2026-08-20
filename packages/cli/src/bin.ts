@@ -20,8 +20,8 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { decideReview, decideTransition, runCli } from "./cli.js";
-import type { CliIO, ReviewDecision, TransitionDecision } from "./cli.js";
+import { decideGrant, decideReview, decideTransition, runCli } from "./cli.js";
+import type { CliIO, GrantDecision, ReviewDecision, TransitionDecision } from "./cli.js";
 import { artifactFetchHost, workspaceCapabilities } from "./capabilities.js";
 import { outboundHost } from "./outbound.js";
 import { createNodeTerminal } from "./dashboard/terminal-node.js";
@@ -142,15 +142,14 @@ const io: CliIO = {
   // candidate and shown "0 granted, N left gated" — a report of decisions nobody made.
   ...(interactive
     ? {
-        reviewGrant: async (): Promise<boolean> => {
-          const answer = await ask(
-            "  Grant this capability a standing (act without pausing)? [y/N]:",
-          );
-          // Undefined already means no here, and no is what a departure should mean: a
-          // grant needs an explicit yes, and declining one changes nothing that has to be
-          // undone. So this one needs no separate quit — the walk ends with N left gated.
-          return answer !== undefined && /^y(es)?$/i.test(answer);
-        },
+        // Same mapping-in-`cli.ts` shape as the two above, and the same distinction: no
+        // answer stops the walk. It matters less here (nothing is granted, and a
+        // candidate is re-proposed next time) but readline closes only its own interface,
+        // so without it a walk of N capabilities took N Ctrl-Ds to leave.
+        reviewGrant: (): Promise<GrantDecision> =>
+          ask("  Grant this capability a standing (act without pausing)? [y]es / [N]o / [q]uit:").then(
+            decideGrant,
+          ),
       }
     : {}),
   // `serve`: start the local HTTP endpoint. Imported lazily so non-serve commands

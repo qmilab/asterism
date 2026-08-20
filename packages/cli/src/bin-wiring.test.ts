@@ -63,6 +63,7 @@ test("every interactive hook is wired on the one terminal test, and the exceptio
   // version and every test would stay green.
   expect(asked).toContain("decideReview(");
   expect(asked).toContain("decideTransition(");
+  expect(asked).toContain("decideGrant");
   expect(asked).not.toMatch(/kind:\s*"reject"/); // no verdict decided in this file
 
   // Exactly one wiring reads the file descriptors itself, and it is the dashboard's TUI

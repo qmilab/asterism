@@ -173,7 +173,7 @@ another capability, and never carries to another agent.
 
 | Form | What it does |
 |---|---|
-| `trust <agent> --review` | Review the capabilities the agent has earned the right to act on without pausing. You grant or decline each; nothing is granted without your yes. The review — each capability, its evidence, and the question — is written to standard error, so redirecting the output leaves what you are deciding about on screen; only the closing count is on standard out. Needs a terminal to ask at: with nobody to ask, it names how many are waiting and stops, leaving them to be decided later. |
+| `trust <agent> --review` | Review the capabilities the agent has earned the right to act on without pausing. You grant or decline each; nothing is granted without your yes, and `[q]uit` (or `Ctrl-D`) stops the walk with the rest keeping for next time. The review — each capability, its evidence, and the question — is written to standard error, so redirecting the output leaves what you are deciding about on screen; only the closing count is on standard out. Needs a terminal to ask at: with nobody to ask, it names how many are waiting and stops, leaving them to be decided later. |
 | `trust <agent> show` | Show the agent's level, which capabilities now act without pausing, and its earning bar. |
 | `trust <agent> revoke <capability>` | Take a grant back — the capability pauses for your confirmation again. |
 | `trust <agent> threshold [--clean <n>] [--targets <n>]` | Tune how much clean track record review asks for before it proposes a grant: how many confirmed executions (`--clean`), across how many different targets (`--targets`). Set either or both; leave the other as it is. |

@@ -16,7 +16,7 @@ import type { RunningServer, ServeConsoleOptions, ServeOptions } from "@qmilab/a
 import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { workspaceCapabilities } from "./capabilities.ts";
-import { decideReview, decideTransition, runCli } from "./cli.ts";
+import { decideGrant, decideReview, decideTransition, runCli } from "./cli.ts";
 import type { CliIO, ReviewDecision, ReviewItem, TransitionDecision } from "./cli.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import type { ModelResolutionContext } from "./model-config.ts";
@@ -367,6 +367,16 @@ test("no answer and an empty answer are different things at a review prompt", as
   expect(await decideReview("e", noEdit)).toEqual({ kind: "quit" });
 });
 
+test("and on a grant prompt, where anything but yes leaves it gated", () => {
+  expect(decideGrant(undefined)).toBe("quit");
+  expect(decideGrant("")).toBe(false); // an answer, and not a yes
+  expect(decideGrant("n")).toBe(false);
+  expect(decideGrant("y")).toBe(true);
+  expect(decideGrant("YES")).toBe(true);
+  expect(decideGrant("q")).toBe("quit");
+  expect(decideGrant("quit")).toBe("quit");
+});
+
 test("the same distinction on a transition prompt, where the default is skip", () => {
   expect(decideTransition(undefined)).toBe("quit");
   expect(decideTransition("")).toBe("skip");
@@ -499,6 +509,37 @@ test("leaving a queue review is not a decision — the rest of the pile survives
   const settled = await capture(["memory", "inspect", "personal"], h.io);
   expect([...settled.matchAll(/· rejected ·/g)]).toHaveLength(3);
   expect(settled).not.toContain("· proposed ·");
+});
+
+test("leaving a grant review stops it, rather than declining the rest one at a time", async () => {
+  // Nothing durable is at stake — a declined grant changes nothing, and a candidate is
+  // re-proposed next time — but readline closes only its own interface and leaves stdin
+  // open, so Ctrl-D answered the candidate in front of you and the loop built a fresh
+  // prompt for the next. A walk of N capabilities took N of them. The two sibling walks
+  // got a way out in this release; this is the third.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
+  seedCleanRecord(h, "cleaner", "fs.move", ["a", "b", "c"]);
+
+  let asked = 0;
+  h.io.reviewGrant = () => {
+    asked++;
+    return "quit";
+  };
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["trust", "cleaner", "--review"], h.io);
+  expect(asked).toBe(1); // asked once, then stopped
+  expect(h.err.join("\n")).toContain("stopped");
+  expect(h.out.join("\n")).toContain("Done — 0 granted, 0 left gated.");
+  // Neither capability was granted, and both are still proposed next time.
+  expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("No capabilities have earned");
+  h.io.reviewGrant = () => false;
+  expect(await captureBoth(["trust", "cleaner", "--review"], h.io)).toContain(
+    "Done — 0 granted, 2 left gated.",
+  );
 });
 
 test("what a reviewer is deciding ABOUT is written where the question is asked", async () => {
@@ -3197,6 +3238,33 @@ test("config set rejects a flag given an EMPTY value, and stores nothing", async
   expect(loadConfig(homeOf(h)).model).toEqual({ id: "llama3.2", provider: "ollama" });
 });
 
+test("config set refuses a value made of whitespace, which the reader would discard", async () => {
+  // The writer must not accept what the reader throws away. `withoutEmptyFields` drops a
+  // stored coordinate whose `trim()` is empty, so `config set "  "` reported a model set
+  // and the very next `config show` reported none — the same one-command-two-answers
+  // shape, reached through whitespace instead of `""`.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+  for (const argv of [
+    ["config", "set", "  "],
+    ["config", "set", "gpt-4o", "--provider", "  "],
+    ["config", "set", "gpt-4o", "--base-url", "\t"],
+    ["config", "set", "gpt-4o", "--agent", " "],
+  ]) {
+    h.err.length = 0;
+    expect(await runCli(argv, h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("needs a value");
+  }
+  expect(loadConfig(homeOf(h)).model).toEqual({ id: "llama3.2", provider: "ollama" });
+  // A value with padding AROUND something is still a value, and is kept as typed — the
+  // rule decides whether anything is there, never what it is.
+  expect(await runCli(["config", "set", " gpt-4o "], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).model?.id).toBe(" gpt-4o ");
+  expect(await runCli(["config", "set", "gpt-4o", "--provider", " openai "], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).model?.provider).toBe(" openai ");
+});
+
 test("config show reports an environment override only when it supplies something", async () => {
   const env: Record<string, string | undefined> = {};
   const h = harness(env);
@@ -3210,6 +3278,16 @@ test("config show reports an environment override only when it supplies somethin
   const empty = await capture(["config", "show"], h.io);
   expect(empty).not.toContain("Environment override");
   expect(empty).toContain("writer  →  llama3.2 (provider: ollama)  [install default]");
+
+  // …and the same for whitespace, which is what the resolver reads it as. This line kept
+  // an untrimmed rule of its own after every consumer moved to the trimming one, and said
+  // "set" over a per-agent line reading `[unset]` — the same defect, inside its own fix.
+  for (const blank of ["  ", "\t", "\n"]) {
+    env.ASTERISM_MODEL_ID = blank;
+    const shown = await capture(["config", "show"], h.io);
+    expect(shown).not.toContain("Environment override");
+    expect(shown).toContain("writer  →  llama3.2 (provider: ollama)  [install default]");
+  }
 
   // A real value still overrides, and still says so.
   env.ASTERISM_MODEL_ID = "gpt-4o";

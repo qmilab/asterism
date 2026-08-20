@@ -112,8 +112,6 @@ import {
   ambientValue,
   EMBED_ENDPOINT_VARS,
   embeddingEndpoint,
-  envIsSet,
-  envValue,
   missingEmbeddingVars,
   suppliesText,
 } from "./env.js";
@@ -258,6 +256,18 @@ export async function decideReview(
 }
 
 /**
+ * The same mapping for an earned standing grant. A grant needs an explicit yes, so
+ * anything that is not one leaves the capability gated — except a departure, which stops
+ * the walk rather than declining the rest on the operator's behalf.
+ */
+export function decideGrant(answer: string | undefined): GrantDecision {
+  if (answer === undefined) return "quit";
+  const choice = answer.toLowerCase();
+  if (choice === "q" || choice === "quit") return "quit";
+  return /^y(es)?$/i.test(answer);
+}
+
+/**
  * The same mapping for a suggested objective transition. Nothing here is durable — a skip
  * changes nothing — but leaving should not silently work through the rest of the list.
  */
@@ -268,6 +278,18 @@ export function decideTransition(answer: string | undefined): TransitionDecision
   if (choice === "q" || choice === "quit") return "quit";
   return "skip";
 }
+
+/**
+ * The operator's verdict on one earned capability: grant it, leave it gated, or stop.
+ *
+ * `"quit"` is here for the same reason the review and transition walks have one — a
+ * departure is not a decision. Nothing is lost without it (a declined grant changes
+ * nothing, and a candidate is re-proposed next time), but Ctrl-D answered only the
+ * candidate in front of you: readline closes its own interface and leaves stdin open, so
+ * the loop built a fresh one and asked again, and a walk of N capabilities took N
+ * Ctrl-Ds. Measured, after a comment here claimed the opposite.
+ */
+export type GrantDecision = boolean | "quit";
 
 /** A proposed standing grant presented for ratification during `trust <agent> --review`. */
 export interface StandingReviewItem {
@@ -427,11 +449,12 @@ export interface CliIO {
   ) => TransitionDecision | Promise<TransitionDecision>;
   /**
    * Ratify a proposed standing grant during `trust <agent> --review` — return true
-   * to grant the capability an auto-approve standing, false to leave it gated. Absent
-   * ⇒ reject every proposal, so nothing is granted without an explicit yes (the same
-   * safe default as `confirm`/`review`; earning autonomy is itself a reviewable act).
+   * to grant the capability an auto-approve standing, false to leave it gated, or
+   * `"quit"` to stop the walk without deciding this one. Absent ⇒ reject every proposal,
+   * so nothing is granted without an explicit yes (the same safe default as
+   * `confirm`/`review`; earning autonomy is itself a reviewable act).
    */
-  reviewGrant?: (item: StandingReviewItem) => boolean | Promise<boolean>;
+  reviewGrant?: (item: StandingReviewItem) => GrantDecision | Promise<GrantDecision>;
   /** Open the kernel store at a path. Absent ⇒ the real local SQLite store. */
   openStore?: (path: string) => AsterismStore;
   /**
@@ -664,7 +687,10 @@ function rejectUnknownFlags(
  *
  * - Given with no value at all (`--host`), which the parser reads as boolean `true`.
  * - Given an EMPTY value (`--host ""`), which is what `--host "$HOST"` expands to when
- *   the variable is unset or has been cleared.
+ *   the variable is unset or has been cleared — or one made only of whitespace, which is
+ *   what `--host "$HOST"` expands to when the variable holds a stray space or a newline.
+ *   The same test, because the reader on the other side discards both: `config set "  "`
+ *   was accepted and reported set, and the very next `config show` said nothing was.
  *
  * Both used to be handled differently, and the second was handled nowhere: it fell
  * through as a real value, and what happened next varied by verb. `config set gpt-4o
@@ -690,7 +716,7 @@ function rejectValuelessFlags(
 ): boolean {
   for (const flag of flags) {
     const given = parsed.flags[flag];
-    if (given === true || given === "") {
+    if (given === true || given?.trim() === "") {
       io.err(`The --${flag} option needs a value.`);
       return false;
     }
@@ -1049,6 +1075,7 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
     );
     io.err("Granting one lets that capability act without pausing for you — until a");
     io.err("regression takes it back. Nothing is granted unless you accept it.");
+    io.err("Answer [q]uit at any point to stop; the rest keep for next time.");
 
     let granted = 0;
     let declined = 0;
@@ -1059,6 +1086,10 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
       io.err(`  ${c.basis}`);
 
       const accept = await review({ index: i + 1, total: candidates.length, capability: c.capability, basis: c.basis });
+      if (accept === "quit") {
+        io.err("  · stopped — the rest are left as they were");
+        break;
+      }
       if (!accept) {
         declined++;
         io.err("  ✗ left gated");
@@ -4773,10 +4804,12 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
         : "Install default model: (none set)",
     );
 
-    // What the RESOLVER reads, not what the shell happens to have defined. A variable
-    // that exists and holds nothing supplies nothing, so reporting it as an override
-    // here while `run` ignored it is how one install described itself two ways (#174).
-    const envSet = MODEL_ENV_VARS.filter((k) => envIsSet(io.env, k));
+    // The rule the RESOLVER reads — `settingsFromEnv` reads these same four through
+    // `envText`, so this must too. A variable that exists and carries nothing supplies
+    // nothing, and reporting it as an override here while `run` ignores it is how one
+    // install described itself two ways (#174). It described itself two ways a second
+    // time when this line kept an untrimmed rule of its own after the resolver moved.
+    const envSet = MODEL_ENV_VARS.filter((k) => suppliesText(io.env, k));
     if (envSet.length > 0) {
       // What it actually beats. "Overrides the config file" is not true of the whole
       // file: a per-agent model is IN that file and wins over the environment, and this
@@ -5544,7 +5577,7 @@ function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // The same rule for the positional form of the id. Skipping it instead would take
   // `config set "" --provider ollama` as a request to set only the provider, dropping
   // the coordinate the operator had actually typed at.
-  if (positionalId === "") {
+  if (positionalId?.trim() === "") {
     io.err("The model id needs a value.");
     return Promise.resolve(1);
   }
