@@ -127,6 +127,19 @@ const DIFF_OUTPUT = process.argv.includes("--diff-output");
 /** Where `asterism init` puts an install's store, relative to the workspace root. */
 const HOME = ".asterism";
 
+/** Every temp install this run has made, so no exit path can leave one behind. */
+const FIXTURES = new Set();
+process.on("exit", () => {
+  for (const dir of FIXTURES) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort on the way out: a directory already gone, or one the OS is still
+      // holding, must not turn a clean exit into a stack trace.
+    }
+  }
+});
+
 // ---------------------------------------------------------------- extraction
 
 /**
@@ -180,9 +193,15 @@ function terminalBlocks(text, isHtml) {
   // A class token CONTAINING `terminal`, not equal to it: the page's own is
   // `asterism__terminal`, and `\bterminal\b` does not match after an underscore — which is
   // how the first version of this read the landing page as having no commands at all.
-  const open = /<(div|pre)\b[^>]*class="([^"]*terminal[^"]*)"[^>]*>/gi;
+  // Both quotings. The `<a href>` reader below already does this and its comment calls the
+  // single-quote miss "the mirror failure and the worse one, since an unmatched link is
+  // silently unchecked rather than loudly wrong" — and then the same reasoning was not
+  // applied here, one function away. A single-quoted block is worse still: `blocklessPages`
+  // cannot see it, because a block WAS found, so every command in it is dropped in silence.
+  const open = /<(div|pre)\b[^>]*class=("([^"]*terminal[^"]*)"|'([^']*terminal[^']*)')[^>]*>/gi;
   for (const m of text.matchAll(open)) {
     const tag = m[1].toLowerCase();
+    const className = m[3] ?? m[4] ?? "";
     const from = m.index + m[0].length;
     // The end is found by MATCHING tags, not by taking the first `</div>`. A non-greedy
     // `([\s\S]*?)<\/(?:div|pre)>` ends at the first close of either kind, so one nested
@@ -210,7 +229,7 @@ function terminalBlocks(text, isHtml) {
     }
     blocks.push({
       tag,
-      className: m[2],
+      className,
       startLine: text.slice(0, m.index).split("\n").length,
       // Inline markup inside a terminal block is presentation (a `<span class="comment">`
       // around a shell comment); the command is what is left once it is gone.
@@ -313,7 +332,10 @@ function extract(relPath, base = ROOT) {
 function sectionIndex(text, isHtml) {
   const marks = [];
   if (isHtml) {
-    for (const m of text.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/g)) {
+    // `gi`, like every other HTML matcher here. Without the `i`, an `<H2>` yields no
+    // section at all and every command below it collapses into one group — sharing a
+    // fixture with commands the grouping exists to keep apart.
+    for (const m of text.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi)) {
       marks.push([text.slice(0, m.index).split("\n").length, `## ${decodeEntities(m[1].replace(/<[^>]+>/g, "")).trim()}`]);
     }
   } else {
@@ -452,23 +474,38 @@ function documentedSecretKeys() {
 const ENV = cleanEnv();
 
 /**
+ * Run one command while BUILDING a fixture, through `runBinary` so it gets the same timeout
+ * and the same refusal to read a killed child. A non-zero exit throws: a fixture that
+ * half-built is worse than one that stops, because every page checked against it would be
+ * checked against a state the docs never describe.
+ *
+ * One function rather than the same eight lines in `buildFixture` and `seedRecords` — they
+ * were changed identically once already, and the next change to one is where they diverge.
+ */
+function fixtureRunner(work) {
+  return (args, input) => {
+    const r = runBinary(args, { cwd: work, input: input ?? "", where: "while building a page's fixture install" });
+    if (r.code !== 0) {
+      throw new Error(
+        `fixture command \`asterism ${args.join(" ")}\` exited ${r.code}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`,
+      );
+    }
+    return r.stdout;
+  };
+}
+
+/**
  * A real install for one page, carrying every agent, file and record that page's
  * examples name but do not create for themselves. `skipAgents` are the ones the page
  * teaches you to create — seeding those would make the page's own `new` line fail.
  */
 function buildFixture(skipAgents = new Set(), skipConnections = false) {
   const work = mkdtempSync(join(tmpdir(), "asterism-docs-"));
-  // Through `runBinary`, so a fixture command gets the same timeout and the same refusal to
-  // read a killed child. A non-zero exit still throws: a fixture that half-built is worse
-  // than one that stops, because every page checked against it would be checked against a
-  // state the docs never describe.
-  const q = (args, input) => {
-    const r = runBinary(args, { cwd: work, input: input ?? "", where: "while building a page's fixture install" });
-    if (r.code !== 0) {
-      throw new Error(`fixture command \`asterism ${args.join(" ")}\` exited ${r.code}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
-    }
-    return r.stdout;
-  };
+  // Every ordinary path removes these in a `finally`; the abort paths in `runBinary` do
+  // not run one, and each install is a full `.asterism` store. Registered here so a
+  // timeout, a crash or an over-long output leaves nothing behind either.
+  FIXTURES.add(work);
+  const q = fixtureRunner(work);
 
   q(["init"]);
   // Every agent name the docs use, at the trust level the page gives it.
@@ -513,17 +550,7 @@ function buildFixture(skipAgents = new Set(), skipConnections = false) {
  * claim under test is that every command RUNS against a realistic install.
  */
 function seedRecords(work, name, present, skipConnections = false) {
-  // Through `runBinary`, so a fixture command gets the same timeout and the same refusal to
-  // read a killed child. A non-zero exit still throws: a fixture that half-built is worse
-  // than one that stops, because every page checked against it would be checked against a
-  // state the docs never describe.
-  const q = (args, input) => {
-    const r = runBinary(args, { cwd: work, input: input ?? "", where: "while building a page's fixture install" });
-    if (r.code !== 0) {
-      throw new Error(`fixture command \`asterism ${args.join(" ")}\` exited ${r.code}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
-    }
-    return r.stdout;
-  };
+  const q = fixtureRunner(work);
 
   if (name === "work" || name === "client") {
     q(["secrets", "add", name, "GITHUB_TOKEN"], "ghp_fixture_token");
@@ -855,6 +882,11 @@ function checkSynopsis(work, scratch, command, where = "") {
 }
 
 const RUN_TIMEOUT_MS = 30_000;
+/**
+ * Explicit, and well above Node's 1 MB default, which no call here used to set. A command
+ * printing past the limit has its child KILLED, which looked exactly like a timeout.
+ */
+const MAX_OUTPUT_BYTES = 16_000_000;
 
 /**
  * The ONE place this file starts the built binary. Every invocation gets the timeout, and
@@ -878,8 +910,18 @@ function runBinary(args, { cwd, input = "", where = "" }) {
       env: ENV,
       stdio: ["pipe", "pipe", "pipe"],
       timeout: RUN_TIMEOUT_MS,
+      maxBuffer: MAX_OUTPUT_BYTES,
     }), stderr: "" };
   } catch (e) {
+    if (e.code === "ENOBUFS") {
+      console.error(
+        `${where ? `${where}  ` : ""}\`asterism ${args.join(" ")}\` printed more than` +
+          ` ${MAX_OUTPUT_BYTES / 1_000_000} MB, so its output was truncated and the child killed.\n` +
+          `Nothing this check reads of it is complete. Either the command has run away, or a\n` +
+          `page's example asks for far more output than a reader would ever see.`,
+      );
+      process.exit(2);
+    }
     if (neverExited(e)) {
       const partial = (e.stderr?.toString() || e.stdout?.toString() || "").trim().split("\n")[0];
       console.error(
@@ -933,7 +975,12 @@ function runCommand(work, command, where = "") {
  * result"; only the sentence explaining it differs, and that is chosen at the call site.
  */
 function neverExited(err) {
-  return err.status === null && err.signal != null;
+  // ⚠ NOT `status === null && signal != null` alone. A `maxBuffer` overflow satisfies that
+  // too — Node kills the child and reports `code: "ENOBUFS", status: null, signal:
+  // "SIGTERM"` — so an over-long output would have aborted the whole run under a message
+  // blaming a crash. That is a result too big to read, not a child that failed to finish,
+  // and it is handled where it happens.
+  return err.status === null && err.signal != null && err.code !== "ENOBUFS";
 }
 
 // ---------------------------------------------------------------------- main
@@ -1704,6 +1751,7 @@ function report(total, tally, groups, coverageWork) {
       ["docs_dir: ../docs", "a path above the repo"],
       ["docs_dir: /abs/docs", "an absolute path"],
       ["docs_dir: docs\ndocs_dir: pages", "two `docs_dir` keys"],
+      ["site_url: https://a.test/x/\nsite_url: https://b.test/y/", "two `site_url` keys"],
       ["exclude_docs: [a, b]", "an inline YAML collection"],
     ];
     for (const [text, why] of MUST_REFUSE) {
@@ -2093,6 +2141,11 @@ function report(total, tally, groups, coverageWork) {
       ['<a href="/asterism/docs/walkthrough/">a</a>', "a page mkdocs builds", 0, 0],
       ['<a href="/asterism/docs/">a</a>', "the docs index", 0, 0],
       ['<a href="/asterism/">a</a>', "the root page itself", 0, 0],
+      // A self-link resolves nothing, so it must not satisfy `checked` — that count is the
+      // only tripwire for a moved site.
+      ['<a href="/asterism/">a</a><a href="/asterism/index.html">b</a>', "only self-links", 0, 0, 0],
+      ['<a href="/asterism/#quickstart">a</a><h2 id="quickstart">q</h2>', "a self-link to an id the page has", 0, 0],
+      ['<a href="/asterism/#nowhere">a</a><h2 id="quickstart">q</h2>', "a self-link to an id the page has not", 1, 0],
       ['<a href="/asterism/docs/nosuchpage/">a</a>', "a page nothing builds", 1, 0],
       ['<a href="/asterism/docs/walkthrough/#claim-1-separate-memory">a</a>', "a heading that exists", 0, 0],
       ['<a href="/asterism/docs/walkthrough/#no-such-heading">a</a>', "a heading that does not", 1, 0],
@@ -2107,8 +2160,11 @@ function report(total, tally, groups, coverageWork) {
       ['<link rel="stylesheet" href="/asterism/docs/nosuchpage/" />', "a stylesheet at a URL no page builds", 0, 0],
     ];
     const linkFailures = [];
-    for (const [html, why, wantBroken, wantOffSite] of linkFixture) {
+    for (const [html, why, wantBroken, wantOffSite, wantChecked] of linkFixture) {
       const got = checkLandingLinks([["<planted>", html]]);
+      if (wantChecked !== undefined && got.checked !== wantChecked) {
+        linkFailures.push(`  ${why}: counted ${got.checked} links checked, wanted ${wantChecked}`);
+      }
       if (got.broken.length !== wantBroken || got.offSite.length !== wantOffSite) {
         linkFailures.push(
           `  ${why}: ${got.broken.length} broken / ${got.offSite.length} undecidable,` +
@@ -2174,6 +2230,22 @@ function report(total, tally, groups, coverageWork) {
       // this case the rule reports the first `<pre class="…terminal…">` anyone adds, for a
       // block that renders correctly, which is how a gate becomes work to suppress.
       ["a multi-line <pre> with no white-space rule at all", styled(null) + '<pre class="x__terminal">a\nb</pre>', false],
+      // …but the browser's default for `<pre>` is only a default. Exempting the tag
+      // outright would let this check pass the exact defect it exists for.
+      ["a <pre> the page's own CSS collapses", styled("normal") + '<pre class="x__terminal">a\nb</pre>', true],
+      ["a <pre> the page re-declares as `pre`", styled("pre") + '<pre class="x__terminal">a\nb</pre>', false],
+      // A statement at-rule ends in `;` and has no block. Read as a rule it swallows the
+      // NEXT selector, so one `@import` at the top of a stylesheet hid everything below it.
+      [
+        "a rule sitting below an @import statement",
+        '<style>@import url("fonts.css");\n.x__terminal { white-space: pre; }</style>' + twoLine,
+        false,
+      ],
+      [
+        "a collapsing rule below an @charset statement",
+        '<style>@charset "utf-8";\n.x__terminal { white-space: normal; }</style>' + twoLine,
+        true,
+      ],
       // The three FALSE PASSES the first version of this had, each of which reported a
       // collapsing page as fine. The first is not hypothetical: `landing/index.html` carries
       // `.asterism__terminal .comment` and `… .keyword`, so a `white-space` in either would
@@ -2331,6 +2403,32 @@ function report(total, tally, groups, coverageWork) {
         console.log("\nSELF-TEST FAILED: a nested element truncated the terminal block:");
         console.log(`  want: ${JSON.stringify(nestedWant)}`);
         console.log(`  got:  ${JSON.stringify(nested)}`);
+        process.exit(1);
+      }
+
+      // Attribute quoting and heading case: HTML permits both, and every matcher here has
+      // to agree about that. A single-quoted class made `terminalBlocks` find nothing while
+      // `blocklessPages` stayed quiet (a block was found elsewhere on the page), and an
+      // `<H2>` yielded no section at all, collapsing a page's groups into one shared
+      // fixture. Both survived their mutation until this fixture existed.
+      writeFileSync(
+        join(exDir, "quoting.html"),
+        [
+          "<H2>Shouting</H2>",
+          "<div class='x__terminal'>asterism new writer",
+          "asterism memory inspect writer</div>",
+          "",
+        ].join("\n"),
+      );
+      const quoted = extract("quoting.html", exDir).map((i) => ({ command: i.command, section: i.section }));
+      const quotedWant = [
+        { command: "asterism new writer", section: "## Shouting" },
+        { command: "asterism memory inspect writer", section: "## Shouting" },
+      ];
+      if (JSON.stringify(quoted) !== JSON.stringify(quotedWant)) {
+        console.log("\nSELF-TEST FAILED: a single-quoted class or an uppercase heading was not read:");
+        console.log(`  want: ${JSON.stringify(quotedWant)}`);
+        console.log(`  got:  ${JSON.stringify(quoted)}`);
         process.exit(1);
       }
 
@@ -2779,8 +2877,17 @@ function checkLandingLinks(
       }
       const [pathPart, fragment] = href.slice(siteRoot.length).split("#");
       const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
+      if (bare === "" || bare === "index") {
+        // This page itself — NOT counted as a link resolved. `checked === 0` is the only
+        // tripwire for a moved site, and counting self-links would let a page whose in-site
+        // links are all `/asterism/` satisfy it while resolving nothing.
+        if (fragment) {
+          const ids = new Set([...text.matchAll(/\bid=("([^"]*)"|'([^']*)')/gi)].map((h) => h[2] ?? h[3]));
+          if (!ids.has(fragment)) broken.push(`${at}  ${href} — this page has no element with that id`);
+        }
+        continue;
+      }
       checked++;
-      if (bare === "" || bare === "index") continue; // this page itself
       // mkdocs' directory URLs: `<site_url>x/` is built from `<docs_dir>/x.md`, and
       // `<site_url>` itself from `<docs_dir>/index.md`. The URL segment and the source
       // directory are two different names, so the served path is translated rather than
@@ -2837,6 +2944,15 @@ function whiteSpaceFor(css, classes, tag) {
   while (i < text.length) {
     const open = text.indexOf("{", i);
     if (open === -1) break;
+    // A STATEMENT at-rule (`@import url(…);`, `@charset "utf-8";`) ends in a semicolon and
+    // has no block. Read naively it becomes part of the NEXT rule's selector text, which
+    // then starts with `@` and is skipped — so one `@import` at the top of a stylesheet
+    // silently hid the rule below it and this reported a correctly-rendering block.
+    const semi = text.indexOf(";", i);
+    if (semi !== -1 && semi < open && text.slice(i, semi).trim().startsWith("@")) {
+      i = semi + 1;
+      continue;
+    }
     const selectorList = text.slice(i, open).trim();
     let depth = 1;
     let j = open + 1;
@@ -2903,12 +3019,15 @@ function checkTerminalRendering(
     const styles = [...text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join("\n");
     for (const block of terminalBlocks(text, true)) {
       if (!block.text.includes("\n")) continue; // a one-line block cannot lose a line break
-      // `<pre>` gets `white-space: pre` from the browser's own stylesheet, so it needs no
-      // declaration and reporting one would be a defect this manufactures. Only `<div>`,
-      // which is what the page uses and what silently collapsed, has to say so.
-      if (block.tag !== "div") continue;
       const classes = block.className.trim().split(/\s+/).filter(Boolean);
-      const preserved = PRESERVING.has(whiteSpaceFor(styles, classes, block.tag));
+      const declared = whiteSpaceFor(styles, classes, block.tag);
+      // Declaring nothing is fine for a `<pre>` and only for a `<pre>`: it gets
+      // `white-space: pre` from the browser's own stylesheet, where a `<div>` gets
+      // `normal` and collapses. But that default is only a default — `pre { white-space:
+      // normal }` collapses a `<pre>` exactly as the published `<div>` collapsed, so the
+      // exemption is "nothing overrides it", not "it is a `<pre>`". Exempting the tag
+      // outright would have let this check pass the very defect it exists for.
+      const preserved = declared === "" ? block.tag === "pre" : PRESERVING.has(declared);
       if (!preserved) {
         gaps.push(
           `${rel}:${block.startLine} — a ${block.text.split("\n").length}-line terminal block in` +

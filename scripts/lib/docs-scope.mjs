@@ -97,6 +97,13 @@ export function readSiteConfig(configText) {
     }
     const url = /^site_url:\s*(.*)$/.exec(line);
     if (url) {
+      if (siteUrl !== undefined) {
+        // The same ambiguity `docs_dir` and `exclude_docs` are refused for, and with a
+        // sharper consequence: this one silently decides which prefix the site's root page
+        // has its links resolved against, and getting it wrong sends every one of them to
+        // the "not ours" pile while the pass reports that all zero of them resolve.
+        refuse("mkdocs.yml declares `site_url` twice; this reader cannot say which one the site is served at.");
+      }
       // Where the built site is SERVED, which is the only thing that can say what an
       // absolute `/…` link on a hand-written page means. Read, not required: mkdocs works
       // without it, so the refusal belongs to the pass that needs it.
