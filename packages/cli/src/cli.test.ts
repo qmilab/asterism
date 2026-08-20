@@ -625,6 +625,45 @@ test("nothing is asked for when the write could never have happened", async () =
   }
 });
 
+test("an empty ambient value is no value, but an empty inline one is still a value", async () => {
+  // A variable a shell cleared with `export KEY=` has supplied nothing, so the next
+  // source is tried — otherwise the operator is refused at a terminal without being
+  // asked, and advised to set the variable they had just cleared.
+  const h = harness({ TOKEN: "" });
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+  h.io.promptSecret = async () => "typed-because-env-was-empty";
+  expect(await runCli(["secrets", "add", "work", "TOKEN"], h.io)).toBe(0);
+
+  // An inline value is a statement, empty included. Looking past it would reach for
+  // `$TOKEN` — a value the operator never named — so this refuses instead.
+  const h2 = harness({ TOKEN: "from-env" });
+  await runCli(["init"], h2.io);
+  await runCli(["new", "work"], h2.io);
+  let asked = 0;
+  h2.io.promptSecret = async () => {
+    asked += 1;
+    return "from-prompt";
+  };
+  expect(await runCli(["secrets", "add", "work", "TOKEN", ""], h2.io)).toBe(1);
+  expect(asked).toBe(0);
+
+  const store = AsterismStore.open(dbPath(join(h.dir, HOME_DIR_NAME)));
+  try {
+    const agent = store.agents.list().find((a) => a.name === "work")!;
+    expect(store.secrets.readByKey(agent.id, "TOKEN")).toBe("typed-because-env-was-empty");
+  } finally {
+    store.close();
+  }
+  const store2 = AsterismStore.open(dbPath(join(h2.dir, HOME_DIR_NAME)));
+  try {
+    const agent = store2.agents.list().find((a) => a.name === "work")!;
+    expect(store2.secrets.readByKey(agent.id, "TOKEN")).toBeUndefined();
+  } finally {
+    store2.close();
+  }
+});
+
 test("secrets add reports when no value is available", async () => {
   const h = harness();
   await runCli(["init"], h.io);

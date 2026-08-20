@@ -211,8 +211,9 @@ credential with \`asterism secrets add\` and name it with --credential.`,
 Give one agent a private credential. The value is stored for that agent alone and
 is never printed back, logged, or readable by any other agent. If you omit the
 value, Asterism reads it from the environment variable of the same name, or from
-standard input when piped, and otherwise asks you for it at the terminal — which
-is the one way that keeps it out of your shell history. Nothing you type is shown.`,
+standard input when piped, and otherwise asks you for it at the terminal. Nothing
+you type is shown, and unlike an inline value it never reaches your shell history
+or the process list.`,
 
   skill: `asterism skill add <agent> <file.md>
 

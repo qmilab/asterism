@@ -1702,6 +1702,16 @@ function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
 
 // --- secrets add -----------------------------------------------------------
 
+/**
+ * A value from a source that merely EXISTS rather than one the operator typed — the
+ * environment, a pipe. Empty means nothing was supplied, so the caller moves on to the
+ * next source; an empty inline argument is not run through this, because typing one is
+ * a statement and looking past it would substitute a value the operator never named.
+ */
+function ambientValue(value: string | undefined): string | undefined {
+  return value !== undefined && value.length > 0 ? value : undefined;
+}
+
 async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
   if (args[0] === "--help" || args[0] === "-h") {
     io.out(COMMAND_HELP.secrets!);
@@ -1737,9 +1747,18 @@ async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
     // piped standard input, then — only when a human is at a terminal — a prompt. Never
     // echoed back, whichever path it came from. The prompt is last because it is the one
     // path that cannot run unattended.
-    let value = args[2] ?? io.env[key];
+    //
+    // An INLINE value is taken exactly as typed, empty included: it is a thing you put on
+    // this command line, and looking elsewhere for a value you have just given would
+    // store something you never named — `secrets add work KEY "$TYPO"` expanding to
+    // nothing must not quietly fall through to `$KEY`. The environment and a pipe are
+    // ambient rather than typed, so an empty one has supplied NOTHING and the next source
+    // is tried. Without that, a shell that cleared a token with `export KEY=` was refused
+    // at a terminal without being asked, and advised to set the variable it had just
+    // cleared.
+    let value = args[2] ?? ambientValue(io.env[key]);
     if (value === undefined && io.readStdin) {
-      value = await io.readStdin();
+      value = ambientValue(await io.readStdin());
     }
     // Held rather than re-tested: after the await, this is the record of whether a human
     // was actually asked, which is what decides WHICH refusal below is true.

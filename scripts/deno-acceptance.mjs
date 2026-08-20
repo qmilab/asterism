@@ -78,10 +78,11 @@ async function part1CliUnderDeno() {
     asterism(work, ["secrets", "add", "work", "GITHUB_TOKEN"], "ghp_deno_token");
 
     // `secrets add` asks for a missing value at a terminal. This session has none — its
-    // stdin is a pipe — so the ask must never be reached: an unattended install has to be
-    // REFUSED promptly, not left waiting for an answer that cannot come. The timeout is
-    // the assertion; a version that blocks here fails by exceeding it rather than by
-    // returning the wrong string.
+    // stdin is a pipe — so an unattended install has to be REFUSED, and refused with the
+    // message that names the three scripted ways rather than the one that reports a human
+    // declining. That distinction is the whole check: it is what fails if the prompt is
+    // ever wired into a session with no terminal. The timeout is a backstop for the worse
+    // shape of the same regression, one that blocks instead of answering.
     let refusedUnattended = "";
     try {
       asterism(work, ["secrets", "add", "work", "NO_VALUE_ANYWHERE"], "", 20_000);
