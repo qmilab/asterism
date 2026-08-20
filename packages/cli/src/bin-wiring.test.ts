@@ -56,6 +56,15 @@ test("every interactive hook is wired on the one terminal test, and the exceptio
     expect(asked).toContain(`${hook}:`);
   }
 
+  // Each answer is turned into a verdict by the mapping in `cli.ts`, not by a second copy
+  // here. That mapping is where EOF (a departure) is kept apart from an empty line (the
+  // reject the prompt names), and `cli.test.ts` pins every case of it — but only if this
+  // file actually calls it. Without this, the binary could inline the old collapsing
+  // version and every test would stay green.
+  expect(asked).toContain("decideReview(");
+  expect(asked).toContain("decideTransition(");
+  expect(asked).not.toMatch(/kind:\s*"reject"/); // no verdict decided in this file
+
   // Exactly one wiring reads the file descriptors itself, and it is the dashboard's TUI
   // — not a question but a full-screen drawing, which is output and belongs on stdout.
   expect(other).toHaveLength(1);

@@ -16,7 +16,7 @@ import type { RunningServer, ServeConsoleOptions, ServeOptions } from "@qmilab/a
 import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { workspaceCapabilities } from "./capabilities.ts";
-import { runCli } from "./cli.ts";
+import { decideReview, decideTransition, runCli } from "./cli.ts";
 import type { CliIO, ReviewDecision, ReviewItem } from "./cli.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import type { ModelResolutionContext } from "./model-config.ts";
@@ -305,6 +305,104 @@ test("trust --review grants an earned capability — only on an explicit yes", a
   const show = await capture(["trust", "cleaner", "show"], h.io);
   expect(show).toContain("Acts without pausing");
   expect(show).toContain("fs.delete");
+});
+
+test("api add names the option that carries nothing, before the arguments it lacks", async () => {
+  // The ordering rule every other verb was moved to in this release: an option you typed
+  // wrong is named, rather than reported as missing arguments you had not typed yet.
+  const h = harness();
+  await runCli(["init"], h.io);
+  for (const argv of [
+    ["api", "add", "--credential"],
+    ["api", "add", "--credential", ""],
+    ["api", "add", "writer", "issues", "https://api.example.com/x", "--credential"],
+  ]) {
+    h.err.length = 0;
+    expect(await runCli(argv, h.io)).toBe(1);
+    const said = h.err.join("\n");
+    expect(said).toContain("--credential <KEY>");
+    expect(said).not.toContain("Usage: asterism api add");
+  }
+  // With a credential given, the arity complaint is what is left to say.
+  h.err.length = 0;
+  expect(await runCli(["api", "add", "--credential", "GITHUB_TOKEN"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Usage: asterism api add");
+});
+
+test("no answer and an empty answer are different things at a review prompt", async () => {
+  // The distinction the whole quit fix turns on, mapped where a test can reach it — the
+  // binary's hook is in `bin.ts`, which runs a command and exits, so this is the logic it
+  // calls rather than a copy of it.
+  const noEdit = (): Promise<string | undefined> => Promise.resolve(undefined);
+  // EOF: the terminal sent nothing (Ctrl-D, or it went away). A departure, not a verdict.
+  expect(await decideReview(undefined, noEdit)).toEqual({ kind: "quit" });
+  // An empty line: someone was there and pressed return, which the prompt calls reject.
+  expect(await decideReview("", noEdit)).toEqual({ kind: "reject" });
+  expect(await decideReview("r", noEdit)).toEqual({ kind: "reject" });
+  expect(await decideReview("anything else", noEdit)).toEqual({ kind: "reject" });
+  expect(await decideReview("a", noEdit)).toEqual({ kind: "accept" });
+  expect(await decideReview("ACCEPT", noEdit)).toEqual({ kind: "accept" });
+  expect(await decideReview("q", noEdit)).toEqual({ kind: "quit" });
+  expect(await decideReview("quit", noEdit)).toEqual({ kind: "quit" });
+  // The edit path asks again, and the same distinction holds on the second question.
+  expect(await decideReview("e", () => Promise.resolve("new text"))).toEqual({
+    kind: "edit",
+    content: "new text",
+  });
+  expect(await decideReview("e", () => Promise.resolve(""))).toEqual({ kind: "reject" });
+  expect(await decideReview("e", noEdit)).toEqual({ kind: "quit" });
+});
+
+test("the same distinction on a transition prompt, where the default is skip", () => {
+  expect(decideTransition(undefined)).toBe("quit");
+  expect(decideTransition("")).toBe("skip");
+  expect(decideTransition("s")).toBe("skip");
+  expect(decideTransition("a")).toBe("apply");
+  expect(decideTransition("APPLY")).toBe("apply");
+  expect(decideTransition("q")).toBe("quit");
+});
+
+test("leaving a queue review is not a decision — the rest of the pile survives", async () => {
+  // The regression this release's own fix introduced. Ctrl-D used to kill the process,
+  // which was ugly but left the queue intact. With the crash fixed, "no answer" flowed
+  // through as a REJECT — and a queued proposal's rejection is durable, so each keypress
+  // destroyed another one and the loop advanced to do it again.
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([
+      { memoryType: "semantic", content: "fact one", confidence: 0.8 },
+      { memoryType: "semantic", content: "fact two", confidence: 0.8 },
+      { memoryType: "semantic", content: "fact three", confidence: 0.8 },
+    ]),
+  });
+  h.io.review = () => ({ kind: "accept" });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // Three queued. Quit on the first: none of them is settled, in either direction.
+  let asked = 0;
+  h.io.review = (): ReviewDecision => {
+    asked++;
+    return { kind: "quit" };
+  };
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
+  expect(asked).toBe(1); // it stopped rather than walking the rest
+  expect(out).toContain("stopped");
+  expect(out).toContain("Done — 0 saved, 0 rejected");
+
+  const still = await capture(["memory", "inspect", "personal"], h.io);
+  expect(still).toContain("fact one");
+  expect(still).toContain("fact three");
+  // All three still awaiting a decision — none settled in either direction.
+  expect(still).not.toContain("rejected");
+  expect([...still.matchAll(/· proposed ·/g)]).toHaveLength(3);
+
+  // …and a REJECT is still a reject, so quitting has not disabled the decision.
+  h.io.review = (): ReviewDecision => ({ kind: "reject" });
+  await runCli(["reflect", "personal", "--review"], h.io);
+  const settled = await capture(["memory", "inspect", "personal"], h.io);
+  expect([...settled.matchAll(/· rejected ·/g)]).toHaveLength(3);
+  expect(settled).not.toContain("· proposed ·");
 });
 
 test("what a reviewer is deciding ABOUT is written where the question is asked", async () => {
@@ -3024,6 +3122,28 @@ test("config show reports an environment override only when it supplies somethin
   expect(real).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
 });
 
+test("config unset removes an empty stored entry, and does not call it a cleared setting", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  const home = homeOf(h);
+  const damaged = loadConfig(home);
+  damaged.model = { provider: "" };
+  saveConfig(home, damaged);
+
+  // `config show` reports this file as "(none set)". Saying "Cleared the install default
+  // model" here would have one command describe one file two ways.
+  expect(await capture(["config", "show"], h.io)).toContain("Install default model: (none set)");
+  const cleared = await capture(["config", "unset"], h.io);
+  expect(cleared).toContain("Removed an empty install default model entry");
+  expect(cleared).not.toContain("Cleared the install default model.");
+  // Removed all the same — this is the operator's way out of such a file.
+  expect(loadConfig(home).model).toBeUndefined();
+
+  // A real setting still clears, and still says so.
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+  expect(await capture(["config", "unset"], h.io)).toContain("Cleared the install default model.");
+});
+
 test("config show credits the layer that supplies the model, on a config an older version damaged", async () => {
   const h = harness();
   await runCli(["init"], h.io);
@@ -3086,14 +3206,24 @@ test("config show calls the embeddings endpoint configured on exactly the terms 
   env.ASTERISM_RECALL_EMBED_MODEL = "   ";
   expect(await shown()).toBe(false); // …nor whitespace, which the builder trims away
 
+  // Half-configured is its own state, and the actionable one: silence over a variable
+  // the operator did export left them a single variable from a working endpoint with no
+  // hint of it, and a hard failure at run time.
+  env.ASTERISM_RECALL_EMBED_MODEL = undefined;
+  const half = await capture(["config", "show"], h.io);
+  expect(half).toContain("local-embeddings endpoint incomplete — also set ASTERISM_RECALL_EMBED_MODEL");
+  expect(half).not.toContain("endpoint configured");
+
   env.ASTERISM_RECALL_EMBED_MODEL = "nomic-embed-text";
   expect(await shown()).toBe(true); // both, and only then
+  expect(await capture(["config", "show"], h.io)).not.toContain("incomplete");
   // Named, so a report that says "configured" without saying what would fail.
   const both = await capture(["config", "show"], h.io);
   expect(both).toContain("ASTERISM_RECALL_EMBED_URL, ASTERISM_RECALL_EMBED_MODEL");
 
   env.ASTERISM_RECALL_EMBED_URL = "";
   expect(await shown()).toBe(false); // and it goes back when either is cleared
+  expect(await capture(["config", "show"], h.io)).toContain("also set ASTERISM_RECALL_EMBED_URL");
 });
 
 test("config recall-budget sets a per-agent budget, persisted in the kernel store", async () => {

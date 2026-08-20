@@ -20,7 +20,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { runCli } from "./cli.js";
+import { decideReview, decideTransition, runCli } from "./cli.js";
 import type { CliIO, ReviewDecision, TransitionDecision } from "./cli.js";
 import { artifactFetchHost, workspaceCapabilities } from "./capabilities.js";
 import { outboundHost } from "./outbound.js";
@@ -116,35 +116,23 @@ const io: CliIO = {
   // every answer is then discarded, and ending on a summary of decisions nobody made.
   ...(interactive
     ? {
-        review: async (): Promise<ReviewDecision> => {
-          const answer = await ask(
-            "  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject):",
-          );
-          const choice = (answer ?? "").toLowerCase();
-          if (choice === "a" || choice === "accept" || choice === "y" || choice === "yes") {
-            return { kind: "accept" };
-          }
-          if (choice === "e" || choice === "edit") {
-            const edited = await ask("  New content:");
-            const content = edited ?? "";
-            return content.length > 0 ? { kind: "edit", content } : { kind: "reject" };
-          }
-          return { kind: "reject" };
-        },
+        // The mapping from an answer to a verdict lives in `cli.ts` (`decideReview`),
+        // where a test can reach it — this file runs a command and exits. The
+        // distinction it turns on is NO answer (EOF: a departure) versus an EMPTY one
+        // (someone pressed return: the reject the prompt names).
+        review: (): Promise<ReviewDecision> =>
+          ask("  Keep this memory? [a]ccept / [e]dit / [r]eject / [q]uit (default: reject):").then(
+            (answer) => decideReview(answer, () => ask("  New content:")),
+          ),
         // `reflect --review` Type B: the kernel suggests an existing objective looks finished and
         // prints it; the human decides here. Apply runs the (audited) transition; skip leaves it; quit
         // stops the rest. Wired only on a TTY for the same reason as `review` — a piped/redirected
         // session has no human, and the field's ABSENCE makes the command apply nothing (and skip the
         // model call). The default on an empty answer is SKIP — nothing changes without an explicit yes.
-        reviewTransition: async (): Promise<TransitionDecision> => {
-          const answer = await ask("  Apply this change? [a]pply / [s]kip / [q]uit (default: skip):");
-          const choice = (answer ?? "").toLowerCase();
-          if (choice === "a" || choice === "apply" || choice === "y" || choice === "yes") {
-            return "apply";
-          }
-          if (choice === "q" || choice === "quit") return "quit";
-          return "skip";
-        },
+        reviewTransition: async (): Promise<TransitionDecision> =>
+          decideTransition(
+            await ask("  Apply this change? [a]pply / [s]kip / [q]uit (default: skip):"),
+          ),
       }
     : {}),
   // `trust --review`: the kernel proposes which capabilities have EARNED a standing
@@ -158,6 +146,9 @@ const io: CliIO = {
           const answer = await ask(
             "  Grant this capability a standing (act without pausing)? [y/N]:",
           );
+          // Undefined already means no here, and no is what a departure should mean: a
+          // grant needs an explicit yes, and declining one changes nothing that has to be
+          // undone. So this one needs no separate quit — the walk ends with N left gated.
           return answer !== undefined && /^y(es)?$/i.test(answer);
         },
       }

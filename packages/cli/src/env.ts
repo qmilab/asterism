@@ -72,3 +72,36 @@ export function embeddingEndpoint(env: Env): { url: string; model: string } | un
   const model = env.ASTERISM_RECALL_EMBED_MODEL?.trim();
   return url && model ? { url, model } : undefined;
 }
+
+/**
+ * The {@link EMBED_ENDPOINT_VARS} still needed when SOME of them are set — empty both
+ * when none is set (nothing to report) and when the endpoint is complete.
+ *
+ * The half-configured state is the one worth naming. Reporting it as "configured" was
+ * wrong (the run refuses), but reporting it as nothing at all is silence over a variable
+ * the operator did export: they see `writer → local [set]`, no endpoint line, and then a
+ * hard failure at run time with no hint that they were one variable away.
+ */
+export function missingEmbeddingVars(env: Env): string[] {
+  const supplied = EMBED_ENDPOINT_VARS.filter((k) => suppliesText(env, k));
+  if (supplied.length === 0 || supplied.length === EMBED_ENDPOINT_VARS.length) return [];
+  return EMBED_ENDPOINT_VARS.filter((k) => !supplied.includes(k));
+}
+
+/**
+ * Whether a variable supplies TEXT — present, and not only whitespace.
+ *
+ * Stricter than {@link envIsSet}, and only for deciding whether a value exists at all:
+ * whatever is written or sent stays verbatim, padding included. It exists because the
+ * readers on the other side of a service's env file trim before testing —
+ * `resolveHttpToken` does — so capturing `ASTERISM_HTTP_TOKEN="  "` reported a token
+ * captured, wrote a blank one into the file, and left the service minting a different
+ * token that every client pinned to the "captured" one is then rejected by. One install,
+ * two answers, narrowed to whitespace.
+ *
+ * NOT the rule for a credential VALUE an operator typed or piped (see
+ * {@link ambientValue}): padding there may be load-bearing, and it is theirs to decide.
+ */
+export function suppliesText(env: Env, name: string): boolean {
+  return (env[name] ?? "").trim().length > 0;
+}

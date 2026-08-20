@@ -108,7 +108,15 @@ import { helpRequested, intFlag, parseArgs, stringFlag, undeclaredOptions } from
 import type { ParsedArgs } from "./args.js";
 import type { AsterismConfig, ModelSettings } from "./config.js";
 import { loadConfig, saveConfig } from "./config.js";
-import { ambientValue, EMBED_ENDPOINT_VARS, embeddingEndpoint, envIsSet, envValue } from "./env.js";
+import {
+  ambientValue,
+  EMBED_ENDPOINT_VARS,
+  embeddingEndpoint,
+  envIsSet,
+  envValue,
+  missingEmbeddingVars,
+  suppliesText,
+} from "./env.js";
 import {
   formatActionSummary,
   formatAgentList,
@@ -184,11 +192,20 @@ export interface ReviewItem {
   findings: readonly FirewallFinding[];
 }
 
-/** The reviewer's verdict on one proposed memory or objective during `reflect --review`. */
+/**
+ * The reviewer's verdict on one proposed memory or objective during `reflect --review`.
+ *
+ * `quit` STOPS the walk without deciding this item, leaving it and everything after it
+ * exactly as it was. It exists because a decision and a departure are different things
+ * and a queued proposal's rejection is DURABLE: reading "the operator left" as "the
+ * operator rejected it" destroys the pile one keypress at a time. `TransitionDecision`
+ * has had this since it was written; the memory walk did not.
+ */
 export type ReviewDecision =
   | { kind: "accept" }
   | { kind: "edit"; content: string }
-  | { kind: "reject" };
+  | { kind: "reject" }
+  | { kind: "quit" };
 
 /** A suggested objective status transition presented during `reflect --review` (Type B, advisory). */
 export interface TransitionReviewItem {
@@ -207,6 +224,50 @@ export interface TransitionReviewItem {
 
 /** The operator's verdict on a suggested transition: apply it, skip it, or stop reviewing the rest. */
 export type TransitionDecision = "apply" | "skip" | "quit";
+
+/**
+ * Map one typed answer to a review verdict — the mapping the binary's `review` hook uses,
+ * here rather than there because it is logic and `bin.ts` cannot be imported by a test
+ * (it runs a command and exits).
+ *
+ * The distinction that matters is between NO answer and an EMPTY one, and it is the whole
+ * of a defect this release introduced. `ask` returns undefined when the terminal sent EOF
+ * — Ctrl-D, or the terminal going away — and `""` when someone was there and pressed
+ * return. Collapsing them made a departure into a rejection, and a queued proposal's
+ * rejection is DURABLE: each keypress destroyed another one and the loop advanced to do
+ * it again. An empty line still means reject, which is what the prompt says it means.
+ *
+ * `askEdit` is consulted only for an edit, and its own EOF stops the walk too.
+ */
+export async function decideReview(
+  answer: string | undefined,
+  askEdit: () => Promise<string | undefined>,
+): Promise<ReviewDecision> {
+  if (answer === undefined) return { kind: "quit" };
+  const choice = answer.toLowerCase();
+  if (choice === "a" || choice === "accept" || choice === "y" || choice === "yes") {
+    return { kind: "accept" };
+  }
+  if (choice === "q" || choice === "quit") return { kind: "quit" };
+  if (choice === "e" || choice === "edit") {
+    const edited = await askEdit();
+    if (edited === undefined) return { kind: "quit" };
+    return edited.length > 0 ? { kind: "edit", content: edited } : { kind: "reject" };
+  }
+  return { kind: "reject" };
+}
+
+/**
+ * The same mapping for a suggested objective transition. Nothing here is durable — a skip
+ * changes nothing — but leaving should not silently work through the rest of the list.
+ */
+export function decideTransition(answer: string | undefined): TransitionDecision {
+  if (answer === undefined) return "quit";
+  const choice = answer.toLowerCase();
+  if (choice === "a" || choice === "apply" || choice === "y" || choice === "yes") return "apply";
+  if (choice === "q" || choice === "quit") return "quit";
+  return "skip";
+}
 
 /** A proposed standing grant presented for ratification during `trust <agent> --review`. */
 export interface StandingReviewItem {
@@ -1591,6 +1652,15 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
   const endpointName = parsed.positionals[1];
   const url = parsed.positionals[2];
   const credential = parsed.flags.credential;
+  // Before the positional check, like every other verb: `api add --credential` used to
+  // print the usage line and never mention the option that was wrong, sending the
+  // operator to look for arguments they had not typed yet. `--credential` with no value
+  // parses to `true`, which must not become the string "true" and silently bind a
+  // credential nobody stored; an empty one carries nothing either.
+  if (typeof credential !== "string" || credential.length === 0) {
+    io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
+    return Promise.resolve(1);
+  }
   if (!name || !endpointName || !url) {
     io.err("Usage: asterism api add <agent> <name> <https-url> --credential <KEY>");
     return Promise.resolve(1);
@@ -1599,12 +1669,6 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
     io.err(
       `asterism api add takes one URL — got ${parsed.positionals.length - 2}. Quote a URL containing spaces or shell characters.`,
     );
-    return Promise.resolve(1);
-  }
-  // `--credential` with no value parses to `true`, which must not become the string
-  // "true" and silently bind a credential nobody stored.
-  if (typeof credential !== "string" || credential.length === 0) {
-    io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
     return Promise.resolve(1);
   }
   return withHomeStore(io, (store) => {
@@ -3997,6 +4061,11 @@ async function driveReviewLoop(
       findings: v.findings,
     });
 
+    // A departure, not a decision: leave this item and everything after it untouched.
+    if (decision.kind === "quit") {
+      io.err("  · stopped — the rest are left as they were");
+      break;
+    }
     if (decision.kind === "reject") {
       recordReject(i, false);
       continue;
@@ -4808,8 +4877,14 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
       // not configured" — one install, two answers, which is the shape #174 exists to
       // remove. It needs BOTH, and it trims.
       const embedSet = embeddingEndpoint(io.env) ? EMBED_ENDPOINT_VARS : [];
+      const embedMissing = missingEmbeddingVars(io.env);
       if (embedSet.length > 0) {
         io.out(`  (local-embeddings endpoint configured: ${embedSet.join(", ")})`);
+      } else if (embedMissing.length > 0) {
+        // The third state, and the actionable one: something is set and it is not enough.
+        // Saying nothing here left an operator one variable away from a working endpoint
+        // with no hint of it, and a hard failure at run time.
+        io.out(`  (local-embeddings endpoint incomplete — also set ${embedMissing.join(", ")})`);
       }
     }
 
@@ -5473,9 +5548,19 @@ function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
       io.out("No install default model set.");
       return 0;
     }
+    // A stored entry that supplies nothing — `{"model":{"provider":""}}`, which an
+    // earlier version would write — is still REMOVED, because this is the operator's way
+    // out of one. But `config show` reports it as "(none set)", so saying "Cleared the
+    // install default model" here would have the same command describe the same file two
+    // ways: nothing was set, and then something was cleared.
+    const supplied = hasSettings(withoutEmptyFields(config.model));
     delete config.model;
     saveConfig(home, config);
-    io.out("Cleared the install default model.");
+    io.out(
+      supplied
+        ? "Cleared the install default model."
+        : "Removed an empty install default model entry — it was already supplying nothing.",
+    );
     return 0;
   });
 }
@@ -5871,7 +5956,12 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
   const startTelegram = io.startTelegram;
 
   // The bot token is a secret: it comes from the environment, never config or a flag.
-  const token = io.env[TELEGRAM_TOKEN_ENV];
+  // Trimmed, so `export ASTERISM_TELEGRAM_TOKEN="  "` is a cleared token rather than a token
+  // made of spaces — the same reading `service install --capture-env` uses when deciding
+  // whether this variable supplies anything, and the same one `resolveHttpToken` has
+  // always used for the HTTP token. The trimmed value is what is sent, which also
+  // forgives the newline a copy-paste leaves on the end.
+  const token = io.env[TELEGRAM_TOKEN_ENV]?.trim();
   if (!token) {
     io.err(
       `Set ${TELEGRAM_TOKEN_ENV} to your bot token (create a bot with @BotFather) before starting the channel.`,
@@ -5991,7 +6081,12 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
   const startDiscord = io.startDiscord;
 
   // The bot token is a secret: it comes from the environment, never config or a flag.
-  const token = io.env[DISCORD_TOKEN_ENV];
+  // Trimmed, so `export ASTERISM_DISCORD_TOKEN="  "` is a cleared token rather than a token
+  // made of spaces — the same reading `service install --capture-env` uses when deciding
+  // whether this variable supplies anything, and the same one `resolveHttpToken` has
+  // always used for the HTTP token. The trimmed value is what is sent, which also
+  // forgives the newline a copy-paste leaves on the end.
+  const token = io.env[DISCORD_TOKEN_ENV]?.trim();
   if (!token) {
     io.err(
       `Set ${DISCORD_TOKEN_ENV} to your bot token (create one in the Discord Developer Portal) before starting the channel.`,
@@ -6230,8 +6325,10 @@ function serviceEnvPlan(
   const auth = providerAuthPlan(io.env, model);
   // Whether capturing would put a VALUE in the service's env file. An exported-but-empty
   // variable would be captured as nothing, so counting it as satisfied told the operator
-  // a required need was met and left the service failing to start on it.
-  const has = (name: string): boolean => envIsSet(io.env, name);
+  // a required need was met and left the service failing to start on it. Whitespace-only
+  // counts as nothing too, because the readers on the other side of the file trim before
+  // testing — see `suppliesText`.
+  const has = (name: string): boolean => suppliesText(io.env, name);
 
   const vars: EnvVarSpec[] = [];
   const needs: ServiceEnvNeed[] = [];
@@ -6433,7 +6530,9 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     if (captureEnv) {
       writeFileAtomic(
         paths.envFile,
-        renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) => envValue(io.env, n)),
+        renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) =>
+          suppliesText(io.env, n) ? io.env[n] : undefined,
+        ),
         0o600,
       );
     } else if (!existsSync(paths.envFile)) {
@@ -6503,7 +6602,7 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     io.out(`  Keeps \`asterism ${display}\` running and restarts it if it fails.`);
     io.out(`  Env file (0600): ${paths.envFile}`);
     if (captureEnv) {
-      const captured = envPlan.vars.filter((v) => envIsSet(io.env, v.name)).map((v) => v.name);
+      const captured = envPlan.vars.filter((v) => suppliesText(io.env, v.name)).map((v) => v.name);
       io.out(
         captured.length > 0
           ? `  Captured from your environment: ${captured.join(", ")}`

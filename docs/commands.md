@@ -1280,10 +1280,13 @@ drafted. Otherwise it looks over the agent's latest completed run and drafts new
 proposals on the spot (which needs a
 [configured model](./installation.md#configuring-a-model)).
 
-At a terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`. The whole
-review — each proposal, its warnings, and the question about it — goes to
+At a terminal each proposal prompts `[a]ccept / [e]dit / [r]eject / [q]uit`. The
+whole review — each proposal, its warnings, and the question about it — goes to
 **standard error**, so redirecting the command's output does not take the thing
-you are deciding about with it; only the closing count is on standard out. With nobody to ask — piped, launched from a scheduler, or with standard
+you are deciding about with it; only the closing count is on standard out.
+**Quitting is not a decision**: the proposal in front of you and everything after
+it are left exactly as they were, so you can stop part-way through a queue without
+settling the rest. `Ctrl-D` does the same. With nobody to ask — piped, launched from a scheduler, or with standard
 error redirected somewhere you would not see the question — it does not decide on
 your behalf: a pile already **queued** by `--propose` is left **untouched** (since
 rejecting a queued proposal is a durable choice), and there is no live pass either,
