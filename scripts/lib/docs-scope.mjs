@@ -330,15 +330,21 @@ export function userFacingMarkdown() {
  * and moving it would silently empty this set rather than fail — the same shape as a
  * `docs_dir` this reader cannot compare.
  */
-export function publishedLandingPages() {
+export function publishedLandingPages(workflowText) {
   const rel = join(".github", "workflows", "docs.yml");
-  let workflow;
-  try {
-    workflow = readFileSync(join(ROOT, rel), "utf8");
-  } catch (err) {
-    refuse(`The site's root pages are published by ${rel}, which could not be read (${err.message}).`);
+  // The text is a parameter so the self-test can drive BOTH refusals below through this
+  // entry point rather than only the one that lives in a pure helper. The empty-set refusal
+  // is the one that matters most and the one hardest to reach: it needs a workflow naming a
+  // real directory with no HTML in it, which is what a move looks like.
+  let text = workflowText;
+  if (text === undefined) {
+    try {
+      text = readFileSync(join(ROOT, rel), "utf8");
+    } catch (err) {
+      refuse(`The site's root pages are published by ${rel}, which could not be read (${err.message}).`);
+    }
   }
-  const dir = readLandingDir(workflow, rel);
+  const dir = readLandingDir(text, rel);
   const pages = trackedFiles(`${dir}/*.html`, "site HTML");
   if (pages.length === 0) {
     // Not "nothing to check": the whole point of deriving the directory is that a move

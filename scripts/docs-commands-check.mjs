@@ -1771,6 +1771,29 @@ function report(total, tally, groups, coverageWork) {
     if (readLandingDir("      - run: |\n          cp -r pages/. _site/\n") !== "pages") {
       scopeFailures.push("  a workflow copying `pages/` was not read as publishing `pages`");
     }
+    // The refusal that matters most, and the one a pure helper cannot reach: a workflow
+    // naming a real directory with no HTML in it — what a MOVE looks like. Left un-refused
+    // this is an empty set, and an empty set here is every pass below reporting a green
+    // over a page nothing read. `decisions/` is tracked and holds no HTML.
+    {
+      let refused = false;
+      try {
+        execFileSync(
+          process.execPath,
+          [
+            "-e",
+            `import(${JSON.stringify(join(ROOT, "scripts/lib/docs-scope.mjs"))}).then((m) => m.publishedLandingPages(process.argv[1]))`,
+            "      - run: |\n          cp -r decisions/. _site/\n",
+          ],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd: ROOT },
+        );
+      } catch (err) {
+        refused = err.status === 2;
+      }
+      if (!refused) {
+        scopeFailures.push("  a workflow publishing a directory with no tracked HTML was accepted instead of refused");
+      }
+    }
 
     const landing = publishedLandingPages();
     if (landing.length === 0) {
