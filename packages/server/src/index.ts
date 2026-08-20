@@ -37,6 +37,7 @@
 import {
   bearerToken,
   DEFAULT_HOSTNAME,
+  resolveBindHost,
   fail,
   json,
   sseResponse,
@@ -133,9 +134,16 @@ function listEvents(deps: ServerDeps, url: URL): Response {
   const options: TailOptions = {};
 
   // An absent param is `null`; an empty one (`?type=`) is `""`. Treat both as "not
-  // given" so an empty value means "no filter" — matching the CLI, where a flag
-  // with no value is dropped — rather than filtering on `type = ''` / an empty
-  // cursor and silently returning nothing.
+  // given" so an empty value means "no filter", rather than filtering on `type = ''`
+  // / an empty cursor and silently returning nothing.
+  //
+  // This DIVERGES from the CLI on purpose, and the divergence is the point of #174:
+  // there, `--type ""` is refused, because an option is something a human typed and
+  // reaching past it would substitute a filter they never named. A query string is
+  // assembled by a program, and a client that renders an absent value as `?type=` has
+  // said nothing rather than asked for nothing — answering that with a 400 would make
+  // the common client bug the loud one. Same question, different answer, because the
+  // source is different: see `env.ts` for the third case.
   const limitRaw = url.searchParams.get("limit");
   if (limitRaw) {
     // A present, non-empty `limit` must be a non-negative integer or it is a
@@ -424,7 +432,7 @@ export interface RunningServer {
  */
 export async function serve(options: ServeOptions): Promise<RunningServer> {
   const { port, hostname, ...deps } = options;
-  const boundHost = hostname ?? DEFAULT_HOSTNAME;
+  const boundHost = resolveBindHost(hostname);
   const boundPort = port ?? DEFAULT_PORT;
   const handler = (req: Request): Promise<Response> => handleRequest(deps, req);
 

@@ -8,7 +8,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { AsterismStore } from "@qmilab/asterism-core";
 import type { Agent, Capability, RecallProvider, RuntimeAdapter, RunOutput } from "@qmilab/asterism-core";
 
-import { handleRequest, serve } from "./index.ts";
+import { DEFAULT_HOSTNAME, handleRequest, serve } from "./index.ts";
+import { resolveBindHost } from "./http.ts";
 import type { ServerDeps } from "./index.ts";
 
 let store: AsterismStore;
@@ -394,6 +395,60 @@ test("host capabilities reach HTTP runs, and the gate still pauses destructive a
   expect(json.output).not.toBe("(tool not exposed)");
   expect(json.status).toBe("awaiting_confirmation");
   expect(executed).toHaveLength(0);
+});
+
+test("what counts as a hostname override: not absent, not empty, and otherwise honoured", () => {
+  // Shared by `serve` and the console, so the two cannot disagree about it. BOTH
+  // directions: an empty hostname must not defeat the loopback default, and a real one
+  // must still reach the socket — refusing is only half a claim.
+  expect(resolveBindHost(undefined)).toBe(DEFAULT_HOSTNAME);
+  expect(resolveBindHost("")).toBe(DEFAULT_HOSTNAME);
+  expect(resolveBindHost("localhost")).toBe("localhost");
+  expect(resolveBindHost("0.0.0.0")).toBe("0.0.0.0");
+});
+
+test("an empty hostname is not an override — the loopback default still wins", async () => {
+  // `listen(port, "")` binds `::`, every interface, which is the opposite of this
+  // default and of what the endpoint promises. The CLI refuses `--host ""` before it
+  // reaches here (#174); `serve` is exported, so the safe reading is made here too.
+  const running = await serve({
+    store,
+    agent: personal,
+    adapter: cannedAdapter({ status: "done", text: "hi" }),
+    authToken: TOKEN,
+    port: 0,
+    hostname: "",
+  });
+  try {
+    expect(running.hostname).toBe(DEFAULT_HOSTNAME);
+    // Not merely the reported value: the socket really is on loopback, so the URL the
+    // handle prints is one that reaches it.
+    const ok = await fetch(`${running.url}/agents/personal/events`, { headers: auth() });
+    expect(ok.status).toBe(200);
+  } finally {
+    running.stop();
+  }
+});
+
+test("a hostname that IS given is bound, not quietly replaced by the default", async () => {
+  // The other half. Without this, a binding that ignored `hostname` entirely would pass
+  // every test above — measured: that mutation survived until this existed.
+  const running = await serve({
+    store,
+    agent: personal,
+    adapter: cannedAdapter({ status: "done", text: "hi" }),
+    authToken: TOKEN,
+    port: 0,
+    hostname: "localhost",
+  });
+  try {
+    expect(running.hostname).toBe("localhost");
+    expect(running.url).toContain("localhost");
+    const ok = await fetch(`${running.url}/agents/personal/events`, { headers: auth() });
+    expect(ok.status).toBe(200);
+  } finally {
+    running.stop();
+  }
 });
 
 test("serve() binds a real socket: a run can be triggered and events read over HTTP", async () => {

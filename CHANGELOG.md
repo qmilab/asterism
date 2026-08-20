@@ -27,7 +27,7 @@ Two ways Asterism could act on something you had not said. A question it needed 
   - `asterism config set gpt-4o --provider ""` wrote `"provider": ""` into the config file, after which `config show` displayed `(provider: )` and every run failed with advice naming an untypeable command.
   - `asterism config set llama3.2 --provider ollama --base-url ""` shadowed the provider's own endpoint with nothing, breaking a configuration that had been fine before the flag was added.
   - `asterism new bot --model ""` wrote a per-agent override that shadows the install default with nothing, so that agent could never run. Setting an install default afterwards did not help — the override had to be replaced or cleared for that one agent, and nothing said so.
-  - `asterism serve writer --host ""` bound **every interface** rather than falling back to the loopback default, putting the endpoint on the network where you had asked for one address.
+  - `asterism serve writer --host ""` bound **every interface** rather than falling back to the loopback default, putting the endpoint on the network where you had asked for one address. The `@qmilab/asterism-server` package now makes the same reading itself, so an embedder calling `serve()` or `serveConsole()` with an empty hostname gets loopback rather than everything.
   - `asterism new bot --soul ""` took the empty path as a soul directory, and `asterism channel telegram a --allow ""` started the bot with no allow-list where you had named one.
   - `asterism connect a b --mode ""` and `asterism service status a --kind ""` did stop, but with `Unknown connection mode ""` and `Unknown service kind ""` — describing what the variable expanded to rather than the mistake you made.
 

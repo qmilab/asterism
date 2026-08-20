@@ -80,7 +80,7 @@ import type {
   TrustLevel,
 } from "@qmilab/asterism-core";
 
-import { DEFAULT_HOSTNAME } from "./http.js";
+import { resolveBindHost } from "./http.js";
 import type { RunningServer } from "./index.js";
 
 /**
@@ -217,7 +217,9 @@ function listRuns(deps: ConsoleDeps, agent: Agent): Response {
 function listEvents(deps: ConsoleDeps, agent: Agent, url: URL): Response {
   const options: TailOptions = {};
   // An absent param is `null`; an empty one (`?type=`) is `""`. Treat both as "not
-  // given" so an empty value means "no filter", matching `serve` and the CLI.
+  // given" so an empty value means "no filter", matching `serve` — and deliberately
+  // NOT the CLI, which refuses `--type ""`. See the note in `index.ts`: an option is
+  // typed by a human, a query string is assembled by a program.
   const limitRaw = url.searchParams.get("limit");
   if (limitRaw) {
     if (!/^\d+$/.test(limitRaw)) return fail(400, "limit must be a non-negative integer.");
@@ -1313,7 +1315,7 @@ export interface ServeConsoleOptions extends ConsoleDeps {
  */
 export async function serveConsole(options: ServeConsoleOptions): Promise<RunningServer> {
   const { port, hostname, ...deps } = options;
-  const boundHost = hostname ?? DEFAULT_HOSTNAME;
+  const boundHost = resolveBindHost(hostname);
   const boundPort = port ?? DEFAULT_CONSOLE_PORT;
   const handler = (req: Request): Promise<Response> => handleConsoleRequest(deps, req);
 
