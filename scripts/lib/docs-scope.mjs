@@ -59,6 +59,7 @@ export function readSiteConfig(configText) {
   const lines = configText.split("\n");
   let docsDir;
   let exclude = null;
+  let siteUrl;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -94,6 +95,14 @@ export function readSiteConfig(configText) {
       }
       continue;
     }
+    const url = /^site_url:\s*(.*)$/.exec(line);
+    if (url) {
+      // Where the built site is SERVED, which is the only thing that can say what an
+      // absolute `/…` link on a hand-written page means. Read, not required: mkdocs works
+      // without it, so the refusal belongs to the pass that needs it.
+      siteUrl = url[1].trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");
+      continue;
+    }
     const ex = /^exclude_docs:\s*(.*)$/.exec(line);
     if (!ex) continue;
     if (exclude !== null) {
@@ -126,7 +135,7 @@ export function readSiteConfig(configText) {
 
   // Absent is not a mismatch: mkdocs defaults `docs_dir` to `docs`, which is what this repo
   // declares anyway.
-  return { docsDir: docsDir ?? "docs", exclude: exclude ?? [] };
+  return { docsDir: docsDir ?? "docs", exclude: exclude ?? [], siteUrl };
 }
 
 let CACHED;
@@ -144,6 +153,34 @@ function config() {
     CACHED = readSiteConfig(text);
   }
   return CACHED;
+}
+
+/**
+ * The path the built docs are SERVED at, from `mkdocs.yml`'s `site_url` — `/asterism/docs/`.
+ *
+ * The site's root page is hand-written HTML full of absolute links (`/asterism/docs/…`),
+ * and deciding whether one of those resolves needs to know which prefix belongs to this
+ * repo. Hard-coding it would be the one undeclared constant in a module built on
+ * derivation, and getting it wrong is SILENT: every link falls through to "not ours", and
+ * the pass reports that all zero of them resolve.
+ *
+ * Always ends in a slash, so a prefix test cannot match a sibling directory.
+ */
+export function siteUrlPath() {
+  const raw = config().siteUrl;
+  if (!raw) {
+    refuse(
+      "mkdocs.yml declares no `site_url`, so nothing here can say what an absolute `/…` link\n" +
+        "on the site's root page points at. Add one, or teach scripts/lib/docs-scope.mjs.",
+    );
+  }
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    refuse(`mkdocs.yml gives \`site_url: ${raw}\`, which is not a URL this can read a path out of.`);
+  }
+  return url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
 }
 
 /** The directory mkdocs publishes, as `mkdocs.yml` declares it. */

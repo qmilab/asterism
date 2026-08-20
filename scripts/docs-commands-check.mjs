@@ -66,9 +66,9 @@ import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOC
 import {
   ROOT,
   siteDir,
+  siteUrlPath,
   isPublished,
   trackedMarkdown,
-  userFacingMarkdown,
   userFacingPages,
   publishedLandingPages,
   readLandingDir,
@@ -180,13 +180,14 @@ function terminalBlocks(text, isHtml) {
   // A class token CONTAINING `terminal`, not equal to it: the page's own is
   // `asterism__terminal`, and `\bterminal\b` does not match after an underscore — which is
   // how the first version of this read the landing page as having no commands at all.
-  for (const m of text.matchAll(/<(?:div|pre)\b[^>]*class="([^"]*terminal[^"]*)"[^>]*>([\s\S]*?)<\/(?:div|pre)>/gi)) {
+  for (const m of text.matchAll(/<(div|pre)\b[^>]*class="([^"]*terminal[^"]*)"[^>]*>([\s\S]*?)<\/(?:div|pre)>/gi)) {
     blocks.push({
-      className: m[1],
+      tag: m[1].toLowerCase(),
+      className: m[2],
       startLine: text.slice(0, m.index).split("\n").length,
       // Inline markup inside a terminal block is presentation (a `<span class="comment">`
       // around a shell comment); the command is what is left once it is gone.
-      text: decodeEntities(m[2].replace(/<[^>]+>/g, "")),
+      text: decodeEntities(m[3].replace(/<[^>]+>/g, "")),
     });
   }
   return blocks;
@@ -551,7 +552,7 @@ function seedRecords(work, name, present, skipConnections = false) {
 
 /** Agent names currently in an install, read back from the binary rather than assumed. */
 function liveAgents(work) {
-  const out = runCommand(work, "asterism list");
+  const out = runCommand(work, "asterism list", "while reading back which agents an install has");
   // `list` prints one bulleted row per agent: "• writer · propose".
   return [...out.stdout.matchAll(/^\s*[•*-]\s+([\w-]+)\s+·/gm)].map((m) => m[1]);
 }
@@ -718,7 +719,7 @@ function probeSubcommandRejections(work) {
   }
   const missed = [];
   for (const verb of [...verbs].sort()) {
-    const result = runCommand(work, `asterism ${verb} __nosuch_subcommand__`);
+    const result = runCommand(work, `asterism ${verb} __nosuch_subcommand__`, "while probing subcommand rejections");
     const first = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
     if (result.code === 0 || !isShapeRejection(first)) {
       missed.push(`  asterism ${verb} __nosuch_subcommand__\n    → ${first || "(no output)"}`);
@@ -741,7 +742,7 @@ function probeSubcommandRejections(work) {
  * refusal (an agent that does not exist, an id that resolves to nothing) is the
  * substitution's fault, not the page's, and is excused.
  */
-function checkSynopsis(work, scratch, command) {
+function checkSynopsis(work, scratch, command, where = "") {
   const { text, leftover } = concretize(command);
   const path = text
     .split(/\s+/)
@@ -776,7 +777,7 @@ function checkSynopsis(work, scratch, command) {
   // workspace, the grammar check silently rewrote the state its examples then met, and
   // three pages "failed" on damage the checker had done itself.
   if (!UNRUNNABLE.some(([re]) => re.test(text))) {
-    const result = runCommand(scratch, text);
+    const result = runCommand(scratch, text, where);
     const first = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
     if (isShapeRejection(first)) {
       return { ok: false, why: `typed as \`${text}\`, the binary rejected its shape`, detail: first };
@@ -785,7 +786,31 @@ function checkSynopsis(work, scratch, command) {
   return { ok: true, exact: norm(both).includes(norm(command)), leftover };
 }
 
-function runCommand(work, command, timeout = 30_000) {
+const RUN_TIMEOUT_MS = 30_000;
+
+/**
+ * Type one command at the built binary and read what it did.
+ *
+ * A child that NEVER EXITED stops the whole run here rather than returning. It has no exit
+ * code — `status` is null and `signal` names what killed it — and the only thing it left
+ * behind is however much output it managed before the kill. Folding that into `-1` is how a
+ * killed command came to be reported as a PASS with the strongest classification this file
+ * has: a page documenting its command's successful output ("Disconnected writer →
+ * researcher") matches the partial stdout, so the run landed under "refused exactly as the
+ * page documents". Seen in a real report, under load, on `docs/commands.md`'s `disconnect`.
+ *
+ * Stopping rather than returning a flag is deliberate, and it is the fix for the CATEGORY
+ * rather than that one site. Four callers read this, and not one of them can say anything
+ * true about a killed child: `checkSynopsis` would call the grammar fine, `liveAgents` would
+ * silently seed a page's fixture with no agents, and `probeSubcommandRejections` would
+ * report a rejection that never happened. Returning a flag makes correctness depend on every
+ * caller remembering to test it, including the fifth one nobody has written yet.
+ *
+ * And it is honest about what it is: a killed child is a fact about the machine or about a
+ * command that hangs, not about the documentation. Reporting it as a docs failure would send
+ * the reader to the page.
+ */
+function runCommand(work, command, where = "") {
   try {
     const stdout = execFileSync(process.execPath, [BIN, ...argvOf(command)], {
       cwd: work,
@@ -793,32 +818,39 @@ function runCommand(work, command, timeout = 30_000) {
       input: "",
       env: ENV,
       stdio: ["pipe", "pipe", "pipe"],
-      timeout,
+      timeout: RUN_TIMEOUT_MS,
     });
-    return { code: 0, stdout, stderr: "", timedOut: false };
+    return { code: 0, stdout, stderr: "" };
   } catch (e) {
-    // A command KILLED for running past the timeout never exited, so it has no exit code:
-    // `e.status` is null and `e.signal` names the signal. Folding that into `-1` alongside
-    // a real non-zero exit is how a killed command came to be reported as a PASS — with
-    // the strongest classification this file has. A page that documents its command's
-    // successful output ("Disconnected writer → researcher") matches the partial stdout the
-    // kill left behind, so the run lands under "refused exactly as the page documents" and
-    // the gate goes green over a command that never finished. Seen in a real report,
-    // under load, on `docs/commands.md`'s `disconnect` example.
+    if (neverExited(e)) {
+      const partial = (e.stderr?.toString() || e.stdout?.toString() || "").trim().split("\n")[0];
+      console.error(
+        `${where ? `${where}  ` : ""}\`${command}\` never finished: it was killed by ${e.signal}` +
+          `${e.code === "ETIMEDOUT" ? ` after ${RUN_TIMEOUT_MS / 1000}s` : ""}.\n` +
+          `Nothing it printed is a result, so this check cannot say whether that command works.\n` +
+          (partial ? `It had printed: ${partial}\n` : "") +
+          (e.code === "ETIMEDOUT"
+            ? `A machine under heavy load is the usual cause; a command that hangs is the other.`
+            : `That is a crash, not a timeout — the binary died part-way through.`),
+      );
+      process.exit(2);
+    }
     return {
       code: e.status ?? -1,
       stdout: e.stdout?.toString() ?? "",
       stderr: e.stderr?.toString() ?? "",
-      timedOut: neverExited(e),
     };
   }
 }
 
 /**
- * Did the child never exit on its own? A process KILLED for running past the timeout has no
- * exit code at all — `status` is null and `signal` names what killed it — where a process
- * that ran and failed has a number and no signal. Its own function because the whole defect
- * was folding the two into one `-1`.
+ * Did the child never exit on its own? A process killed — by the timeout, or by a segfault
+ * or the OOM killer — has no exit code at all: `status` is null and `signal` names what
+ * killed it, where a process that ran and failed has a number and no signal. Its own
+ * function because the whole defect was folding the two into one `-1`.
+ *
+ * Deliberately not narrowed to `ETIMEDOUT`. A crash is equally "nothing it printed is a
+ * result"; only the sentence explaining it differs, and that is chosen at the call site.
  */
 function neverExited(err) {
   return err.status === null && err.signal != null;
@@ -1403,7 +1435,7 @@ function main() {
             tally.skipped++;
             continue;
           }
-          const verdict = checkSynopsis(work, scratch, command);
+          const verdict = checkSynopsis(work, scratch, command, `${item.file}:${item.line}`);
           if (verdict.ok) {
             tally.synopsis++;
             if (!verdict.exact) inexact.push(item);
@@ -1422,7 +1454,7 @@ function main() {
           continue;
         }
 
-        const result = runCommand(work, command);
+        const result = runCommand(work, command, `${item.file}:${item.line}`);
         if (result.code === 0) {
           tally.ran++;
           if (DIFF_OUTPUT) {
@@ -1433,16 +1465,6 @@ function main() {
           // so its later examples meet the install the page describes.
           const born = command.match(/^asterism\s+new\s+([\w-]+)/);
           if (born) seedRecords(work, born[1], liveAgents(work), opensOwnChannels);
-          continue;
-        }
-        if (result.timedOut) {
-          // Before any excuse or documented-refusal match, because both of those read the
-          // output a kill left behind as though the command had finished and said it.
-          failures.push({
-            ...item,
-            why: "killed for running past the timeout — it never finished, so nothing it printed is a result",
-            detail: (result.stderr || result.stdout).trim().split("\n")[0] ?? "(no output)",
-          });
           continue;
         }
         const first = (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
@@ -1702,42 +1724,6 @@ function report(total, tally, groups, coverageWork) {
       for (const p of extra) scopeFailures.push(`  release.yml loop ${i + 1} publishes packages/${p}, which is not a package this repo publishes`);
     });
 
-    console.log(
-      `Both passes read a DERIVED set: ${tracked.length} tracked files for links,` +
-        ` ${sourceFiles().length} user-facing pages for commands, and \`docs_dir\` comes from mkdocs.yml.`,
-    );
-
-    // The anchor port is checked against pinned pairs taken from a real
-    // Python-Markdown `slugify` run, because getting it wrong is SILENT and worse than
-    // having no checker: an anchor helper that disagrees with the site reports the
-    // correct links as dead, and "fixing" them to agree breaks the published page.
-    // Every pair below has an em dash or punctuation — the cases an eyeball
-    // reimplementation gets wrong. This is the cheap, interpreter-free half; the thorough
-    // half is `check:mkdocs-parity`, which renders every published page with the site's own
-    // Python-Markdown and compares every id it emits, pinning nothing.
-    const ANCHOR_PAIRS = [
-      ["## `handoff` — hand over a task", "handoff-hand-over-a-task"],
-      ["### Earned autonomy — per-capability grants", "earned-autonomy-per-capability-grants"],
-      ["## `artifact-only` — get the files, not the words", "artifact-only-get-the-files-not-the-words"],
-      ["## What isolation means today", "what-isolation-means-today"],
-      ["## `channel telegram`", "channel-telegram"],
-    ];
-    const anchorFailures = ANCHOR_PAIRS.filter(([h, want]) => anchorOf(h) !== want);
-    if (anchorFailures.length) {
-      console.log("\nSELF-TEST FAILED: the anchor port no longer matches Python-Markdown:");
-      for (const [h, want] of anchorFailures) {
-        console.log(`  ${h}\n    want: ${want}\n    got:  ${anchorOf(h)}`);
-      }
-      process.exit(1);
-    }
-    console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
-
-    // The landing page is HTML, so it could not be in any set built from `*.md` — which is
-    // how it came to name three of the nine catalog tools and say an agent pauses "at every
-    // level", eight releases after both were corrected elsewhere. Asserted from a second
-    // derivation (the workflow line that publishes it) rather than read back from the
-    // function under test, and asserted NON-EMPTY, because a clause that finds nothing
-    // would satisfy every `includes` above without reading a page.
     // The shapes `readLandingDir` REFUSES, each spawned, because refusing is
     // `process.exit(2)` and a refusal that is only read is a refusal nobody has run. Both
     // of them leave this pass with no page to check, which is not an error anywhere
@@ -1795,11 +1781,27 @@ function report(total, tally, groups, coverageWork) {
       }
     }
 
-    const landing = publishedLandingPages();
-    if (landing.length === 0) {
-      scopeFailures.push("  no page is published at the site's root, so the HTML half proves nothing");
+    // Which page the command pass must read, RE-derived here from the workflow and from
+    // git — a second derivation, the way `shouldRead` above re-derives the npm READMEs from
+    // the manifests. Asking `publishedLandingPages()` and then checking `sourceFiles()`
+    // contains it would be the function agreeing with itself, since `userFacingPages()` is
+    // built from that very call; and `landing.length === 0` cannot happen, because the
+    // function refuses on an empty set. Neither would fail if the clause were deleted.
+    const copiedDir = /^\s*cp\s+-r\s+(\S+?)\/\.\s+_site\/?\s*$/m.exec(
+      readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8"),
+    )?.[1];
+    if (!copiedDir) {
+      scopeFailures.push("  docs.yml no longer copies a directory into the Pages artifact root");
     }
-    for (const page of landing) {
+    const shouldReadHtml = copiedDir
+      ? execFileSync("git", ["ls-files", "-z", "--", `${copiedDir}/*.html`], { cwd: ROOT, encoding: "utf8" })
+          .split("\u0000")
+          .filter(Boolean)
+      : [];
+    if (shouldReadHtml.length === 0) {
+      scopeFailures.push("  git tracks no HTML in the directory the site serves at its root, so this proves nothing");
+    }
+    for (const page of shouldReadHtml) {
       if (!read.includes(page)) scopeFailures.push(`  the command pass does not read ${page}`);
       if (terminalBlocks(readFileSync(join(ROOT, page), "utf8"), true).length === 0) {
         scopeFailures.push(`  ${page} is read, but no terminal block was found in it — it is checked for nothing`);
@@ -1812,9 +1814,43 @@ function report(total, tally, groups, coverageWork) {
       process.exit(1);
     }
     console.log(
-      `The site's root page is derived from the workflow that publishes it: ${landing.join(", ")}.`,
+      `Both passes read a DERIVED set: ${tracked.length} tracked files for links,` +
+        ` ${sourceFiles().length} user-facing pages for commands, \`docs_dir\` comes from` +
+        ` mkdocs.yml, and the site's root page from the workflow that publishes it` +
+        ` (${shouldReadHtml.join(", ")}).`,
     );
 
+    // The anchor port is checked against pinned pairs taken from a real
+    // Python-Markdown `slugify` run, because getting it wrong is SILENT and worse than
+    // having no checker: an anchor helper that disagrees with the site reports the
+    // correct links as dead, and "fixing" them to agree breaks the published page.
+    // Every pair below has an em dash or punctuation — the cases an eyeball
+    // reimplementation gets wrong. This is the cheap, interpreter-free half; the thorough
+    // half is `check:mkdocs-parity`, which renders every published page with the site's own
+    // Python-Markdown and compares every id it emits, pinning nothing.
+    const ANCHOR_PAIRS = [
+      ["## `handoff` — hand over a task", "handoff-hand-over-a-task"],
+      ["### Earned autonomy — per-capability grants", "earned-autonomy-per-capability-grants"],
+      ["## `artifact-only` — get the files, not the words", "artifact-only-get-the-files-not-the-words"],
+      ["## What isolation means today", "what-isolation-means-today"],
+      ["## `channel telegram`", "channel-telegram"],
+    ];
+    const anchorFailures = ANCHOR_PAIRS.filter(([h, want]) => anchorOf(h) !== want);
+    if (anchorFailures.length) {
+      console.log("\nSELF-TEST FAILED: the anchor port no longer matches Python-Markdown:");
+      for (const [h, want] of anchorFailures) {
+        console.log(`  ${h}\n    want: ${want}\n    got:  ${anchorOf(h)}`);
+      }
+      process.exit(1);
+    }
+    console.log(`Anchor slugify matches Python-Markdown on ${ANCHOR_PAIRS.length} pinned headings.`);
+
+    // The landing page is HTML, so it could not be in any set built from `*.md` — which is
+    // how it came to name three of the nine catalog tools and say an agent pauses "at every
+    // level", eight releases after both were corrected elsewhere. Asserted from a second
+    // derivation (the workflow line that publishes it) rather than read back from the
+    // function under test, and asserted NON-EMPTY, because a clause that finds nothing
+    // would satisfy every `includes` above without reading a page.
     // The tool-catalog rule, planted in BOTH directions. The direction that matters most is
     // the negative one: four of the nine names — `find`, `stat`, `move`, `mkdir` — are
     // ordinary English words, so a pass that counted prose instead of code spans would
@@ -1850,11 +1886,11 @@ function report(total, tally, groups, coverageWork) {
         ` in code spans, and on nothing else — prose mentions included.`,
     );
 
-    // A command KILLED for running past the timeout must be told apart from one that ran
-    // and failed. Folding both into `-1` is how a real report came to file a killed
-    // `disconnect` under "refused exactly as the page documents" — the strongest
-    // classification here — because the partial stdout the kill left behind was the success
-    // line the page shows. The gate went green over a command that never finished.
+    // A child that never exited must be told apart from one that ran and failed, and the
+    // whole run must STOP rather than read what the kill left behind. Folding both into
+    // `-1` is how a killed `disconnect` came to be filed under "refused exactly as the page
+    // documents" — the strongest classification here — because its partial stdout was the
+    // success line the page shows.
     //
     // Proved against a REAL killed child rather than a hand-made error object, because the
     // fragile half is Node's contract, not the comparison. No `asterism` verb serves as the
@@ -1878,10 +1914,21 @@ function report(total, tally, groups, coverageWork) {
         killShapes.push("  the fixture printed nothing before being killed, so it does not exercise the case at all");
       }
     }
+    // A crash is the same fact — nothing it printed is a result — and must be caught by the
+    // same predicate, or a segfaulting binary is read as a command that failed cleanly.
+    try {
+      execFileSync(process.execPath, ["-e", "process.kill(process.pid, 'SIGSEGV')"], {
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      killShapes.push("  a child that killed itself with SIGSEGV did not throw");
+    } catch (e) {
+      if (!neverExited(e)) killShapes.push("  a child killed by SIGSEGV was read as one that exited");
+    }
     // The control, and the direction that matters more: a child that RAN and failed must
     // never be called killed, or every documented refusal in the corpus becomes a failure.
     try {
-      execFileSync(process.execPath, ["-e", 'process.exit(3)'], { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+      execFileSync(process.execPath, ["-e", "process.exit(3)"], { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
       killShapes.push("  a child exiting 3 did not throw");
     } catch (e) {
       if (neverExited(e)) killShapes.push("  a child that exited 3 on its own was reported as killed");
@@ -1891,7 +1938,7 @@ function report(total, tally, groups, coverageWork) {
       for (const f of killShapes) console.log(f);
       process.exit(1);
     }
-    console.log("A command killed for running past the timeout is told apart from one that exited and failed.");
+    console.log("A command killed — by the timeout or by a crash — is told apart from one that exited and failed.");
 
     // The root page's links, planted in both directions. It found nothing wrong on the real
     // page, so the only evidence it works at all is here — and the negative cases matter as
@@ -1907,6 +1954,9 @@ function report(total, tally, groups, coverageWork) {
       ['<a href="https://github.com/qmilab/asterism">a</a>', "an external link", 0, 0],
       ['<a href="logo.png">a</a>', "a relative asset", 0, 0],
       ['<a href="#top">a</a>', "an in-page anchor", 0, 0],
+      ["<a href='/asterism/docs/nosuchpage/'>a</a>", "a SINGLE-quoted href at a URL nothing builds", 1, 0],
+      ["<a href='/asterism/docs/walkthrough/'>a</a>", "a single-quoted href that resolves", 0, 0],
+      ['<a data-href="/asterism/docs/nosuchpage/" href="/asterism/docs/walkthrough/">a</a>', "a `data-href` beside a real one — only the real one is a link", 0, 0],
       ['<link rel="icon" href="/favicon.svg" />', "a favicon, which is an asset and not a link", 0, 0],
       ['<link rel="stylesheet" href="/asterism/docs/nosuchpage/" />', "a stylesheet at a URL no page builds", 0, 0],
     ];
@@ -1920,6 +1970,29 @@ function report(total, tally, groups, coverageWork) {
         );
       }
     }
+    // The prefixes are DERIVED, and the self-test proves it by pointing a wrong one at the
+    // REAL page: every link then falls to the undecidable pile, which is printed but does
+    // not fail the build — so without the zero-report below, a moved site is a green over
+    // links nothing looked at.
+    const realPages = publishedLandingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]);
+    const realPublished = new Set(publishedPages());
+    const right = checkLandingLinks(realPages, realPublished);
+    if (right.checked === 0) {
+      linkFailures.push("  the real root page resolved zero links against its own derived prefix");
+    }
+    const wrong = checkLandingLinks(realPages, realPublished, { docsPrefix: "/elsewhere/docs/", siteRoot: "/elsewhere/" });
+    if (wrong.checked !== 0) {
+      linkFailures.push(`  a wrong prefix over the real page still checked ${wrong.checked} links`);
+    }
+    // …and everything it could not check is ACCOUNTED FOR rather than dropped, which is
+    // what makes `checked === 0` at the call site a reliable signal that the prefix moved.
+    if (wrong.offSite.length !== right.checked + right.offSite.length) {
+      linkFailures.push(
+        `  under a wrong prefix ${wrong.offSite.length} links were set aside, where the page has` +
+          ` ${right.checked + right.offSite.length} absolute links in all`,
+      );
+    }
+
     // …and the anchor half must be judged by the SITE's renderer. `## Claim 1 — separate
     // memory` slugs differently under GitHub's rule (which keeps no em dash and joins with
     // `-`), so a pass using the wrong one would pass the fixture above and fail the site.
@@ -1951,6 +2024,10 @@ function report(total, tally, groups, coverageWork) {
       ["a multi-line block set to `normal`", styled("normal") + twoLine, true],
       ["a multi-line block set to `pre-line`, which eats the column alignment", styled("pre-line") + twoLine, true],
       ["a multi-line block set to `pre`", styled("pre") + twoLine, false],
+      // `<pre>` needs no declaration — the browser gives it `white-space: pre`. Without
+      // this case the rule reports the first `<pre class="…terminal…">` anyone adds, for a
+      // block that renders correctly, which is how a gate becomes work to suppress.
+      ["a multi-line <pre> with no white-space rule at all", styled(null) + '<pre class="x__terminal">a\nb</pre>', false],
       ["a multi-line block set to `pre-wrap`", styled("pre-wrap") + twoLine, false],
       ["a multi-line block set to `break-spaces`", styled("break-spaces") + twoLine, false],
       ["a ONE-line block with no white-space rule, which cannot lose a break", styled(null) + oneLine, false],
@@ -2232,7 +2309,18 @@ function report(total, tally, groups, coverageWork) {
   // than counted as zero: for the HTML half the answer "no commands" is far more often "the
   // markup changed" than it is true, and a checker reading nothing while printing a green
   // total is the exact failure this file has now paid for twice.
-  const landingLinks = SELF_TEST ? { broken: [], offSite: [], checked: 0 } : checkLandingLinks();
+  const landingLinks = SELF_TEST ? { broken: [], offSite: [], checked: 1 } : checkLandingLinks();
+  if (landingLinks.checked === 0) {
+    // Zero over the REAL root page, which is full of absolute links, means they no longer
+    // begin with the prefix `site_url` derives — so every one went to the undecidable pile,
+    // which is printed but does not fail the build. The self-test proves this is reachable
+    // by pointing a wrong prefix at the real page and watching `checked` go to zero.
+    console.log(
+      `\nNOT ONE LINK ON THE SITE'S ROOT PAGE WAS CHECKED — none of them begins with` +
+        ` \`${landingLinks.siteRoot}\`, the path derived from \`site_url\`. Either the site moved` +
+        ` or the page's links did; nothing here was looked at.`,
+    );
+  }
   if (landingLinks.broken.length) {
     console.log(`\nBROKEN LINKS ON THE SITE'S ROOT PAGE (${landingLinks.broken.length}):`);
     for (const b of landingLinks.broken) console.log(`  ${b}`);
@@ -2279,6 +2367,7 @@ function report(total, tally, groups, coverageWork) {
     providerGaps.length ||
     catalogGaps.length ||
     landingLinks.broken.length ||
+    landingLinks.checked === 0 ||
     renderGaps.length ||
     blockless.length
   ) {
@@ -2406,6 +2495,12 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
   return gaps;
 }
 
+/** `site_url` → the two prefixes the root page's links are read against. */
+function landingPrefixes() {
+  const docsPrefix = siteUrlPath();
+  return { docsPrefix, siteRoot: docsPrefix.replace(/[^/]+\/$/, "") };
+}
+
 /**
  * Every link on the site's root page that points INTO this site, resolved against the pages
  * mkdocs actually builds.
@@ -2428,8 +2523,15 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
 function checkLandingLinks(
   pages = publishedLandingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]),
   published = new Set(publishedPages()),
+  // Both prefixes are DERIVED. `site_url` says where the built docs are served
+  // (`/asterism/docs/`); the workflow puts the landing page in the artifact ROOT, one level
+  // above the directory mkdocs builds into — so the site's root is that path with its last
+  // segment dropped. A hard-coded `/asterism/` would be the one undeclared constant in a
+  // module built on derivation, and wrong it fails SILENTLY: every link falls through to
+  // "not ours", and this reports that all zero of them resolve. A parameter so the
+  // self-test can point a deliberately wrong prefix at the real page and see that happen.
+  { docsPrefix, siteRoot } = landingPrefixes(),
 ) {
-  const siteRoot = "/asterism/";
   const broken = [];
   const offSite = [];
   let checked = 0;
@@ -2438,8 +2540,12 @@ function checkLandingLinks(
     // `<a href>` only. A `<link rel="icon" href="/favicon.svg">` is an ASSET request, served
     // by whoever owns the apex, and listing eleven of those as links-we-cannot-decide buries
     // the eight navigation links that genuinely are.
-    for (const m of text.matchAll(/<a\b[^>]*?\bhref="([^"]+)"/gi)) {
-      const href = decodeEntities(m[1]);
+    // Both quotings, and `href` only as its OWN attribute: `\bhref=` also matches
+    // `data-href=`, because `-` is not a word character — which would report an author's
+    // private attribute as a page link. A single-quoted `href` is the mirror failure and
+    // the worse one, since an unmatched link is silently unchecked rather than loudly wrong.
+    for (const m of text.matchAll(/<a\b[^>]*?[\s"']href=("([^"]*)"|'([^']*)')/gi)) {
+      const href = decodeEntities(m[2] ?? m[3] ?? "");
       if (EXTERNAL_TARGET.test(href) || href.startsWith("mailto:") || href.startsWith("#")) continue;
       if (!href.startsWith("/")) continue; // a relative asset (logo.png) — not a page link
       const line = text.slice(0, m.index).split("\n").length;
@@ -2452,9 +2558,13 @@ function checkLandingLinks(
       const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
       checked++;
       if (bare === "" || bare === "index") continue; // this page itself
-      // mkdocs' directory URLs: `/asterism/docs/x/` is built from `docs/x.md`, and
-      // `/asterism/docs/` from `docs/index.md`.
-      const candidates = [`${bare}.md`, `${bare}/index.md`];
+      // mkdocs' directory URLs: `<site_url>x/` is built from `<docs_dir>/x.md`, and
+      // `<site_url>` itself from `<docs_dir>/index.md`. The URL segment and the source
+      // directory are two different names, so the served path is translated rather than
+      // assumed to match: a `docs_dir` rename must not silently stop resolving anything.
+      const served = docsPrefix.slice(siteRoot.length).replace(/\/$/, "");
+      const rel2 = bare === served ? siteDir() : bare.startsWith(`${served}/`) ? `${siteDir()}/${bare.slice(served.length + 1)}` : bare;
+      const candidates = [`${rel2}.md`, `${rel2}/index.md`];
       const target = candidates.find((c) => published.has(c));
       if (!target) {
         broken.push(`${at}  ${href} — no published page builds that URL`);
@@ -2467,7 +2577,11 @@ function checkLandingLinks(
       }
     }
   }
-  return { broken, offSite, checked };
+  // `checked` is reported rather than judged here: a page whose only links go to the org
+  // site legitimately checks zero, and that is a real shape (the self-test plants it). It
+  // is the REAL root page reaching zero that means the prefix is wrong, so the caller — the
+  // one that knows it is looking at the real site — makes that call.
+  return { broken, offSite, checked, siteRoot };
 }
 
 /**
@@ -2500,6 +2614,10 @@ function checkTerminalRendering(
     const styles = [...text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join("\n");
     for (const block of terminalBlocks(text, true)) {
       if (!block.text.includes("\n")) continue; // a one-line block cannot lose a line break
+      // `<pre>` gets `white-space: pre` from the browser's own stylesheet, so it needs no
+      // declaration and reporting one would be a defect this manufactures. Only `<div>`,
+      // which is what the page uses and what silently collapsed, has to say so.
+      if (block.tag !== "div") continue;
       const classes = block.className.trim().split(/\s+/).filter(Boolean);
       const preserved = classes.some((cls) => {
         // The declaration for this class, anywhere in the page's own CSS.
