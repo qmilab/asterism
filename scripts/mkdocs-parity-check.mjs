@@ -38,7 +38,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { anchorsOf, MKDOCS_RULE, anchorOf } from "./lib/anchors.mjs";
-import { ROOT, siteDir, publishedPages, readSiteConfig, publishedPredicate } from "./lib/docs-scope.mjs";
+import { ROOT, siteDir, siteUrlPath, publishedPages, readSiteConfig, publishedPredicate } from "./lib/docs-scope.mjs";
 
 const SELF_TEST = process.argv.includes("--self-test");
 
@@ -72,7 +72,7 @@ for rel in pages:
     with open(os.path.join(root, rel), encoding='utf-8') as fh:
         html = md.convert(fh.read())
     anchors[rel] = re.findall(r'<h[1-6][^>]*\\bid="([^"]+)"', html)
-print(json.dumps({'docs_dir': docs_dir, 'pages': pages, 'anchors': anchors}))
+print(json.dumps({'docs_dir': docs_dir, 'site_url': cfg['site_url'], 'pages': pages, 'anchors': anchors}))
 `;
 
 /**
@@ -297,6 +297,23 @@ if (SELF_TEST) {
   const model = siteModel(python, join(ROOT, "mkdocs.yml"));
   const failures = [];
 
+  // `site_url` decides which absolute links on the site's ROOT page belong to this repo,
+  // and its reader is the one this codebase repeatedly calls out as failing SILENTLY when
+  // wrong — every link falling through to "not ours" while the pass reports that all zero
+  // of them resolve. It was also the one derived value with no parity check here, under a
+  // module header claiming everything derived is cross-checked against mkdocs itself.
+  // mkdocs normalizes (`!ENV` resolution, a trailing slash); this compares against that.
+  if (model.site_url) {
+    const fromMkdocs = new URL(model.site_url).pathname.replace(/\/?$/, "/");
+    if (siteUrlPath() !== fromMkdocs) {
+      failures.push(
+        `  siteUrlPath() is '${siteUrlPath()}' where mkdocs resolves site_url to '${fromMkdocs}'`,
+      );
+    }
+  } else {
+    failures.push("  mkdocs reports no site_url, so the site's root page has no prefix to resolve links against");
+  }
+
   if (siteDir() !== model.docs_dir) {
     failures.push(
       `  docs_dir: mkdocs publishes '${model.docs_dir}', and the checkers read '${siteDir()}'.` +
@@ -322,6 +339,7 @@ if (SELF_TEST) {
   }
 
   console.log(`docs_dir agrees with mkdocs: ${model.docs_dir}`);
+  console.log(`site_url agrees with mkdocs: ${siteUrlPath()}`);
   console.log(
     `The ${model.pages.length} pages this repo calls published are exactly the ${model.pages.length}` +
       ` mkdocs builds, \`exclude_docs\` included.`,

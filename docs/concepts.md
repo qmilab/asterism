@@ -405,8 +405,9 @@ workspace (`..`, an absolute path), but that is each tool's own best-effort
 check, not OS-level containment — a different or misbehaving tool would not be
 physically prevented from writing elsewhere today. What ultimately guards
 against irreversible loss is the
-[destructive-action gate](#the-destructive-action-gate) — a deletion pauses for
-confirmation regardless of trust — not the workspace boundary. Stronger execution
+[destructive-action gate](#the-destructive-action-gate), not the workspace
+boundary — under [the rule above](#the-destructive-action-gate), a deletion
+never happens on its own whatever an agent's trust level. Stronger execution
 isolation — process, container, and microVM tiers — is planned for a later phase.
 Until then, prefer the words *separate* and *scoped* over *sandboxed* when
 describing what Asterism does.

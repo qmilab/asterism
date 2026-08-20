@@ -19,6 +19,11 @@
 // terms of a rule derived here from `mkdocs.yml` and `git ls-files`, and names the set it
 // read in its report.
 //
+// A fifth answer was missing entirely rather than repeated, because the question every one
+// of the four asks is "which MARKDOWN counts" and the site's own landing page is HTML. It
+// is served at the root of the same site, from a directory the docs workflow copies into
+// the Pages artifact, and no `*.md` filter can reach it. See `publishedLandingPages`.
+//
 // The derivation is CROSS-CHECKED against mkdocs itself: `scripts/mkdocs-parity-check.mjs`
 // asks `mkdocs.config.load_config()` for the same answers and fails if they differ. That is
 // what makes this a port rather than a guess — the same discipline the anchor helpers are
@@ -54,6 +59,7 @@ export function readSiteConfig(configText) {
   const lines = configText.split("\n");
   let docsDir;
   let exclude = null;
+  let siteUrl;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -89,6 +95,21 @@ export function readSiteConfig(configText) {
       }
       continue;
     }
+    const url = /^site_url:\s*(.*)$/.exec(line);
+    if (url) {
+      if (siteUrl !== undefined) {
+        // The same ambiguity `docs_dir` and `exclude_docs` are refused for, and with a
+        // sharper consequence: this one silently decides which prefix the site's root page
+        // has its links resolved against, and getting it wrong sends every one of them to
+        // the "not ours" pile while the pass reports that all zero of them resolve.
+        refuse("mkdocs.yml declares `site_url` twice; this reader cannot say which one the site is served at.");
+      }
+      // Where the built site is SERVED, which is the only thing that can say what an
+      // absolute `/…` link on a hand-written page means. Read, not required: mkdocs works
+      // without it, so the refusal belongs to the pass that needs it.
+      siteUrl = url[1].trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");
+      continue;
+    }
     const ex = /^exclude_docs:\s*(.*)$/.exec(line);
     if (!ex) continue;
     if (exclude !== null) {
@@ -121,7 +142,7 @@ export function readSiteConfig(configText) {
 
   // Absent is not a mismatch: mkdocs defaults `docs_dir` to `docs`, which is what this repo
   // declares anyway.
-  return { docsDir: docsDir ?? "docs", exclude: exclude ?? [] };
+  return { docsDir: docsDir ?? "docs", exclude: exclude ?? [], siteUrl };
 }
 
 let CACHED;
@@ -141,9 +162,43 @@ function config() {
   return CACHED;
 }
 
-/** The directory mkdocs publishes, as `mkdocs.yml` declares it. */
-export function siteDir() {
-  return config().docsDir;
+/**
+ * The path the built docs are SERVED at, from `mkdocs.yml`'s `site_url` — `/asterism/docs/`.
+ *
+ * The site's root page is hand-written HTML full of absolute links (`/asterism/docs/…`),
+ * and deciding whether one of those resolves needs to know which prefix belongs to this
+ * repo. Hard-coding it would be the one undeclared constant in a module built on
+ * derivation, and getting it wrong is SILENT: every link falls through to "not ours", and
+ * the pass reports that all zero of them resolve.
+ *
+ * Always ends in a slash, so a prefix test cannot match a sibling directory.
+ */
+export function siteUrlPath(cfg = config()) {
+  const raw = cfg.siteUrl;
+  if (!raw) {
+    refuse(
+      "mkdocs.yml declares no `site_url`, so nothing here can say what an absolute `/…` link\n" +
+        "on the site's root page points at. Add one, or teach scripts/lib/docs-scope.mjs.",
+    );
+  }
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    refuse(`mkdocs.yml gives \`site_url: ${raw}\`, which is not a URL this can read a path out of.`);
+  }
+  return url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+}
+
+/**
+ * The directory mkdocs publishes, as `mkdocs.yml` declares it.
+ *
+ * Takes the config so a caller can drive it with one that is NOT this repo's. Comparing
+ * `siteDir()` against this repo's own parsed config cannot tell a reader from a constant —
+ * both give "docs" — which is what the self-test's comment used to claim it caught.
+ */
+export function siteDir(cfg = config()) {
+  return cfg.docsDir;
 }
 
 /**
@@ -233,20 +288,24 @@ export function isPublished(rel) {
 }
 
 /**
- * Every markdown file this repo SHIPS, from git rather than a readdir: the root also holds
- * a contributor's private notes (`ROADMAP.md` and friends are gitignored), and a gate that
- * fails on files the repo does not ship is a gate people learn to skip.
+ * Every file this repo SHIPS matching one `git ls-files` pathspec, from git rather than a
+ * readdir: the root also holds a contributor's private notes (`ROADMAP.md` and friends are
+ * gitignored), and a gate that fails on files the repo does not ship is a gate people learn
+ * to skip.
+ *
+ * `what` names the corpus in the two messages this can stop with, because both of them are
+ * read by someone who does not yet know which pass asked.
  */
-export function trackedMarkdown() {
+function trackedFiles(pathspec, what) {
   let out;
   try {
-    out = execFileSync("git", ["ls-files", "-z", "--", "*.md"], { cwd: ROOT, encoding: "utf8" });
+    out = execFileSync("git", ["ls-files", "-z", "--", pathspec], { cwd: ROOT, encoding: "utf8" });
   } catch (err) {
     // Not a fallback — a readdir here would gate on a contributor's private notes, and an
     // empty list would let a pass report a green zero over nothing at all. Say why it
     // stopped, because `spawnSync git ENOENT` reads like a broken checkout.
     refuse(
-      `The markdown this repo ships is listed by asking git, and git did not answer here` +
+      `The ${what} this repo ships is listed by asking git, and git did not answer here` +
         ` (${err.message}). Run this from a git checkout with git available.`,
     );
   }
@@ -257,13 +316,18 @@ export function trackedMarkdown() {
   const missing = tracked.filter((rel) => !existsSync(join(ROOT, rel)));
   if (missing.length) {
     refuse(
-      `git tracks ${missing.length} markdown file${missing.length === 1 ? "" : "s"} not in the` +
+      `git tracks ${missing.length} file${missing.length === 1 ? "" : "s"} not in the` +
         ` working tree, and every check here reads them:\n` +
         missing.map((m) => `  ${m}`).join("\n") +
         `\nStage the deletion (\`git rm\`) or restore the file.`,
     );
   }
   return tracked;
+}
+
+/** Every markdown file this repo ships. */
+export function trackedMarkdown() {
+  return trackedFiles("*.md", "markdown");
 }
 
 /** The tracked markdown the site publishes — the pages a reader meets on the site. */
@@ -296,6 +360,81 @@ export function userFacingMarkdown() {
 }
 
 /**
+ * The pages the site serves that mkdocs did not build — today, the landing page at the
+ * site's root.
+ *
+ * This is the clause that could not exist while every answer here was `*.md`. The site is
+ * assembled from two halves: `mkdocs build` renders `docs_dir` into `_site/docs`, and the
+ * workflow copies a directory of hand-written HTML into `_site` alongside it, so
+ * `qmilab.com/asterism/` is served from that directory and `qmilab.com/asterism/docs/` from
+ * this one. The second half is HTML, so no filter built on tracked markdown can reach it —
+ * and it is the page a reader arrives at FIRST.
+ *
+ * It cost something to leave outside: the landing page named three of the nine catalog
+ * tools and said an agent "pauses for confirmation at every level", which is false at
+ * `propose` — the two defects #164 fixed on the npm README, in the copy that was still
+ * outside the gate that found them there.
+ *
+ * Derived from the workflow line that does the copying, not from the directory's name. A
+ * hard-coded `landing/` would be one more constant that is right until someone moves it,
+ * and moving it would silently empty this set rather than fail — the same shape as a
+ * `docs_dir` this reader cannot compare.
+ */
+export function publishedLandingPages(workflowText) {
+  const rel = join(".github", "workflows", "docs.yml");
+  // The text is a parameter so the self-test can drive BOTH refusals below through this
+  // entry point rather than only the one that lives in a pure helper. The empty-set refusal
+  // is the one that matters most and the one hardest to reach: it needs a workflow naming a
+  // real directory with no HTML in it, which is what a move looks like.
+  let text = workflowText;
+  if (text === undefined) {
+    try {
+      text = readFileSync(join(ROOT, rel), "utf8");
+    } catch (err) {
+      refuse(`The site's root pages are published by ${rel}, which could not be read (${err.message}).`);
+    }
+  }
+  const dir = readLandingDir(text, rel);
+  const pages = trackedFiles(`${dir}/*.html`, "site HTML");
+  if (pages.length === 0) {
+    // Not "nothing to check": the whole point of deriving the directory is that a move
+    // must be loud. An empty set here is a pass reading no pages while reporting a zero.
+    refuse(
+      `${rel} publishes \`${dir}/\` at the site's root, and git tracks no HTML there.\n` +
+        `Either the directory moved without this line moving with it, or the page is untracked.`,
+    );
+  }
+  return pages;
+}
+
+/**
+ * A workflow's text → the directory it copies into the Pages artifact root.
+ *
+ * `cp -r landing/. _site/` — the artifact root is where GitHub Pages serves `/asterism/`
+ * from, so a copy INTO it is by definition a publish. Anything copied elsewhere is not.
+ *
+ * Separate from the caller, and taking the text rather than reading it, for the same reason
+ * `readSiteConfig` does: refusing is `process.exit(2)`, so the only way to show a refusal
+ * happens is to run it — which needs a planted workflow this can be pointed at.
+ */
+export function readLandingDir(workflowText, rel = ".github/workflows/docs.yml") {
+  const copies = [...workflowText.matchAll(/^\s*cp\s+-r\s+([^\s]+?)\/\.\s+_site\/?\s*$/gm)].map((m) => m[1]);
+  if (copies.length !== 1) {
+    refuse(
+      copies.length === 0
+        ? `${rel} no longer copies any directory into the Pages artifact root (\`_site/\`), so\n` +
+            `this cannot say which directory serves the site's root. Either the landing page is\n` +
+            `no longer published from this repo, or the line that publishes it changed shape.\n` +
+            `Teach scripts/lib/docs-scope.mjs before changing it.`
+        : `${rel} copies ${copies.length} directories into the Pages artifact root; this reader\n` +
+            `handles exactly one and cannot say which of ${copies.length} serves the site's root.\n` +
+            `Teach scripts/lib/docs-scope.mjs before adding another.`,
+    );
+  }
+  return copies[0].replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/**
  * Every directory holding a manifest this repo PUBLISHES — the workspace's own is private,
  * so it is not one. Derived from git and each manifest's `private` flag rather than from a
  * glob on `packages/*`, because the release workflow's list of eight is derived the same
@@ -320,6 +459,20 @@ export function publishedPackages() {
     dirs.push(rel === "package.json" ? "" : rel.slice(0, -"/package.json".length));
   }
   return dirs.filter(Boolean);
+}
+
+/**
+ * Every page a USER of Asterism meets, whichever markup it is written in: the site's own
+ * pages, the repo's front page, each npm package's README, and the landing page the site
+ * serves at its root.
+ *
+ * Kept separate from `userFacingMarkdown()` because a pass may legitimately want only the
+ * markdown — the anchor rule and the link pass are both about markdown link syntax. A pass
+ * about what a page SAYS wants this one, and the difference between the two sets is exactly
+ * the page that was outside every check.
+ */
+export function userFacingPages() {
+  return [...userFacingMarkdown(), ...publishedLandingPages()].sort();
 }
 
 /**

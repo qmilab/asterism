@@ -427,6 +427,10 @@
       }
 
       .asterism__terminal {
+        /* Without this the block is a <div>, so every newline in it collapses to a space
+           and the whole quickstart renders as one run-on paragraph — which is how it was
+           published. `overflow-x: auto` below only makes sense alongside it. */
+        white-space: pre;
         font-family: var(--font-mono);
         font-size: 0.85rem;
         line-height: 1.7;
@@ -473,7 +477,7 @@
             <p class="asterism__tagline">Many agents. One runtime. Separate lives.</p>
             <dl class="asterism__meta">
               <dt>Status</dt>
-              <dd>v0.1.0 — Phase 0; five packages on npm</dd>
+              <dd>Phase 3 — Collaboration (in progress); published on npm</dd>
               <dt>License</dt>
               <dd>Apache 2.0</dd>
               <dt>Repository</dt>
@@ -513,8 +517,9 @@
             <p>
               Unlike multi-agent <em>orchestration</em> frameworks — which coordinate agents to
               finish a task and share context freely — Asterism starts with
-              <strong>identity and boundaries</strong>. Collaboration is a later, explicit,
-              permissioned connection, not the default and never implicit shared state.
+              <strong>identity and boundaries</strong>. Collaboration is an explicit, permissioned
+              connection you open between two named agents, not the default and never implicit
+              shared state.
             </p>
           </section>
 
@@ -563,9 +568,11 @@
                 with everything surfaced for review.
               </li>
               <li>
-                <strong>Destructive actions always pause.</strong> Even a fully autonomous agent
-                stops for explicit confirmation before anything destructive — deleting files,
-                force-pushing, spending money.
+                <strong>Destructive actions never happen without you.</strong> Even a fully
+                autonomous agent stops and asks before anything destructive — deleting files,
+                force-pushing, spending money — and a <code>propose</code> agent does not take one
+                at all, handing you the plan instead. The only way past it is you: a capability you
+                have explicitly allowed that agent.
               </li>
               <li>
                 <strong>Memory is reviewable.</strong> Every memory an agent forms is typed, scoped
@@ -612,16 +619,21 @@ asterism events tail client</div>
               <code>client</code>'s <code>GITHUB_TOKEN</code> can't be read from
               <code>writer</code> — those boundaries hold the moment the agents exist. The
               autonomy you set governs the rest: <code>propose</code> hands you a plan,
-              <code>notify</code> and <code>autonomous</code> act on their own, and at
-              <em>every</em> level an agent pauses for confirmation before anything destructive.
+              <code>notify</code> and <code>autonomous</code> act on their own — but before
+              anything <strong>destructive</strong>, <em>whatever</em> the agent's trust level,
+              nothing happens without you: <code>notify</code> and <code>autonomous</code> stop and
+              ask, <code>propose</code> does not take the action at all, and neither acts unasked on
+              a capability you have not allowed it.
             </p>
 
             <p>
               The gate acts on an agent's <em>tools</em>. The shipped CLI registers a default
-              catalog of workspace-scoped file tools — <code>read_file</code>,
-              <code>write_file</code>, <code>delete_file</code> — behind it, so with a
+              catalog of workspace-scoped file tools behind it — the read-only
+              <code>read_file</code>, <code>list_dir</code>, <code>stat</code> and
+              <code>find</code>, the writes <code>write_file</code>, <code>append_file</code>,
+              <code>mkdir</code> and <code>move</code>, and <code>delete_file</code> — so with a
               <a href="/asterism/docs/installation/">configured model</a> an ordinary edit runs
-              under <code>autonomous</code> while a deletion pauses regardless of trust level. The
+              under <code>autonomous</code> while a deletion stops and waits for you. The
               memory and secret boundaries, by contrast, you can see from a fresh install — and all
               five claims are verified end to end by the
               <a href="/asterism/docs/walkthrough/">acceptance test</a>.
@@ -666,12 +678,26 @@ Accept? edit? reject?</div>
             <h2>Status</h2>
 
             <p>
-              <strong>Phase 0 (Core), v0.1.0 on npm</strong> — local CLI and HTTP endpoint,
-              per-agent scoping of memory, secrets, skills, and workspace, souls and roles, trust
-              profiles with the destructive-action gate, and reviewable memory. Richer cognition,
-              collaboration, and stronger execution isolation come in later phases — the
-              <a href="/asterism/docs/concepts/">Concepts</a> page is precise about which
-              boundaries exist today.
+              <strong>The local-first core is shipped</strong> — distinct agents with per-agent
+              memory, secrets, skills and workspace, souls and roles, dialable trust with the
+              destructive-action gate, and reviewable memory — reachable from a terminal
+              dashboard, Telegram and Discord, a background service, a token-protected HTTP
+              endpoint, and a multi-arch container image. On top of it sits
+              <strong>governed learning</strong> — earned trust, structured recall, reviewed
+              reflection, standing objectives, and an agent's own working notes. All of it runs
+              against a model on your own machine, with no account anywhere.
+            </p>
+
+            <p>
+              <strong>Collaboration is the phase in progress.</strong> The first modes are
+              shipped: a one-way connection you open between two agents, carrying only what you
+              chose — a result, the files produced, a screened extract, standing context, or one
+              tool called with its owner's credential and never revealing it. More of it is still
+              to come, and so is <strong>stronger execution isolation</strong>: today's boundary is
+              enforced by the kernel, not by the operating system, and the
+              <a href="/asterism/docs/threat-model/">threat model</a> is as specific about that gap
+              as about the guarantees; <a href="/asterism/docs/concepts/">Concepts</a> is precise
+              about what "separate" means right now.
             </p>
           </section>
 
