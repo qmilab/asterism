@@ -2,7 +2,7 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## 0.9.0
+## 0.9.0 — 2026-08-20
 
 `asterism secrets add` asks you for the value when you do not give it one. Type the command with just an agent and a key, and it prompts — showing nothing as you type. It keeps the value out of your shell history and out of the `ps` output any other user of the machine can read — where the inline form the quickstart showed you put it — and out of the environment, where the alternative it offered put it.
 
