@@ -4400,18 +4400,22 @@ async function reviewObjectiveTransitions(
   }
   if (advisories.length === 0) return 0;
 
-  io.out("");
-  io.out(
+  // The conversation goes where the question goes — the third instance of the split
+  // round 2 found in the other two reviews, and the only one no reviewer flagged. The
+  // suggestion and its confidence were on stdout while "Apply this change?" was on
+  // stderr, so a redirected run asked which objective to retire without showing which.
+  io.err("");
+  io.err(
     `${advisories.length} of ${name}'s objectives ${advisories.length === 1 ? "looks" : "look"} finished, based on recent runs.`,
   );
-  io.out("These are suggestions — an objective only changes if you apply it.");
+  io.err("These are suggestions — an objective only changes if you apply it.");
 
   let applied = 0;
   let skipped = 0;
   for (let i = 0; i < advisories.length; i++) {
     const a = advisories[i]!;
-    io.out("");
-    io.out(
+    io.err("");
+    io.err(
       `(${i + 1}/${advisories.length}) "${a.objective.content}" (${shortId(a.objective.id)}) looks ${a.proposedStatus}` +
         ` · confidence ${a.confidence}`,
     );
@@ -4424,12 +4428,12 @@ async function reviewObjectiveTransitions(
       confidence: a.confidence,
     });
     if (decision === "quit") {
-      io.out("  · stopped");
+      io.err("  · stopped");
       break;
     }
     if (decision !== "apply") {
       skipped++;
-      io.out("  · skipped");
+      io.err("  · skipped");
       continue;
     }
     // Apply through the GUARDED audited path: the CAS flips the status only if the objective is still
@@ -4439,13 +4443,13 @@ async function reviewObjectiveTransitions(
     const result = store.applyObjectiveTransition(agent.id, a.objective.id, a.proposedStatus);
     if (result && result.status === a.proposedStatus) {
       applied++;
-      io.out(`  ✓ marked ${a.proposedStatus}`);
+      io.err(`  ✓ marked ${a.proposedStatus}`);
     } else {
       skipped++;
-      io.out("  · the objective changed elsewhere — skipped");
+      io.err("  · the objective changed elsewhere — skipped");
     }
   }
-  io.out("");
+  // Only the count is the result.
   io.out(`Done — ${applied} applied, ${skipped} skipped.`);
   return 0;
 }

@@ -333,6 +333,27 @@ test("what a reviewer is deciding ABOUT is written where the question is asked",
   expect(result).not.toContain("fs.delete");
 });
 
+test("…and for an objective transition, which is the third review that asks", async () => {
+  // No reviewer flagged this one; the category did. `Apply this change?` was on stderr
+  // while the objective it names, and the confidence behind the suggestion, were on
+  // stdout — so a redirected run asked which objective to retire without showing which.
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  h.io.reviewTransition = () => "skip";
+
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["reflect", "personal", "--review"], h.io);
+  const asked = h.err.join("\n");
+  expect(asked).toContain("finish the blog migration");
+  expect(asked).toContain("looks done");
+  expect(asked).toContain("These are suggestions");
+  expect(h.out.join("\n")).toContain("Done — 0 applied, 1 skipped.");
+  expect(h.out.join("\n")).not.toContain("finish the blog migration");
+});
+
 test("the same holds for a memory review: the proposal is where its question is", async () => {
   const h = harness();
   await withFinishedRun(h);
@@ -1490,6 +1511,8 @@ test("reflect --review suggests finishing an objective the run completed, and ap
   h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
   h.io.reviewTransition = () => "apply";
 
+  h.out.length = 0;
+  h.err.length = 0;
   const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("looks finished");
   expect(out).toContain("looks done");
