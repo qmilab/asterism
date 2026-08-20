@@ -338,18 +338,7 @@ export function publishedLandingPages() {
   } catch (err) {
     refuse(`The site's root pages are published by ${rel}, which could not be read (${err.message}).`);
   }
-  // `cp -r landing/. _site/` — the artifact root is where GitHub Pages serves `/asterism/`
-  // from, so a copy INTO it is by definition a publish. Anything else copied elsewhere is
-  // not this set.
-  const copies = [...workflow.matchAll(/^\s*cp\s+-r\s+([^\s]+?)\/\.\s+_site\/?\s*$/gm)].map((m) => m[1]);
-  if (copies.length !== 1) {
-    refuse(
-      `${rel} copies ${copies.length} directories into the Pages artifact root; this reader\n` +
-        `handles exactly one and cannot say which of ${copies.length} serves the site's root.\n` +
-        `Teach scripts/lib/docs-scope.mjs before adding another.`,
-    );
-  }
-  const dir = copies[0].replace(/^\.\//, "").replace(/\/+$/, "");
+  const dir = readLandingDir(workflow, rel);
   const pages = trackedFiles(`${dir}/*.html`, "site HTML");
   if (pages.length === 0) {
     // Not "nothing to check": the whole point of deriving the directory is that a move
@@ -360,6 +349,33 @@ export function publishedLandingPages() {
     );
   }
   return pages;
+}
+
+/**
+ * A workflow's text → the directory it copies into the Pages artifact root.
+ *
+ * `cp -r landing/. _site/` — the artifact root is where GitHub Pages serves `/asterism/`
+ * from, so a copy INTO it is by definition a publish. Anything copied elsewhere is not.
+ *
+ * Separate from the caller, and taking the text rather than reading it, for the same reason
+ * `readSiteConfig` does: refusing is `process.exit(2)`, so the only way to show a refusal
+ * happens is to run it — which needs a planted workflow this can be pointed at.
+ */
+export function readLandingDir(workflowText, rel = ".github/workflows/docs.yml") {
+  const copies = [...workflowText.matchAll(/^\s*cp\s+-r\s+([^\s]+?)\/\.\s+_site\/?\s*$/gm)].map((m) => m[1]);
+  if (copies.length !== 1) {
+    refuse(
+      copies.length === 0
+        ? `${rel} no longer copies any directory into the Pages artifact root (\`_site/\`), so\n` +
+            `this cannot say which directory serves the site's root. Either the landing page is\n` +
+            `no longer published from this repo, or the line that publishes it changed shape.\n` +
+            `Teach scripts/lib/docs-scope.mjs before changing it.`
+        : `${rel} copies ${copies.length} directories into the Pages artifact root; this reader\n` +
+            `handles exactly one and cannot say which of ${copies.length} serves the site's root.\n` +
+            `Teach scripts/lib/docs-scope.mjs before adding another.`,
+    );
+  }
+  return copies[0].replace(/^\.\//, "").replace(/\/+$/, "");
 }
 
 /**

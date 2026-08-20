@@ -71,6 +71,7 @@ import {
   userFacingMarkdown,
   userFacingPages,
   publishedLandingPages,
+  readLandingDir,
   publishedPages,
   publishedPredicate,
   publishedPackages,
@@ -1737,6 +1738,40 @@ function report(total, tally, groups, coverageWork) {
     // derivation (the workflow line that publishes it) rather than read back from the
     // function under test, and asserted NON-EMPTY, because a clause that finds nothing
     // would satisfy every `includes` above without reading a page.
+    // The shapes `readLandingDir` REFUSES, each spawned, because refusing is
+    // `process.exit(2)` and a refusal that is only read is a refusal nobody has run. Both
+    // of them leave this pass with no page to check, which is not an error anywhere
+    // downstream — it is a green over a page nothing looked at, the same failure the
+    // `docs_dir` refusals above exist to stop.
+    //
+    // ⚠ The fixtures below carry the shape the workflow actually uses — a bare `cp` line
+    // inside a `run: |` block. The first version wrote them as `- run: cp -r landing/. …`,
+    // which the reader cannot match at all: the "two directories" case would then have been
+    // refused for having ZERO, passing for the wrong reason, and the control refused
+    // outright.
+    const LANDING_MUST_REFUSE = [
+      ["jobs:\n  build:\n    steps:\n      - run: mkdocs build --strict\n", "no copy into the artifact root at all"],
+      ["      - run: |\n          cp -r landing/. _site/\n          cp -r extra/. _site/\n", "two directories copied into the artifact root"],
+    ];
+    for (const [text, why] of LANDING_MUST_REFUSE) {
+      let refused = false;
+      try {
+        execFileSync(
+          process.execPath,
+          ["-e", `import(${JSON.stringify(join(ROOT, "scripts/lib/docs-scope.mjs"))}).then((m) => m.readLandingDir(process.argv[1]))`, text],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd: ROOT },
+        );
+      } catch (err) {
+        refused = err.status === 2;
+      }
+      if (!refused) scopeFailures.push(`  a workflow with ${why} was accepted instead of refused`);
+    }
+    // …and the control: the shape this repo actually uses is READ, not merely tolerated. A
+    // parser that returned "landing" regardless would satisfy every check below.
+    if (readLandingDir("      - run: |\n          cp -r pages/. _site/\n") !== "pages") {
+      scopeFailures.push("  a workflow copying `pages/` was not read as publishing `pages`");
+    }
+
     const landing = publishedLandingPages();
     if (landing.length === 0) {
       scopeFailures.push("  no page is published at the site's root, so the HTML half proves nothing");
