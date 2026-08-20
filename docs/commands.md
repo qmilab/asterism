@@ -1286,7 +1286,9 @@ whole review — each proposal, its warnings, and the question about it — goes
 you are deciding about with it; only the closing count is on standard out.
 **Quitting is not a decision**: the proposal in front of you and everything after
 it are left exactly as they were, so you can stop part-way through a queue without
-settling the rest. `Ctrl-D` does the same. With nobody to ask — piped, launched from a scheduler, or with standard
+settling the rest. That includes the parts of the review still to come — proposed
+objectives, and any objective that looks finished — so leaving stops the command
+rather than the list you were on. `Ctrl-D` does the same. With nobody to ask — piped, launched from a scheduler, or with standard
 error redirected somewhere you would not see the question — it does not decide on
 your behalf: a pile already **queued** by `--propose` is left **untouched** (since
 rejecting a queued proposal is a durable choice), and there is no live pass either,

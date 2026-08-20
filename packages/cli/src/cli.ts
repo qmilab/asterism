@@ -1652,12 +1652,15 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
   const endpointName = parsed.positionals[1];
   const url = parsed.positionals[2];
   const credential = parsed.flags.credential;
-  // Before the positional check, like every other verb: `api add --credential` used to
-  // print the usage line and never mention the option that was wrong, sending the
-  // operator to look for arguments they had not typed yet. `--credential` with no value
-  // parses to `true`, which must not become the string "true" and silently bind a
-  // credential nobody stored; an empty one carries nothing either.
-  if (typeof credential !== "string" || credential.length === 0) {
+  // Before the positional check, like every other verb — but only for an option that WAS
+  // typed and carries nothing (`--credential`, which parses to `true`, or `--credential
+  // ""`). That is the case the ordering rule is about: name the option that is wrong
+  // rather than the arguments the operator has not reached yet.
+  //
+  // An ABSENT `--credential` is a different mistake, and moving it up here cost `asterism
+  // api add` its usage line — the one thing that names the whole shape of the command to
+  // someone who typed it with nothing at all. It is answered below, after the arity check.
+  if (credential === true || credential === "") {
     io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
     return Promise.resolve(1);
   }
@@ -1669,6 +1672,12 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
     io.err(
       `asterism api add takes one URL — got ${parsed.positionals.length - 2}. Quote a URL containing spaces or shell characters.`,
     );
+    return Promise.resolve(1);
+  }
+  // Not given at all. The usage line above has already covered the operator who typed
+  // nothing; this is the one who typed the arguments and forgot the option.
+  if (typeof credential !== "string") {
+    io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
     return Promise.resolve(1);
   }
   return withHomeStore(io, (store) => {
@@ -3927,15 +3936,24 @@ async function runReflectReview(
   // A persisted queue (from `--propose`) is drained, never re-computed: if EITHER queue has
   // rows we are in drain mode, and we drain whichever kinds have rows — no model needed.
   let code = 0;
+  // Set by any section the operator LEFT part-way through. Every later section is then
+  // skipped: a quit that ended only the loop it was given in was not a quit — measured,
+  // one quit at memory 1 of 2 went on to ask about the queued objective, and then built a
+  // model and paid for a call to find a transition to ask about.
+  let quit = false;
+  const section = (outcome: SectionOutcome): void => {
+    code = outcome.code || code;
+    quit = quit || outcome.quit;
+  };
   if (queuedMemories.length > 0 || queuedObjectives.length > 0) {
     if (queuedMemories.length > 0) {
-      code = (await reviewQueueDrain(io, store, agent, name, queuedMemories)) || code;
+      section(await reviewQueueDrain(io, store, agent, name, queuedMemories));
     }
-    if (queuedObjectives.length > 0) {
-      code = (await reviewObjectiveQueueDrain(io, store, agent, name, queuedObjectives)) || code;
+    if (queuedObjectives.length > 0 && !quit) {
+      section(await reviewObjectiveQueueDrain(io, store, agent, name, queuedObjectives));
     }
   } else {
-    code = (await reviewLive(io, store, home, agent, name)) || code;
+    section(await reviewLive(io, store, home, agent, name));
   }
   // Type B (advisory): after reviewing what reflection PROPOSED TO ADD (memories + new objectives),
   // surface any EXISTING active objective recent work looks to have FINISHED, and let the operator
@@ -3950,6 +3968,7 @@ async function runReflectReview(
   // completion is judged only against the latest run. Closing it fully would need either the persisted
   // proposed-transition shape (the fork settled as advisory-only) or judging all recently-reflected
   // runs (a different, re-judging selection model) — both deliberately out of scope (world-model.md §14).
+  if (quit) return code;
   const queuedRunIds = [
     ...new Set(
       [
@@ -3963,6 +3982,22 @@ async function runReflectReview(
 }
 
 /** The running tally a review loop returns, formatted into the closing `Done — …` line. */
+/**
+ * What one section of `reflect --review` did: its exit code, and whether the operator LEFT
+ * part-way through rather than working to the end.
+ *
+ * The second half exists because `reflect --review` has SECTIONS — queued memories, then
+ * queued objectives, then suggested transitions — and a quit that ended only the loop it
+ * was given in was not a quit. Measured: one quit at memory 1 of 2 went on to ask about
+ * the queued objective, and then BUILT a reflection provider and paid for a call to find
+ * a transition to ask about. "Everything after it is left as it was" has to mean
+ * everything.
+ */
+interface SectionOutcome {
+  code: number;
+  quit: boolean;
+}
+
 interface ReviewCounts {
   accepted: number;
   rejected: number;
@@ -3970,6 +4005,15 @@ interface ReviewCounts {
   errored: number;
   /** Proposals another surface settled mid-review — the write didn't happen here (queue only). */
   stale: number;
+  /**
+   * The operator LEFT rather than working through the batch — an explicit quit, or the
+   * terminal sending EOF. Carried out of the loop because `reflect --review` has more
+   * than one section: without it a quit in the first ended that loop and the next one
+   * asked again, and the transitions section went as far as BUILDING a model and paying
+   * for a call to find something to ask about. "Everything after it is left as it was"
+   * has to mean everything, not everything in this section (#172).
+   */
+  quit: boolean;
 }
 
 /**
@@ -4023,7 +4067,14 @@ async function driveReviewLoop(
   //
   // Absent reviewer ⇒ reject everything: nothing is accepted without an explicit yes.
   const review = io.review ?? ((): ReviewDecision => ({ kind: "reject" }));
-  const counts: ReviewCounts = { accepted: 0, rejected: 0, blocked: 0, errored: 0, stale: 0 };
+  const counts: ReviewCounts = {
+    accepted: 0,
+    rejected: 0,
+    blocked: 0,
+    errored: 0,
+    stale: 0,
+    quit: false,
+  };
   // Record a rejection, accounting a concurrent settle as skipped rather than rejected.
   const recordReject = (i: number, emptyEdit: boolean): void => {
     if (reject(i) === "stale") {
@@ -4061,9 +4112,11 @@ async function driveReviewLoop(
       findings: v.findings,
     });
 
-    // A departure, not a decision: leave this item and everything after it untouched.
+    // A departure, not a decision: leave this item and everything after it untouched —
+    // including the sections that come after this loop, which is what `quit` carries out.
     if (decision.kind === "quit") {
       io.err("  · stopped — the rest are left as they were");
+      counts.quit = true;
       break;
     }
     if (decision.kind === "reject") {
@@ -4139,7 +4192,7 @@ async function reviewQueueDrain(
   agent: Agent,
   name: string,
   queued: Memory[],
-): Promise<number> {
+): Promise<SectionOutcome> {
   // Draining a persisted proposal is a DURABLE decision: a reject transitions the row to
   // `rejected`, not a discard. So in a non-interactive session (no reviewer wired — e.g. a
   // piped or cron-launched `reflect --review`) the safe-default reject would silently wipe
@@ -4150,7 +4203,7 @@ async function reviewQueueDrain(
       `${queued.length} proposed ${queued.length === 1 ? "memory is" : "memories are"} waiting for ${name}.`,
     );
     io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal to go through them.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
   // The preamble to a question goes where the question goes — see `driveReviewLoop`.
@@ -4189,7 +4242,7 @@ async function reviewQueueDrain(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /**
@@ -4205,13 +4258,13 @@ async function reviewObjectiveQueueDrain(
   agent: Agent,
   name: string,
   queued: Objective[],
-): Promise<number> {
+): Promise<SectionOutcome> {
   if (!io.review) {
     io.out(
       `${queued.length} proposed ${queued.length === 1 ? "objective is" : "objectives are"} waiting for ${name}.`,
     );
     io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal to go through them.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
   io.err(
@@ -4239,7 +4292,7 @@ async function reviewObjectiveQueueDrain(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /**
@@ -4254,14 +4307,14 @@ async function reviewLive(
   home: string,
   agent: Agent,
   name: string,
-): Promise<number> {
+): Promise<SectionOutcome> {
   // Check for a reflectable run BEFORE building the model, so an agent with nothing to reflect
   // on is told so without needing a model configured. Both sections re-select the same run (the
   // shared kernel helpers own that policy); this early check only gates the model build.
   const target = store.runs.latestWithOutput(agent.id);
   if (!target || target.output === undefined) {
     io.out(`${name} has no completed run with output to reflect on yet.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
   // Build the reflection provider (a hosted model) once — both the memory and objective sections
@@ -4272,7 +4325,7 @@ async function reviewLive(
     : (await import("./reflect-model.js")).buildReflectionProvider(io.env, context);
   if (!made.provider) {
     io.err(made.reason ?? "No model configured for reflection.");
-    return 1;
+    return { code: 1, quit: false };
   }
   const provider = made.provider;
 
@@ -4290,13 +4343,16 @@ async function reviewLive(
     io.out(`${name} has a run to reflect on, but there is nobody here to review what it proposes.`);
     io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal, or`);
     io.out(`\`asterism reflect ${name} --propose\` to queue proposals for review later.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
-  const memCode = await reviewMemoryLive(io, store, agent, name, target, provider);
-  const objCode = await reviewObjectiveLive(io, store, agent, name, target, provider);
+  const mem = await reviewMemoryLive(io, store, agent, name, target, provider);
+  // A departure in the first half stops the second: the objectives it would ask about are
+  // left exactly as they were, which is what quitting means.
+  if (mem.quit) return mem;
+  const obj = await reviewObjectiveLive(io, store, agent, name, target, provider);
   // Either section failing (a model error) surfaces as a non-zero exit; both clean ⇒ 0.
-  return memCode || objCode;
+  return { code: mem.code || obj.code, quit: obj.quit };
 }
 
 /** The live memory section of {@link reviewLive}: propose memories for `target`, review, persist accepts. */
@@ -4307,24 +4363,24 @@ async function reviewMemoryLive(
   name: string,
   target: Run,
   provider: ReflectionProvider,
-): Promise<number> {
+): Promise<SectionOutcome> {
   let usable: readonly ReviewableProposal[];
   let ignored: number;
   try {
     const result = await proposeReviewableMemories(store, agent, provider, { runId: target.id });
     if (result.kind === "no_run") {
       io.out(`${name} has no completed run with output to reflect on yet.`);
-      return 0;
+      return { code: 0, quit: false };
     }
     usable = result.proposals;
     ignored = result.ignored;
   } catch (err) {
     io.err(`Reflection failed: ${errorMessage(err)}`);
-    return 1;
+    return { code: 1, quit: false };
   }
   if (usable.length === 0) {
     io.out(`${name}: nothing worth remembering from run ${shortId(target.id)}.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
   io.err(
@@ -4368,7 +4424,7 @@ async function reviewMemoryLive(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /** The live objective section of {@link reviewLive}: propose objectives for `target`, review, persist accepts. */
@@ -4379,19 +4435,19 @@ async function reviewObjectiveLive(
   name: string,
   target: Run,
   provider: ReflectionProvider,
-): Promise<number> {
+): Promise<SectionOutcome> {
   let usable: readonly ReviewableObjectiveProposal[];
   try {
     const result = await proposeReviewableObjectives(store, agent, provider, { runId: target.id });
-    if (result.kind === "no_run") return 0;
+    if (result.kind === "no_run") return { code: 0, quit: false };
     usable = result.proposals;
   } catch (err) {
     io.err(`Objective reflection failed: ${errorMessage(err)}`);
-    return 1;
+    return { code: 1, quit: false };
   }
   if (usable.length === 0) {
     io.out(`${name}: nothing worth proposing as a standing objective from run ${shortId(target.id)}.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
   io.err(
@@ -4417,7 +4473,7 @@ async function reviewObjectiveLive(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /**
@@ -5544,11 +5600,21 @@ function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
         io.out(`No model override set for agent "${agentName}".`);
         return 0;
       }
+      // Same distinction as the install-default branch below: `config show` reports an
+      // override that supplies nothing as no override at all, so reporting one cleared
+      // here would have the command describe the same file two ways.
+      const suppliedOverride = hasSettings(
+        withoutEmptyFields(config.agents[agentName]?.model ?? {}),
+      );
       const agents = { ...config.agents };
       delete agents[agentName];
       config.agents = agents;
       saveConfig(home, config);
-      io.out(`Cleared the model override for agent "${agentName}".`);
+      io.out(
+        suppliedOverride
+          ? `Cleared the model override for agent "${agentName}".`
+          : `Removed an empty model override for agent "${agentName}" — it was already supplying nothing.`,
+      );
       return 0;
     }
     if (config.model === undefined) {

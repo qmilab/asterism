@@ -37,6 +37,22 @@ export function envValue(env: Env, name: string): string | undefined {
 }
 
 /**
+ * An environment variable's value when it carries TEXT — the raw value, returned only if
+ * it is not blank. The reading for a COORDINATE (a model id, an endpoint) or an
+ * infrastructure CREDENTIAL (an API key), where whitespace on its own is never what was
+ * meant and is usually what a copy-paste left behind.
+ *
+ * Distinct from {@link envValue}, which an agent-scoped secret uses: padding on a
+ * credential the operator supplied may be load-bearing, and it is theirs to decide. The
+ * difference is only about whether anything is THERE — what is returned, sent or written
+ * is the value exactly as given, padding included.
+ */
+export function envText(env: Env, name: string): string | undefined {
+  const raw = env[name];
+  return raw !== undefined && raw.trim().length > 0 ? raw : undefined;
+}
+
+/**
  * Whether an environment variable supplies anything. Derived from {@link envValue}
  * rather than testing `undefined` separately, so a surface that REPORTS a variable as
  * set and the code that USES it can never disagree about what "set" means — which is
@@ -103,5 +119,5 @@ export function missingEmbeddingVars(env: Env): string[] {
  * {@link ambientValue}): padding there may be load-bearing, and it is theirs to decide.
  */
 export function suppliesText(env: Env, name: string): boolean {
-  return (env[name] ?? "").trim().length > 0;
+  return envText(env, name) !== undefined;
 }

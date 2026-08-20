@@ -17,7 +17,7 @@ import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/ast
 
 import { workspaceCapabilities } from "./capabilities.ts";
 import { decideReview, decideTransition, runCli } from "./cli.ts";
-import type { CliIO, ReviewDecision, ReviewItem } from "./cli.ts";
+import type { CliIO, ReviewDecision, ReviewItem, TransitionDecision } from "./cli.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import type { ModelResolutionContext } from "./model-config.ts";
 import { dbPath, HOME_DIR_NAME } from "./paths.ts";
@@ -327,6 +327,20 @@ test("api add names the option that carries nothing, before the arguments it lac
   h.err.length = 0;
   expect(await runCli(["api", "add", "--credential", "GITHUB_TOKEN"], h.io)).toBe(1);
   expect(h.err.join("\n")).toContain("Usage: asterism api add");
+
+  // …and an option NOT TYPED AT ALL is a different mistake. The ordering rule is about
+  // naming the option that is wrong; someone who typed nothing has no wrong option, and
+  // needs the usage line that names the whole shape of the command. Moving the check up
+  // took that away from them.
+  for (const argv of [["api", "add"], ["api", "add", "writer"]]) {
+    h.err.length = 0;
+    expect(await runCli(argv, h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("Usage: asterism api add <agent> <name> <https-url>");
+  }
+  // The one who typed the arguments and forgot the option is still told which option.
+  h.err.length = 0;
+  expect(await runCli(["api", "add", "writer", "issues", "https://api.example.com/x"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("--credential <KEY>");
 });
 
 test("no answer and an empty answer are different things at a review prompt", async () => {
@@ -360,6 +374,88 @@ test("the same distinction on a transition prompt, where the default is skip", (
   expect(decideTransition("a")).toBe("apply");
   expect(decideTransition("APPLY")).toBe("apply");
   expect(decideTransition("q")).toBe("quit");
+});
+
+test("leaving stops the NEXT section, queued and live alike", async () => {
+  // The two remaining orderings, each its own branch: memories → objectives inside a
+  // QUEUE drain, and inside a LIVE pass. Both survived a mutation until this existed —
+  // the sibling test queues only memories, so neither branch was ever entered.
+  const queueBoth: ReflectionProvider = {
+    async reflect(i) {
+      return [{ memoryType: "semantic" as const, content: "a fact", confidence: 0.8, sourceRunId: i.transcript.runId }];
+    },
+    async proposeObjectives(i) {
+      return [{ content: "keep the notes tidy", confidence: 0.7, sourceRunId: i.transcript.runId }];
+    },
+  };
+
+  // --- queued: `--propose` fills both piles, `--review` drains them in order ---
+  const q = harness();
+  await withFinishedRun(q);
+  q.io.makeReflectionProvider = () => ({ provider: queueBoth });
+  await runCli(["reflect", "personal", "--propose"], q.io);
+  let seen: string[] = [];
+  q.io.review = (item: ReviewItem): ReviewDecision => {
+    seen.push(item.label);
+    return { kind: "quit" };
+  };
+  await runCli(["reflect", "personal", "--review"], q.io);
+  expect(seen).toEqual(["semantic"]); // asked once, about the memory, and stopped
+  // The queued objective is untouched — still awaiting a decision, not rejected.
+  expect(await capture(["objective", "list", "personal"], q.io)).toContain("proposed");
+
+  // --- live: no queue, so both halves are computed from the latest run ---
+  const l = harness();
+  await withFinishedRun(l);
+  l.io.makeReflectionProvider = () => ({ provider: queueBoth });
+  seen = [];
+  l.io.review = (item: ReviewItem): ReviewDecision => {
+    seen.push(item.label);
+    return { kind: "quit" };
+  };
+  await runCli(["reflect", "personal", "--review"], l.io);
+  expect(seen).toEqual(["semantic"]);
+  expect(await capture(["objective", "list", "personal"], l.io)).toContain("has no objectives yet");
+});
+
+test("leaving stops every later section too, model call included", async () => {
+  // `reflect --review` has SECTIONS: queued memories, then queued objectives, then
+  // suggested transitions. A quit that ended only the loop it was given in was not a
+  // quit — measured before this fix: the objective section asked again, and the
+  // transition section BUILT a provider and paid for a call to find something to ask
+  // about, after the operator had already left.
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "fact one", confidence: 0.8 }]),
+  });
+  h.io.review = () => ({ kind: "accept" });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  let asked = 0;
+  let transitionsAsked = 0;
+  let built = 0;
+  h.io.review = (): ReviewDecision => {
+    asked++;
+    return { kind: "quit" };
+  };
+  h.io.reviewTransition = (): TransitionDecision => {
+    transitionsAsked++;
+    return "skip";
+  };
+  h.io.makeReflectionProvider = () => {
+    built++;
+    return { provider: fakeTransitionProvider() };
+  };
+
+  await runCli(["reflect", "personal", "--review"], h.io);
+  expect(asked).toBe(1); // one question, then it stopped
+  expect(transitionsAsked).toBe(0); // …and never reached the transition section…
+  expect(built).toBe(0); // …so it never built a model to find one to ask about.
+
+  // The objective the transition section would have retired is untouched.
+  expect(await capture(["objective", "list", "personal"], h.io)).not.toContain("· done");
 });
 
 test("leaving a queue review is not a decision — the rest of the pile survives", async () => {
@@ -3131,6 +3227,31 @@ test("config show reports an environment override only when it supplies somethin
   expect(withPin).not.toContain("overrides the config file");
   expect(withPin).toContain("pinned  →  claude-opus-4-8 (provider: ollama)  [agent override]");
   expect(withPin).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
+});
+
+test("…and the same for a per-agent override, which was one branch short", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "bot", "--trust", "propose"], h.io);
+  const home = homeOf(h);
+  const damaged = loadConfig(home);
+  damaged.agents = { bot: { model: { provider: "" } } };
+  saveConfig(home, damaged);
+
+  // `config show` credits this agent's model to no override at all, so reporting one
+  // cleared here would be the same file described two ways — the defect the install
+  // default branch was fixed for, one branch along.
+  expect(await capture(["config", "show"], h.io)).toContain("bot  →  (no model — set one)  [unset]");
+  const cleared = await capture(["config", "unset", "--agent", "bot"], h.io);
+  expect(cleared).toContain("Removed an empty model override for agent \"bot\"");
+  expect(cleared).not.toContain("Cleared the model override");
+  expect(loadConfig(home).agents?.bot).toBeUndefined();
+
+  // A real override still clears, and still says so.
+  await runCli(["config", "set", "gpt-4o", "--agent", "bot"], h.io);
+  expect(await capture(["config", "unset", "--agent", "bot"], h.io)).toContain(
+    'Cleared the model override for agent "bot".',
+  );
 });
 
 test("config unset removes an empty stored entry, and does not call it a cleared setting", async () => {

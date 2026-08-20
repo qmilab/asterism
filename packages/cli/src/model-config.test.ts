@@ -679,3 +679,25 @@ test("a layer that supplies an EMPTY id is not credited with the resolved one", 
   expect(modelIdSource({ ASTERISM_MODEL_ID: "" }, { config: damaged })).toBe("install default");
   expect(modelIdSource({}, { config: { model: { id: "" } } })).toBeUndefined();
 });
+
+test("a coordinate or key made of whitespace supplies nothing, from the environment or from disk", () => {
+  const config: AsterismConfig = { model: { id: "llama3.2", provider: "ollama" } };
+  // The environment layer.
+  expect(resolveModelConfig({ ASTERISM_MODEL_ID: "   " }, { config }).model?.id).toBe("llama3.2");
+  expect(resolveModelConfig({ ASTERISM_MODEL_PROVIDER: "\t" }, { config }).model?.provider).toBe(
+    "ollama",
+  );
+  // The stored layer — what a hand-edited file, or an older version, can hold.
+  const padded: AsterismConfig = { model: { id: "llama3.2", provider: "ollama", baseUrl: "  " } };
+  expect(resolveModelConfig({}, { config: padded }).model?.baseUrl).toBe(
+    PROVIDER_DEFAULTS.ollama!.baseUrl,
+  );
+  // And the credential reads, which `service install --capture-env` has to agree with:
+  // reporting the key need satisfied by a value it will not write is how a service came
+  // to install cleanly and start with no key at all.
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o" });
+  expect(resolveProviderAuth({ OPENAI_API_KEY: " " }, model!).apiKey).toBeUndefined();
+  expect(providerAuthPlan({ OPENAI_API_KEY: "\n" }, model).satisfied).toBe(false);
+  // A key with padding AROUND something is still a key, and is sent exactly as given.
+  expect(resolveProviderAuth({ OPENAI_API_KEY: " sk-real " }, model!).apiKey).toBe(" sk-real ");
+});

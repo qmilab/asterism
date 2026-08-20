@@ -16,7 +16,7 @@
 import type { PiModelConfig } from "@qmilab/asterism-adapter-pi";
 
 import type { AsterismConfig, ModelSettings } from "./config.js";
-import { envValue } from "./env.js";
+import { envText } from "./env.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -224,8 +224,10 @@ export function resolveProviderAuth(
 ): ProviderAuth {
   const keyVar = providerKeyEnvVar(model.provider);
   // Read through the one empty-is-unset rule, like every other variable in this module:
-  // an exported-but-empty key is a cleared key, not a credential to send.
-  const explicit = envValue(env, keyVar);
+  // an exported-but-empty key — or one holding only whitespace — is a cleared key, not a
+  // credential to send. `service install --capture-env` decides the same way, so it
+  // cannot report the key need satisfied by a value it then declines to capture.
+  const explicit = envText(env, keyVar);
   if (explicit !== undefined) return { apiKey: explicit };
 
   const declaredKeyless = PROVIDER_DEFAULTS[model.provider]?.needsNoKey === true;
@@ -239,7 +241,7 @@ export function resolveProviderAuth(
     };
   }
 
-  const shared = envValue(env, SHARED_KEY_ENV);
+  const shared = envText(env, SHARED_KEY_ENV);
   if (shared !== undefined) return { apiKey: shared };
   return {
     reason:
@@ -300,8 +302,11 @@ export function providerAuthPlan(
 /**
  * The model coordinates carried by the ASTERISM_MODEL_* environment variables.
  *
- * Read through {@link envValue}, so a variable that exists and holds nothing supplies
- * nothing. Read as merely-defined, `ASTERISM_MODEL_ID=` silently disabled a working
+ * Read through {@link envText}, so a variable that exists and holds nothing — or holds
+ * only whitespace, which is what a copy-paste leaves — supplies nothing. The service env
+ * plan asks the same question when deciding whether capturing this variable would put a
+ * value in the file, and the two have to agree or it reports a need satisfied by a value
+ * it will not write. Read as merely-defined, `ASTERISM_MODEL_ID=` silently disabled a working
  * configured model that `config show` went on displaying (#174). {@link mergeSettings}
  * drops an empty field from every layer, so this is belt as well as braces — but the
  * question `config show` asks about the environment is answered by the same rule, and
@@ -309,13 +314,13 @@ export function providerAuthPlan(
  */
 function settingsFromEnv(env: Env): ModelSettings {
   const s: ModelSettings = {};
-  const id = envValue(env, "ASTERISM_MODEL_ID");
+  const id = envText(env, "ASTERISM_MODEL_ID");
   if (id !== undefined) s.id = id;
-  const provider = envValue(env, "ASTERISM_MODEL_PROVIDER");
+  const provider = envText(env, "ASTERISM_MODEL_PROVIDER");
   if (provider !== undefined) s.provider = provider;
-  const baseUrl = envValue(env, "ASTERISM_MODEL_BASE_URL");
+  const baseUrl = envText(env, "ASTERISM_MODEL_BASE_URL");
   if (baseUrl !== undefined) s.baseUrl = baseUrl;
-  const api = envValue(env, "ASTERISM_MODEL_API");
+  const api = envText(env, "ASTERISM_MODEL_API");
   if (api !== undefined) s.api = api;
   return s;
 }
@@ -340,11 +345,19 @@ function settingsFromEnv(env: Env): ModelSettings {
  * reporting what those coordinates resolve to. One command, two answers.
  */
 export function withoutEmptyFields(layer: ModelSettings): ModelSettings {
+  // Whitespace-only counts as empty here too — a stored coordinate made of spaces is
+  // never what was meant, and the environment layer reads the same way (`envText`).
+  const carried = (v: string | undefined): string | undefined =>
+    v !== undefined && v.trim().length > 0 ? v : undefined;
   const out: ModelSettings = {};
-  if (layer.id !== undefined && layer.id !== "") out.id = layer.id;
-  if (layer.provider !== undefined && layer.provider !== "") out.provider = layer.provider;
-  if (layer.baseUrl !== undefined && layer.baseUrl !== "") out.baseUrl = layer.baseUrl;
-  if (layer.api !== undefined && layer.api !== "") out.api = layer.api;
+  const id = carried(layer.id);
+  if (id !== undefined) out.id = id;
+  const provider = carried(layer.provider);
+  if (provider !== undefined) out.provider = provider;
+  const baseUrl = carried(layer.baseUrl);
+  if (baseUrl !== undefined) out.baseUrl = baseUrl;
+  const api = carried(layer.api);
+  if (api !== undefined) out.api = api;
   return out;
 }
 

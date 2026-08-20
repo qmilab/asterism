@@ -10,6 +10,7 @@ import {
   EMBED_ENDPOINT_VARS,
   embeddingEndpoint,
   envIsSet,
+  envText,
   envValue,
   missingEmbeddingVars,
   suppliesText,
@@ -103,4 +104,22 @@ test("a half-configured embeddings endpoint names what is still missing", () => 
   expect(
     missingEmbeddingVars({ ASTERISM_RECALL_EMBED_URL: url, ASTERISM_RECALL_EMBED_MODEL: " " }),
   ).toEqual(["ASTERISM_RECALL_EMBED_MODEL"]);
+});
+
+test("envText and envValue answer two different questions on purpose", () => {
+  // `envValue`: did the operator put something there? Padding on an agent-scoped secret
+  // may be load-bearing, and it is theirs. `envText`: is there anything to USE? A model
+  // id or an API key made of spaces is what a copy-paste left, never what was meant.
+  expect(envValue({ K: "  " }, "K")).toBe("  ");
+  expect(envText({ K: "  " }, "K")).toBeUndefined();
+  expect(envText({ K: "\n" }, "K")).toBeUndefined();
+  expect(envText({ K: "" }, "K")).toBeUndefined();
+  expect(envText({}, "K")).toBeUndefined();
+  // Whatever IS there comes back exactly as given — the rule decides presence, not shape.
+  expect(envText({ K: " sk-padded " }, "K")).toBe(" sk-padded ");
+  // `suppliesText` is derived from it, so the two cannot answer differently.
+  for (const raw of [undefined, "", " ", "\t", "x", " x "]) {
+    const env = raw === undefined ? {} : { K: raw };
+    expect(suppliesText(env, "K")).toBe(envText(env, "K") !== undefined);
+  }
 });
