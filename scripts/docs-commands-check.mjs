@@ -1607,6 +1607,12 @@ function report(total, tally, groups, coverageWork) {
     if (readSiteConfig("site_name: X\n").docsDir !== "docs") {
       scopeFailures.push("  a config with no `docs_dir` did not fall back to mkdocs' own default");
     }
+    // `site_url` is READ too — it is what the root page's absolute links are resolved
+    // against, and a `siteUrlPath()` that returned this repo's answer regardless would
+    // satisfy every link assertion below while being a constant.
+    if (readSiteConfig("site_url: https://example.test/a/b/\n").siteUrl !== "https://example.test/a/b/") {
+      scopeFailures.push("  a config declaring `site_url` was not read");
+    }
     // The shapes this reader REFUSES, each spawned because refusing is `process.exit(2)`.
     // Every one of them makes the prefix test match nothing, which is not an error anywhere
     // downstream — it is "no page is published", and the pass goes on reporting that every
@@ -1654,11 +1660,27 @@ function report(total, tally, groups, coverageWork) {
 
     // The three above are pure functions, and a caller that never asks them would pass all
     // of them. So: what this repo's checkers actually use must equal what this repo's own
-    // config parses to — which is what fails if `siteDir()` or the cached config is
-    // replaced by the constant that happens to be right today.
+    // config parses to.
     const real = readSiteConfig(readFileSync(join(ROOT, "mkdocs.yml"), "utf8"));
     if (siteDir() !== real.docsDir) {
       scopeFailures.push(`  siteDir() is '${siteDir()}' where mkdocs.yml declares '${real.docsDir}'`);
+    }
+    if (real.siteUrl && siteUrlPath() !== new URL(real.siteUrl).pathname.replace(/\/?$/, "/")) {
+      scopeFailures.push(
+        `  siteUrlPath() is '${siteUrlPath()}' where mkdocs.yml's site_url gives '${new URL(real.siteUrl).pathname}'`,
+      );
+    }
+    // ⚠ Neither comparison above can tell a READER from a constant, and the comment here
+    // used to claim otherwise: this repo declares `docs_dir: docs` and mkdocs' own default
+    // is `docs`, so `siteDir() { return "docs" }` satisfies it, and the same is true of
+    // `siteUrlPath()`. Only a config that is NOT this repo's separates the two — the shape
+    // `publishedPredicate` has had all along, now given to both accessors.
+    const elsewhere = readSiteConfig("docs_dir: pages\nsite_url: https://example.test/a/b\n");
+    if (siteDir(elsewhere) !== "pages") {
+      scopeFailures.push(`  siteDir() ignored the config it was handed and answered '${siteDir(elsewhere)}'`);
+    }
+    if (siteUrlPath(elsewhere) !== "/a/b/") {
+      scopeFailures.push(`  siteUrlPath() ignored the config it was handed and answered '${siteUrlPath(elsewhere)}'`);
     }
     const fromConfig = publishedPredicate(real);
     for (const rel of trackedMarkdown()) {

@@ -166,8 +166,8 @@ function config() {
  *
  * Always ends in a slash, so a prefix test cannot match a sibling directory.
  */
-export function siteUrlPath() {
-  const raw = config().siteUrl;
+export function siteUrlPath(cfg = config()) {
+  const raw = cfg.siteUrl;
   if (!raw) {
     refuse(
       "mkdocs.yml declares no `site_url`, so nothing here can say what an absolute `/…` link\n" +
@@ -183,9 +183,15 @@ export function siteUrlPath() {
   return url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
 }
 
-/** The directory mkdocs publishes, as `mkdocs.yml` declares it. */
-export function siteDir() {
-  return config().docsDir;
+/**
+ * The directory mkdocs publishes, as `mkdocs.yml` declares it.
+ *
+ * Takes the config so a caller can drive it with one that is NOT this repo's. Comparing
+ * `siteDir()` against this repo's own parsed config cannot tell a reader from a constant —
+ * both give "docs" — which is what the self-test's comment used to claim it caught.
+ */
+export function siteDir(cfg = config()) {
+  return cfg.docsDir;
 }
 
 /**
