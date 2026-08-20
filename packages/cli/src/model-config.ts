@@ -333,8 +333,13 @@ function settingsFromEnv(env: Env): ModelSettings {
  * install default with nothing. Refusing to LOAD such a file would strand the operator —
  * `config unset` reads it too — so it is normalized here instead, and `config show` then
  * displays the layer that will actually be used.
+ *
+ * Exported because a surface that DESCRIBES a stored layer has to describe the same
+ * thing resolution reads from it. `config show`'s install-default line printed the file
+ * verbatim — `llama3.2 (provider: , base url: )` — one line above the per-agent lines
+ * reporting what those coordinates resolve to. One command, two answers.
  */
-function withoutEmptyFields(layer: ModelSettings): ModelSettings {
+export function withoutEmptyFields(layer: ModelSettings): ModelSettings {
   const out: ModelSettings = {};
   if (layer.id !== undefined && layer.id !== "") out.id = layer.id;
   if (layer.provider !== undefined && layer.provider !== "") out.provider = layer.provider;

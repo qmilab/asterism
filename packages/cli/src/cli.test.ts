@@ -2928,6 +2928,23 @@ test("config show credits the layer that supplies the model, on a config an olde
   const shown = await capture(["config", "show"], h.io);
   expect(shown).toContain("bot  →  llama3.2 (provider: ollama)  [install default]");
   expect(shown).toContain("other  →  llama3.2 (provider: ollama)  [install default]");
+
+  // The line above them describes the same layer, so it must describe it the same way:
+  // the file's bytes read `(provider: , base url: )`, and printing that beside per-agent
+  // lines reporting what those coordinates resolve to is one command, two answers.
+  const alsoDamaged = loadConfig(home);
+  alsoDamaged.model = { id: "llama3.2", provider: "ollama", baseUrl: "", api: "" };
+  saveConfig(home, alsoDamaged);
+  const head = await capture(["config", "show"], h.io);
+  expect(head).toContain("Install default model: llama3.2 (provider: ollama)");
+  expect(head).not.toContain("base url: )");
+  expect(head).not.toContain("api: )");
+  // And a model whose every coordinate is empty is no model at all.
+  const emptyDefault = loadConfig(home);
+  emptyDefault.model = { id: "", provider: "" };
+  saveConfig(home, emptyDefault);
+  expect(await capture(["config", "show"], h.io)).toContain("Install default model: (none set)");
+  saveConfig(home, damaged);
   // A REAL override is still credited, so the label has not simply stopped naming one.
   // (The provider still comes from the install default — the override names only an id,
   // and the merge is field-wise.)

@@ -132,7 +132,12 @@ import {
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import type { ModelResolutionContext } from "./model-config.js";
-import { modelIdSource, providerAuthPlan, resolveModelConfig } from "./model-config.js";
+import {
+  modelIdSource,
+  providerAuthPlan,
+  resolveModelConfig,
+  withoutEmptyFields,
+} from "./model-config.js";
 import {
   isServiceKind,
   launchdLabel,
@@ -4596,9 +4601,14 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
     const config = loadConfig(home);
     io.out(`Configuration  (${configPath(home)})`);
     io.out("");
+    // What the install default SUPPLIES, not the file's bytes. An empty coordinate is
+    // dropped the same way resolution drops it, so this line cannot read
+    // `llama3.2 (provider: , base url: )` while the per-agent lines below report what
+    // those same coordinates resolve to (#174).
+    const installDefault = withoutEmptyFields(config.model ?? {});
     io.out(
-      hasSettings(config.model)
-        ? `Install default model: ${describeModel(config.model)}`
+      hasSettings(installDefault)
+        ? `Install default model: ${describeModel(installDefault)}`
         : "Install default model: (none set)",
     );
 
