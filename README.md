@@ -53,7 +53,7 @@ asterism new writer  --soul casual-helper       --trust autonomous
 asterism new client  --soul careful-consultant  --trust propose
 
 # scoped secrets and skills — never shared across agents
-asterism secrets add client GITHUB_TOKEN ghp_example_token   # value: inline, piped, or from $GITHUB_TOKEN
+asterism secrets add client GITHUB_TOKEN ghp_example_token   # value: inline, piped, from $GITHUB_TOKEN — or omit it and be prompted
 # a skill is just a markdown file you write
 echo "# Blog style: sentence-case headings, active voice" > blog-style.md
 asterism skill   add writer blog-style.md

@@ -237,6 +237,16 @@ const EXCUSED = [
     "needs-token",
     "needs a third-party chat token",
   ],
+  // `secrets add` with no value asks for one, and this refusal is what it prints when
+  // there is no terminal to ask at. Every command here runs with its stdin on a pipe,
+  // so the prompt is the one documented value path a checker can never take. Narrow on
+  // purpose: it matches only the non-interactive refusal, so a `secrets add` example
+  // that is wrong for any OTHER reason still fails.
+  [
+    /^No value for \S+\. Pass it inline,/,
+    "needs-terminal",
+    "the value would be typed at a terminal, and a checker's stdin is a pipe",
+  ],
   [
     /^No (run|objective) matching "/,
     "illustrative-id",

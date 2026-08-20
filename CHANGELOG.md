@@ -2,6 +2,18 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.9.0
+
+`asterism secrets add` asks you for the value when you do not give it one. Type the command with just an agent and a key, and it prompts — showing nothing as you type. It is the only way of the four to add a credential that leaves the value out of your shell history and out of the process list, where until now the form the quickstart showed you put it.
+
+### Added
+
+- **A missing secret value is asked for, when there is a terminal to ask at.** `asterism secrets add work GITHUB_TOKEN` used to exit 1 and list the three ways to supply a value. It now prompts for one, echoes nothing while you type, and stores what you typed; answering with a blank line stores nothing rather than an empty credential.
+
+  Nothing that runs without you changes. The three scripted ways still come first — the inline value, then `$KEY` in the environment, then piped standard input — so a script that already supplies a value never sees a prompt, and where there is no terminal at all there is no prompt to reach: the same refusal appears, with the same three suggestions, as promptly as before.
+
+  One difference between the four worth knowing: a value typed at the prompt is trimmed, where the other three are stored byte for byte. Whitespace around a line you cannot see is whitespace you cannot check, so a value whose leading or trailing padding matters is one to pipe in.
+
 ## 0.8.1 — 2026-08-19
 
 Corrections to what Asterism tells you about itself, in the two places you are most likely to read before anything works: the page npm shows for the package you install, and the line a command prints when you have typed it wrong. Nothing about how Asterism behaves changes.

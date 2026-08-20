@@ -47,11 +47,12 @@ function authed(extra = {}) {
 }
 
 // Run the built CLI under THIS Node, in `cwd`, optionally feeding piped stdin.
-function asterism(cwd, args, input) {
+function asterism(cwd, args, input, timeout) {
   return execFileSync(process.execPath, [BIN, ...args], {
     cwd,
     encoding: "utf8",
     ...(input !== undefined ? { input } : {}),
+    ...(timeout !== undefined ? { timeout } : {}),
   });
 }
 
@@ -65,6 +66,27 @@ async function part1CliUnderNode() {
 
     // Piped stdin is the runtime-neutral path that replaced `Bun.stdin.text()`.
     asterism(work, ["secrets", "add", "work", "GITHUB_TOKEN"], "ghp_node_floor_token");
+
+    // `secrets add` asks for a missing value at a terminal. This session has none — its
+    // stdin is a pipe — so the ask must never be reached: an unattended install has to be
+    // REFUSED promptly, not left waiting for an answer that cannot come. The timeout is
+    // the assertion; a version that blocks here fails by exceeding it rather than by
+    // returning the wrong string.
+    let refusedUnattended = "";
+    try {
+      asterism(work, ["secrets", "add", "work", "NO_VALUE_ANYWHERE"], "", 20_000);
+    } catch (err) {
+      refusedUnattended = err.stderr?.toString() ?? "";
+      if (err.code === "ETIMEDOUT") refusedUnattended = "BLOCKED waiting for input";
+    }
+    check(
+      "a value-less `secrets add` with no terminal refuses instead of waiting",
+      // The whole first clause, not just the key: BOTH refusals open with "No value for
+      // <KEY>", and the one that names the three scripted ways is the only one that says
+      // no terminal was ever consulted. Matching the shorter prefix passed even with the
+      // prompt wired into this session.
+      refusedUnattended.includes("No value for NO_VALUE_ANYWHERE. Pass it inline"),
+    );
 
     const list = asterism(work, ["list"]);
     check("list shows both agents", list.includes("personal") && list.includes("work"));

@@ -268,6 +268,19 @@ export interface CliIO {
   /** Read piped standard input (for `secrets add` without an inline value). */
   readStdin?: () => Promise<string | undefined>;
   /**
+   * Ask a human to type a secret VALUE, without echoing it (for `secrets add` when no
+   * value was found any other way). Absent ⇒ there is no terminal, and that ABSENCE is
+   * the non-interactive signal — the same shape as `review`. It has to be the presence
+   * of this field rather than a return value, because "a human was asked and declined"
+   * and "no one could be asked" are different facts and the command says different
+   * things about them.
+   *
+   * Wired last on purpose. It is the only value path that puts nothing in shell history
+   * and nothing in the process list, but it also cannot run unattended, so every
+   * scripted path (inline, environment, pipe) must win over it.
+   */
+  promptSecret?: (key: string) => Promise<string | undefined>;
+  /**
    * Build the run adapter. Absent ⇒ the default wiring resolves the model from the
    * config file, the environment, and the agent's own override (the `context`).
    */
@@ -1703,15 +1716,29 @@ async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
     io.err("Usage: asterism secrets add <agent> <KEY> [value]");
     return 1;
   }
-  // Value precedence: inline argument, then the matching environment variable,
-  // then piped standard input. Never echoed back, whichever path it came from.
+  // Value precedence: inline argument, then the matching environment variable, then
+  // piped standard input, then — only when a human is at a terminal — a prompt. Never
+  // echoed back, whichever path it came from. The prompt is last because it is the one
+  // path that cannot run unattended.
   let value = args[2] ?? io.env[key];
   if (value === undefined && io.readStdin) {
     value = await io.readStdin();
   }
+  // Held rather than re-tested: after the await, this is the record of whether a human
+  // was actually asked, which is what decides WHICH refusal below is true.
+  const prompt = value === undefined ? io.promptSecret : undefined;
+  if (prompt) {
+    // Trimmed, unlike every other path: whitespace around a line typed blind cannot be
+    // SEEN, so the person typing it cannot check it. A value that must keep its
+    // whitespace (PEM material, a deliberately padded token) is one to pipe in, where it
+    // round-trips byte for byte.
+    value = (await prompt(key))?.trim();
+  }
   if (value === undefined || value.length === 0) {
     io.err(
-      `No value for ${key}. Pass it inline, set $${key} in the environment, or pipe it on stdin.`,
+      prompt
+        ? `No value for ${key} — nothing was typed, so nothing was stored.`
+        : `No value for ${key}. Pass it inline, set $${key} in the environment, or pipe it on stdin.`,
     );
     return 1;
   }

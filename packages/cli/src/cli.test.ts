@@ -508,6 +508,90 @@ test("a dash-prefixed inline secret value is stored, not parsed as a flag", asyn
   }
 });
 
+test("secrets add asks for a value when a terminal is there to answer", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+  const asked: string[] = [];
+  h.io.promptSecret = async (key) => {
+    asked.push(key);
+    return "typed-at-the-terminal";
+  };
+  expect(await runCli(["secrets", "add", "work", "GITHUB_TOKEN"], h.io)).toBe(0);
+  // The prompt is asked for the KEY being set, and the value it returns is stored —
+  // this is the demo's own `secrets add work GITHUB_TOKEN`, which exited 1 before.
+  expect(asked).toEqual(["GITHUB_TOKEN"]);
+  const printed = [...h.out, ...h.err].join("\n");
+  expect(printed).toContain("Stored credential GITHUB_TOKEN");
+  expect(printed).not.toContain("typed-at-the-terminal");
+
+  const store = AsterismStore.open(dbPath(join(h.dir, HOME_DIR_NAME)));
+  try {
+    const agent = store.agents.list().find((a) => a.name === "work")!;
+    expect(store.secrets.readByKey(agent.id, "GITHUB_TOKEN")).toBe("typed-at-the-terminal");
+  } finally {
+    store.close();
+  }
+});
+
+test("every scripted value path wins over the prompt", async () => {
+  // The prompt cannot run unattended, so anything a script can supply must beat it.
+  // A prompt that fired here would hang a pipeline that is already supplying the value.
+  for (const path of ["inline", "environment", "stdin"] as const) {
+    const h = harness(path === "environment" ? { TOKEN: "from-env" } : {});
+    await runCli(["init"], h.io);
+    await runCli(["new", "work"], h.io);
+    let asked = 0;
+    h.io.promptSecret = async () => {
+      asked += 1;
+      return "from-prompt";
+    };
+    if (path === "stdin") h.io.readStdin = async () => "from-stdin";
+    const args = ["secrets", "add", "work", "TOKEN", ...(path === "inline" ? ["from-inline"] : [])];
+    expect(await runCli(args, h.io)).toBe(0);
+    expect(asked).toBe(0);
+
+    const store = AsterismStore.open(dbPath(join(h.dir, HOME_DIR_NAME)));
+    try {
+      const agent = store.agents.list().find((a) => a.name === "work")!;
+      expect(store.secrets.readByKey(agent.id, "TOKEN")).toBe(`from-${path === "environment" ? "env" : path}`);
+    } finally {
+      store.close();
+    }
+  }
+});
+
+test("declining the prompt says a human declined, not that there was no way to answer", async () => {
+  // Two different facts, and the advice differs: telling someone who just pressed Enter
+  // to "pipe it on stdin" describes a session they are not in.
+  for (const answer of [undefined, "", "   "]) {
+    const h = harness();
+    await runCli(["init"], h.io);
+    await runCli(["new", "work"], h.io);
+    h.io.promptSecret = async () => answer;
+    expect(await runCli(["secrets", "add", "work", "GITHUB_TOKEN"], h.io)).toBe(1);
+    const printed = h.err.join("\n");
+    expect(printed).toContain("No value for GITHUB_TOKEN — nothing was typed");
+    expect(printed).not.toContain("pipe it on stdin");
+  }
+});
+
+test("a value typed at the prompt is trimmed, where a piped one is not", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "work"], h.io);
+  h.io.promptSecret = async () => "  ghp_padded  ";
+  expect(await runCli(["secrets", "add", "work", "GITHUB_TOKEN"], h.io)).toBe(0);
+
+  const store = AsterismStore.open(dbPath(join(h.dir, HOME_DIR_NAME)));
+  try {
+    const agent = store.agents.list().find((a) => a.name === "work")!;
+    expect(store.secrets.readByKey(agent.id, "GITHUB_TOKEN")).toBe("ghp_padded");
+  } finally {
+    store.close();
+  }
+});
+
 test("secrets add reports when no value is available", async () => {
   const h = harness();
   await runCli(["init"], h.io);
