@@ -25,8 +25,21 @@ import type { CliIO, ReviewDecision, TransitionDecision } from "./cli.js";
 import { artifactFetchHost, workspaceCapabilities } from "./capabilities.js";
 import { outboundHost } from "./outbound.js";
 import { createNodeTerminal } from "./dashboard/terminal-node.js";
-import { ask, askSecret, readPipedStdin } from "./runtime.js";
+import { ask, askSecret, hasAskableTerminal, readPipedStdin } from "./runtime.js";
 import type { Action } from "@qmilab/asterism-core";
+
+// Whether this session can be asked a question at all: a terminal to read an answer
+// from AND one to show the question on. Every interactive hook below is wired on this
+// one answer, and `ask`/`askSecret` refuse on the same one, so a hook can never be
+// present in a session where the question behind it cannot be put.
+//
+// That lockstep is load-bearing, not tidiness. These hooks use ABSENCE as the "no human
+// present" signal, and a hook wired more widely than the prompt it calls is worse than
+// no hook: `reflect --review`'s persisted queue would reach a reviewer that can never be
+// asked, read every unanswerable question as a reject, and durably reject the pile it
+// exists to protect. Read once rather than per call — the streams do not change under a
+// running process, and one read cannot disagree with another.
+const interactive = hasAskableTerminal();
 
 const io: CliIO = {
   cwd: process.cwd(),
@@ -52,9 +65,13 @@ const io: CliIO = {
   err: (text) => {
     process.stderr.write(`${text}\n`);
   },
-  // Destructive actions pause for an explicit yes. `ask` returns undefined for a
-  // non-interactive (piped) session, so a run with no human present never
-  // auto-approves — the safe default is to stay paused.
+  // Destructive actions pause for an explicit yes. `ask` returns undefined when there is
+  // no terminal to ask at, so a run with no human present never auto-approves — the safe
+  // default is to stay paused, and the run reports how to confirm it later.
+  //
+  // Wired unconditionally, unlike the hooks below, because absence and a declined answer
+  // are the SAME outcome here: the kernel pauses either way (`run.ts`, `confirm?`). There
+  // is nothing for its absence to signal that its answer does not already say.
   confirm: async (action: Action) => {
     // Show the action's arguments (e.g. the path a delete targets) so the human is
     // approving a specific operation, not a bare capability name — the difference
@@ -82,18 +99,18 @@ const io: CliIO = {
   // ask: measured, `secrets add work KEY 2>log` on a terminal put the question in the
   // file and waited for an answer with a blank screen. Refusing with the three scripted
   // ways is the better end to that.
-  ...(process.stdin.isTTY && process.stderr.isTTY
+  ...(interactive
     ? { promptSecret: (key: string) => askSecret(`Value for ${key} (not echoed):`) }
     : {}),
   // `reflect --review`: the kernel proposes typed memories and prints each one; the
-  // human decides its fate here. Wired ONLY when stdin is a TTY — a piped/redirected
-  // session has no human to decide, and the field's ABSENCE is what the command reads as
-  // "non-interactive". This matters for the persisted queue: there, a reject is a durable
-  // transition, so a default-reject in a non-interactive session would wipe the pile;
-  // omitting `review` makes the queue drain refuse to run unattended instead (the live
-  // path's reject is ephemeral, so it stays harmless either way). The proposal text is
-  // already printed by the command, so this only collects the decision.
-  ...(process.stdin.isTTY
+  // human decides its fate here. Wired ONLY when there is a terminal to ask at — a
+  // piped/redirected session has no human to decide, and the field's ABSENCE is what the
+  // command reads as "non-interactive". This matters for the persisted queue: there, a
+  // reject is a durable transition, so a default-reject in a non-interactive session
+  // would wipe the pile; omitting `review` makes the queue drain refuse to run unattended
+  // instead (the live path's reject is ephemeral, so it stays harmless either way). The
+  // proposal text is already printed by the command, so this only collects the decision.
+  ...(interactive
     ? {
         review: async (): Promise<ReviewDecision> => {
           const answer = await ask(
@@ -127,13 +144,20 @@ const io: CliIO = {
       }
     : {}),
   // `trust --review`: the kernel proposes which capabilities have EARNED a standing
-  // grant and prints each with its evidence; the human ratifies here. Nothing is
-  // granted without an explicit yes, and a non-interactive (piped) session grants
-  // nothing — the same safe default as the prompts above.
-  reviewGrant: async (): Promise<boolean> => {
-    const answer = await ask("  Grant this capability a standing (act without pausing)? [y/N]:");
-    return answer !== undefined && /^y(es)?$/i.test(answer);
-  },
+  // grant and prints each with its evidence; the human ratifies here. Nothing is granted
+  // without an explicit yes. Wired on the same terminal test as the hooks above, so a
+  // session with no human is told to come back with one rather than walked through every
+  // candidate and shown "0 granted, N left gated" — a report of decisions nobody made.
+  ...(interactive
+    ? {
+        reviewGrant: async (): Promise<boolean> => {
+          const answer = await ask(
+            "  Grant this capability a standing (act without pausing)? [y/N]:",
+          );
+          return answer !== undefined && /^y(es)?$/i.test(answer);
+        },
+      }
+    : {}),
   // `serve`: start the local HTTP endpoint. Imported lazily so non-serve commands
   // never load the HTTP layer (the same pattern `run` uses for the substrate).
   startServer: async (options) => (await import("@qmilab/asterism-server")).serve(options),
@@ -143,6 +167,10 @@ const io: CliIO = {
   // `dashboard`: the interactive terminal, wired only when stdin AND stdout are TTYs
   // — a piped/redirected session has no raw input or sized output to drive a TUI, so
   // the field is omitted and `dashboard` reports it needs a terminal (or --headless).
+  //
+  // Deliberately NOT `interactive`: a TUI is not a question. It draws a full screen,
+  // which is output and belongs on stdout, where the dashboard's own renderer already
+  // writes. A question is not output, which is why it goes to stderr instead.
   ...(process.stdin.isTTY && process.stdout.isTTY ? { terminal: createNodeTerminal() } : {}),
   // `channel telegram`: start the chat channel. Lazily imported for the same reason
   // — only this command loads the channel transport.
