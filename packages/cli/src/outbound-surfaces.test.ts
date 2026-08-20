@@ -243,6 +243,45 @@ test("`channel discord` hands the outbound host to the chat surface", async () =
   expect(captured?.outboundHost).toBe(h.host);
 });
 
+// --- the allow-list flag itself ------------------------------------------------
+
+test("a chat channel refuses an --allow that carries nothing, on both transports", async () => {
+  // The channels have no synopsis line of their own, so `unknown-flags.test.ts`'s derived
+  // sweep of "an option that refuses a missing value refuses an empty one" cannot reach
+  // them — it says so, and points here. `--allow ""` is what `--allow "$IDS"` expands to
+  // with the variable unset; taken as a value it started the bot with no allow-list at
+  // all, silently, where the operator had named one (#174).
+  const h = await install();
+  let started = false;
+  const startedIo = {
+    startTelegram: () => {
+      started = true;
+      return fakeChannel();
+    },
+    startDiscord: () => {
+      started = true;
+      return fakeChannel();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  };
+
+  for (const [transport, tokenVar, token, noun] of [
+    ["telegram", "ASTERISM_TELEGRAM_TOKEN", "123456:fake-bot-token", "chat ids"],
+    ["discord", "ASTERISM_DISCORD_TOKEN", "fake-discord-token", "channel ids"],
+  ] as const) {
+    const err: string[] = [];
+    const io = { ...h.io, ...startedIo, env: { [tokenVar]: token }, err: (t: string) => err.push(t) };
+    expect(await runCli(["channel", transport, "personal", "--allow", ""], io)).toBe(1);
+    expect(err.join("\n")).toContain(`The --allow option needs a value (a comma-separated list of ${noun})`);
+    // And the bot never started, so nothing was ever reachable without the list.
+    expect(started).toBe(false);
+    // The ordinary form still starts, so the refusal has not swallowed the flag.
+    expect(await runCli(["channel", transport, "personal", "--allow", "42"], { ...io, err: () => {} })).toBe(0);
+    expect(started).toBe(true);
+    started = false;
+  }
+});
+
 // --- and the honest negative --------------------------------------------------
 
 test("with no outbound host the tool is still offered, and says why it cannot call", async () => {

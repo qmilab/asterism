@@ -16,6 +16,7 @@
 import type { PiModelConfig } from "@qmilab/asterism-adapter-pi";
 
 import type { AsterismConfig, ModelSettings } from "./config.js";
+import { envValue } from "./env.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -222,8 +223,10 @@ export function resolveProviderAuth(
   model: Pick<PiModelConfig, "provider" | "baseUrl">,
 ): ProviderAuth {
   const keyVar = providerKeyEnvVar(model.provider);
-  const explicit = env[keyVar];
-  if (explicit !== undefined && explicit !== "") return { apiKey: explicit };
+  // Read through the one empty-is-unset rule, like every other variable in this module:
+  // an exported-but-empty key is a cleared key, not a credential to send.
+  const explicit = envValue(env, keyVar);
+  if (explicit !== undefined) return { apiKey: explicit };
 
   const declaredKeyless = PROVIDER_DEFAULTS[model.provider]?.needsNoKey === true;
   if (declaredKeyless) {
@@ -236,8 +239,8 @@ export function resolveProviderAuth(
     };
   }
 
-  const shared = env[SHARED_KEY_ENV];
-  if (shared !== undefined && shared !== "") return { apiKey: shared };
+  const shared = envValue(env, SHARED_KEY_ENV);
+  if (shared !== undefined) return { apiKey: shared };
   return {
     reason:
       `No API key configured for ${model.provider}. Set ${keyVar} (or ${SHARED_KEY_ENV}) — ` +
@@ -294,13 +297,25 @@ export function providerAuthPlan(
   };
 }
 
-/** The model coordinates carried by the ASTERISM_MODEL_* environment variables. */
+/**
+ * The model coordinates carried by the ASTERISM_MODEL_* environment variables.
+ *
+ * Read through {@link envValue}, so a variable that exists and holds nothing supplies
+ * nothing and the layer below shows through. Read as merely-defined, `ASTERISM_MODEL_ID=`
+ * silently disabled a working configured model that `config show` went on displaying, and
+ * `ASTERISM_MODEL_PROVIDER=` reached the "no endpoint" message below with an empty
+ * provider name — which then suggested a command nobody could type (#174).
+ */
 function settingsFromEnv(env: Env): ModelSettings {
   const s: ModelSettings = {};
-  if (env.ASTERISM_MODEL_ID !== undefined) s.id = env.ASTERISM_MODEL_ID;
-  if (env.ASTERISM_MODEL_PROVIDER !== undefined) s.provider = env.ASTERISM_MODEL_PROVIDER;
-  if (env.ASTERISM_MODEL_BASE_URL !== undefined) s.baseUrl = env.ASTERISM_MODEL_BASE_URL;
-  if (env.ASTERISM_MODEL_API !== undefined) s.api = env.ASTERISM_MODEL_API;
+  const id = envValue(env, "ASTERISM_MODEL_ID");
+  if (id !== undefined) s.id = id;
+  const provider = envValue(env, "ASTERISM_MODEL_PROVIDER");
+  if (provider !== undefined) s.provider = provider;
+  const baseUrl = envValue(env, "ASTERISM_MODEL_BASE_URL");
+  if (baseUrl !== undefined) s.baseUrl = baseUrl;
+  const api = envValue(env, "ASTERISM_MODEL_API");
+  if (api !== undefined) s.api = api;
   return s;
 }
 

@@ -296,15 +296,20 @@ test("trust --review grants an earned capability — only on an explicit yes", a
   expect(show).toContain("fs.delete");
 });
 
-test("trust --review grants nothing without a reviewer (the safe default)", async () => {
+test("trust --review grants nothing without a reviewer, and says so instead of reporting decisions nobody made", async () => {
   const h = harness();
   await runCli(["init"], h.io);
   await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
   seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
 
-  // No reviewGrant injected ⇒ every proposal is declined, nothing is granted.
+  // No reviewGrant injected ⇒ no human to ratify anything. The safe outcome is unchanged
+  // — nothing is granted — but the session is told to come back with a terminal rather
+  // than shown "0 granted, 1 left gated", which reads as a human having declined it.
   const out = await capture(["trust", "cleaner", "--review"], h.io);
-  expect(out).toContain("0 granted");
+  expect(out).toContain("1 earned capability is waiting for cleaner");
+  expect(out).toContain("in an interactive terminal");
+  // The evidence walk is what the operator came for, and it is not shown to nobody.
+  expect(out).not.toContain("left gated");
   expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("No capabilities have earned");
 });
 
@@ -2860,6 +2865,63 @@ test("config set rejects a value-bearing flag given with no value", async () => 
   await runCli(["init"], h.io);
   expect(await runCli(["config", "set", "gpt-4o", "--provider"], h.io)).toBe(1);
   expect(h.err.join("\n")).toContain("--provider");
+});
+
+test("config set rejects a flag given an EMPTY value, and stores nothing", async () => {
+  // `--provider "$UNSET"` expands to this. Taken literally it wrote `"provider": ""` to
+  // the config file, after which `config show` printed `(provider: )` and `run` refused
+  // with `--provider  --base-url <url>` — a flag whose value is the next flag (#174).
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+
+  for (const flag of ["model", "provider", "base-url", "api", "agent"]) {
+    h.err.length = 0;
+    expect(await runCli(["config", "set", "gpt-4o", `--${flag}`, ""], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain(`--${flag} option needs a value`);
+  }
+  // An empty positional model id too — skipping it would take `config set "" --provider x`
+  // as a request to set only the provider, dropping the coordinate that was typed at.
+  h.err.length = 0;
+  expect(await runCli(["config", "set", ""], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("model id needs a value");
+
+  // Nothing was written by any of them: the working configuration is untouched.
+  expect(loadConfig(homeOf(h)).model).toEqual({ id: "llama3.2", provider: "ollama" });
+});
+
+test("config show reports an environment override only when it supplies something", async () => {
+  const env: Record<string, string | undefined> = {};
+  const h = harness(env);
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "propose"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+
+  // Exported and empty. `config show` used to report an active override while `run`
+  // reported no model at all — one install, two answers (#174).
+  env.ASTERISM_MODEL_ID = "";
+  const empty = await capture(["config", "show"], h.io);
+  expect(empty).not.toContain("Environment override");
+  expect(empty).toContain("writer  →  llama3.2 (provider: ollama)  [install default]");
+
+  // A real value still overrides, and still says so.
+  env.ASTERISM_MODEL_ID = "gpt-4o";
+  const real = await capture(["config", "show"], h.io);
+  expect(real).toContain("Environment override");
+  expect(real).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
+});
+
+test("config show does not call an empty embeddings endpoint configured", async () => {
+  const env: Record<string, string | undefined> = { ASTERISM_RECALL_EMBED_URL: "" };
+  const h = harness(env);
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "propose"], h.io);
+  // `buildEmbeddingRecallProvider` requires a non-empty URL and refuses the run without
+  // one, so reporting it here as configured would contradict the runtime.
+  expect(await capture(["config", "show"], h.io)).not.toContain("local-embeddings endpoint configured");
+
+  env.ASTERISM_RECALL_EMBED_URL = "http://localhost:11434/v1/embeddings";
+  expect(await capture(["config", "show"], h.io)).toContain("local-embeddings endpoint configured");
 });
 
 test("config recall-budget sets a per-agent budget, persisted in the kernel store", async () => {

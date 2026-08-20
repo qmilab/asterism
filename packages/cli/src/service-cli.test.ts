@@ -189,6 +189,39 @@ describe("asterism service", () => {
     expect(text).not.toContain("Before it can work");
   });
 
+  test("--capture-env does not count an exported-but-empty variable as captured", async () => {
+    // `export ASTERISM_TELEGRAM_TOKEN=` is how a shell clears one. Counted as present it
+    // wrote a blank value into the service's env file AND reported the required need as
+    // met — so the operator was told nothing was missing and the service failed to start
+    // on the one thing that was (#174).
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "",
+        OPENAI_API_KEY: "sk-xyz",
+      },
+    });
+    const p = paths("writer", "telegram");
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+
+    const env = readFileSync(p.env, "utf8");
+    // Left as the commented placeholder it would be if the variable were absent…
+    expect(env).toContain("# ASTERISM_TELEGRAM_TOKEN=");
+    expect(env).not.toContain("ASTERISM_TELEGRAM_TOKEN=''");
+    // …the value that IS there is still captured…
+    expect(env).toContain("OPENAI_API_KEY='sk-xyz'");
+    // …it is not claimed as captured…
+    expect(text).toContain("Captured from your environment: OPENAI_API_KEY");
+    expect(text).not.toContain("Captured from your environment: ASTERISM_TELEGRAM_TOKEN");
+    // …and the operator is told what the service still needs before it can work.
+    expect(text).toContain("Before it can work");
+    expect(text).toContain("ASTERISM_TELEGRAM_TOKEN");
+  });
+
   test("--capture-env overwrites a loose-permission env file and leaves it 0600", async () => {
     const p = paths("writer", "serve");
     await run(baseIo({ platform: "linux", runCommand: makeRunner().run }), ["service", "install", "writer"]);

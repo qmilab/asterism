@@ -554,3 +554,49 @@ test("with no model configured the plan is the default provider's", () => {
   expect(plan.required).toBe(true);
   expect(providerAuthPlan({ OPENAI_API_KEY: "sk" }).satisfied).toBe(true);
 });
+
+// --- an environment variable that exists but is empty (#174) ------------------
+
+test("an empty model variable does not shadow the layer below it", () => {
+  const config: AsterismConfig = { model: { id: "llama3.2", provider: "ollama" } };
+  // `export ASTERISM_MODEL_ID=` is how a shell CLEARS a variable. Read as merely
+  // defined it silently disabled a working configured model — `run` reported no model
+  // at all while `config show` went on displaying one.
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "" }, { config });
+  expect(model?.id).toBe("llama3.2");
+  expect(model?.provider).toBe("ollama");
+  // And a real override still wins, so the rule has not just switched the layer off.
+  expect(resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o" }, { config }).model?.id).toBe("gpt-4o");
+});
+
+test("an empty provider variable never reaches a message as a provider name", () => {
+  const config: AsterismConfig = { model: { id: "llama3.2", provider: "ollama" } };
+  const { model, reason } = resolveModelConfig({ ASTERISM_MODEL_PROVIDER: "" }, { config });
+  // It used to resolve `provider: ""`, which has no built-in endpoint, so the refusal
+  // interpolated the empty name into its own advice: `--provider  --base-url <url>`, a
+  // flag whose value is the next flag — a command that cannot be typed.
+  expect(reason).toBeUndefined();
+  expect(model?.provider).toBe("ollama");
+  expect(model?.baseUrl).toBe(PROVIDER_DEFAULTS.ollama!.baseUrl);
+});
+
+test("an empty endpoint or protocol variable leaves the provider's own default standing", () => {
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "llama3.2",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+    ASTERISM_MODEL_BASE_URL: "",
+    ASTERISM_MODEL_API: "",
+  });
+  expect(model?.baseUrl).toBe(PROVIDER_DEFAULTS.ollama!.baseUrl);
+  expect(model?.api).toBeUndefined();
+});
+
+test("an empty API key variable is a cleared key, not a credential to send", () => {
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o" });
+  expect(resolveProviderAuth({ OPENAI_API_KEY: "" }, model!).apiKey).toBeUndefined();
+  // …and it falls through to the shared key rather than stopping at the empty one.
+  expect(resolveProviderAuth({ OPENAI_API_KEY: "", [SHARED_KEY_ENV]: "sk-shared" }, model!).apiKey).toBe(
+    "sk-shared",
+  );
+  expect(providerAuthPlan({ OPENAI_API_KEY: "" }, model).satisfied).toBe(false);
+});

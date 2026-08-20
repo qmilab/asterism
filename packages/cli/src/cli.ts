@@ -108,6 +108,7 @@ import { helpRequested, intFlag, parseArgs, stringFlag, undeclaredOptions } from
 import type { ParsedArgs } from "./args.js";
 import type { AsterismConfig, ModelSettings } from "./config.js";
 import { loadConfig, saveConfig } from "./config.js";
+import { ambientValue, envIsSet, envValue } from "./env.js";
 import {
   formatActionSummary,
   formatAgentList,
@@ -590,6 +591,48 @@ function rejectUnknownFlags(
 }
 
 /**
+ * Refuse a value-bearing option that was given no value — the sibling of
+ * {@link rejectUnknownFlags}, in the same `if (!…) return 1;` shape.
+ *
+ * TWO ways an option carries nothing, and they are one mistake:
+ *
+ * - Given with no value at all (`--host`), which the parser reads as boolean `true`.
+ * - Given an EMPTY value (`--host ""`), which is what `--host "$HOST"` expands to when
+ *   the variable is unset or has been cleared.
+ *
+ * Both used to be handled differently, and the second was handled nowhere: it fell
+ * through as a real value, and what happened next varied by verb. `config set gpt-4o
+ * --provider ""` wrote `"provider": ""` to the config file, after which `config show`
+ * displayed `(provider: )` and every run failed. `new bot --model ""` wrote an empty
+ * per-agent override that shadows the install default with nothing, so that agent could
+ * never run — and setting an install default afterwards did not reach it, because the
+ * override is the more specific layer (measured; only replacing or clearing that one
+ * agent's override recovers). And `serve writer --host ""` bound `::` — every interface
+ * — where the operator had asked for one address and the documented default is loopback
+ * only (#174).
+ *
+ * This is deliberately NOT the rule for an environment variable, which is ambient and
+ * whose emptiness means "not supplied" (see `env.ts`). An option is something the
+ * operator typed on this command line: the honest answer is that it carries nothing,
+ * not to act as though they never typed it. Clearing a stored setting is `--unset` /
+ * `config unset`, which says so — the distinction #159 settled for the other setters.
+ */
+function rejectValuelessFlags(
+  parsed: ParsedArgs,
+  flags: readonly string[],
+  io: CliIO,
+): boolean {
+  for (const flag of flags) {
+    const given = parsed.flags[flag];
+    if (given === true || given === "") {
+      io.err(`The --${flag} option needs a value.`);
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Build the run substrate from the IO's override or, lazily, from the resolved
  * model. The single seam either run-bearing command (`run`, `serve`) reaches the
  * model through, so the two cannot drift in how it is wired — the same reason the
@@ -752,6 +795,11 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, NEW_FLAGS, "new", NEW_USAGE, io)) return 1;
+  // A value-bearing flag carrying nothing must not silently fall back to a default —
+  // `new bot --trust` must not quietly create a `propose` agent the user did not ask
+  // for, and `new bot --model ""` must not write a per-agent override that shadows the
+  // install default with nothing and can never be run.
+  if (!rejectValuelessFlags(parsed, NEW_FLAGS, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(NEW_USAGE);
@@ -762,15 +810,6 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
       `Invalid agent name "${name}". Use letters, digits, dot, dash, or underscore (no spaces or slashes).`,
     );
     return 1;
-  }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently falling back to a default — `new bot --trust` must not
-  // quietly create a `propose` agent the user did not ask for.
-  for (const flag of NEW_FLAGS) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
   }
   const role = stringFlag(parsed.flags.role) ?? "";
   const trustLevel = stringFlag(parsed.flags.trust) ?? "propose";
@@ -918,14 +957,27 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
       return 0;
     }
 
+    // No reviewer wired ⇒ no human to ratify anything (the binary wires this only where
+    // there is a terminal to ask at). Say so and stop, rather than walking every
+    // candidate and printing "0 granted, N left gated" — a summary of decisions nobody
+    // took, which reads as a human having declined them. Nothing is lost: a candidate
+    // that has earned a grant is re-proposed on the next review. The queue drain's
+    // refusal, applied to a surface that persists nothing (#172).
+    if (!io.reviewGrant) {
+      io.out(
+        `${candidates.length} earned ${candidates.length === 1 ? "capability is" : "capabilities are"} waiting for ${name}.`,
+      );
+      io.out(`Run \`asterism trust ${name} --review\` in an interactive terminal to decide them.`);
+      return 0;
+    }
+    const review = io.reviewGrant;
+
     io.out(
       `Reviewing ${candidates.length} earned ${candidates.length === 1 ? "capability" : "capabilities"} for ${name}.`,
     );
     io.out("Granting one lets that capability act without pausing for you — until a");
     io.out("regression takes it back. Nothing is granted unless you accept it.");
 
-    // Absent reviewer ⇒ reject everything: nothing is granted without an explicit yes.
-    const review = io.reviewGrant ?? ((): boolean => false);
     let granted = 0;
     let declined = 0;
     for (let i = 0; i < candidates.length; i++) {
@@ -1702,16 +1754,6 @@ function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
 
 // --- secrets add -----------------------------------------------------------
 
-/**
- * A value from a source that merely EXISTS rather than one the operator typed — the
- * environment, a pipe. Empty means nothing was supplied, so the caller moves on to the
- * next source; an empty inline argument is not run through this, because typing one is
- * a statement and looking past it would substitute a value the operator never named.
- */
-function ambientValue(value: string | undefined): string | undefined {
-  return value !== undefined && value.length > 0 ? value : undefined;
-}
-
 async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
   if (args[0] === "--help" || args[0] === "-h") {
     io.out(COMMAND_HELP.secrets!);
@@ -2351,21 +2393,22 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
   ) {
     return Promise.resolve(1);
   }
+  // The only mode in T1 is handoff; an ABSENT `--mode` defaults to it so the common case
+  // needs no flag. But `--mode` with NO value parses as boolean `true` — a malformed
+  // invocation (`--mode`, or `--mode --artifact-only`, where the next dash-token is read as
+  // its own flag) — and `--mode ""` carries nothing either. Since connect grants a
+  // permissioned channel, reject both loudly rather than silently opening the default
+  // connection (the absent case is `undefined`, which still correctly defaults).
+  // [Codex review P2: reject a missing connect mode value.]
+  const modeFlag = parsed.flags.mode;
+  if (modeFlag === true || modeFlag === "") {
+    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
+    return Promise.resolve(1);
+  }
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
   if (!fromName || !toName) {
     io.err(CONNECT_USAGE);
-    return Promise.resolve(1);
-  }
-  // The only mode in T1 is handoff; an ABSENT `--mode` defaults to it so the common case
-  // needs no flag. But `--mode` with NO value parses as boolean `true` — a malformed
-  // invocation (`--mode`, or `--mode --artifact-only`, where the next dash-token is read as
-  // its own flag). Since connect grants a permissioned channel, reject that loudly rather
-  // than silently opening the default connection (the absent case is `undefined`, which
-  // still correctly defaults). [Codex review P2: reject a missing connect mode value.]
-  const modeFlag = parsed.flags.mode;
-  if (modeFlag === true) {
-    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
     return Promise.resolve(1);
   }
   // Validate any value given so an unimplemented mode is a clear error, not a silent
@@ -2437,19 +2480,19 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["mode"], "disconnect", DISCONNECT_USAGE, io)) {
     return Promise.resolve(1);
   }
+  // `--mode` with no value parses as boolean `true` (`--mode`, or `--mode --foo` where the
+  // next dash-token is read as its own flag), and `--mode ""` carries nothing either. Reject
+  // both loudly rather than falling through to inference, which would silently withdraw a
+  // channel the operator did not name. Mirrors `connect`'s handling of the same mistake.
+  const modeFlag = parsed.flags.mode;
+  if (modeFlag === true || modeFlag === "") {
+    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
+    return Promise.resolve(1);
+  }
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
   if (!fromName || !toName) {
     io.err(DISCONNECT_USAGE);
-    return Promise.resolve(1);
-  }
-  // `--mode` with no value parses as boolean `true` (`--mode`, or `--mode --foo` where the
-  // next dash-token is read as its own flag). Reject it loudly rather than falling through to
-  // inference, which would silently withdraw a channel the operator did not name. Mirrors
-  // `connect`'s handling of the same malformed invocation.
-  const modeFlag = parsed.flags.mode;
-  if (modeFlag === true) {
-    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
     return Promise.resolve(1);
   }
   if (modeFlag !== undefined && !(CONNECTION_MODES as readonly string[]).includes(modeFlag)) {
@@ -3556,18 +3599,13 @@ async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, MEMORY_FLAGS, "memory inspect", MEMORY_USAGE, io)) return 1;
+  // A value-bearing flag carrying nothing must not silently drop the filter and show
+  // the unfiltered view.
+  if (!rejectValuelessFlags(parsed, MEMORY_FLAGS, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(MEMORY_USAGE);
     return 1;
-  }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently dropping the filter and showing the unfiltered view.
-  for (const flag of MEMORY_FLAGS) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
   }
   const typeRaw = stringFlag(parsed.flags.type);
   const reviewRaw = stringFlag(parsed.flags["review-state"]);
@@ -3640,18 +3678,14 @@ async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
   ) {
     return 1;
   }
+  // A value-bearing flag carrying nothing must not silently drop the filter — nor be
+  // taken as one, which is how `--type ""` came to report "no activity matching type=".
+  // (`--follow` is a genuine boolean.)
+  if (!rejectValuelessFlags(parsed, EVENTS_VALUE_FLAGS, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(EVENTS_USAGE);
     return 1;
-  }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently dropping the filter. (`--follow` is a genuine boolean.)
-  for (const flag of EVENTS_VALUE_FLAGS) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
   }
   // A `--limit` that is not a non-negative integer is an error, not a silently
   // ignored value that would show the whole log instead of the cap asked for.
@@ -4568,7 +4602,10 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
         : "Install default model: (none set)",
     );
 
-    const envSet = MODEL_ENV_VARS.filter((k) => io.env[k] !== undefined);
+    // What the RESOLVER reads, not what the shell happens to have defined. A variable
+    // that exists and holds nothing supplies nothing, so reporting it as an override
+    // here while `run` ignored it is how one install described itself two ways (#174).
+    const envSet = MODEL_ENV_VARS.filter((k) => envIsSet(io.env, k));
     if (envSet.length > 0) {
       io.out(`Environment override:  ${envSet.join(", ")} set — overrides the config file.`);
     }
@@ -4586,7 +4623,7 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
         // Name the source of the resolved id — the headline coordinate.
         const source = hasSettings(override) && override.id !== undefined
           ? "agent override"
-          : io.env.ASTERISM_MODEL_ID !== undefined
+          : envIsSet(io.env, "ASTERISM_MODEL_ID")
             ? "environment"
             : config.model?.id !== undefined
               ? "install default"
@@ -4723,8 +4760,10 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
             : `  ${agent.name}  →  ${DEFAULT_RECALL_PROVIDER_LABEL}  [default]`,
         );
       }
-      const embedSet = ["ASTERISM_RECALL_EMBED_URL", "ASTERISM_RECALL_EMBED_MODEL"].filter(
-        (k) => io.env[k] !== undefined,
+      // `buildEmbeddingRecallProvider` requires both to be non-empty and refuses the run
+      // otherwise, so an empty one is not a configured endpoint here either.
+      const embedSet = ["ASTERISM_RECALL_EMBED_URL", "ASTERISM_RECALL_EMBED_MODEL"].filter((k) =>
+        envIsSet(io.env, k),
       );
       if (embedSet.length > 0) {
         io.out(`  (local-embeddings endpoint configured: ${embedSet.join(", ")})`);
@@ -5304,16 +5343,30 @@ function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["agent", ...MODEL_FLAGS], "config set", CONFIG_SET_USAGE, io)) {
     return Promise.resolve(1);
   }
-  for (const flag of ["agent", ...MODEL_FLAGS] as const) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return Promise.resolve(1);
-    }
-  }
+  // An option given with NO value, and one given an EMPTY value, are refused the same
+  // way: neither carries a coordinate. The empty form is what `--provider "$UNSET"`
+  // expands to, and taking it literally wrote `"provider": ""` into the config file —
+  // after which `config show` displayed `(provider: )` and `run` refused with advice
+  // that could not be typed, `--provider  --base-url <url>`, a flag whose value is the
+  // next flag (#174). `--base-url ""` was worse: it shadowed a working provider default
+  // with nothing, breaking a configuration that had been fine without the flag.
+  //
+  // Refused rather than skipped, unlike an empty environment variable (see `env.ts`).
+  // The operator named this option on this command line; the honest answer is that it
+  // carries nothing, not to act as though they never typed it. Clearing a setting is
+  // `config unset`, which says so — the distinction #159 settled for the other setters.
+  if (!rejectValuelessFlags(parsed, ["agent", ...MODEL_FLAGS], io)) return Promise.resolve(1);
   // The model id may be given positionally (`config set gpt-4o`) or via --model;
   // the positional is the ergonomic form. Other coordinates are flags only.
   const settings = modelSettingsFromFlags(parsed);
   const positionalId = parsed.positionals[1];
+  // The same rule for the positional form of the id. Skipping it instead would take
+  // `config set "" --provider ollama` as a request to set only the provider, dropping
+  // the coordinate the operator had actually typed at.
+  if (positionalId === "") {
+    io.err("The model id needs a value.");
+    return Promise.resolve(1);
+  }
   if (positionalId !== undefined) settings.id = positionalId;
   if (!hasSettings(settings)) {
     // The same constant the option refusal above prints. A second copy of this line drifted
@@ -5356,10 +5409,7 @@ function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["agent"], "config unset", CONFIG_UNSET_USAGE, io)) {
     return Promise.resolve(1);
   }
-  if (parsed.flags.agent === true) {
-    io.err("The --agent option needs a value.");
-    return Promise.resolve(1);
-  }
+  if (!rejectValuelessFlags(parsed, ["agent"], io)) return Promise.resolve(1);
   const agentName = stringFlag(parsed.flags.agent);
 
   return withHomeStore(io, (_store, home) => {
@@ -5398,18 +5448,15 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
   // A mistyped `--port` used to bind the DEFAULT port and print that URL as if it were
   // the one asked for — the same silent substitution the bad-VALUE check below refuses.
   if (!rejectUnknownFlags(parsed, ["port", "host"], "serve", SERVE_USAGE, io)) return 1;
+  // A value-bearing flag carrying nothing must not silently bind something the user did
+  // not ask for. `--host ""` is the sharp one: it does not fall back to the loopback
+  // default, it binds `::` — every interface — so an unset variable in `--host "$HOST"`
+  // would put the endpoint on the network (#174).
+  if (!rejectValuelessFlags(parsed, ["port", "host"], io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(SERVE_USAGE);
     return 1;
-  }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently binding a default the user did not ask for.
-  for (const flag of ["port", "host"] as const) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
   }
   const host = stringFlag(parsed.flags.host);
   // A `--port` with a value that is not a valid port (non-numeric, or out of
@@ -5558,12 +5605,7 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
   // Refused before the terminal check, so a mistyped `--headless` is named as the
   // mistake rather than reported as "this needs a TTY" — which is true, and useless.
   if (!rejectUnknownFlags(parsed, DASHBOARD_FLAGS, "dashboard", DASHBOARD_USAGE, io)) return 1;
-  for (const flag of ["token", "port", "host"] as const) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
-  }
+  if (!rejectValuelessFlags(parsed, ["token", "port", "host"], io)) return 1;
   const headless = parsed.flags.headless === true;
   const urlArg = parsed.positionals[0];
   const tokenFlag = stringFlag(parsed.flags.token);
@@ -5766,15 +5808,16 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["allow"], "channel telegram", TELEGRAM_USAGE, io)) return 1;
+  // A value-bearing flag given bare parses as boolean `true`, and `--allow ""` — what
+  // `--allow "$IDS"` expands to with the variable unset — carries nothing either. Reject
+  // both rather than silently starting the bot with no allow-list where one was named.
+  if (parsed.flags.allow === true || parsed.flags.allow === "") {
+    io.err("The --allow option needs a value (a comma-separated list of chat ids).");
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (!name) {
     io.err(TELEGRAM_USAGE);
-    return 1;
-  }
-  // A value-bearing flag given bare parses as boolean `true`; reject it rather than
-  // silently treating "--allow" as no allow-list.
-  if (parsed.flags.allow === true) {
-    io.err("The --allow option needs a value (a comma-separated list of chat ids).");
     return 1;
   }
 
@@ -5885,15 +5928,16 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["allow"], "channel discord", DISCORD_USAGE, io)) return 1;
+  // A value-bearing flag given bare parses as boolean `true`, and `--allow ""` — what
+  // `--allow "$IDS"` expands to with the variable unset — carries nothing either. Reject
+  // both rather than silently starting the bot with no allow-list where one was named.
+  if (parsed.flags.allow === true || parsed.flags.allow === "") {
+    io.err("The --allow option needs a value (a comma-separated list of channel ids).");
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (!name) {
     io.err(DISCORD_USAGE);
-    return 1;
-  }
-  // A value-bearing flag given bare parses as boolean `true`; reject it rather than
-  // silently treating "--allow" as no allow-list.
-  if (parsed.flags.allow === true) {
-    io.err("The --allow option needs a value (a comma-separated list of channel ids).");
     return 1;
   }
 
@@ -6073,7 +6117,10 @@ function serviceTitle(agentName: string, kind: ServiceKind): string {
 /** Resolve a `--kind` flag into a ServiceKind. A bare/unknown value is an error. */
 function parseServiceKind(value: string | true | undefined): { kind?: ServiceKind; error?: string } {
   if (value === undefined) return { kind: "serve" };
-  if (value === true) {
+  // Given with no value, or given an EMPTY one (`--kind "$KIND"` with the variable
+  // unset) — the same mistake, so the same answer, rather than falling through to
+  // `Unknown service kind ""`, which describes the expansion instead of the mistake.
+  if (value === true || value === "") {
     return { error: "The --kind option needs a value (serve, telegram, or discord)." };
   }
   if (!isServiceKind(value)) {
@@ -6138,7 +6185,10 @@ function serviceEnvPlan(
   const config = loadConfig(home);
   const { model } = resolveModelConfig(io.env, { config, agentName });
   const auth = providerAuthPlan(io.env, model);
-  const has = (name: string): boolean => io.env[name] !== undefined;
+  // Whether capturing would put a VALUE in the service's env file. An exported-but-empty
+  // variable would be captured as nothing, so counting it as satisfied told the operator
+  // a required need was met and left the service failing to start on it.
+  const has = (name: string): boolean => envIsSet(io.env, name);
 
   const vars: EnvVarSpec[] = [];
   const needs: ServiceEnvNeed[] = [];
@@ -6289,15 +6339,15 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["kind", "capture-env"], "service install", SERVICE_INSTALL_USAGE, io)) {
     return 1;
   }
-  const name = parsed.positionals[0];
-  if (!name) {
-    io.err(SERVICE_INSTALL_USAGE);
-    return 1;
-  }
   const captureEnv = parsed.flags["capture-env"] === true;
   const { kind, error } = parseServiceKind(parsed.flags.kind);
   if (error || !kind) {
     io.err(error ?? "A service kind is required.");
+    return 1;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err(SERVICE_INSTALL_USAGE);
     return 1;
   }
 
@@ -6338,7 +6388,11 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     chmodSync(paths.baseDir, 0o700); // the dir holds the private env file and wrapper
     const envPlan = serviceEnvPlan(io, home, agent.name, kind, captureEnv);
     if (captureEnv) {
-      writeFileAtomic(paths.envFile, renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) => io.env[n]), 0o600);
+      writeFileAtomic(
+        paths.envFile,
+        renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) => envValue(io.env, n)),
+        0o600,
+      );
     } else if (!existsSync(paths.envFile)) {
       writeFileAtomic(paths.envFile, renderEnvTemplate(serviceTitle(agent.name, kind), envPlan.vars), 0o600);
     } else {
@@ -6406,7 +6460,7 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     io.out(`  Keeps \`asterism ${display}\` running and restarts it if it fails.`);
     io.out(`  Env file (0600): ${paths.envFile}`);
     if (captureEnv) {
-      const captured = envPlan.vars.filter((v) => io.env[v.name] !== undefined).map((v) => v.name);
+      const captured = envPlan.vars.filter((v) => envIsSet(io.env, v.name)).map((v) => v.name);
       io.out(
         captured.length > 0
           ? `  Captured from your environment: ${captured.join(", ")}`
@@ -6468,12 +6522,9 @@ async function cmdServiceStatus(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["kind"], "service status", SERVICE_STATUS_USAGE, io)) return 1;
-  const name = parsed.positionals[0];
-  if (!name) {
-    io.err(SERVICE_STATUS_USAGE);
-    return 1;
-  }
-  // With no --kind, status reports across every kind; with one, only that kind.
+  // With no --kind, status reports across every kind; with one, only that kind. Resolved
+  // before the positional check so a `--kind` carrying nothing names itself, rather than
+  // being reported as a missing agent name (the ordering `rejectUnknownFlags` documents).
   let filterKind: ServiceKind | undefined;
   if (parsed.flags.kind !== undefined) {
     const { kind, error } = parseServiceKind(parsed.flags.kind);
@@ -6482,6 +6533,11 @@ async function cmdServiceStatus(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
     filterKind = kind;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err(SERVICE_STATUS_USAGE);
+    return 1;
   }
   const platform = servicePlatform(io);
   if (!platform) {
@@ -6530,11 +6586,6 @@ async function cmdServiceUninstall(args: string[], io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["kind"], "service uninstall", SERVICE_UNINSTALL_USAGE, io)) {
     return 1;
   }
-  const name = parsed.positionals[0];
-  if (!name) {
-    io.err(SERVICE_UNINSTALL_USAGE);
-    return 1;
-  }
   let filterKind: ServiceKind | undefined;
   if (parsed.flags.kind !== undefined) {
     const { kind, error } = parseServiceKind(parsed.flags.kind);
@@ -6543,6 +6594,11 @@ async function cmdServiceUninstall(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
     filterKind = kind;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err(SERVICE_UNINSTALL_USAGE);
+    return 1;
   }
   const platform = servicePlatform(io);
   if (!platform) {

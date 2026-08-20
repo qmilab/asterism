@@ -27,6 +27,18 @@ asterism new does not take --trsut.
 Usage: asterism new <agent> [--soul <name|path>] [--role "<text>"] [--trust <level>]
 ```
 
+**An option given no value is an error too** — whether you left the value off
+entirely, or gave one that is empty. `--provider ""` is what `--provider "$VAR"`
+expands to when the variable is unset, and it names no provider:
+
+```console
+$ asterism config set gpt-4o --provider ""
+The --provider option needs a value.
+```
+
+Clearing something you have set is [`config unset`](#config) or the command's own
+`--unset`, which say so.
+
 Text you write yourself is untouched by this. [`handoff`](#handoff),
 [`artifact`](#artifact), [`summary`](#summary), [`brief`](#brief),
 [`objective add`](#objective), the [`notes`](#notes) verbs, and
@@ -161,7 +173,7 @@ another capability, and never carries to another agent.
 
 | Form | What it does |
 |---|---|
-| `trust <agent> --review` | Review the capabilities the agent has earned the right to act on without pausing. You grant or decline each; nothing is granted without your yes. |
+| `trust <agent> --review` | Review the capabilities the agent has earned the right to act on without pausing. You grant or decline each; nothing is granted without your yes. Needs a terminal to ask at — with nobody to ask it names how many are waiting and stops, leaving them to be decided later. |
 | `trust <agent> show` | Show the agent's level, which capabilities now act without pausing, and its earning bar. |
 | `trust <agent> revoke <capability>` | Take a grant back — the capability pauses for your confirmation again. |
 | `trust <agent> threshold [--clean <n>] [--targets <n>]` | Tune how much clean track record review asks for before it proposes a grant: how many confirmed executions (`--clean`), across how many different targets (`--targets`). Set either or both; leave the other as it is. |
@@ -564,11 +576,14 @@ A run ends in one of three ways:
 
 - **done** — the agent's output is printed.
 - **paused** — a destructive action needs confirmation: `Run paused: a
-  destructive action needs your confirmation before it can proceed.` In an
-  interactive terminal you are prompted `[y/N]` to approve it right away. Otherwise
-  the run stays paused — it also prints the exact command to resume it later
-  (`asterism confirm <agent> <id>`; see [`confirm`](#confirm)). A non-interactive
-  (piped) run never auto-approves.
+  destructive action needs your confirmation before it can proceed.` At a terminal
+  you are prompted `[y/N]` to approve it right away. The question is put on
+  **standard error**, alongside the run's activity and summary, so redirecting the
+  agent's output still shows it to you. Otherwise the run stays paused — it also
+  prints the exact command to resume it later (`asterism confirm <agent> <id>`; see
+  [`confirm`](#confirm)). A run with nobody to ask — standard input or standard
+  error redirected, or no terminal at all — never auto-approves and never waits for
+  an answer that cannot come.
 - **failed** — an error is printed and the command exits `1`.
 
 The run's activity streams as it happens, and an agent that can act on its own
@@ -1265,8 +1280,9 @@ drafted. Otherwise it looks over the agent's latest completed run and drafts new
 proposals on the spot (which needs a
 [configured model](./installation.md#configuring-a-model)).
 
-In an interactive terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`.
-Outside a terminal — piped, or launched from a scheduler — nothing is ever
+At a terminal each proposal prompts `[a]ccept / [e]dit / [r]eject`, on **standard
+error**. With nobody to ask — piped, launched from a scheduler, or with standard
+error redirected somewhere you would not see the question — nothing is ever
 accepted, and a pile already **queued** by `--propose` is left **untouched** (with
 a note to review it in a terminal) rather than silently rejected, since rejecting a
 queued proposal is a durable choice. Either way, nothing is written without you.

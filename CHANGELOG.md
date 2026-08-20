@@ -2,6 +2,39 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.9.1
+
+Two ways Asterism could act on something you had not said. A question it needed answered was written to standard output while only standard input decided whether to ask, so redirecting a run's output put the destructive-action confirmation in the file and left you at a blank screen waiting on a question you could not see. And a value that was empty — a cleared environment variable, an option given `""` — was read as a value you had chosen, which is how one install came to report a configured model to `config show` and none to `run`, and how `--host ""` came to bind every interface.
+
+### Fixed
+
+- **A question Asterism needs answered is now always put where you can see it.** Every prompt — the destructive-action confirmation, `reflect --review`, `trust --review` — is written to **standard error**, and Asterism asks only when standard error is a terminal as well as standard input.
+
+  Before, the question went to standard output while only standard input decided whether to ask. Those are different destinations, so `asterism run writer "…" > run.log` at a terminal put the destructive-action confirmation into the log file and waited, indefinitely, against a blank screen. That is the gate the whole product rests on, and a wait with nothing on screen reads as a crash. Redirecting a run's output now leaves the confirmation on your screen — the same place the run's activity and its summary already went — and a session Asterism cannot put a question to stays paused and tells you the command to resume it, rather than waiting for an answer that cannot come.
+
+  `asterism trust <agent> --review` no longer walks you through the evidence for each earned capability when there is nobody there to decide. It names how many are waiting and stops; they keep until you review them at a terminal. It used to end with `0 granted, N left gated` — a summary of decisions nobody had made.
+
+  Pressing `Ctrl-D` at a prompt now declines the question, like an empty answer. It used to end the command with an unhandled Node error and a stack trace.
+
+- **An environment variable that exists but is empty is read as unset, not as set to nothing.** `export ASTERISM_MODEL_ID=` is how a shell clears a variable, and Asterism used to read the cleared variable as an instruction. The two commands that answer "which model will run" then answered differently about the same install: `asterism config show` reported a configured model *and* an active override, while `asterism run` reported no model at all. An emptied variable now supplies nothing and the configured model shows through — the same reading the HTTP and chat-channel tokens always had, and the one `asterism secrets add` adopted in 0.9.0.
+
+  `ASTERISM_MODEL_PROVIDER=` was worse: the empty name reached the refusal, which suggested `asterism config set <id> --provider  --base-url <url>` — a flag whose value is the next flag, a command nobody could type.
+
+  An emptied API key variable is likewise a cleared key rather than a credential to send, and `asterism service install --capture-env` no longer captures a blank value into a service's environment file while reporting that nothing is missing.
+
+- **An option given an empty value is now the same error as an option given no value.** 0.8.0 made a misspelled option an error and an option with its value left off an error; an option given an *empty* value still fell through as if it were a real one. `--provider ""` is what `--provider "$VAR"` expands to when the variable is unset, and what each command did with it varied:
+
+  - `asterism config set gpt-4o --provider ""` wrote `"provider": ""` into the config file, after which `config show` displayed `(provider: )` and every run failed with advice naming an untypeable command.
+  - `asterism config set llama3.2 --provider ollama --base-url ""` shadowed the provider's own endpoint with nothing, breaking a configuration that had been fine before the flag was added.
+  - `asterism new bot --model ""` wrote a per-agent override that shadows the install default with nothing, so that agent could never run. Setting an install default afterwards did not help — the override had to be replaced or cleared for that one agent, and nothing said so.
+  - `asterism serve writer --host ""` bound **every interface** rather than falling back to the loopback default, putting the endpoint on the network where you had asked for one address.
+  - `asterism new bot --soul ""` took the empty path as a soul directory, and `asterism channel telegram a --allow ""` started the bot with no allow-list where you had named one.
+  - `asterism connect a b --mode ""` and `asterism service status a --kind ""` did stop, but with `Unknown connection mode ""` and `Unknown service kind ""` — describing what the variable expanded to rather than the mistake you made.
+
+  Every option that already refused a missing value now refuses an empty one, in the same words. Clearing something you have set is still `asterism config unset` or the command's own `--unset`, which say so.
+
+- **An option that carries nothing is now named before a missing argument is.** `asterism new --soul` reported the usage line, sending you to look for the agent name you had not typed yet rather than at the option that was wrong. It now names the option, which is the rule a misspelled option has followed since 0.8.0.
+
 ## 0.9.0 — 2026-08-20
 
 `asterism secrets add` asks you for the value when you do not give it one. Type the command with just an agent and a key, and it prompts — showing nothing as you type. It keeps the value out of your shell history and out of the `ps` output any other user of the machine can read — where the inline form the quickstart showed you put it — and out of the environment, where the alternative it offered put it.

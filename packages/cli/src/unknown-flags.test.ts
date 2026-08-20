@@ -185,6 +185,71 @@ describe("every advertised verb refuses an option it does not take", () => {
     expect(unnamed.sort()).toEqual(NO_SYNOPSIS_OF_ITS_OWN);
   });
 
+  test("every option that refuses a MISSING value refuses an EMPTY one the same way", async () => {
+    // The other half of "an option you typed is not discarded in silence" (#174). An
+    // option given no value at all parses as boolean `true` and has been refused since
+    // 0.8.0; an option given an EMPTY value — what `--host "$HOST"` expands to with the
+    // variable unset or cleared — fell through as a real value, and what happened next
+    // varied by verb. `config set gpt-4o --provider ""` wrote it to the config file;
+    // `new bot --model ""` wrote a per-agent override that shadows the install default
+    // with nothing; `serve writer --host ""` bound `::`, every interface, where the
+    // documented default is loopback.
+    //
+    // Which options take a value is DERIVED from the binary, not listed: an option whose
+    // bare form says it needs one is an option that takes one. So a flag added tomorrow
+    // is covered the moment it refuses a missing value, and no list can fall behind.
+    const verbs = await advertisedVerbs(cwd);
+    const missed: string[] = [];
+    const seen: string[] = [];
+    let checked = 0;
+    for (const verb of verbs) {
+      const path = verb.split(" ");
+      const { flags } = synopsisFlags(await helpText(cwd, path), verb);
+      for (const flag of flags) {
+        const bare = await run(cwd, [...path, flag]);
+        // Not a value-bearing option — a genuine boolean (`--review`, `--follow`,
+        // `--unset`, `--headless`). Nothing to give an empty value to.
+        if (bare.code === 0 || !/needs a value/.test(bare.text)) continue;
+        checked++;
+        seen.push(`${verb} ${flag}`);
+        const empty = await run(cwd, [...path, flag, ""]);
+        // The SAME first line, not merely a non-zero exit: the two are one mistake, and
+        // a verb that refuses the empty form for some other reason (an unknown enum
+        // value, say) is describing the expansion instead of the mistake.
+        const same = empty.text.split("\n")[0] === bare.text.split("\n")[0];
+        if (empty.code === 0 || !same) {
+          missed.push(
+            `  asterism ${verb} ${flag} ""\n    → exit ${empty.code}: ${empty.text.split("\n")[0]}` +
+              `\n    (bare form said: ${bare.text.split("\n")[0]})`,
+          );
+        }
+      }
+    }
+    expect(missed.join("\n")).toBe("");
+    // A derivation that found nothing would pass the assertion above over zero options —
+    // and one that quietly found FEWER would pass it too. So: a floor on the count, and
+    // the options whose empty form actually did damage, named. A verb that starts
+    // checking its positionals before its options drops out of this sweep silently, which
+    // is how four of these were missed on the first pass.
+    expect(checked).toBeGreaterThan(20);
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        "new --soul", // resolved an empty path as a soul directory
+        "new --model", // wrote an override that shadows the install default with nothing
+        "new --trust",
+        "config set --provider", // wrote `"provider": ""`, then advised an untypeable command
+        "config set --base-url", // shadowed a working provider default with nothing
+        "serve --host", // bound `::` — every interface — instead of loopback
+        "dashboard --host",
+        "connect --mode", // grants a permissioned channel
+        "disconnect --mode",
+        "service install --kind",
+        "memory inspect --type",
+        "events tail --type",
+      ]),
+    );
+  });
+
   test("the refusal comes before the usage complaint, so it names the real mistake", async () => {
     // The option check runs first everywhere. Without that, a verb missing its
     // positionals reports the positional — sending the operator to look for a value
