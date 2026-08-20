@@ -3120,6 +3120,17 @@ test("config show reports an environment override only when it supplies somethin
   const real = await capture(["config", "show"], h.io);
   expect(real).toContain("Environment override");
   expect(real).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
+
+  // …and it names what it actually beats. "Overrides the config file" is not true of the
+  // whole file — a per-agent model is IN that file and wins — and this line sits directly
+  // above the per-agent lines that say so.
+  await runCli(["new", "pinned", "--trust", "propose"], h.io);
+  await runCli(["config", "set", "claude-opus-4-8", "--agent", "pinned"], h.io);
+  const withPin = await capture(["config", "show"], h.io);
+  expect(withPin).toContain("overrides the install default (an agent's own model still wins)");
+  expect(withPin).not.toContain("overrides the config file");
+  expect(withPin).toContain("pinned  →  claude-opus-4-8 (provider: ollama)  [agent override]");
+  expect(withPin).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
 });
 
 test("config unset removes an empty stored entry, and does not call it a cleared setting", async () => {

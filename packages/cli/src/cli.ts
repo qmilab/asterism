@@ -4722,7 +4722,14 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
     // here while `run` ignored it is how one install described itself two ways (#174).
     const envSet = MODEL_ENV_VARS.filter((k) => envIsSet(io.env, k));
     if (envSet.length > 0) {
-      io.out(`Environment override:  ${envSet.join(", ")} set — overrides the config file.`);
+      // What it actually beats. "Overrides the config file" is not true of the whole
+      // file: a per-agent model is IN that file and wins over the environment, and this
+      // line sits directly above the per-agent lines that say so — one command answering
+      // one question two ways, which is the shape #174 exists to remove.
+      io.out(
+        `Environment override:  ${envSet.join(", ")} set — overrides the install default` +
+          " (an agent's own model still wins).",
+      );
     }
 
     io.out("");
