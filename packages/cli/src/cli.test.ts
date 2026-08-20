@@ -635,6 +635,23 @@ test("an empty ambient value is no value, but an empty inline one is still a val
   h.io.promptSecret = async () => "typed-because-env-was-empty";
   expect(await runCli(["secrets", "add", "work", "TOKEN"], h.io)).toBe(0);
 
+  // A pipe is ambient in the same way, and `runCli` is a public entry point: a host can
+  // wire a `readStdin` that yields nothing alongside a prompt, even though the shipped
+  // binary never has both at once. The rule is one rule, so it holds here too.
+  const h3 = harness();
+  await runCli(["init"], h3.io);
+  await runCli(["new", "work"], h3.io);
+  h3.io.readStdin = async () => "";
+  h3.io.promptSecret = async () => "typed-because-the-pipe-was-empty";
+  expect(await runCli(["secrets", "add", "work", "PIPED"], h3.io)).toBe(0);
+  const store3 = AsterismStore.open(dbPath(join(h3.dir, HOME_DIR_NAME)));
+  try {
+    const agent = store3.agents.list().find((a) => a.name === "work")!;
+    expect(store3.secrets.readByKey(agent.id, "PIPED")).toBe("typed-because-the-pipe-was-empty");
+  } finally {
+    store3.close();
+  }
+
   // An inline value is a statement, empty included. Looking past it would reach for
   // `$TOKEN` — a value the operator never named — so this refuses instead.
   const h2 = harness({ TOKEN: "from-env" });
