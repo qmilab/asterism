@@ -61,7 +61,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve, relative, sep, basename } from "node:path";
+import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import {
   ROOT,
@@ -238,10 +238,23 @@ function terminalBlocks(text, isHtml) {
       startLine: text.slice(0, m.index).split("\n").length,
       // Inline markup inside a terminal block is presentation (a `<span class="comment">`
       // around a shell comment); the command is what is left once it is gone.
-      text: decodeEntities(text.slice(from, end).replace(/<[^>]+>/g, "")),
+      text: decodeEntities(stripMarkup(text.slice(from, end))),
     });
   }
   return blocks;
+}
+
+/**
+ * Remove markup, keeping the line breaks that were INSIDE it.
+ *
+ * A plain `replace(/<[^>]+>/g, "")` eats them, because `[^>]` spans newlines — so one
+ * `<span\n class="comment">` inside a terminal block shifts every command below it up a
+ * line, and a tag straddling the join between two commands merges them, where the
+ * trailing-comment strip can drop the second outright. A silent under-read with no
+ * diagnostic, which is the failure class this file exists to prevent.
+ */
+function stripMarkup(text) {
+  return text.replace(/<[^>]+>/g, (tag) => tag.replace(/[^\n]/g, ""));
 }
 
 /**
@@ -371,7 +384,7 @@ function sectionIndex(text, isHtml) {
     // section at all and every command below it collapses into one group — sharing a
     // fixture with commands the grouping exists to keep apart.
     for (const m of text.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi)) {
-      marks.push([text.slice(0, m.index).split("\n").length, `## ${decodeEntities(m[1].replace(/<[^>]+>/g, "")).trim()}`]);
+      marks.push([text.slice(0, m.index).split("\n").length, `## ${decodeEntities(stripMarkup(m[1])).trim()}`]);
     }
   } else {
     let inFence = false;
@@ -2216,7 +2229,7 @@ function report(total, tally, groups, coverageWork) {
       // Named as the real index would be: with `<planted>` the basename lookups below can
       // never match, which is exactly why the self-link case passed while the code counted
       // it. A fixture whose name makes the branch unreachable proves nothing about it.
-      const got = checkLandingLinks([["landing/index.html", html]]);
+      const got = checkLandingLinks([["landing/index.html", html]], undefined, undefined, "landing");
       if (wantChecked !== undefined && got.checked !== wantChecked) {
         linkFailures.push(`  ${why}: counted ${got.checked} links checked, wanted ${wantChecked}`);
       }
@@ -2248,7 +2261,25 @@ function report(total, tally, groups, coverageWork) {
       ["landing/blog/post.html", "<h2 id=x>x</h2>"],
       ["landing/index.html", '<a href="/asterism/blog/post.html">a</a><a href="/asterism/blog/">b</a>'],
     ];
-    const nestedResult = checkLandingLinks(nested, realPublished);
+    // A corpus with no page at the declared root at all. Inferring the directory from the
+    // pages gives `landing/en`, and every URL then resolves one level too deep.
+    const deepOnly = checkLandingLinks(
+      [
+        ["landing/en/about.html", "<h2 id=a>a</h2>"],
+        ["landing/en/index.html", '<a href="/asterism/en/about.html">a</a>'],
+      ],
+      realPublished,
+      undefined,
+      "landing",
+    );
+    if (deepOnly.broken.length !== 0 || deepOnly.checked !== 1) {
+      linkFailures.push(
+        `  a corpus with no page at the declared root: ${deepOnly.broken.length} broken /` +
+          ` ${deepOnly.checked} checked, wanted 0 / 1 — ${JSON.stringify(deepOnly.broken)}`,
+      );
+    }
+
+    const nestedResult = checkLandingLinks(nested, realPublished, undefined, "landing");
     if (nestedResult.broken.length !== 0 || nestedResult.checked !== 2) {
       linkFailures.push(
         `  a nested landing page: ${nestedResult.broken.length} broken / ${nestedResult.checked} checked,` +
@@ -2260,6 +2291,8 @@ function report(total, tally, groups, coverageWork) {
     const wrongPage = checkLandingLinks(
       [["landing/index.html", '<a href="/asterism/blog/#x">a</a>'], ["landing/blog/index.html", "<h2 id=y>y</h2>"]],
       realPublished,
+      undefined,
+      "landing",
     );
     if (wrongPage.broken.length !== 1) {
       linkFailures.push("  a fragment was resolved against the wrong landing page");
@@ -2377,6 +2410,42 @@ function report(total, tally, groups, coverageWork) {
         "an inline style that says nothing about white-space",
         styled("normal") + '<div class="x__terminal" style="color: red">a\nb</div>',
         true,
+      ],
+      // `!important` outranks specificity outright.
+      [
+        "a `*` rule with !important collapsing what a class rule preserves",
+        "<style>.x__terminal { white-space: pre; } * { white-space: normal !important; }</style>" + twoLine,
+        true,
+      ],
+      [
+        "an !important `pre` rescuing what a class rule collapses",
+        "<style>.x__terminal { white-space: normal; } div { white-space: pre !important; }</style>" + twoLine,
+        false,
+      ],
+      // CSS NESTING: a nested rule's declaration belongs to the nested selector, not the
+      // outer one. Read whole, the last match in the body wins and it is the wrong one.
+      [
+        "a nested `& .comment` rule that must not be read as the block's own",
+        "<style>.x__terminal { white-space: pre; & .comment { white-space: normal; } }</style>" + twoLine,
+        false,
+      ],
+      [
+        "a nested rule that must not rescue a collapsing outer one",
+        "<style>.x__terminal { white-space: normal; & .comment { white-space: pre; } }</style>" + twoLine,
+        true,
+      ],
+      // A `<pre>`'s exemption rests on the browser's default APPLYING. A rule this cannot
+      // evaluate is not the same as no rule, and treating it as one left the exemption over
+      // a block that renders as one paragraph.
+      [
+        "a <pre> collapsed by an ancestor rule this cannot evaluate",
+        '<style>.wrapper .x__terminal { white-space: normal; }</style><pre class="x__terminal">a\nb</pre>',
+        true,
+      ],
+      [
+        "a <pre> under a rule that declares no white-space at all",
+        styled(null) + '<pre class="x__terminal">a\nb</pre>',
+        false,
       ],
       [
         "two class rules at equal specificity, the later collapsing",
@@ -2527,7 +2596,14 @@ function report(total, tally, groups, coverageWork) {
           // NUMERIC references, decimal and hex — the same page, written by a different
           // editor. Left undecoded these reach the binary as literal `&#62;` text and are
           // reported as a docs failure on correct copy.
-          "asterism run writer &#x27;tidy&#x27; &#62; out.txt</div>",
+          "asterism run writer &#x27;tidy&#x27; &#62; out.txt",
+          // An inline tag broken across LINES. Stripping markup with `<[^>]+>` eats the
+          // newline inside it, shifting every command below and, when the tag straddles a
+          // join, merging two commands into one — where the trailing-comment strip drops
+          // the second outright.
+          '<span',
+          ' class="comment"># a wrapped comment</span>',
+          "asterism events tail writer</div>",
           "<h2>Later</h2>",
           '<pre class="terminal">$ asterism memory inspect writer</pre>',
           "",
@@ -2596,7 +2672,8 @@ function report(total, tally, groups, coverageWork) {
         { line: 4, command: 'asterism run writer "tidy posts/" > out.txt', section: "## Quickstart" },
         { line: 5, command: 'asterism notes set writer sigil "&gt; means redirect"', section: "## Quickstart" },
         { line: 6, command: "asterism run writer 'tidy' > out.txt", section: "## Quickstart" },
-        { line: 8, command: "asterism memory inspect writer", section: "## Later" },
+        { line: 9, command: "asterism events tail writer", section: "## Quickstart" },
+        { line: 11, command: "asterism memory inspect writer", section: "## Later" },
       ];
       const htmlGot = html.map((i) => ({ line: i.line, command: i.command, section: i.section }));
       if (JSON.stringify(htmlGot) !== JSON.stringify(htmlWant)) {
@@ -2936,7 +3013,7 @@ function codeSpans(text) {
   // either, a page marking its catalog up that way silently drops below the two-name
   // threshold and stops being covered at all.
   for (const m of text.matchAll(/<code\b[^>]*>([\s\S]*?)<\/code>/gi)) {
-    spans.add(decodeEntities(m[1].replace(/<[^>]+>/g, "")).trim());
+    spans.add(decodeEntities(stripMarkup(m[1])).trim());
   }
   return spans;
 }
@@ -2977,19 +3054,6 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
     );
   }
   return gaps;
-}
-
-/** The deepest directory every one of these paths sits under. */
-function commonDirectory(paths) {
-  const split = paths.map((p) => p.split("/").slice(0, -1));
-  const first = split[0] ?? [];
-  let n = first.length;
-  for (const parts of split) {
-    let i = 0;
-    while (i < n && parts[i] === first[i]) i++;
-    n = i;
-  }
-  return first.slice(0, n).join("/");
 }
 
 /**
@@ -3048,16 +3112,19 @@ function checkLandingLinks(
   // "not ours", and this reports that all zero of them resolve. A parameter so the
   // self-test can point a deliberately wrong prefix at the real page and see that happen.
   { docsPrefix, siteRoot } = landingPrefixes(),
+  // The directory the workflow DECLARES, not one inferred from the corpus. Inferring it as
+  // the deepest shared directory is only right when some page sits at its top level: a site
+  // whose pages all live under `landing/en/` infers `landing/en`, and then
+  // `/asterism/en/about.html` maps to `landing/en/en/about.html` and is reported broken —
+  // the same failure the commit before this one fixed, re-introduced one level up, with the
+  // authoritative answer already in hand.
+  landingRoot = readLandingDir(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8")),
 ) {
   const broken = [];
   const offSite = [];
   let checked = 0;
   const landingPages = pages.map(([rel]) => rel);
   const bodyOf = new Map(pages);
-  // The directory the workflow copies into the artifact ROOT, derived from the pages
-  // themselves so a caller can plant its own. Everything under it is served at the same
-  // path beneath the site's root, which is what makes the mapping below exact.
-  const landingRoot = commonDirectory(landingPages);
   const landingIndex = `${landingRoot}/index.html`;
 
   for (const [rel, text] of pages) {
@@ -3092,12 +3159,11 @@ function checkLandingLinks(
       // broken on a correct link.
       const landingTarget = landingPageFor(landingRoot, landingPages, pathPart);
       if (landingTarget) {
-        // ⚠ THIS PAGE is tested first, and the ordering is the point. `index.html` is also
-        // the basename of `landing/index.html`, so with the sibling lookup first the site's
-        // own root link counted as a link RESOLVED — satisfying the `checked === 0`
-        // tripwire it is specifically not allowed to satisfy. The fixture that claimed
-        // otherwise was vacuous: its planted page is named `<planted>`, whose basename can
-        // never match, so this ordering was never exercised by it.
+        // ⚠ A link to THIS page resolves nothing and must not be counted: `checked === 0`
+        // is the only tripwire for a moved site, and a page whose in-site links are all
+        // `/asterism/` would otherwise satisfy it while resolving nothing. An earlier
+        // version counted it, and the fixture that claimed otherwise was vacuous — it
+        // planted a page named `<planted>`, which no URL can name.
         if (landingTarget !== rel) checked++;
         if (fragment) {
           // From the CORPUS, not from disk: `pages` already holds every landing page's
@@ -3161,7 +3227,8 @@ const PRESERVING = new Set(["pre", "pre-wrap", "break-spaces"]);
  * is skipped rather than guessed at, which keeps the failure on the side of reporting.
  */
 function whiteSpaceFor(css, classes, tag) {
-  let winner = null; // { spec: [classes, types], order, value }
+  let winner = null; // { important, spec: [classes, types], order, value }
+  let skipped = false;
   const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
   let i = 0;
   let order = 0;
@@ -3188,22 +3255,71 @@ function whiteSpaceFor(css, classes, tag) {
     // An at-rule's whole block is skipped: `@media`/`@supports` declarations are
     // conditional, and the question here is what the page renders as by default.
     if (!selectorList.startsWith("@")) {
+      // TOP-LEVEL declarations only. CSS nesting puts a whole rule inside a rule, and
+      // reading the brace-matched body whole attributed a nested `& .comment { white-space:
+      // normal }` to the outer selector — failing a page that renders correctly, or, with
+      // the declarations the other way round, passing one that does not.
       let declared = "";
-      for (const m of text.slice(open + 1, j - 1).matchAll(/white-space:\s*([a-z-]+)/gi)) declared = m[1].toLowerCase();
+      let important = false;
+      for (const m of topLevelOf(text.slice(open + 1, j - 1)).matchAll(/white-space:\s*([a-z-]+)\s*(!\s*important)?/gi)) {
+        declared = m[1].toLowerCase();
+        important = Boolean(m[2]);
+      }
       if (declared) {
         order++;
-        for (const spec of applicableSpecificities(selectorList, classes, tag)) {
-          if (!winner || beats(spec, order, winner)) winner = { spec, order, value: declared };
+        const applicable = applicableSpecificities(selectorList, classes, tag);
+        for (const spec of applicable) {
+          if (!winner || beats({ important, spec, order }, winner)) winner = { important, spec, order, value: declared };
         }
+        // A `white-space` on a selector that NAMES this element but that this deliberately
+        // does not evaluate — an ancestor constraint, a pseudo-class, an attribute. Not the
+        // same as no rule at all; see `preserved` at the call site. A rule declaring no
+        // `white-space` is not this case, which is why the test sits inside `if (declared)`.
+        if (applicable.length === 0 && mentions(selectorList, classes, tag)) skipped = true;
       }
     }
     i = j;
   }
-  return winner ? winner.value : "";
+  return { value: winner ? winner.value : "", skipped };
 }
 
-/** Does (spec, order) win over the current best? More specific first, then later in the file. */
-function beats([classesA, typesA], order, { spec: [classesB, typesB], order: orderB }) {
+/** The declarations at a rule's own level, with any nested rule's body removed. */
+function topLevelOf(body) {
+  let out = "";
+  let depth = 0;
+  for (const ch of body) {
+    if (ch === "{") depth++;
+    else if (ch === "}") depth = Math.max(0, depth - 1);
+    else if (depth === 0) out += ch;
+  }
+  return out;
+}
+
+/**
+ * Does this selector list SAY something about an element with these classes and this tag,
+ * whether or not the rule could be evaluated?
+ *
+ * Only used to tell "no rule found" from "a rule was skipped". The difference matters for a
+ * `<pre>`, whose exemption rests on the browser's default applying — and a
+ * `.wrapper .terminal { white-space: normal }` that this deliberately does not evaluate
+ * would otherwise leave the exemption in place over a block that renders as one paragraph.
+ */
+function mentions(selectorList, classes, tag) {
+  return selectorList.split(",").some((selector) => {
+    const named = [...selector.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+    if (named.some((name) => classes.includes(name))) return true;
+    return selector.trim().split(/[\s>+~]+/).some((c) => c && c.replace(/\.[\w-]+/g, "").trim().toLowerCase() === tag);
+  });
+}
+
+/**
+ * Does this declaration win over the current best? `!important` first — it outranks every
+ * ordinary declaration whatever its specificity, which is exactly how a `* { white-space:
+ * normal !important }` collapses a block a class rule says to preserve — then specificity,
+ * then position in the file.
+ */
+function beats({ important, spec: [classesA, typesA], order }, { important: impB, spec: [classesB, typesB], order: orderB }) {
+  if (important !== impB) return important;
   if (classesA !== classesB) return classesA > classesB;
   if (typesA !== typesB) return typesA > typesB;
   return order >= orderB;
@@ -3275,14 +3391,21 @@ function checkTerminalRendering(
       if (!block.text.includes("\n")) continue; // a one-line block cannot lose a line break
       const classes = block.className.trim().split(/\s+/).filter(Boolean);
       const inline = [...block.inlineStyle.matchAll(/white-space:\s*([a-z-]+)/gi)].pop()?.[1]?.toLowerCase();
-      const declared = inline ?? whiteSpaceFor(styles, classes, block.tag);
+      const sheet = whiteSpaceFor(styles, classes, block.tag);
+      const declared = inline ?? sheet.value;
       // Declaring nothing is fine for a `<pre>` and only for a `<pre>`: it gets
       // `white-space: pre` from the browser's own stylesheet, where a `<div>` gets
       // `normal` and collapses. But that default is only a default — `pre { white-space:
       // normal }` collapses a `<pre>` exactly as the published `<div>` collapsed, so the
       // exemption is "nothing overrides it", not "it is a `<pre>`". Exempting the tag
       // outright would have let this check pass the very defect it exists for.
-      const preserved = declared === "" ? block.tag === "pre" : PRESERVING.has(declared);
+      // "No rule found" and "a rule was skipped" are not the same thing, and only the first
+      // justifies leaning on the browser's default for a `<pre>`. A
+      // `.wrapper .terminal { white-space: normal }` is deliberately not evaluated — this
+      // cannot see ancestors — and treating that as "nothing declared" left the `<pre>`
+      // exempt over a block that renders as one paragraph, which is the false pass the
+      // exemption's own comment says it must not create.
+      const preserved = declared === "" ? block.tag === "pre" && !(inline === undefined && sheet.skipped) : PRESERVING.has(declared);
       if (!preserved) {
         gaps.push(
           `${rel}:${block.startLine} — a ${block.text.split("\n").length}-line terminal block in` +
