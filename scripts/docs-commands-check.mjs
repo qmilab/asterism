@@ -622,7 +622,7 @@ const norm = (s) => s.replace(/\s+/g, " ").trim();
  * is the difference between that and a green.
  */
 function commandsBlock(work) {
-  const block = helpFor(work, "").split(/^Commands:$/m)[1]?.split(/^\S/m)[0] ?? "";
+  const block = commandsBlockOf(helpFor(work, ""));
   if (!block.trim()) {
     console.error(
       "`asterism --help` printed no `Commands:` block, so this check cannot derive a single\n" +
@@ -632,6 +632,20 @@ function commandsBlock(work) {
     process.exit(2);
   }
   return block;
+}
+
+/**
+ * The extraction itself, on the text rather than on a work directory, so the self-test can
+ * hand it the shapes that matter — including the empty one.
+ *
+ * ⚠ Stated limit: the REFUSAL above is not exercised. It is `process.exit(2)` inside a
+ * function that gets its input from the built binary, and no fixture here can make
+ * `asterism --help` print nothing. What is exercised is the extraction, which is where the
+ * empty string would come from; the kill that originally produced one is now stopped at
+ * `runBinary`, so this refusal is a second line rather than the only one.
+ */
+function commandsBlockOf(helpText) {
+  return helpText.split(/^Commands:$/m)[1]?.split(/^\S/m)[0] ?? "";
 }
 
 /** Every verb the root help advertises, derived from that block. */
@@ -1987,6 +2001,35 @@ function report(total, tally, groups, coverageWork) {
     console.log(
       `The tool-catalog rule fires on a page naming 2–${nine.length - 1} of ${nine.length} tools` +
         ` in code spans, and on nothing else — prose mentions included.`,
+    );
+
+    // The `Commands:` extraction, on the shapes that decide whether a derived verb list is
+    // trustworthy. An empty answer is what a killed `--help` used to produce, and every
+    // pass built on it reads "no verbs" as "nothing to report" — so the empty case is
+    // asserted here even though the refusal it feeds cannot be run from a fixture.
+    const blockCases = [
+      ["an empty help", "", ""],
+      ["a help with no `Commands:` heading at all", "Usage: asterism <command>\n  --version\n", ""],
+      // The split keeps the newline that ended the `Commands:` line, which is why the
+      // consumers match on `^\s{2}` per line rather than trimming.
+      ["a real-shaped help", "Usage: asterism <command>\n\nCommands:\n  new <agent>   create\n  run <agent>   work\n\nOptions:\n  -v\n", "\n  new <agent>   create\n  run <agent>   work\n\n"],
+    ];
+    for (const [why, help, want] of blockCases) {
+      if (commandsBlockOf(help) !== want) {
+        console.log(`\nSELF-TEST FAILED: the \`Commands:\` extraction on ${why}:`);
+        console.log(`  want: ${JSON.stringify(want)}\n  got:  ${JSON.stringify(commandsBlockOf(help))}`);
+        process.exit(1);
+      }
+    }
+    // …and it is non-empty for the binary this run actually uses, or every verb-derived
+    // check below is checking nothing.
+    if (advertisedVerbSet(coverageWork).size === 0) {
+      console.log("\nSELF-TEST FAILED: the binary's own `Commands:` block yielded no verbs.");
+      process.exit(1);
+    }
+    console.log(
+      `The root help's \`Commands:\` block yields ${advertisedVerbSet(coverageWork).size} verbs, and an` +
+        ` empty help yields none rather than an empty list nothing questions.`,
     );
 
     // A child that never exited must be told apart from one that ran and failed, and the
