@@ -180,14 +180,41 @@ function terminalBlocks(text, isHtml) {
   // A class token CONTAINING `terminal`, not equal to it: the page's own is
   // `asterism__terminal`, and `\bterminal\b` does not match after an underscore — which is
   // how the first version of this read the landing page as having no commands at all.
-  for (const m of text.matchAll(/<(div|pre)\b[^>]*class="([^"]*terminal[^"]*)"[^>]*>([\s\S]*?)<\/(?:div|pre)>/gi)) {
+  const open = /<(div|pre)\b[^>]*class="([^"]*terminal[^"]*)"[^>]*>/gi;
+  for (const m of text.matchAll(open)) {
+    const tag = m[1].toLowerCase();
+    const from = m.index + m[0].length;
+    // The end is found by MATCHING tags, not by taking the first `</div>`. A non-greedy
+    // `([\s\S]*?)<\/(?:div|pre)>` ends at the first close of either kind, so one nested
+    // element truncates the block — and every command below the nesting then falls outside
+    // every block and is dropped with no diagnostic. `blocklessPages` cannot see that: a
+    // block WAS found. It is the same silent under-read this file exists to prevent,
+    // arriving at partial granularity instead of whole-page.
+    const nest = new RegExp(`<(/?)${tag}\\b[^>]*>`, "gi");
+    nest.lastIndex = from;
+    let depth = 1;
+    let end = -1;
+    let hit;
+    while ((hit = nest.exec(text)) !== null) {
+      depth += hit[1] === "/" ? -1 : 1;
+      if (depth === 0) {
+        end = hit.index;
+        break;
+      }
+    }
+    if (end === -1) {
+      // Unclosed. Running to the end of the file is what the markdown half does with an
+      // unterminated fence, and for the same reason: dropping it stops checking every
+      // command below it while the report stays green.
+      end = text.length;
+    }
     blocks.push({
-      tag: m[1].toLowerCase(),
+      tag,
       className: m[2],
       startLine: text.slice(0, m.index).split("\n").length,
       // Inline markup inside a terminal block is presentation (a `<span class="comment">`
       // around a shell comment); the command is what is left once it is gone.
-      text: decodeEntities(m[3].replace(/<[^>]+>/g, "")),
+      text: decodeEntities(text.slice(from, end).replace(/<[^>]+>/g, "")),
     });
   }
   return blocks;
@@ -431,14 +458,17 @@ const ENV = cleanEnv();
  */
 function buildFixture(skipAgents = new Set(), skipConnections = false) {
   const work = mkdtempSync(join(tmpdir(), "asterism-docs-"));
-  const q = (args, input) =>
-    execFileSync(process.execPath, [BIN, ...args], {
-      cwd: work,
-      encoding: "utf8",
-      input: input ?? "",
-      env: ENV,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  // Through `runBinary`, so a fixture command gets the same timeout and the same refusal to
+  // read a killed child. A non-zero exit still throws: a fixture that half-built is worse
+  // than one that stops, because every page checked against it would be checked against a
+  // state the docs never describe.
+  const q = (args, input) => {
+    const r = runBinary(args, { cwd: work, input: input ?? "", where: "while building a page's fixture install" });
+    if (r.code !== 0) {
+      throw new Error(`fixture command \`asterism ${args.join(" ")}\` exited ${r.code}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
+    }
+    return r.stdout;
+  };
 
   q(["init"]);
   // Every agent name the docs use, at the trust level the page gives it.
@@ -483,14 +513,17 @@ function buildFixture(skipAgents = new Set(), skipConnections = false) {
  * claim under test is that every command RUNS against a realistic install.
  */
 function seedRecords(work, name, present, skipConnections = false) {
-  const q = (args, input) =>
-    execFileSync(process.execPath, [BIN, ...args], {
-      cwd: work,
-      encoding: "utf8",
-      input: input ?? "",
-      env: ENV,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  // Through `runBinary`, so a fixture command gets the same timeout and the same refusal to
+  // read a killed child. A non-zero exit still throws: a fixture that half-built is worse
+  // than one that stops, because every page checked against it would be checked against a
+  // state the docs never describe.
+  const q = (args, input) => {
+    const r = runBinary(args, { cwd: work, input: input ?? "", where: "while building a page's fixture install" });
+    if (r.code !== 0) {
+      throw new Error(`fixture command \`asterism ${args.join(" ")}\` exited ${r.code}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
+    }
+    return r.stdout;
+  };
 
   if (name === "work" || name === "client") {
     q(["secrets", "add", name, "GITHUB_TOKEN"], "ghp_fixture_token");
@@ -578,23 +611,44 @@ function argvOf(command) {
 /** Collapse runs of whitespace so a synopsis aligned for the page still matches. */
 const norm = (s) => s.replace(/\s+/g, " ").trim();
 
+/**
+ * The `Commands:` block of the root help — the source BOTH verb derivations read.
+ *
+ * Empty is refused rather than returned. Every pass built on this treats an empty block as
+ * "no verbs", which is not a finding anywhere: `checkCommandCoverage` then reports that
+ * every command in `asterism --help` has a reference section, over none of them, and
+ * `probeSubcommandRejections` probes nothing and says every verb rejects an invented
+ * subcommand. A binary that cannot print its own help is a broken checkout, and saying so
+ * is the difference between that and a green.
+ */
+function commandsBlock(work) {
+  const block = helpFor(work, "").split(/^Commands:$/m)[1]?.split(/^\S/m)[0] ?? "";
+  if (!block.trim()) {
+    console.error(
+      "`asterism --help` printed no `Commands:` block, so this check cannot derive a single\n" +
+        "verb — and every pass built on that list would report a green over nothing.\n" +
+        "Rebuild with:  bun run build",
+    );
+    process.exit(2);
+  }
+  return block;
+}
+
+/** Every verb the root help advertises, derived from that block. */
+function advertisedVerbSet(work) {
+  return new Set([...commandsBlock(work).matchAll(/^\s{2}([a-z][\w-]*)/gm)].map((m) => m[1]));
+}
+
 /** `--help` for a command, cached; the top-level help under the empty key. */
 const helpCache = new Map();
 function helpFor(work, verb) {
   if (helpCache.has(verb)) return helpCache.get(verb);
   const args = verb ? [...verb.split(" "), "--help"] : ["--help"];
-  let text = "";
-  try {
-    text = execFileSync(process.execPath, [BIN, ...args], {
-      cwd: work,
-      encoding: "utf8",
-      input: "",
-      env: ENV,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  } catch (e) {
-    text = `${e.stdout ?? ""}${e.stderr ?? ""}`;
-  }
+  // A non-zero exit is expected here — several verbs print their help and exit 1 — so both
+  // streams are kept. A KILLED child is not: `runBinary` stops the run rather than letting
+  // the empty string it left behind be cached as this verb's help.
+  const r = runBinary(args, { cwd: work, where: `while reading \`asterism ${args.join(" ")}\`` });
+  const text = `${r.stdout}${r.stderr}`;
   helpCache.set(verb, text);
   return text;
 }
@@ -711,7 +765,7 @@ function probeSubcommandRejections(work) {
   // (`run <agent> "<task>"`, `confirm [<agent>] <run>`). Deriving this from the DOCS
   // instead read the agent name in `asterism confirm researcher <run>` as a subcommand
   // and reported a rejection that was never a rejection.
-  const block = helpFor(work, "").split(/^Commands:$/m)[1]?.split(/^\S/m)[0] ?? "";
+  const block = commandsBlock(work);
   const verbs = new Set();
   for (const line of block.split("\n")) {
     const m = line.match(/^\s{2}([a-z][\w-]*)\s+([a-z][\w-]*)/);
@@ -789,6 +843,47 @@ function checkSynopsis(work, scratch, command, where = "") {
 const RUN_TIMEOUT_MS = 30_000;
 
 /**
+ * The ONE place this file starts the built binary. Every invocation gets the timeout, and
+ * a child that never exited stops the run here.
+ *
+ * It exists because the first version of that guard lived in `runCommand` and named "the
+ * fifth caller nobody has written yet" as the reason to centralise — while a fifth caller
+ * already existed and did not go through it. `helpFor` catches every throw into
+ * `${stdout}${stderr}` and caches it, so a killed `--help` cached the empty string, and the
+ * three passes built on that string could not tell: `checkCommandCoverage` derived ZERO
+ * verbs from it and printed "Every command in `asterism --help` has a section in the command
+ * reference" over none of them. Two more call sites — the fixture builders — carried no
+ * timeout at all, so the loaded machine that motivated the timeout would hang them forever.
+ */
+function runBinary(args, { cwd, input = "", where = "" }) {
+  try {
+    return { code: 0, stdout: execFileSync(process.execPath, [BIN, ...args], {
+      cwd,
+      encoding: "utf8",
+      input,
+      env: ENV,
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: RUN_TIMEOUT_MS,
+    }), stderr: "" };
+  } catch (e) {
+    if (neverExited(e)) {
+      const partial = (e.stderr?.toString() || e.stdout?.toString() || "").trim().split("\n")[0];
+      console.error(
+        `${where ? `${where}  ` : ""}\`asterism ${args.join(" ")}\` never finished: it was killed by` +
+          ` ${e.signal}${e.code === "ETIMEDOUT" ? ` after ${RUN_TIMEOUT_MS / 1000}s` : ""}.\n` +
+          `Nothing it printed is a result, so this check cannot say whether that command works.\n` +
+          (partial ? `It had printed: ${partial}\n` : "") +
+          (e.code === "ETIMEDOUT"
+            ? `A machine under heavy load is the usual cause; a command that hangs is the other.`
+            : `That is a crash, not a timeout — the binary died part-way through.`),
+      );
+      process.exit(2);
+    }
+    return { code: e.status ?? -1, stdout: e.stdout?.toString() ?? "", stderr: e.stderr?.toString() ?? "" };
+  }
+}
+
+/**
  * Type one command at the built binary and read what it did.
  *
  * A child that NEVER EXITED stops the whole run here rather than returning. It has no exit
@@ -811,36 +906,7 @@ const RUN_TIMEOUT_MS = 30_000;
  * the reader to the page.
  */
 function runCommand(work, command, where = "") {
-  try {
-    const stdout = execFileSync(process.execPath, [BIN, ...argvOf(command)], {
-      cwd: work,
-      encoding: "utf8",
-      input: "",
-      env: ENV,
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: RUN_TIMEOUT_MS,
-    });
-    return { code: 0, stdout, stderr: "" };
-  } catch (e) {
-    if (neverExited(e)) {
-      const partial = (e.stderr?.toString() || e.stdout?.toString() || "").trim().split("\n")[0];
-      console.error(
-        `${where ? `${where}  ` : ""}\`${command}\` never finished: it was killed by ${e.signal}` +
-          `${e.code === "ETIMEDOUT" ? ` after ${RUN_TIMEOUT_MS / 1000}s` : ""}.\n` +
-          `Nothing it printed is a result, so this check cannot say whether that command works.\n` +
-          (partial ? `It had printed: ${partial}\n` : "") +
-          (e.code === "ETIMEDOUT"
-            ? `A machine under heavy load is the usual cause; a command that hangs is the other.`
-            : `That is a crash, not a timeout — the binary died part-way through.`),
-      );
-      process.exit(2);
-    }
-    return {
-      code: e.status ?? -1,
-      stdout: e.stdout?.toString() ?? "",
-      stderr: e.stderr?.toString() ?? "",
-    };
-  }
+  return runBinary(argvOf(command), { cwd: work, where });
 }
 
 /**
@@ -867,11 +933,7 @@ function neverExited(err) {
  * Twelve commands were missing when this was written.
  */
 function checkCommandCoverage(work) {
-  const help = helpFor(work, "");
-  const block = help.split(/^Commands:$/m)[1]?.split(/^\S/m)[0] ?? "";
-  const verbs = new Set(
-    [...block.matchAll(/^\s{2}([a-z][\w-]*)/gm)].map((m) => m[1]),
-  );
+  const verbs = advertisedVerbSet(work);
   const reference = readFileSync(join(ROOT, siteDir(), "commands.md"), "utf8");
   const documented = new Set(
     [...reference.matchAll(/^##\s+`([a-z][\w-]*)/gm)].map((m) => m[1]),
@@ -1782,8 +1844,25 @@ function report(total, tally, groups, coverageWork) {
     // The refusal that matters most, and the one a pure helper cannot reach: a workflow
     // naming a real directory with no HTML in it — what a MOVE looks like. Left un-refused
     // this is an empty set, and an empty set here is every pass below reporting a green
-    // over a page nothing read. `decisions/` is tracked and holds no HTML.
-    {
+    // over a page nothing read.
+    //
+    // The directory is CHOSEN at test time rather than hard-coded. Naming `decisions/`
+    // worked until the day someone tracked an `.html` under it, and then this failed
+    // saying the workflow reader had accepted something — pointing at the reader rather
+    // than at the unrelated file that had just been added.
+    const htmlDirs = new Set(
+      execFileSync("git", ["ls-files", "-z", "--", "*.html"], { cwd: ROOT, encoding: "utf8" })
+        .split("\u0000")
+        .filter(Boolean)
+        .map((rel) => rel.split("/")[0]),
+    );
+    const emptyOfHtml = [...new Set(tracked.map((rel) => rel.split("/")[0]).filter((d) => d.includes(".") === false))]
+      .filter((d) => !htmlDirs.has(d))
+      .sort()[0];
+    if (!emptyOfHtml) {
+      scopeFailures.push("  every tracked directory holds HTML, so the empty-set refusal cannot be exercised");
+    }
+    if (emptyOfHtml) {
       let refused = false;
       try {
         execFileSync(
@@ -1791,7 +1870,7 @@ function report(total, tally, groups, coverageWork) {
           [
             "-e",
             `import(${JSON.stringify(join(ROOT, "scripts/lib/docs-scope.mjs"))}).then((m) => m.publishedLandingPages(process.argv[1]))`,
-            "      - run: |\n          cp -r decisions/. _site/\n",
+            `      - run: |\n          cp -r ${emptyOfHtml}/. _site/\n`,
           ],
           { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd: ROOT },
         );
@@ -1799,7 +1878,9 @@ function report(total, tally, groups, coverageWork) {
         refused = err.status === 2;
       }
       if (!refused) {
-        scopeFailures.push("  a workflow publishing a directory with no tracked HTML was accepted instead of refused");
+        scopeFailures.push(
+          `  a workflow publishing \`${emptyOfHtml}/\`, which holds no tracked HTML, was accepted instead of refused`,
+        );
       }
     }
 
@@ -2050,6 +2131,56 @@ function report(total, tally, groups, coverageWork) {
       // this case the rule reports the first `<pre class="…terminal…">` anyone adds, for a
       // block that renders correctly, which is how a gate becomes work to suppress.
       ["a multi-line <pre> with no white-space rule at all", styled(null) + '<pre class="x__terminal">a\nb</pre>', false],
+      // The three FALSE PASSES the first version of this had, each of which reported a
+      // collapsing page as fine. The first is not hypothetical: `landing/index.html` carries
+      // `.asterism__terminal .comment` and `… .keyword`, so a `white-space` in either would
+      // have satisfied the gate while the block it styles ran together.
+      [
+        "a `white-space` on a DESCENDANT of the block's class",
+        "<style>.x__terminal .comment { white-space: pre; } .x__terminal { color: red; }</style>" + twoLine,
+        true,
+      ],
+      [
+        "a `white-space` on a class that merely starts the same way",
+        "<style>.x__terminal-wrap { white-space: pre; } .x__terminal { color: red; }</style>" + twoLine,
+        true,
+      ],
+      [
+        "a `white-space` only inside an @media block, which is not the default rendering",
+        "<style>@media print { .x__terminal { white-space: pre; } } .x__terminal { color: red; }</style>" + twoLine,
+        true,
+      ],
+      // The same, but with the at-rule holding TWO rules — which is what makes the
+      // brace-matching load-bearing rather than incidental. A reader that stopped at the
+      // first `}` would resume mid-block and read the second rule as a top-level one.
+      [
+        "a `white-space` inside an @media block that holds more than one rule",
+        "<style>@media print { .other { color: blue; } .x__terminal { white-space: pre; } }</style>" + twoLine,
+        true,
+      ],
+      [
+        "a compound demanding a second class the block does not carry",
+        "<style>.x__terminal.wide { white-space: pre; }</style>" + twoLine,
+        true,
+      ],
+      // …and the cascade, in both directions: the LAST applicable declaration is the one
+      // that renders, so a later `normal` undoes an earlier `pre` and vice versa.
+      [
+        "`pre` undone by a later `normal`",
+        "<style>.x__terminal { white-space: pre; } .x__terminal { white-space: normal; }</style>" + twoLine,
+        true,
+      ],
+      [
+        "`normal` overridden by a later `pre`",
+        "<style>.x__terminal { white-space: normal; } .x__terminal { white-space: pre; }</style>" + twoLine,
+        false,
+      ],
+      // A selector list is not one selector: the block's class may be any member of it.
+      [
+        "the block's class as the second member of a selector list",
+        "<style>.other, .x__terminal { white-space: pre; }</style>" + twoLine,
+        false,
+      ],
       ["a multi-line block set to `pre-wrap`", styled("pre-wrap") + twoLine, false],
       ["a multi-line block set to `break-spaces`", styled("break-spaces") + twoLine, false],
       ["a ONE-line block with no white-space rule, which cannot lose a break", styled(null) + oneLine, false],
@@ -2133,6 +2264,33 @@ function report(total, tally, groups, coverageWork) {
           "",
         ].join("\n"),
       );
+      // A block containing a NESTED element of the same tag. The first version of the
+      // reader was non-greedy to the first `</div>`, so everything below the nesting fell
+      // outside every block and was dropped with no diagnostic — invisible to
+      // `blocklessPages`, because a block was found.
+      writeFileSync(
+        join(exDir, "nested.html"),
+        [
+          '<div class="x__terminal">asterism new writer',
+          '<div class="note">a note in the middle</div>',
+          "asterism run writer &quot;after the nesting&quot;",
+          "asterism memory inspect writer</div>",
+          "",
+        ].join("\n"),
+      );
+      const nested = extract("nested.html", exDir).map((i) => i.command);
+      const nestedWant = [
+        "asterism new writer",
+        'asterism run writer "after the nesting"',
+        "asterism memory inspect writer",
+      ];
+      if (JSON.stringify(nested) !== JSON.stringify(nestedWant)) {
+        console.log("\nSELF-TEST FAILED: a nested element truncated the terminal block:");
+        console.log(`  want: ${JSON.stringify(nestedWant)}`);
+        console.log(`  got:  ${JSON.stringify(nested)}`);
+        process.exit(1);
+      }
+
       const html = extract("page.html", exDir);
       const htmlWant = [
         // The opening tag shares its line with the first command, which is exactly the
@@ -2606,6 +2764,72 @@ function checkLandingLinks(
   return { broken, offSite, checked, siteRoot };
 }
 
+/** The `white-space` values that keep BOTH the line breaks and the column alignment. */
+const PRESERVING = new Set(["pre", "pre-wrap", "break-spaces"]);
+
+/**
+ * The `white-space` an element ends up with, from a page's own inline stylesheet.
+ *
+ * "Does the stylesheet mention this class near a `white-space`" is not the question, and
+ * answering that one was wrong in three ways at once — every one of them a FALSE PASS, so
+ * the check reported a page as fine while it rendered as a run-on paragraph:
+ *
+ *   - `.terminal .comment { white-space: pre }` — a rule for a DESCENDANT. This page already
+ *     has two such rules (`.asterism__terminal .comment`, `… .keyword`), so putting a
+ *     `white-space` in either would have satisfied the gate outright.
+ *   - `.terminal-wrap { … }` — a different class that merely starts with the same letters,
+ *     because `\b` matches before a hyphen.
+ *   - `@media print { .terminal { white-space: pre } }` — conditional, and not what the page
+ *     renders as by default.
+ *
+ * So this reads rules rather than text: top-level rules only, in document order, and one
+ * applies when the RIGHTMOST compound of one of its selectors is satisfied by this element.
+ * A compound carrying anything this cannot evaluate — a pseudo-class, an attribute, an id —
+ * is skipped rather than guessed at, which keeps the failure on the side of reporting.
+ */
+function whiteSpaceFor(css, classes, tag) {
+  let value = "";
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  let i = 0;
+  while (i < text.length) {
+    const open = text.indexOf("{", i);
+    if (open === -1) break;
+    const selectorList = text.slice(i, open).trim();
+    let depth = 1;
+    let j = open + 1;
+    while (j < text.length && depth > 0) {
+      if (text[j] === "{") depth++;
+      else if (text[j] === "}") depth--;
+      j++;
+    }
+    // An at-rule's whole block is skipped: `@media`/`@supports` declarations are
+    // conditional, and the question here is what the page renders as by default.
+    if (!selectorList.startsWith("@") && selectorApplies(selectorList, classes, tag)) {
+      // Last declaration wins, which is what the cascade does among rules of equal
+      // specificity — so a later `white-space: normal` correctly undoes an earlier `pre`.
+      for (const m of text.slice(open + 1, j - 1).matchAll(/white-space:\s*([a-z-]+)/g)) value = m[1];
+    }
+    i = j;
+  }
+  return value;
+}
+
+/** Does any selector in this list apply to an element with these classes and this tag? */
+function selectorApplies(selectorList, classes, tag) {
+  return selectorList.split(",").some((selector) => {
+    const compounds = selector.trim().split(/[\s>+~]+/).filter(Boolean);
+    const last = compounds[compounds.length - 1] ?? "";
+    if (!last || /[:[#]/.test(last)) return false; // a condition this cannot evaluate
+    const named = [...last.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+    if (named.length === 0) return false;
+    const element = last.replace(/\.[\w-]+/g, "").trim();
+    if (element && element !== "*" && element !== tag) return false;
+    // Every class the compound demands must be on the element — `.a.b` does not apply to
+    // an element carrying only `a`.
+    return named.every((name) => classes.includes(name));
+  });
+}
+
 /**
  * A multi-line terminal block whose class does not preserve newlines.
  *
@@ -2641,15 +2865,7 @@ function checkTerminalRendering(
       // which is what the page uses and what silently collapsed, has to say so.
       if (block.tag !== "div") continue;
       const classes = block.className.trim().split(/\s+/).filter(Boolean);
-      const preserved = classes.some((cls) => {
-        // The declaration for this class, anywhere in the page's own CSS.
-        const rule = new RegExp(`\\.${cls.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b[^{}]*\\{([^}]*)\\}`, "g");
-        for (const m of styles.matchAll(rule)) {
-          const ws = /white-space:\s*([a-z-]+)/.exec(m[1]);
-          if (ws && ["pre", "pre-wrap", "break-spaces"].includes(ws[1])) return true;
-        }
-        return false;
-      });
+      const preserved = PRESERVING.has(whiteSpaceFor(styles, classes, block.tag));
       if (!preserved) {
         gaps.push(
           `${rel}:${block.startLine} — a ${block.text.split("\n").length}-line terminal block in` +
