@@ -2405,13 +2405,26 @@ function report(total, tally, groups, coverageWork) {
     const siteFixture = [
       ["[a](https://example.test/proj/docs/concepts/)", "a published page", 0, 0, 1],
       ["[a](https://example.test/proj/docs/)", "the docs index", 0, 0, 1],
+      // The docs root with no trailing slash — the shape `site_url` itself is often written
+      // in, and the one the prefix test has to special-case rather than fall through.
+      ["[a](https://example.test/proj/docs)", "the docs root with no trailing slash", 0, 0, 1],
       ["[a](https://example.test/proj/docs/concepts/#claim-1-separate-memory)", "a heading the site emits", 0, 0, 1],
       ["[a](https://example.test/proj/docs/concepts/#claim-1--separate-memory)", "the same heading under GitHub's rule, which does not serve this URL", 1, 0, 1],
       ["[a](https://example.test/proj/docs/concepts/#no-such-heading)", "a heading it does not", 1, 0, 1],
       ["[a](https://example.test/proj/docs/nosuchpage/)", "a page nothing builds", 1, 0, 1],
+      // Inside the site, ABOVE the docs it serves. Without the prefix test this resolves to
+      // `docs/concepts.md` — the page is real, the URL is not, and the checker says fine.
+      ["[a](https://example.test/proj/concepts/)", "a real page named without the docs segment", 1, 0, 1],
       // The site serves `concepts/`, so `concepts.html` is a 404 even though the source
       // page it names is right there. A resolver that strips `.html` calls it fine.
       ["[a](https://example.test/proj/docs/concepts.html)", "a real page at a URL directory URLs do not serve", 1, 0, 1],
+      // …and its MIRROR, which refusing `.html` outright got wrong: mkdocs builds
+      // `index.md` at `index.html` under BOTH settings, so this one is live.
+      ["[a](https://example.test/proj/docs/index.html)", "the docs index by its file name", 0, 0, 1],
+      // Under directory URLs `concepts.md` is built at `concepts/index.html`, so naming
+      // that file is naming a page the site really serves.
+      ["[a](https://example.test/proj/docs/concepts/index.html)", "a page by the index file directory URLs build it at", 0, 0, 1],
+      ["[a](https://example.test/proj/docs/concepts)", "a page by its bare path, which a host redirects", 0, 0, 1],
       ["[a](https://example.test/proj/)", "the site's root page", 0, 0, 1],
       // A bare root must resolve, not fall out of the site: `[qmilab.com/asterism](…)` is
       // how the changelog writes it, and reading that as the ORG site is a wrong answer
@@ -2472,24 +2485,82 @@ function report(total, tally, groups, coverageWork) {
           ` ${renamed.checked} checked, wanted 0 / 2 — ${JSON.stringify(renamed.broken)}`,
       );
     }
-
-    // …and with directory URLs OFF the answer is the other way round, which is the only
-    // way to tell a derived `use_directory_urls` from a constant `true`.
-    const flatSite = checkSiteLinks(
-      [["PAGE.md", "[a](https://example.test/proj/docs/concepts.html)[b](https://example.test/proj/docs/concepts/)"]],
-      sitePublished,
-      SITE,
-      siteLanding,
+    // `archive/x.md` is the control for the boundary itself: it is not under `content/`, and
+    // it is the SAME LENGTH, so a resolver that slices the directory's length off every path
+    // instead of testing where it ends reads it as `x.md` and answers `…/pages/x/` with a
+    // page that exists at a URL that does not.
+    const outside = checkSiteLinks(
+      [["PAGE.md", "[a](https://example.test/proj/pages/x/)"]],
+      new Set(["content/index.md", "archive/x.md"]),
+      { origin: "https://example.test", path: "/proj/pages/" },
+      [],
       "site",
-      readFixture,
-      "docs",
-      false,
+      () => "# x\n",
+      "content",
     );
-    if (flatSite.broken.length !== 0 || flatSite.checked !== 2) {
+    if (outside.broken.length !== 1) {
       siteFailures.push(
-        `  a site with \`use_directory_urls: false\`: ${flatSite.broken.length} broken /` +
-          ` ${flatSite.checked} checked, wanted 0 / 2 — ${JSON.stringify(flatSite.broken)}`,
+        "  a page OUTSIDE `docs_dir` was resolved as if it were inside it: " +
+          JSON.stringify(outside),
       );
+    }
+
+    // …and with directory URLs OFF every one of those answers flips, which is the only way
+    // to tell a derived `use_directory_urls` from a constant `true`. The expectations here
+    // are what `mkdocs build` actually writes under each setting, checked by building a
+    // fixture site both ways: on → `concepts/index.html`; off → `concepts.html`, and no
+    // `concepts/` for a trailing slash to reach.
+    const flatPublished = new Set(["docs/index.md", "docs/concepts.md", "docs/sub/index.md"]);
+    for (const [md, why, wantBroken] of [
+      ["[a](https://example.test/proj/docs/concepts.html)", "the URL a flat site serves", 0],
+      ["[a](https://example.test/proj/docs/concepts/)", "the directory URL a flat site does NOT serve", 1],
+      // Built as `index.html` under either setting, so it is live under both.
+      ["[a](https://example.test/proj/docs/)", "the docs index", 0],
+      ["[a](https://example.test/proj/docs/sub/)", "a subdirectory index", 0],
+      ["[a](https://example.test/proj/docs/sub/index.html)", "that index by its file name", 0],
+      // A bare path is answered either way by a static host, so it needs BOTH readings —
+      // and under a flat site only the second one finds anything.
+      ["[a](https://example.test/proj/docs/concepts)", "a page by its bare path", 0],
+    ]) {
+      const flat = checkSiteLinks(
+        [["PAGE.md", md]],
+        flatPublished,
+        SITE,
+        siteLanding,
+        "site",
+        () => "# x\n",
+        "docs",
+        false,
+      );
+      if (flat.broken.length !== wantBroken || flat.checked !== 1) {
+        siteFailures.push(
+          `  \`use_directory_urls: false\`, ${why}: ${flat.broken.length} broken /` +
+            ` ${flat.checked} checked, wanted ${wantBroken} / 1 — ${JSON.stringify(flat.broken)}`,
+        );
+      }
+    }
+    // …and the same URLs under directory URLs give the opposite verdicts.
+    for (const [md, why, wantBroken] of [
+      ["[a](https://example.test/proj/docs/concepts.html)", "the flat URL a directory site does NOT serve", 1],
+      ["[a](https://example.test/proj/docs/concepts/)", "the directory URL it does", 0],
+      ["[a](https://example.test/proj/docs/sub/)", "a subdirectory index", 0],
+    ]) {
+      const dirs = checkSiteLinks(
+        [["PAGE.md", md]],
+        flatPublished,
+        SITE,
+        siteLanding,
+        "site",
+        () => "# x\n",
+        "docs",
+        true,
+      );
+      if (dirs.broken.length !== wantBroken || dirs.checked !== 1) {
+        siteFailures.push(
+          `  \`use_directory_urls: true\`, ${why}: ${dirs.broken.length} broken /` +
+            ` ${dirs.checked} checked, wanted ${wantBroken} / 1 — ${JSON.stringify(dirs.broken)}`,
+        );
+      }
     }
 
     // Both halves of `site_url` are DERIVED, and each fails SILENTLY on its own: a wrong
@@ -3289,10 +3360,9 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
  * A path under the site's root → the published markdown page mkdocs builds into it, or
  * undefined.
  *
- * mkdocs' directory URLs: `<site_url>x/` is built from `<docs_dir>/x.md`, and `<site_url>`
- * itself from `<docs_dir>/index.md`. The URL segment and the source directory are two
- * different names, so the served path is TRANSLATED rather than assumed to match: a
- * `docs_dir` rename must not silently stop resolving anything.
+ * The URL segment and the source directory are two different names, so the served path is
+ * TRANSLATED rather than assumed to match: a `docs_dir` rename must not silently stop
+ * resolving anything.
  *
  * Shared by the two passes that resolve a site URL — the root page's host-relative links
  * and a markdown page's absolute ones. They were one rule written twice for about ten
@@ -3300,33 +3370,61 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
  * place for a `docs_dir` rename to be missed.
  *
  * `dir` and `directoryUrls` are parameters and not just `siteDir()`/`usesDirectoryUrls()`
- * because each was UNKILLABLE otherwise. The translation below was
- * invisible here: this repo publishes `docs/` at `…/docs/`, so the served segment and the
- * source directory are the same word and dropping the translation changes nothing any
- * fixture built on this repo could see. A comment claiming a rename is handled, over a line
- * no test can break, is the shape this file has already paid for more than once.
+ * because each was UNKILLABLE otherwise: this repo publishes `docs/` at `…/docs/` with
+ * mkdocs' default URL shape, so a reader and a constant give the same answer and no fixture
+ * built on this repo could tell them apart. A comment claiming a rename is handled, over a
+ * line no test can break, is the shape this file has already paid for more than once.
  */
 function publishedPageFor(
   pathPart,
   published,
   { docsPrefix, siteRoot, dir = siteDir(), directoryUrls = usesDirectoryUrls() },
 ) {
-  // Which shape names a page is the SITE's answer, not both. Under directory URLs
-  // `concepts.md` is served at `concepts/`, and `concepts.html` is a 404 — so accepting
-  // `.html` here would report a dead link as resolving, which is the one failure mode this
-  // whole pass exists to remove. The mirror is deliberately NOT refused: with directory
-  // URLs off mkdocs still writes `x/index.html`, and a static host serves `x/` from it, so
-  // that shape is live either way.
-  if (directoryUrls && /\.html$/.test(pathPart)) return undefined;
-  const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
-  const served = docsPrefix.slice(siteRoot.length).replace(/\/$/, "");
-  const rel =
-    bare === served
-      ? dir
-      : bare.startsWith(`${served}/`)
-        ? `${dir}/${bare.slice(served.length + 1)}`
-        : bare;
-  return [`${rel}.md`, `${rel}/index.md`].find((c) => published.has(c));
+  // Resolved through the tree mkdocs BUILDS, rather than by stripping whichever suffix a
+  // URL happens to carry. Both halves of that stripping were wrong, in opposite
+  // directions, and each wrong one reports a dead link as resolving — the single failure
+  // mode this pass exists to remove. MEASURED by building a fixture site both ways:
+  //
+  //   use_directory_urls: true    concepts.md → concepts/index.html   (concepts.html 404s)
+  //   use_directory_urls: false   concepts.md → concepts.html         (concepts/ 404s)
+  //   either                      index.md    → index.html
+  //
+  // So the question is not "which suffix does this URL have" but "does the file this URL
+  // asks for exist in that tree" — one comparison that cannot be right in one direction
+  // and backwards in the other.
+  const served = docsPrefix.slice(siteRoot.length);
+  const within = pathPart.startsWith(served)
+    ? pathPart.slice(served.length)
+    : `${pathPart}/` === served
+      ? ""
+      : undefined;
+  if (within === undefined) return undefined;
+  // What the request asks a static host for. A bare path gets both readings because a host
+  // answers it either way — a redirect to the directory, or the flat file beside it.
+  const wanted =
+    within === "" || within.endsWith("/")
+      ? [`${within}index.html`]
+      : /\.html$/.test(within)
+        ? [within]
+        : [`${within}/index.html`, `${within}.html`];
+  // One `prefix` for both the boundary test and the slice. Written as `startsWith(dir + "/")`
+  // beside `slice(dir.length + 1)` they are two spellings of one number, which is a thing to
+  // keep in agreement rather than a thing that cannot disagree.
+  const prefix = `${dir}/`;
+  for (const rel of published) {
+    if (!rel.startsWith(prefix)) continue;
+    const stem = rel.slice(prefix.length).replace(/\.md$/, "");
+    // An index page is built at its own name under either setting; every other page is
+    // built at whichever name this site serves.
+    const built =
+      stem === "index" || stem.endsWith("/index")
+        ? `${stem}.html`
+        : directoryUrls
+          ? `${stem}/index.html`
+          : `${stem}.html`;
+    if (wanted.includes(built)) return rel;
+  }
+  return undefined;
 }
 
 function landingPageFor(dir, pages, pathPart) {
@@ -3524,8 +3622,9 @@ function checkSiteLinks(
       try {
         url = new URL(target);
       } catch {
-        // A scheme this is not a URL parser for — `mailto:`, `ftp:`, a bare `//host/x`.
-        // Not ours either way, and the markdown pass already accounts for it.
+        // Not an absolute URL, so it cannot name this site: a relative path, an in-page
+        // `#anchor`, a `mailto:`, a protocol-relative `//host/x`. The first two belong to
+        // the markdown pass; the rest name a host, and nothing here can resolve a host.
         continue;
       }
       if (url.origin !== origin) continue;
