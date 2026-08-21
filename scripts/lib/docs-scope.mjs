@@ -47,11 +47,11 @@ function refuse(message) {
 }
 
 /**
- * `mkdocs.yml`, read for the two keys that decide what the site contains.
+ * `mkdocs.yml`, read for the keys that decide what the site contains and what it serves.
  *
  * Deliberately not a YAML parser: the config carries a `!!python/name:` tag that only
  * mkdocs' own loader resolves, so a general parser here would be a second thing to keep
- * correct. This reads the two keys it needs and REFUSES any shape it has not been shown to
+ * correct. This reads the keys it needs and REFUSES any shape it has not been shown to
  * handle, which is the difference between a port and a guess. `--self-test` runs it against
  * planted configs, including the shapes it must refuse.
  */
@@ -60,6 +60,7 @@ export function readSiteConfig(configText) {
   let docsDir;
   let exclude = null;
   let siteUrl;
+  let useDirectoryUrls;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -110,6 +111,26 @@ export function readSiteConfig(configText) {
       siteUrl = url[1].trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");
       continue;
     }
+    const dirUrls = /^use_directory_urls:\s*(.*)$/.exec(line);
+    if (dirUrls) {
+      // Which URL a page is SERVED at, which is a different question from which pages
+      // exist. On (mkdocs' default) `x.md` is served at `x/` and `x.html` is a 404; off,
+      // the reverse. A resolver that accepts both calls a real 404 fine, and does it
+      // silently — so this is read rather than assumed, and a value this has not been
+      // shown is refused rather than guessed at.
+      if (useDirectoryUrls !== undefined) {
+        refuse("mkdocs.yml declares `use_directory_urls` twice; this reader cannot say which one the site uses.");
+      }
+      const raw = dirUrls[1].trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "").toLowerCase();
+      if (raw !== "true" && raw !== "false") {
+        refuse(
+          `mkdocs.yml gives \`use_directory_urls: ${dirUrls[1].trim()}\`, and this reader only knows` +
+            ` \`true\` and \`false\`. Teach scripts/lib/docs-scope.mjs before using another value.`,
+        );
+      }
+      useDirectoryUrls = raw === "true";
+      continue;
+    }
     const ex = /^exclude_docs:\s*(.*)$/.exec(line);
     if (!ex) continue;
     if (exclude !== null) {
@@ -142,7 +163,13 @@ export function readSiteConfig(configText) {
 
   // Absent is not a mismatch: mkdocs defaults `docs_dir` to `docs`, which is what this repo
   // declares anyway.
-  return { docsDir: docsDir ?? "docs", exclude: exclude ?? [], siteUrl };
+  return {
+    docsDir: docsDir ?? "docs",
+    exclude: exclude ?? [],
+    siteUrl,
+    // Absent is mkdocs' own default, like `docs_dir` above.
+    useDirectoryUrls: useDirectoryUrls ?? true,
+  };
 }
 
 let CACHED;
@@ -163,17 +190,24 @@ function config() {
 }
 
 /**
- * The path the built docs are SERVED at, from `mkdocs.yml`'s `site_url` — `/asterism/docs/`.
+ * `site_url` split into the two halves a link into this site is resolved against: the
+ * HOST it is served from and the PATH it sits at under that host.
  *
- * The site's root page is hand-written HTML full of absolute links (`/asterism/docs/…`),
- * and deciding whether one of those resolves needs to know which prefix belongs to this
- * repo. Hard-coding it would be the one undeclared constant in a module built on
- * derivation, and getting it wrong is SILENT: every link falls through to "not ours", and
- * the pass reports that all zero of them resolve.
+ * Two kinds of link need this, and they need different halves. The site's root page is
+ * hand-written HTML full of host-relative links (`/asterism/docs/…`), which need only the
+ * path. A markdown page — README, the npm page, the changelog — cannot write one of those,
+ * because it is also read on GitHub and on npm, so it writes the whole URL
+ * (`https://qmilab.com/asterism/docs/…`) and the origin is what says whether that URL is
+ * ours to resolve at all.
  *
- * Always ends in a slash, so a prefix test cannot match a sibling directory.
+ * One parse for both, because the refusals are the valuable part and a second copy of them
+ * is a second thing to keep true. Hard-coding either half would be the one undeclared
+ * constant in a module built on derivation, and getting it wrong is SILENT: every link
+ * falls through to "not ours", and the pass reports that all zero of them resolve.
+ *
+ * The path always ends in a slash, so a prefix test cannot match a sibling directory.
  */
-export function siteUrlPath(cfg = config()) {
+export function siteUrlParts(cfg = config()) {
   const raw = cfg.siteUrl;
   if (!raw) {
     refuse(
@@ -187,7 +221,15 @@ export function siteUrlPath(cfg = config()) {
   } catch {
     refuse(`mkdocs.yml gives \`site_url: ${raw}\`, which is not a URL this can read a path out of.`);
   }
-  return url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+  return {
+    origin: url.origin,
+    path: url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`,
+  };
+}
+
+/** The path the built docs are SERVED at — `/asterism/docs/`. See `siteUrlParts`. */
+export function siteUrlPath(cfg = config()) {
+  return siteUrlParts(cfg).path;
 }
 
 /**
@@ -199,6 +241,16 @@ export function siteUrlPath(cfg = config()) {
  */
 export function siteDir(cfg = config()) {
   return cfg.docsDir;
+}
+
+/**
+ * Whether the built site serves `x.md` at `x/` (mkdocs' default) or at `x.html`.
+ *
+ * Takes the config for the same reason `siteDir` does: read against this repo's own,
+ * a reader and a constant give the same answer and nothing can tell them apart.
+ */
+export function usesDirectoryUrls(cfg = config()) {
+  return cfg.useDirectoryUrls;
 }
 
 /**
@@ -405,6 +457,93 @@ export function publishedLandingPages(workflowText) {
     );
   }
   return pages;
+}
+
+/**
+ * Every file the site serves that is NOT one of its pages — the images, the stylesheet,
+ * anything else living beside the markdown.
+ *
+ * mkdocs copies these out of `docs_dir` verbatim, and the workflow copies the landing
+ * directory into the artifact root the same way, so both are served at the path their name
+ * gives them. A link to one is as much a claim about this repo as a link to a page, and it
+ * goes stale the same way — but only a PAGE can be found by asking which markdown builds a
+ * URL, so without this an absolute link to a real screenshot is reported as naming nothing.
+ *
+ * `exclude_docs` is applied, because it removes media as readily as it removes pages.
+ *
+ * Two lists rather than one, because the two halves are served at different roots: the docs
+ * ones under `site_url`, the landing ones one level above it. The caller knows both
+ * prefixes; this only says which files exist.
+ */
+export function publishedAssets(published = isPublished) {
+  // Markdown is excluded because mkdocs RENDERS it rather than copying it: `concepts.md`
+  // is served at `concepts/`, and `…/docs/concepts.md` is a 404.
+  //
+  // `published` is a parameter, and the only one, because it is the half no fixture built
+  // on this repo can otherwise reach: nothing `exclude_docs` removes here is a media file,
+  // so a reader that dropped the exclusion entirely would give the same answer and nothing
+  // could tell. `docs_dir` needs no such treatment — it is compared against mkdocs itself
+  // by `check:mkdocs-parity`, and a parameter nothing passes is a claim, not a check.
+  return trackedFiles(`${siteDir()}/*`, "site files").filter(
+    (rel) => !rel.endsWith(".md") && published(rel),
+  );
+}
+
+/**
+ * Every tracked file under the directory the workflow serves at the site's root.
+ *
+ * What the workflow DELETES after copying is not applied here — a removal is expressed in
+ * artifact paths and can name either half of the site, so it is applied where both halves
+ * are already keyed that way. See `readLandingRemovals`.
+ */
+export function landingFiles(workflowText) {
+  const rel = join(".github", "workflows", "docs.yml");
+  let text = workflowText;
+  if (text === undefined) {
+    try {
+      text = readFileSync(join(ROOT, rel), "utf8");
+    } catch (err) {
+      refuse(`The site's root pages are published by ${rel}, which could not be read (${err.message}).`);
+    }
+  }
+  return trackedFiles(`${readLandingDir(text, rel)}/*`, "site root files");
+}
+
+/**
+ * A workflow's text → the paths it DELETES from the Pages artifact after assembling it,
+ * relative to the artifact root.
+ *
+ * Copying a directory in is not the last word on what the site serves: this repo's workflow
+ * copies `landing/.` into the root and then removes `_site/README.md`, because that file is
+ * a maintainer note rather than a published asset. A reader that stops at the copy calls
+ * `/asterism/README.md` a file the site serves — a FALSE GREEN over a URL the deployed site
+ * answers with a 404, which is the one failure the asset lookup exists to avoid producing.
+ *
+ * Derived from the line that does the deleting, for the same reason `readLandingDir` is
+ * derived from the line that does the copying.
+ *
+ * Only `rm` lines that name something in the artifact are considered — a workflow is free
+ * to delete a scratch file, and that is not a statement about the site. One that mixes the
+ * two in a single command is REFUSED rather than half-read.
+ */
+export function readLandingRemovals(workflowText, rel = ".github/workflows/docs.yml") {
+  const removed = [];
+  for (const line of workflowText.split("\n")) {
+    const tokens = line.trim().split(/\s+/);
+    if (tokens[0] !== "rm") continue;
+    const operands = tokens.slice(1).filter((tok) => !tok.startsWith("-"));
+    const inArtifact = operands.filter((tok) => tok === "_site" || tok.startsWith("_site/"));
+    if (inArtifact.length === 0) continue;
+    if (inArtifact.length !== operands.length) {
+      refuse(
+        `${rel} deletes both artifact and non-artifact paths in one command (\`${line.trim()}\`);\n` +
+          `this reader cannot say which of them the site would have served.\n` +
+          `Teach scripts/lib/docs-scope.mjs before writing one.`,
+      );
+    }
+    for (const tok of inArtifact) removed.push(tok.replace(/^_site\/?/, "").replace(/\/+$/, ""));
+  }
+  return removed;
 }
 
 /**
