@@ -403,6 +403,9 @@ test("what counts as a hostname override: not absent, not empty, and otherwise h
   // must still reach the socket — refusing is only half a claim.
   expect(resolveBindHost(undefined)).toBe(DEFAULT_HOSTNAME);
   expect(resolveBindHost("")).toBe(DEFAULT_HOSTNAME);
+  // Blank is the same class of input as empty, and the same premise decides it.
+  expect(resolveBindHost("  ")).toBe(DEFAULT_HOSTNAME);
+  expect(resolveBindHost("\n")).toBe(DEFAULT_HOSTNAME);
   expect(resolveBindHost("localhost")).toBe("localhost");
   expect(resolveBindHost("0.0.0.0")).toBe("0.0.0.0");
 });

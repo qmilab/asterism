@@ -104,7 +104,14 @@ import { DashboardClient } from "./dashboard/client.js";
 import { runDashboard } from "./dashboard/tui.js";
 import type { TerminalIO } from "./dashboard/tui.js";
 
-import { helpRequested, intFlag, parseArgs, stringFlag, undeclaredOptions } from "./args.js";
+import {
+  carriesNothing,
+  helpRequested,
+  intFlag,
+  parseArgs,
+  stringFlag,
+  undeclaredOptions,
+} from "./args.js";
 import type { ParsedArgs } from "./args.js";
 import type { AsterismConfig, ModelSettings } from "./config.js";
 import { loadConfig, saveConfig } from "./config.js";
@@ -715,8 +722,7 @@ function rejectValuelessFlags(
   io: CliIO,
 ): boolean {
   for (const flag of flags) {
-    const given = parsed.flags[flag];
-    if (given === true || given?.trim() === "") {
+    if (carriesNothing(parsed.flags[flag])) {
       io.err(`The --${flag} option needs a value.`);
       return false;
     }
@@ -1691,7 +1697,7 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // An ABSENT `--credential` is a different mistake, and moving it up here cost `asterism
   // api add` its usage line — the one thing that names the whole shape of the command to
   // someone who typed it with nothing at all. It is answered below, after the arity check.
-  if (credential === true || credential === "") {
+  if (carriesNothing(credential)) {
     io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
     return Promise.resolve(1);
   }
@@ -2515,7 +2521,7 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
   // connection (the absent case is `undefined`, which still correctly defaults).
   // [Codex review P2: reject a missing connect mode value.]
   const modeFlag = parsed.flags.mode;
-  if (modeFlag === true || modeFlag === "") {
+  if (carriesNothing(modeFlag)) {
     io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
     return Promise.resolve(1);
   }
@@ -2526,8 +2532,9 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
     return Promise.resolve(1);
   }
   // Validate any value given so an unimplemented mode is a clear error, not a silent
-  // connection nothing can use.
-  const mode = modeFlag ?? "handoff";
+  // connection nothing can use. `carriesNothing` above has already refused the bare and
+  // blank forms; the `typeof` is the narrowing a predicate cannot give.
+  const mode = typeof modeFlag === "string" ? modeFlag : "handoff";
   if (!(CONNECTION_MODES as readonly string[]).includes(mode)) {
     io.err(`Unknown connection mode "${mode}". Supported: ${CONNECTION_MODES.join(", ")}.`);
     return Promise.resolve(1);
@@ -2599,7 +2606,7 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
   // both loudly rather than falling through to inference, which would silently withdraw a
   // channel the operator did not name. Mirrors `connect`'s handling of the same mistake.
   const modeFlag = parsed.flags.mode;
-  if (modeFlag === true || modeFlag === "") {
+  if (carriesNothing(modeFlag)) {
     io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
     return Promise.resolve(1);
   }
@@ -2609,7 +2616,9 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
     io.err(DISCONNECT_USAGE);
     return Promise.resolve(1);
   }
-  if (modeFlag !== undefined && !(CONNECTION_MODES as readonly string[]).includes(modeFlag)) {
+  // `typeof` rather than `!== undefined`: `carriesNothing` has already refused the bare
+  // and blank forms, but it is a predicate, not a type guard, so the narrowing is here.
+  if (typeof modeFlag === "string" && !(CONNECTION_MODES as readonly string[]).includes(modeFlag)) {
     io.err(`Unknown connection mode "${modeFlag}". Supported: ${CONNECTION_MODES.join(", ")}.`);
     return Promise.resolve(1);
   }
@@ -3723,14 +3732,13 @@ async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
   }
   const typeRaw = stringFlag(parsed.flags.type);
   const reviewRaw = stringFlag(parsed.flags["review-state"]);
+  // An empty or blank `--run=` (an unset shell variable) is refused by
+  // `rejectValuelessFlags` above, in the same words — `run` is one of MEMORY_FLAGS. It
+  // used to be checked again here, with a comment explaining why; measured unreachable
+  // (removing it changed nothing), and a check whose comment outlives its reason is the
+  // failure this repo keeps re-encountering. What it guarded still matters: every run id
+  // begins with "", so a blank prefix would match the sole run or trip an ambiguity error.
   const runRef = stringFlag(parsed.flags.run);
-  // An empty `--run=` (e.g. an unset shell variable) must be rejected like a missing
-  // value, not treated as a prefix — every run id begins with "", so it would
-  // silently match the sole run or trip an ambiguity error on several.
-  if (runRef !== undefined && runRef.trim() === "") {
-    io.err("The --run option needs a value.");
-    return 1;
-  }
 
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
@@ -3813,14 +3821,10 @@ async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
   }
   const type = stringFlag(parsed.flags.type);
   const sinceId = stringFlag(parsed.flags.since);
+  // Refused above by `rejectValuelessFlags` — `run` is one of EVENTS_VALUE_FLAGS — in the
+  // same words this used to print for itself. See the note in `memory inspect`.
   const runRef = stringFlag(parsed.flags.run);
   const follow = parsed.flags.follow === true;
-  // An empty `--run=` (e.g. an unset shell variable) must be rejected like a missing
-  // value, not treated as a prefix that matches every run id.
-  if (runRef !== undefined && runRef.trim() === "") {
-    io.err("The --run option needs a value.");
-    return 1;
-  }
 
   return withHomeStore(io, async (store) => {
     const agent = findAgentByName(store, name);
@@ -4012,7 +4016,6 @@ async function runReflectReview(
   return code;
 }
 
-/** The running tally a review loop returns, formatted into the closing `Done — …` line. */
 /**
  * What one section of `reflect --review` did: its exit code, and whether the operator LEFT
  * part-way through rather than working to the end.
@@ -4029,6 +4032,7 @@ interface SectionOutcome {
   quit: boolean;
 }
 
+/** The running tally a review loop returns, formatted into the closing `Done — …` line. */
 interface ReviewCounts {
   accepted: number;
   rejected: number;
@@ -5577,7 +5581,7 @@ function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   // The same rule for the positional form of the id. Skipping it instead would take
   // `config set "" --provider ollama` as a request to set only the provider, dropping
   // the coordinate the operator had actually typed at.
-  if (positionalId?.trim() === "") {
+  if (positionalId !== undefined && positionalId.trim().length === 0) {
     io.err("The model id needs a value.");
     return Promise.resolve(1);
   }
@@ -6042,10 +6046,15 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["allow"], "channel telegram", TELEGRAM_USAGE, io)) return 1;
-  // A value-bearing flag given bare parses as boolean `true`, and `--allow ""` — what
-  // `--allow "$IDS"` expands to with the variable unset — carries nothing either. Reject
-  // both rather than silently starting the bot with no allow-list where one was named.
-  if (parsed.flags.allow === true || parsed.flags.allow === "") {
+  // Refuse exactly what the READER discards. `parseAllowList` trims each segment and
+  // drops the empties, so `--allow ""`, `--allow "  "` and `--allow ","` all reach it as
+  // an empty list — a bot started with no allow-list at all where one had been named.
+  // Testing the option's text alone caught the first two and let the third through.
+  const allowFlag = parsed.flags.allow;
+  if (
+    allowFlag !== undefined &&
+    (carriesNothing(allowFlag) || parseAllowList(stringFlag(allowFlag)).length === 0)
+  ) {
     io.err("The --allow option needs a value (a comma-separated list of chat ids).");
     return 1;
   }
@@ -6167,10 +6176,15 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["allow"], "channel discord", DISCORD_USAGE, io)) return 1;
-  // A value-bearing flag given bare parses as boolean `true`, and `--allow ""` — what
-  // `--allow "$IDS"` expands to with the variable unset — carries nothing either. Reject
-  // both rather than silently starting the bot with no allow-list where one was named.
-  if (parsed.flags.allow === true || parsed.flags.allow === "") {
+  // Refuse exactly what the READER discards. `parseAllowList` trims each segment and
+  // drops the empties, so `--allow ""`, `--allow "  "` and `--allow ","` all reach it as
+  // an empty list — a bot started with no allow-list at all where one had been named.
+  // Testing the option's text alone caught the first two and let the third through.
+  const allowFlag = parsed.flags.allow;
+  if (
+    allowFlag !== undefined &&
+    (carriesNothing(allowFlag) || parseAllowList(stringFlag(allowFlag)).length === 0)
+  ) {
     io.err("The --allow option needs a value (a comma-separated list of channel ids).");
     return 1;
   }
@@ -6364,11 +6378,11 @@ function parseServiceKind(value: string | true | undefined): { kind?: ServiceKin
   // Given with no value, or given an EMPTY one (`--kind "$KIND"` with the variable
   // unset) — the same mistake, so the same answer, rather than falling through to
   // `Unknown service kind ""`, which describes the expansion instead of the mistake.
-  if (value === true || value === "") {
+  if (carriesNothing(value)) {
     return { error: "The --kind option needs a value (serve, telegram, or discord)." };
   }
-  if (!isServiceKind(value)) {
-    return { error: `Unknown service kind "${value}". Use serve, telegram, or discord.` };
+  if (typeof value !== "string" || !isServiceKind(value)) {
+    return { error: `Unknown service kind "${String(value)}". Use serve, telegram, or discord.` };
   }
   return { kind: value };
 }

@@ -31,7 +31,11 @@ export const DEFAULT_HOSTNAME = "127.0.0.1";
  * the default itself, so the two can never disagree about what counts as an override.
  */
 export function resolveBindHost(hostname?: string): string {
-  return hostname === undefined || hostname === "" ? DEFAULT_HOSTNAME : hostname;
+  // Blank, not merely empty: a hostname of spaces or a newline is the same class of input
+  // (`--host "$HOST"` with the variable holding whitespace) and the same premise applies —
+  // when we cannot tell what was meant, the strictest bind wins. The CLI refuses it
+  // upstream; this is the package's own reading, for an embedder that does not.
+  return hostname === undefined || hostname.trim().length === 0 ? DEFAULT_HOSTNAME : hostname;
 }
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;

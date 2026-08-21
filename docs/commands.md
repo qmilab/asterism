@@ -1303,12 +1303,12 @@ Nothing is saved unless you accept it.
 
 (1/2) convention · confidence 0.86
   This blog uses sentence case in headings.
-  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject): a
+  Keep this memory? [a]ccept / [e]dit / [r]eject / [q]uit (default: reject): a
   ✓ saved
 
 (2/2) procedural · confidence 0.78
   Run a spell pass before saving.
-  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject): r
+  Keep this memory? [a]ccept / [e]dit / [r]eject / [q]uit (default: reject): r
   ✗ rejected
 
 Done — 1 saved, 1 rejected.
@@ -1319,9 +1319,10 @@ a flagged one anyway, the firewall still refuses to save it (`⛔ blocked`).
 
 Finally, if the latest run looks to have **finished** one of the agent's standing
 objectives, `--review` suggests marking that objective **done** (or dropped) — you
-**apply** or **skip** each suggestion. The suggestion is advisory: only your apply
-changes the objective's status, and an agent never finishes its own objective. (When
-not run interactively, suggestions are listed, never applied.)
+**apply**, **skip**, or **quit**. The suggestion is advisory: only your apply changes
+the objective's status, and an agent never finishes its own objective. With nobody to
+ask, this part does not run at all — no suggestion is computed, and no model is called
+for one.
 
 ### `--propose` — fill the pile, unattended
 

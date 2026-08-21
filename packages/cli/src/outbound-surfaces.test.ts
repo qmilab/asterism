@@ -310,14 +310,25 @@ test("a chat channel refuses an --allow that carries nothing, on both transports
     ["telegram", "ASTERISM_TELEGRAM_TOKEN", "123456:fake-bot-token", "chat ids"],
     ["discord", "ASTERISM_DISCORD_TOKEN", "fake-discord-token", "channel ids"],
   ] as const) {
-    const err: string[] = [];
-    const io = { ...h.io, ...startedIo, env: { [tokenVar]: token }, err: (t: string) => err.push(t) };
-    expect(await runCli(["channel", transport, "personal", "--allow", ""], io)).toBe(1);
-    expect(err.join("\n")).toContain(`The --allow option needs a value (a comma-separated list of ${noun})`);
-    // And the bot never started, so nothing was ever reachable without the list.
-    expect(started).toBe(false);
+    const io = { ...h.io, ...startedIo, env: { [tokenVar]: token }, err: () => {} };
+    // Every shape the option carries nothing in. `--allow "$IDS"` expands to the first
+    // when the variable is unset and the rest when it holds a stray space or the newline
+    // a `$(cat …)` leaves; `parseAllowList` trims and drops empties, so all of them
+    // produced an empty list — a bot started with no allow-list where one was named.
+    for (const nothing of ["", "  ", "\t", ","]) {
+      const err: string[] = [];
+      expect(
+        await runCli(["channel", transport, "personal", "--allow", nothing], {
+          ...io,
+          err: (t: string) => err.push(t),
+        }),
+      ).toBe(1);
+      expect(err.join("\n")).toContain(`The --allow option needs a value (a comma-separated list of ${noun})`);
+      // And the bot never started, so nothing was ever reachable without the list.
+      expect(started).toBe(false);
+    }
     // The ordinary form still starts, so the refusal has not swallowed the flag.
-    expect(await runCli(["channel", transport, "personal", "--allow", "42"], { ...io, err: () => {} })).toBe(0);
+    expect(await runCli(["channel", transport, "personal", "--allow", "42"], io)).toBe(0);
     expect(started).toBe(true);
     started = false;
   }

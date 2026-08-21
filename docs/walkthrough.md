@@ -182,12 +182,12 @@ Nothing is saved unless you accept it.
 
 (1/2) semantic · confidence 0.9
   the blog drafts live in ./drafts
-  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject): a
+  Keep this memory? [a]ccept / [e]dit / [r]eject / [q]uit (default: reject): a
   ✓ saved
 
 (2/2) procedural · confidence 0.7
   regenerate dist/ before publishing
-  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject): r
+  Keep this memory? [a]ccept / [e]dit / [r]eject / [q]uit (default: reject): r
   ✗ rejected
 
 Done — 1 saved, 1 rejected.
