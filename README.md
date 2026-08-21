@@ -67,7 +67,7 @@ asterism memory inspect writer
 asterism events tail client
 ```
 
-> **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. The autonomy you set governs the rest — `propose` hands you a plan, while `notify` and `autonomous` act on their own — but before anything **destructive**, even an `autonomous` agent **pauses for your confirmation**. The gate acts on an agent's *tools*: the shipped CLI registers a default catalog of workspace-scoped file tools (read-only `read_file`/`list_dir`/`stat`/`find`, the writes `write_file`/`append_file`/`mkdir`/`move`, and `delete_file`) behind it, so with a [configured model](./docs/installation.md#configuring-a-model) an ordinary edit runs under `autonomous` while a deletion pauses — proven end to end in the [five-claims walkthrough](./docs/walkthrough.md).
+> **What you'll see** — `writer`'s memory never appears in `client`, and `client`'s `GITHUB_TOKEN` can't be read from `writer`; those boundaries hold the moment the agents exist. The autonomy you set governs the rest — `propose` hands you a plan, while `notify` and `autonomous` act on their own — but before anything **destructive**, even an `autonomous` agent **pauses for your confirmation**, unless you have allowed that capability for it. The gate acts on an agent's *tools*: the shipped CLI registers a default catalog of workspace-scoped file tools (read-only `read_file`/`list_dir`/`stat`/`find`, the writes `write_file`/`append_file`/`mkdir`/`move`, and `delete_file`) behind it, so with a [configured model](./docs/installation.md#configuring-a-model) an ordinary edit runs under `autonomous` while a deletion pauses — proven end to end in the [five-claims walkthrough](./docs/walkthrough.md).
 
 <div align="center">
 <img src="docs/assets/img/gate.gif" alt="A terminal recording: an autonomous agent writes a file without asking, then pauses for confirmation before deleting one; after the user confirms, the deletion runs." width="760">
@@ -89,7 +89,7 @@ See [Run in a container](./docs/container.md) for the full setup.
 | Capability | What it gives you |
 |---|---|
 | **Distinct agents & souls** | Many agents from one install, each its own identity with its own character. → [Concepts](./docs/concepts.md) |
-| **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included. → [Trust](./docs/concepts.md#trust-levels) |
+| **Dialable trust + a destructive-action gate** | `propose` hands you a plan; `notify` and `autonomous` act, and stop for your confirmation before anything irreversible, `autonomous` included — unless you have allowed that capability. → [Trust](./docs/concepts.md#trust-levels) |
 | **Earned trust contracts** | An agent can *earn* the right to take one capability without pausing — always proposed for your approval, and lost the moment something goes wrong. → [Earned autonomy](./docs/concepts.md#earned-autonomy) |
 | **Agents that work together** | Open a one-way channel between two agents and choose what it's for — a result, the files it made, what it knows, or standing context both share. Only that crosses; memory, secrets and tools never do. → [Working together](./docs/collaboration.md) |
 | **Choose which tools an agent has** | Narrow a single agent to less than the standard toolkit, separately from how much it may do with it. → [`capabilities`](./docs/commands.md#capabilities) |

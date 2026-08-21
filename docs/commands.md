@@ -158,7 +158,8 @@ Set writer to autonomous.
 Records an `agent.trust_changed` event. Remember: `notify` and `autonomous` both act
 without asking first. Only the
 [destructive-action gate](./concepts.md#the-destructive-action-gate) still pauses
-them — that gate is independent of trust level.
+them — unless the agent has [earned](#earned-autonomy-per-capability-grants) standing
+on that capability — and `propose` withholds the action rather than asking about it.
 
 ### Earned autonomy — per-capability grants
 
@@ -609,8 +610,9 @@ response>` lands on stdout.)
 > `write_file`, `append_file`, `mkdir`, and `move` to change things and
 > `delete_file` to remove them — behind the trust gate. The read-only tools and
 > the write tools are ordinary read/write effects; `delete_file` is destructive,
-> so a `notify` or `autonomous` run stops and asks before it and a `propose` agent
-> never runs it at all, while `move` refuses to
+> so a `notify` or `autonomous` run stops and asks before it — unless you have allowed
+> that capability for the agent — and a `propose` agent never runs it at all, while
+> `move` refuses to
 > overwrite an existing destination (so it never silently destroys anything). Each is confined
 > to the agent's workspace (logical scoping, not an OS-enforced jail — see
 > [what isolation means today](./concepts.md#what-isolation-means-today)). The
@@ -738,9 +740,9 @@ level, framed by **its own** memory and skills — and hands back only its final
 The asking agent never sees the other's memory, secrets, files, or how it got there.
 
 Because the work runs as the receiving agent, that agent's protections apply: a
-destructive action stops for your confirmation according to the **receiving** agent's
-autonomy, no matter how much autonomy the asking agent has. A handoff can never be a
-way around another agent's limits. If it pauses, confirm it on the receiving agent:
+destructive action answers to the **receiving** agent's own gate, and to nothing the
+asking agent holds — no matter how much autonomy the asking agent was given. A handoff
+can never be a way around another agent's limits. If it pauses, confirm it on the receiving agent:
 
 ```
 asterism confirm <to> <run>
@@ -1219,9 +1221,10 @@ is never a way to see another agent's.
 
 A trace exists only for an agent you opt in with
 [`config cognition-provider <agent> lodestar`](#config). It is **observe-only**:
-recording a trace never changes what an agent may do — a destructive action still
-pauses for the same confirmation. By default it records **references only** (which tool
-ran, whether it succeeded, how much it returned) — never the contents of a tool's input
+recording a trace never changes what an agent may do — the destructive-action gate
+reaches the same verdict with a trace running as without one. By default it records
+**references only** (which tool ran, whether it succeeded, how much it returned) —
+never the contents of a tool's input
 or output. You can additionally record the **redacted content** each tool returned with
 [`config cognition-capture <agent> content`](#config); even then, input arguments are
 never kept, common secret shapes (keys, tokens, passwords, private keys) are scrubbed,
@@ -1819,8 +1822,8 @@ Installed service "writer (telegram)".
 ```
 
 The **destructive-action gate still fires** in a service exactly as it does at the
-keyboard: an HTTP run parks at `awaiting_confirmation` until you approve it out of
-band, and a chat run asks for a `/confirm` reply. A background service never
+keyboard: a run it stops parks at `awaiting_confirmation` until you approve it out
+of band, and a chat run asks for a `/confirm` reply. A background service never
 loosens that gate. See the [run-as-a-service guide](./service.md) for the full
 setup, the boot-start note, and how a service finds the right install.
 

@@ -17,7 +17,7 @@ The five claims:
 3. A `propose` agent **returns a plan it never runs**; an `autonomous` agent
    **acts**.
 4. Even an `autonomous` agent **pauses for confirmation before a destructive
-   action** — the gate is independent of trust level.
+   action**, unless you have allowed it that capability.
 5. Reflection **proposes** typed memories; nothing is written without your
    approval.
 

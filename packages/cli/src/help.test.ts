@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 
 import { AUTONOMY_HELP, COMMAND_HELP, USAGE } from "./help.ts";
+// The destructive-action gate's copy rule, shared with `check:docs` so there is exactly
+// one of it. See the test that uses it for why that matters.
+// @ts-expect-error — a checker's plain-JS helper, deliberately outside the package graph.
+import { gateOverclaims } from "../../../scripts/lib/gate-claims.mjs";
 import { formatStandingList } from "./format.ts";
 import { PROVIDER_DEFAULTS } from "./model-config.ts";
 
@@ -70,6 +74,32 @@ test("no user-facing copy claims a destructive action pauses at EVERY trust leve
       universal && pauses,
       `copy claims a pause at every level, which is false at 'propose': ${sentence.trim()}`,
     ).toBe(false);
+  }
+});
+
+test("no user-facing copy promises the destructive gate without its allow-list exception", () => {
+  // The mirror of the test above, and the reason both are here: correcting the `propose`
+  // overclaim (#139) is what wrote this one (#176 → #177). `decideGate` consults
+  // `autoApprove` BEFORE it decides to pause, and `run.ts` fills that set from earned
+  // standing grants — so an operator who accepted a `trust <agent> --review` grant on
+  // `fs.delete` gets deletions with no prompt, and copy that promises otherwise is wrong
+  // in the operator's favour right up until it matters.
+  //
+  // The rule itself lives in `scripts/lib/gate-claims.mjs` and is shared with `check:docs`,
+  // which applies it to every page a user meets and to the help the binary actually PRINTS.
+  // One implementation on purpose: two guards for one sentence are how the correction for
+  // half of it shipped without the other half. This test is the fast half — it needs no
+  // build — and covers the constants those help screens are rendered from.
+  for (const [name, copy] of [
+    ["USAGE", USAGE],
+    ["AUTONOMY_HELP", AUTONOMY_HELP],
+    ...Object.entries(COMMAND_HELP),
+  ] as [string, string][]) {
+    const overclaims = gateOverclaims(copy);
+    expect(
+      overclaims.map((f) => `${name}: [${f.rule}] ${f.sentence}`),
+      `${name} states the destructive-action gate more widely than the kernel enforces it`,
+    ).toEqual([]);
   }
 });
 

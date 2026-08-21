@@ -88,9 +88,9 @@ memory and skills, at its own autonomy level. What came back is its final answer
 
 That last point is the one worth being precise about, because it is the obvious thing
 to worry about: **a handoff is not a way around another agent's limits.** The work
-runs under the *receiving* agent's autonomy, so if the task needs a destructive
-action, it stops and asks according to `researcher`'s level — no matter how much
-autonomy `writer` has. Confirm it on the agent that paused:
+runs under the *receiving* agent's autonomy, so a destructive action answers to
+`researcher`'s own gate and to nothing `writer` has — no matter how much autonomy
+`writer` was given. Confirm it on the agent that paused:
 
 ```
 asterism confirm researcher <run>

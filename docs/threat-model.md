@@ -122,10 +122,11 @@ across. The same key in two agents resolves to two distinct, isolated values.
 
 ### The destructive-action gate
 
-**An action classified destructive pauses for explicit confirmation regardless
-of the agent's autonomy level**, unless that specific capability has been
-allow-listed for that agent. This is the single rule that separates "an agent
-with its own database" from an agent you can leave running.
+**An action classified destructive never runs without your explicit confirmation,
+regardless of the agent's autonomy level**, unless that specific capability has
+been allow-listed for that agent. At `notify` and `autonomous` the run stops and
+asks; at `propose` it is not taken at all. This is the single rule that separates
+"an agent with its own database" from an agent you can leave running.
 
 An unapproved destructive action is a real stop — the tool does not run and the
 result is not quietly reported as success. Classification happens in the kernel,
