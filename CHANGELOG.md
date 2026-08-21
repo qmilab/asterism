@@ -18,6 +18,8 @@ Two ways Asterism could act on something you had not said. A question it needed 
 
   **Leaving a review is no longer a decision.** `Ctrl-D` used to end the command with an unhandled Node error and a stack trace. It now stops the review — leaving the proposal in front of you, and every one after it, exactly as it was — and `reflect --review` has a `[q]uit` option that says so. Reading a departure as a rejection would have been worse than the crash it replaced: rejecting a *queued* proposal is durable, so each keypress would have destroyed another one and moved on to the next.
 
+  Stopping is reported as stopping. The closing line — the one thing on standard out, and so the only thing a redirect keeps — says `Stopped early — 4 left for next time.` rather than `Done — 0 saved, 0 rejected.`, which was indistinguishable from a review that had genuinely settled nothing.
+
   Stopping stops the whole command, not the list you were on. `asterism reflect <agent> --review` has three parts — proposed memories, proposed objectives, then any objective that looks finished — and leaving the first no longer walks you into the next, nor asks the model for something to put in it. `asterism trust <agent> --review` has the same way out, for the same reason: `Ctrl-D` there used to answer only the capability in front of you, so leaving a list of five took five of them.
 
   An empty answer is still what the prompt says it is — reject for a memory, skip for an objective. Someone was there and pressed return; that is a decision, and a different thing from nobody being there at all.
@@ -27,6 +29,8 @@ Two ways Asterism could act on something you had not said. A question it needed 
   `ASTERISM_MODEL_PROVIDER=` was worse: the empty name reached the refusal, which suggested `asterism config set <id> --provider  --base-url <url>` — a flag whose value is the next flag, a command nobody could type.
 
   An emptied API key variable is likewise a cleared key rather than a credential to send, and `asterism service install --capture-env` no longer captures a blank value into a service's environment file while reporting that nothing is missing. A variable holding only **whitespace** counts as cleared too, for a model's coordinates and for the keys and tokens that reach a provider: an API key of one space used to install as a satisfied requirement and leave the service starting with no key at all.
+
+  That reading now reaches the run itself. `asterism reflect` refused a whitespace-only API key while `asterism run` went ahead: the substrate keeps its own list of key variables — wider than Asterism's, which is why it is asked before refusing — and it read the same blank variable as a key it could use. It no longer does, so a cleared key stops both, in the same words.
 
   Whitespace **around** one of those is removed rather than sent. `export OPENAI_API_KEY=$(cat key.txt)` leaves a newline on the end, which used to travel into the request and fail with an opaque header error instead of working. The value of an **agent's own** secret is untouched by any of this — `asterism secrets add` stores what you give it, whitespace and all, because padding there can be part of the credential and it is yours to decide.
 

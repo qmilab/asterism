@@ -491,10 +491,16 @@ test("leaving a queue review is not a decision — the rest of the pile survives
     asked++;
     return { kind: "quit" };
   };
-  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["reflect", "personal", "--review"], h.io);
   expect(asked).toBe(1); // it stopped rather than walking the rest
-  expect(out).toContain("stopped");
-  expect(out).toContain("Done — 0 saved, 0 rejected");
+  expect(h.err.join("\n")).toContain("stopped");
+  // The RESULT line says the review was abandoned, and how much is still waiting — on
+  // STDOUT, which is the only stream a redirect keeps. Under `reflect … --review >
+  // out.txt` — the redirect this release exists to make safe — `Done — 0 saved, 0
+  // rejected.` alone was indistinguishable from a review that genuinely settled nothing.
+  expect(h.out.join("\n")).toContain("Done — 0 saved, 0 rejected. Stopped early — 3 left for next time.");
 
   const still = await capture(["memory", "inspect", "personal"], h.io);
   expect(still).toContain("fact one");
@@ -533,7 +539,9 @@ test("leaving a grant review stops it, rather than declining the rest one at a t
   await runCli(["trust", "cleaner", "--review"], h.io);
   expect(asked).toBe(1); // asked once, then stopped
   expect(h.err.join("\n")).toContain("stopped");
-  expect(h.out.join("\n")).toContain("Done — 0 granted, 0 left gated.");
+  expect(h.out.join("\n")).toContain(
+    "Done — 0 granted, 0 left gated. Stopped early — 2 left for next time.",
+  );
   // Neither capability was granted, and both are still proposed next time.
   expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("No capabilities have earned");
   h.io.reviewGrant = () => false;
@@ -568,6 +576,31 @@ test("what a reviewer is deciding ABOUT is written where the question is asked",
   expect(result).not.toContain("fs.delete");
 });
 
+test("quitting a transition walk leaves the rest, and the result line says so", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  await runCli(["objective", "add", "personal", "tidy the notes folder"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  let asked = 0;
+  h.io.reviewTransition = (): TransitionDecision => {
+    asked++;
+    return "quit";
+  };
+
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["reflect", "personal", "--review"], h.io);
+  expect(asked).toBe(1);
+  expect(h.err.join("\n")).toContain("stopped");
+  // Every advisory this walk would have asked about, named on the result line — the only
+  // stream a redirect keeps.
+  expect(h.out.join("\n")).toContain("Done — 0 applied, 0 skipped. Stopped early — 2 left for next time.");
+  // Neither objective was retired.
+  const listed = await capture(["objective", "list", "personal"], h.io);
+  expect(listed).not.toContain("· done");
+});
+
 test("…and for an objective transition, which is the third review that asks", async () => {
   // No reviewer flagged this one; the category did. `Apply this change?` was on stderr
   // while the objective it names, and the confidence behind the suggestion, were on
@@ -586,6 +619,8 @@ test("…and for an objective transition, which is the third review that asks", 
   expect(asked).toContain("looks done");
   expect(asked).toContain("These are suggestions");
   expect(h.out.join("\n")).toContain("Done — 0 applied, 1 skipped.");
+  // Worked to the end, so nothing is reported as left.
+  expect(h.out.join("\n")).not.toContain("Stopped early");
   expect(h.out.join("\n")).not.toContain("finish the blog migration");
 });
 
@@ -1554,6 +1589,8 @@ test("reflect saves nothing without an explicit accept (the safe default)", asyn
   h.io.review = () => ({ kind: "reject" });
   const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("0 saved");
+  // Worked to the end, so the result line must not claim it was abandoned.
+  expect(out).not.toContain("Stopped early");
   expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
 
   // With NOBODY to decide, it does not reject on their behalf and report it — it says so

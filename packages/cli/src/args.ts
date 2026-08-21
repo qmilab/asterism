@@ -140,7 +140,6 @@ export function undeclaredOptions(parsed: ParsedArgs, allowed: readonly string[]
   ];
 }
 
-/** A flag's value when it was given as a string, else undefined. */
 /**
  * Whether an option CARRIES NOTHING — given with no value at all (which the parser reads
  * as boolean `true`), or given one that is only whitespace.
@@ -159,6 +158,7 @@ export function carriesNothing(value: string | true | undefined): boolean {
   return value === true || (typeof value === "string" && value.trim().length === 0);
 }
 
+/** A flag's value when it was given as a string, else undefined. */
 export function stringFlag(value: string | true | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
 }

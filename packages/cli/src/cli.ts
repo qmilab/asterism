@@ -457,9 +457,14 @@ export interface CliIO {
   /**
    * Ratify a proposed standing grant during `trust <agent> --review` — return true
    * to grant the capability an auto-approve standing, false to leave it gated, or
-   * `"quit"` to stop the walk without deciding this one. Absent ⇒ reject every proposal,
-   * so nothing is granted without an explicit yes (the same safe default as
-   * `confirm`/`review`; earning autonomy is itself a reviewable act).
+   * `"quit"` to stop the walk without deciding this one.
+   *
+   * ABSENT ⇒ the review does not run: the command names how many capabilities are
+   * waiting and stops, walking nothing and declining nothing. (It used to walk every
+   * candidate and report `Done — 0 granted, N left gated`, which reads as a human
+   * having declined them.) Nothing is granted without an explicit yes either way —
+   * earning autonomy is itself a reviewable act — and a candidate that has earned one
+   * is re-proposed on the next review.
    */
   reviewGrant?: (item: StandingReviewItem) => GrantDecision | Promise<GrantDecision>;
   /** Open the kernel store at a path. Absent ⇒ the real local SQLite store. */
@@ -1085,6 +1090,7 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
 
     let granted = 0;
     let declined = 0;
+    let left = 0;
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i]!;
       io.err("");
@@ -1094,6 +1100,7 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
       const accept = await review({ index: i + 1, total: candidates.length, capability: c.capability, basis: c.basis });
       if (accept === "quit") {
         io.err("  · stopped — the rest are left as they were");
+        left = candidates.length - i;
         break;
       }
       if (!accept) {
@@ -1106,7 +1113,10 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
       io.err("  ✓ granted — acts without pausing from now on");
     }
 
-    io.out(`Done — ${granted} granted, ${declined} left gated.`);
+    io.out(
+      `Done — ${granted} granted, ${declined} left gated.` +
+        `${left > 0 ? ` Stopped early — ${left} left for next time.` : ""}`,
+    );
     return 0;
   });
 }
@@ -4049,6 +4059,8 @@ interface ReviewCounts {
    * has to mean everything, not everything in this section (#172).
    */
   quit: boolean;
+  /** How many were left undecided by that departure — the one in hand plus the rest. */
+  left: number;
 }
 
 /**
@@ -4109,6 +4121,7 @@ async function driveReviewLoop(
     errored: 0,
     stale: 0,
     quit: false,
+    left: 0,
   };
   // Record a rejection, accounting a concurrent settle as skipped rather than rejected.
   const recordReject = (i: number, emptyEdit: boolean): void => {
@@ -4152,6 +4165,7 @@ async function driveReviewLoop(
     if (decision.kind === "quit") {
       io.err("  · stopped — the rest are left as they were");
       counts.quit = true;
+      counts.left = total - i;
       break;
     }
     if (decision.kind === "reject") {
@@ -4211,7 +4225,13 @@ function printReviewSummary(io: CliIO, c: ReviewCounts): void {
     `Done — ${c.accepted} saved, ${c.rejected} rejected` +
       `${c.blocked > 0 ? `, ${c.blocked} blocked` : ""}` +
       `${c.errored > 0 ? `, ${c.errored} errored` : ""}` +
-      `${c.stale > 0 ? `, ${c.stale} already reviewed elsewhere` : ""}.`,
+      `${c.stale > 0 ? `, ${c.stale} already reviewed elsewhere` : ""}.` +
+      // The result line has to say the review was ABANDONED. It is the only thing on
+      // stdout, so under `reflect writer --review > out.txt` — the exact redirect this
+      // release exists to make safe — `Done — 0 saved, 0 rejected.` was indistinguishable
+      // from a review that genuinely settled nothing, while four proposals sat waiting.
+      // "A departure is not a decision" has to hold on the line that reports the outcome.
+      `${c.quit ? ` Stopped early — ${c.left} left for next time.` : ""}`,
   );
 }
 
@@ -4572,6 +4592,7 @@ async function reviewObjectiveTransitions(
 
   let applied = 0;
   let skipped = 0;
+  let left = 0;
   for (let i = 0; i < advisories.length; i++) {
     const a = advisories[i]!;
     io.err("");
@@ -4589,6 +4610,7 @@ async function reviewObjectiveTransitions(
     });
     if (decision === "quit") {
       io.err("  · stopped");
+      left = advisories.length - i;
       break;
     }
     if (decision !== "apply") {
@@ -4610,7 +4632,10 @@ async function reviewObjectiveTransitions(
     }
   }
   // Only the count is the result.
-  io.out(`Done — ${applied} applied, ${skipped} skipped.`);
+  io.out(
+    `Done — ${applied} applied, ${skipped} skipped.` +
+      `${left > 0 ? ` Stopped early — ${left} left for next time.` : ""}`,
+  );
   return 0;
 }
 
