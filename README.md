@@ -89,7 +89,7 @@ See [Run in a container](./docs/container.md) for the full setup.
 | Capability | What it gives you |
 |---|---|
 | **Distinct agents & souls** | Many agents from one install, each its own identity with its own character. → [Concepts](./docs/concepts.md) |
-| **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included, unless you have allowed that capability. → [Trust](./docs/concepts.md#trust-levels) |
+| **Dialable trust + a destructive-action gate** | `propose` hands you a plan; `notify` and `autonomous` act, and stop for your confirmation before anything irreversible, `autonomous` included — unless you have allowed that capability. → [Trust](./docs/concepts.md#trust-levels) |
 | **Earned trust contracts** | An agent can *earn* the right to take one capability without pausing — always proposed for your approval, and lost the moment something goes wrong. → [Earned autonomy](./docs/concepts.md#earned-autonomy) |
 | **Agents that work together** | Open a one-way channel between two agents and choose what it's for — a result, the files it made, what it knows, or standing context both share. Only that crosses; memory, secrets and tools never do. → [Working together](./docs/collaboration.md) |
 | **Choose which tools an agent has** | Narrow a single agent to less than the standard toolkit, separately from how much it may do with it. → [`capabilities`](./docs/commands.md#capabilities) |

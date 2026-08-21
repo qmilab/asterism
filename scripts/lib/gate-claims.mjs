@@ -172,12 +172,37 @@ export function maskEvidenceBlocks(text) {
  * `(\s+\w+)?` is what lets `at every TRUST level` and `for all AUTONOMY levels` match; a
  * version allowing only the word `trust` missed the other, and it was false the same way.
  */
-const LEVEL_WIDE =
+const LEVEL_WIDE_PHRASE =
   /\b(at|for) (every|any|all)(\s+\w+)? levels?\b|\bgate holds\b|whatever (the agent'?s?|its) (trust|autonomy) level|regardless of (the agent'?s? |its )?(trust|autonomy)|independent of (the )?(trust|autonomy)/i;
+
+/**
+ * The three levels, named here and checked against the kernel's own `TRUST_LEVELS` by
+ * `check:docs --self-test`. Hard-coded rather than imported because this module is pure —
+ * `help.test.ts` uses it with no build — so the self-test is what stops the list drifting.
+ */
+export const TRUST_LEVEL_NAMES = ["propose", "notify", "autonomous"];
+
+/**
+ * A claim is level-wide if it says so, OR if it simply LISTS all three levels and then
+ * promises a pause.
+ *
+ * `README.md`'s feature table did the second: "`propose` / `notify` / `autonomous` — with a
+ * hard stop for your confirmation before anything irreversible". Naming the levels puts all
+ * three in the frame just as firmly as the words "at every level" — and at `propose` there
+ * is no stop for your confirmation, there is a plan. A rule that reads only the phrasings
+ * is a rule about phrasing, which is the correction this file already made once.
+ *
+ * A sentence that enumerates the levels in order to DISTINGUISH them still passes, because
+ * saying what `propose` does instead is exactly what {@link PROPOSE_QUALIFIED} looks for —
+ * as the binary's own `AUTONOMY_HELP` does, naming all three in one paragraph.
+ */
+function levelWide(claim) {
+  if (LEVEL_WIDE_PHRASE.test(claim)) return true;
+  return TRUST_LEVEL_NAMES.every((name) => new RegExp(`\\b${name}\\b`, "i").test(claim));
+}
 
 const UNIVERSAL = [
   /\beven (an?|the) (autonomous|notify)\b/i,
-  LEVEL_WIDE,
   /\bautonomous included\b/i,
   /never happens without you/i,
   /\balways (pauses|stops|asks)\b/i,
@@ -224,6 +249,10 @@ const DESTRUCTIVE = /destructive|irreversible|\bdelet\w*|force-push/i;
  *   - `by default` counts only where it qualifies the pause itself (`pauses every
  *     destructive action by default`). Unanchored, it matched "By default the trace records
  *     references only" three pages away and excused four bare guarantees.
+ *   - So does saying the exception CANNOT apply. "this one can never earn a standing
+ *     grant" is the most complete way to address it there is, and a pattern that only knew
+ *     `earn the standing` reported the one capability the kernel refuses to auto-approve —
+ *     the delegated call — as though it had forgotten the exception it exists to deny.
  *   - `you have NOT allowed` counts. The landing page states the exception by its
  *     contrapositive — "neither acts unasked on a capability you have not allowed it" —
  *     and a pattern demanding the positive spelling called the site's front page broken.
@@ -231,10 +260,22 @@ const DESTRUCTIVE = /destructive|irreversible|\bdelet\w*|force-push/i;
  *     something, while a red gets a correct sentence "fixed" until the checker agrees.
  */
 const EXCEPTION =
-  /unless[^.]{0,140}(allow|grant|earn)|allow-listed|specifically allowed|you have (not )?allowed|(pauses?|stops?|asks?)[^.]{0,70}\bby default\b|\bearn(s|ed)? the (standing|right)/i;
+  /unless[^.]{0,140}(allow|grant|earn)|allow-listed|specifically allowed|you have (not )?allowed|(pauses?|stops?|asks?)[^.]{0,70}\bby default\b|\bearn(s|ed)? (a|the) (standing|right)|\bearn its way out/i;
 
-/** `propose` named alongside the claim, which is what makes an every-level phrasing honest. */
-const PROPOSE_QUALIFIED = /\bpropose\b[^.]{0,120}(never|not|no)\b|(never|not|no)\b[^.]{0,120}\bpropose\b/i;
+/**
+ * What `propose` does INSTEAD, named alongside the claim — which is what makes a level-wide
+ * phrasing honest.
+ *
+ * Both spellings count, because the copy uses both: the negative ("a `propose` agent does
+ * not take one at all") and the positive ("`propose` hands you a plan"). A version wanting
+ * only a negation reported `README.md`'s own quickstart note, which says exactly what
+ * `propose` does and says it the other way round.
+ */
+const PROPOSE_ALTERNATIVE = /\b(never|not|no|plans?|diffs?|withholds?|withheld)\b/;
+const PROPOSE_QUALIFIED = new RegExp(
+  `\\bpropose\\b[^.]{0,120}${PROPOSE_ALTERNATIVE.source}|${PROPOSE_ALTERNATIVE.source}[^.]{0,120}\\bpropose\\b`,
+  "i",
+);
 
 /**
  * How far from the claim the exception may sit.
@@ -268,7 +309,7 @@ export function gateOverclaims(text) {
   for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
     const claim = plainClaim(piece);
     if (!claim) continue;
-    if (!UNIVERSAL.some((re) => re.test(claim))) continue;
+    if (!UNIVERSAL.some((re) => re.test(claim)) && !levelWide(claim)) continue;
     if (!PAUSE.test(claim)) continue;
 
     const window = plainClaim(
@@ -284,7 +325,7 @@ export function gateOverclaims(text) {
     // A pause asserted across the LEVELS has to say what `propose` does instead, because
     // at `propose` there is no pause to wait for. It is the pause VERB that makes the
     // claim false there — the same quantifier over "never happens without you" is true.
-    if (LEVEL_WIDE.test(claim) && PAUSE_VERB.test(claim) && !PROPOSE_QUALIFIED.test(window)) {
+    if (levelWide(claim) && PAUSE_VERB.test(claim) && !PROPOSE_QUALIFIED.test(window)) {
       found.push({ line, rule: "every-level", sentence });
     }
     if (!EXCEPTION.test(window)) {

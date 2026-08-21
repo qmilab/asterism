@@ -63,7 +63,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
-import { gateOverclaims, GATE_RULE_ADVICE } from "./lib/gate-claims.mjs";
+import { gateOverclaims, GATE_RULE_ADVICE, TRUST_LEVEL_NAMES } from "./lib/gate-claims.mjs";
 import {
   ROOT,
   siteDir,
@@ -2266,13 +2266,45 @@ function report(total, tally, groups, coverageWork) {
       ["makes the same universal promise about something that is not the gate",
         "Every request needs an access token, at every level, and the server always asks for your confirmation of the fingerprint.",
         []],
+      // `earn its way out of asking` is the OTHER way this repo denies the exception, and
+      // it is the only one in range of the claim in `docs/commands.md`'s delegated-call
+      // bullet — the "can never earn a standing grant" sentence two lines down is outside
+      // the window. Dropping this spelling reports that bullet, which is the one capability
+      // the kernel refuses to auto-approve: a red demanding the opposite of the truth.
+      // Verbatim, because a paraphrase of it was inert — "always asks" is not a pause verb,
+      // so the fixture never fired and the mutation survived it either way.
+      ["denies the exception with `earn its way out`, the only spelling in range",
+        "- **No call happens without you, and it cannot earn its way out of asking.** At\n" +
+          "  `notify` and `autonomous` the run pauses and asks; a `propose` agent never calls at\n" +
+          "  all, it only tells you it would. Unlike every other destructive capability, this one\n" +
+          "  can never [earn](#earned-autonomy-per-capability-grants) a standing grant — sending\n" +
+          "  a credential somewhere is the one thing this product will not learn to do on its own.\n",
+        []],
+      // Codex R3, pinned. Naming all three levels and then promising a confirmation puts
+      // `propose` in the frame just as firmly as the words "at every level" — and there is
+      // no confirmation there, there is a plan. `README.md`'s feature table did exactly this.
+      ["lists all three levels and then promises a stop, saying nothing about `propose`",
+        "| **Dialable trust** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included, unless you have allowed that capability. |",
+        ["every-level"]],
+      // …and the two false reds that rule produced on its first run, both now controls.
+      // A POSITIVE statement of what `propose` does qualifies as well as a negative one:
+      // the quickstart note says what it does and says it the other way round.
+      ["names all three but says what `propose` does instead, positively",
+        "The autonomy you set governs the rest — `propose` hands you a plan, while `notify` and `autonomous` act on their own — but before anything **destructive**, even an `autonomous` agent **pauses for your confirmation**, unless you have allowed that capability for it.",
+        []],
+      // Saying the exception CANNOT apply is the most complete way to address it. This is
+      // the delegated call — the one destructive capability the kernel refuses to
+      // auto-approve — and a gate that reported it would be demanding the opposite of true.
+      ["names all three and says the exception can never apply",
+        "- **No call happens without you, and it cannot earn its way out of asking.** At\n  `notify` and `autonomous` the run pauses and asks; a `propose` agent never calls at\n  all, it only tells you it would. Unlike every other destructive capability, this one\n  can never earn a standing grant.\n",
+        []],
       // Codex R2, pinned. A qualifier in a NEIGHBOURING block is not a qualifier: each of
       // these is a real pair this repo shipped, where the bare guarantee sat in one table
       // row or list item and the thing excusing it sat in the next.
       ["is a table row whose exception is in the row BELOW it",
         "| **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included. |\n" +
           "| **Earned trust contracts** | An agent can *earn* the right to take one capability without pausing. |\n",
-        ["no-exception"]],
+        ["every-level", "no-exception"]],
       ["is a numbered claim whose `propose` half is in the claim ABOVE it",
         "3. A `propose` agent **returns a plan it never runs**; an `autonomous` agent\n   **acts**.\n" +
           "4. Even an `autonomous` agent **pauses for confirmation before a destructive\n   action** — the gate is independent of trust level, and only a capability you\n   have allowed that agent skips it.\n",
@@ -2481,6 +2513,24 @@ function report(total, tally, groups, coverageWork) {
     )[0];
     if (!longOne || !longOne.sentence.endsWith("...") || longOne.sentence.length > 240) {
       gateFailures.push(`  a ${longOne ? longOne.sentence.length : 0}-character finding was not truncated for the report`);
+    }
+
+    // The three level names the rule reads are hard-coded in a pure module, so the kernel
+    // is what says whether they are still the three. A fourth level added to `TRUST_LEVELS`
+    // would otherwise leave the enumeration rule quietly matching nothing.
+    // `main` is synchronous, and core's dist is ESM, so the kernel is asked in a child
+    // rather than imported here.
+    const declared = JSON.parse(
+      execFileSync(
+        process.execPath,
+        ["-e", `import(${JSON.stringify(CORE)}).then((m) => console.log(JSON.stringify(m.TRUST_LEVELS)))`],
+        { encoding: "utf8", cwd: ROOT },
+      ).trim(),
+    );
+    if (JSON.stringify([...declared].sort()) !== JSON.stringify([...TRUST_LEVEL_NAMES].sort())) {
+      gateFailures.push(
+        `  the gate rule reads levels ${JSON.stringify(TRUST_LEVEL_NAMES)} where the kernel declares ${JSON.stringify(declared)}`,
+      );
     }
 
     // The rule this one grew out of, asserted as a CAPABILITY rather than trusted: the

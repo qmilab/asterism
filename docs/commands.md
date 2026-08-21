@@ -610,8 +610,9 @@ response>` lands on stdout.)
 > `write_file`, `append_file`, `mkdir`, and `move` to change things and
 > `delete_file` to remove them — behind the trust gate. The read-only tools and
 > the write tools are ordinary read/write effects; `delete_file` is destructive,
-> so a `notify` or `autonomous` run stops and asks before it and a `propose` agent
-> never runs it at all, while `move` refuses to
+> so a `notify` or `autonomous` run stops and asks before it — unless you have allowed
+> that capability for the agent — and a `propose` agent never runs it at all, while
+> `move` refuses to
 > overwrite an existing destination (so it never silently destroys anything). Each is confined
 > to the agent's workspace (logical scoping, not an OS-enforced jail — see
 > [what isolation means today](./concepts.md#what-isolation-means-today)). The
