@@ -8,6 +8,10 @@ One agent for work, one per client, one for the side project — without a runti
 
 A *soul* is nothing exotic: a small persona file giving an agent its voice, values, and operating style.
 
+![The Asterism dashboard: a roster of three agents with their autonomy levels, and one autonomous agent paused for confirmation before a destructive action.](https://qmilab.com/asterism/docs/assets/img/dashboard.png)
+
+*Every agent and its autonomy in one view — including an autonomous one stopped before a destructive action.*
+
 ## Quickstart
 
 ```bash

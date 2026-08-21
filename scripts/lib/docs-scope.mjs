@@ -460,6 +460,50 @@ export function publishedLandingPages(workflowText) {
 }
 
 /**
+ * Every file the site serves that is NOT one of its pages — the images, the stylesheet,
+ * anything else living beside the markdown.
+ *
+ * mkdocs copies these out of `docs_dir` verbatim, and the workflow copies the landing
+ * directory into the artifact root the same way, so both are served at the path their name
+ * gives them. A link to one is as much a claim about this repo as a link to a page, and it
+ * goes stale the same way — but only a PAGE can be found by asking which markdown builds a
+ * URL, so without this an absolute link to a real screenshot is reported as naming nothing.
+ *
+ * `exclude_docs` is applied, because it removes media as readily as it removes pages.
+ *
+ * Two lists rather than one, because the two halves are served at different roots: the docs
+ * ones under `site_url`, the landing ones one level above it. The caller knows both
+ * prefixes; this only says which files exist.
+ */
+export function publishedAssets(published = isPublished) {
+  // Markdown is excluded because mkdocs RENDERS it rather than copying it: `concepts.md`
+  // is served at `concepts/`, and `…/docs/concepts.md` is a 404.
+  //
+  // `published` is a parameter, and the only one, because it is the half no fixture built
+  // on this repo can otherwise reach: nothing `exclude_docs` removes here is a media file,
+  // so a reader that dropped the exclusion entirely would give the same answer and nothing
+  // could tell. `docs_dir` needs no such treatment — it is compared against mkdocs itself
+  // by `check:mkdocs-parity`, and a parameter nothing passes is a claim, not a check.
+  return trackedFiles(`${siteDir()}/*`, "site files").filter(
+    (rel) => !rel.endsWith(".md") && published(rel),
+  );
+}
+
+/** Every tracked file under the directory the workflow serves at the site's root. */
+export function landingFiles(workflowText) {
+  const rel = join(".github", "workflows", "docs.yml");
+  let text = workflowText;
+  if (text === undefined) {
+    try {
+      text = readFileSync(join(ROOT, rel), "utf8");
+    } catch (err) {
+      refuse(`The site's root pages are published by ${rel}, which could not be read (${err.message}).`);
+    }
+  }
+  return trackedFiles(`${readLandingDir(text, rel)}/*`, "site root files");
+}
+
+/**
  * A workflow's text → the directory it copies into the Pages artifact root.
  *
  * `cp -r landing/. _site/` — the artifact root is where GitHub Pages serves `/asterism/`

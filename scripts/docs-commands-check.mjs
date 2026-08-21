@@ -75,6 +75,8 @@ import {
   publishedPages,
   publishedPredicate,
   publishedPackages,
+  publishedAssets,
+  landingFiles,
   publishedPackagesWithoutReadme,
   readSiteConfig,
   siteUrlParts,
@@ -1802,6 +1804,32 @@ function report(total, tally, groups, coverageWork) {
     if (readSiteConfig("site_url: https://example.test/a/b/\n").siteUrl !== "https://example.test/a/b/") {
       scopeFailures.push("  a config declaring `site_url` was not read");
     }
+    // The two readers behind the asset half. Both are consulted, not merely available: a
+    // resolver reading either wrong reports a link to a real file as naming nothing, which
+    // is the finding this half exists to fix, arriving from the other side.
+    const assets = publishedAssets();
+    if (assets.length === 0) {
+      scopeFailures.push("  git tracks no non-markdown file under `docs_dir`, so the asset rule is checked against nothing");
+    }
+    if (assets.some((rel) => rel.endsWith(".md"))) {
+      scopeFailures.push("  publishedAssets() returned a page; mkdocs renders those, it does not copy them");
+    }
+    if (!trackedMarkdown().some((rel) => rel.startsWith(`${siteDir()}/`))) {
+      scopeFailures.push("  no markdown lives under `docs_dir`, so excluding it from the assets proves nothing");
+    }
+    // …and `exclude_docs` is CONSULTED. Nothing this repo excludes is a media file, so the
+    // predicate is handed in and one real file withheld — otherwise a reader that dropped
+    // the exclusion entirely would give the same answer and nothing could tell.
+    const withheld = publishedAssets((rel) => isPublished(rel) && rel !== assets[0]);
+    if (withheld.includes(assets[0]) || withheld.length !== assets.length - 1) {
+      scopeFailures.push(`  publishedAssets() ignored the predicate it was handed (${withheld.length} of ${assets.length})`);
+    }
+    const landingRootHere = readLandingDir(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8"));
+    const landing = landingFiles();
+    if (landing.length === 0 || !landing.every((rel) => rel.startsWith(`${landingRootHere}/`))) {
+      scopeFailures.push(`  landingFiles() does not list files under '${landingRootHere}/': ${JSON.stringify(landing)}`);
+    }
+
     // `use_directory_urls` decides which URL SHAPE names a page, and this repo leaves it at
     // mkdocs' default — so a reader that answers `true` regardless satisfies every link
     // assertion below while being a constant. Both directions, plus the default.
@@ -2255,6 +2283,8 @@ function report(total, tally, groups, coverageWork) {
       ['<a href="/asterism/#quickstart">a</a><h2 id=quickstart>q</h2>', "a self-link to an UNQUOTED id", 0, 0],
       ['<a href="/asterism/#quickstart">a</a><div data-id="quickstart">q</div>', "a `data-id`, which is not an id", 1, 0],
       ['<a href="/asterism/docs/nosuchpage/">a</a>', "a page nothing builds", 1, 0],
+      ['<a href="/asterism/docs/assets/img/dashboard.png">a</a>', "a file the site serves", 0, 0, 1],
+      ['<a href="/asterism/docs/assets/img/nosuch.png">a</a>', "a file it does not", 1, 0, 1],
       ['<a href="/asterism/docs/walkthrough/#claim-1-separate-memory">a</a>', "a heading that exists", 0, 0],
       ['<a href="/asterism/docs/walkthrough/#no-such-heading">a</a>', "a heading that does not", 1, 0],
       ['<a href="/manifesto">a</a>', "a page on the org site", 0, 1],
@@ -2397,6 +2427,12 @@ function report(total, tally, groups, coverageWork) {
       "docs/concepts.md": "# Concepts\n\n## Claim 1 \u2014 separate memory\n",
       "site/index.html": '<h2 id="quickstart">q</h2><h2 id="caf\u00e9">c</h2>',
     };
+    // Keyed by the path a URL asks for, at the two different roots the two halves are
+    // served from: the docs one under `site_url`, the landing one above it.
+    const siteAssets = new Map([
+      ["docs/img/shot.png", "docs/img/shot.png"],
+      ["logo.png", "site/logo.png"],
+    ]);
     const readFixture = (rel) => {
       if (!(rel in siteBodies)) throw new Error(`the fixture has no ${rel}`);
       return siteBodies[rel];
@@ -2412,6 +2448,13 @@ function report(total, tally, groups, coverageWork) {
       ["[a](https://example.test/proj/docs/concepts/#claim-1--separate-memory)", "the same heading under GitHub's rule, which does not serve this URL", 1, 0, 1],
       ["[a](https://example.test/proj/docs/concepts/#no-such-heading)", "a heading it does not", 1, 0, 1],
       ["[a](https://example.test/proj/docs/nosuchpage/)", "a page nothing builds", 1, 0, 1],
+      // A file the site serves is not a page and cannot be found by asking which markdown
+      // builds a URL — before this, an absolute link to a real screenshot was reported
+      // BROKEN, which is a red over a live link and the worse of the two failures.
+      ["![a](https://example.test/proj/docs/img/shot.png)", "an image the site serves", 0, 0, 1],
+      ["[a](https://example.test/proj/logo.png)", "a file served at the site's ROOT, above the docs", 0, 0, 1],
+      ["![a](https://example.test/proj/docs/img/nosuch.png)", "an image it does not serve", 1, 0, 1],
+      ["[a](https://example.test/proj/docs/img/shot.png#page=2)", "a fragment into a file, which nothing here can adjudicate", 0, 1, 1],
       // Inside the site, ABOVE the docs it serves. Without the prefix test this resolves to
       // `docs/concepts.md` — the page is real, the URL is not, and the checker says fine.
       ["[a](https://example.test/proj/concepts/)", "a real page named without the docs segment", 1, 0, 1],
@@ -2455,6 +2498,9 @@ function report(total, tally, groups, coverageWork) {
         siteLanding,
         "site",
         readFixture,
+        "docs",
+        true,
+        siteAssets,
       );
       if (got.checked !== wantChecked) {
         siteFailures.push(`  ${why}: counted ${got.checked} links checked, wanted ${wantChecked}`);
@@ -2478,6 +2524,8 @@ function report(total, tally, groups, coverageWork) {
       "site",
       () => "# x\n",
       "content",
+      undefined,
+      new Map(),
     );
     if (renamed.broken.length !== 0 || renamed.checked !== 2) {
       siteFailures.push(
@@ -2497,6 +2545,8 @@ function report(total, tally, groups, coverageWork) {
       "site",
       () => "# x\n",
       "content",
+      undefined,
+      new Map(),
     );
     if (outside.broken.length !== 1) {
       siteFailures.push(
@@ -2531,6 +2581,7 @@ function report(total, tally, groups, coverageWork) {
         () => "# x\n",
         "docs",
         false,
+        siteAssets,
       );
       if (flat.broken.length !== wantBroken || flat.checked !== 1) {
         siteFailures.push(
@@ -2554,6 +2605,7 @@ function report(total, tally, groups, coverageWork) {
         () => "# x\n",
         "docs",
         true,
+        siteAssets,
       );
       if (dirs.broken.length !== wantBroken || dirs.checked !== 1) {
         siteFailures.push(
@@ -2561,6 +2613,30 @@ function report(total, tally, groups, coverageWork) {
             ` ${dirs.checked} checked, wanted ${wantBroken} / 1 — ${JSON.stringify(dirs.broken)}`,
         );
       }
+    }
+
+    // `servedAssets` maps its two halves at DIFFERENT roots — the docs one under
+    // `site_url`, the landing one above it — and mapping either at the other is silent: the
+    // link just reports as naming nothing, which is where this whole finding came from.
+    const mapped = servedAssets(
+      { docsPrefix: "/proj/pages/", siteRoot: "/proj/" },
+      "content",
+      ["content/img/x.png", "content/deep/theme.css"],
+      "site",
+      ["site/logo.png", "site/index.html"],
+    );
+    for (const [url, want] of [
+      ["pages/img/x.png", "content/img/x.png"],
+      ["pages/deep/theme.css", "content/deep/theme.css"],
+      ["logo.png", "site/logo.png"],
+      ["index.html", "site/index.html"],
+    ]) {
+      if (mapped.get(url) !== want) {
+        siteFailures.push(`  servedAssets maps '${url}' to '${mapped.get(url)}', not '${want}'`);
+      }
+    }
+    if (mapped.size !== 4) {
+      siteFailures.push(`  servedAssets built ${mapped.size} entries from 4 files`);
     }
 
     // Both halves of `site_url` are DERIVED, and each fails SILENTLY on its own: a wrong
@@ -3357,6 +3433,36 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
  * a directory copied verbatim rather than rendered.
  */
 /**
+ * Every path under the site's root that serves a FILE rather than a page — the screenshots,
+ * the stylesheet, the logo.
+ *
+ * A link into this site can name one of these, and until it could the answer was "no
+ * published page builds that URL": an absolute link to a screenshot the site really serves
+ * was reported BROKEN. That is the failure this file's header calls the worse one, because
+ * a green over a dead link merely misses something, while a red over a live one gets the
+ * live one "fixed". It is also the shape most likely to arrive next — the npm page can only
+ * write an image as a whole URL, for exactly the reason its text links are whole URLs.
+ *
+ * Both halves are DERIVED and served at different roots: mkdocs copies `docs_dir` under
+ * `site_url`, the workflow copies the landing directory into the artifact root one level
+ * above it. Keyed by the path a URL asks for, so a lookup is an exact mapping rather than
+ * a name match.
+ */
+function servedAssets(
+  { docsPrefix, siteRoot } = landingPrefixes(),
+  dir = siteDir(),
+  docsAssets = publishedAssets(),
+  landingRoot = readLandingDir(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8")),
+  landingAssets = landingFiles(),
+) {
+  const served = new Map();
+  const under = docsPrefix.slice(siteRoot.length);
+  for (const rel of docsAssets) served.set(`${under}${rel.slice(`${dir}/`.length)}`, rel);
+  for (const rel of landingAssets) served.set(rel.slice(`${landingRoot}/`.length), rel);
+  return served;
+}
+
+/**
  * A path under the site's root → the published markdown page mkdocs builds into it, or
  * undefined.
  *
@@ -3483,6 +3589,7 @@ function checkLandingLinks(
   // the same failure the commit before this one fixed, re-introduced one level up, with the
   // authoritative answer already in hand.
   landingRoot = readLandingDir(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8")),
+  assets = servedAssets({ docsPrefix, siteRoot }, siteDir(), undefined, landingRoot),
 ) {
   const broken = [];
   const offSite = [];
@@ -3550,7 +3657,12 @@ function checkLandingLinks(
       checked++;
       const target = publishedPageFor(pathPart, published, { docsPrefix, siteRoot });
       if (!target) {
-        broken.push(`${at}  ${href} — no published page builds that URL`);
+        const asset = assets.get(pathPart);
+        if (asset) {
+          if (fragment) offSite.push(`${at}  ${href} — a fragment into ${asset}, which is not a page`);
+          continue;
+        }
+        broken.push(`${at}  ${href} — the site serves no page or file at that URL`);
         continue;
       }
       if (fragment) {
@@ -3605,6 +3717,7 @@ function checkSiteLinks(
   readPage = (rel) => readFileSync(join(ROOT, rel), "utf8"),
   dir = siteDir(),
   directoryUrls = usesDirectoryUrls(),
+  assets = servedAssets({ docsPrefix, siteRoot: docsPrefix.replace(/[^/]+\/$/, "") }, dir),
 ) {
   const siteRoot = docsPrefix.replace(/[^/]+\/$/, "");
   const broken = [];
@@ -3649,7 +3762,16 @@ function checkSiteLinks(
       }
       const page = publishedPageFor(pathPart, published, { docsPrefix, siteRoot, dir, directoryUrls });
       if (!page) {
-        broken.push(`${at}  ${target} — no published page builds that URL`);
+        const asset = assets.get(pathPart);
+        if (asset) {
+          // The file resolving IS the claim. A `#fragment` into one is a viewer's business
+          // — `#page=2` in a PDF — and nothing here can adjudicate it, so it is named as
+          // undecidable rather than passed over, the same treatment the markdown pass gives
+          // a fragment into a file it cannot read headings out of.
+          if (fragment) offSite.push(`${at}  ${target} — a fragment into ${asset}, which is not a page`);
+          continue;
+        }
+        broken.push(`${at}  ${target} — the site serves no page or file at that URL`);
         continue;
       }
       if (fragment && !anchorsOf(readPage(page), MKDOCS_RULE).has(fragment)) {
