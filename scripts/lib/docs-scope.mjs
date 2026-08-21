@@ -489,7 +489,13 @@ export function publishedAssets(published = isPublished) {
   );
 }
 
-/** Every tracked file under the directory the workflow serves at the site's root. */
+/**
+ * Every tracked file under the directory the workflow serves at the site's root.
+ *
+ * What the workflow DELETES after copying is not applied here — a removal is expressed in
+ * artifact paths and can name either half of the site, so it is applied where both halves
+ * are already keyed that way. See `readLandingRemovals`.
+ */
 export function landingFiles(workflowText) {
   const rel = join(".github", "workflows", "docs.yml");
   let text = workflowText;
@@ -501,6 +507,43 @@ export function landingFiles(workflowText) {
     }
   }
   return trackedFiles(`${readLandingDir(text, rel)}/*`, "site root files");
+}
+
+/**
+ * A workflow's text → the paths it DELETES from the Pages artifact after assembling it,
+ * relative to the artifact root.
+ *
+ * Copying a directory in is not the last word on what the site serves: this repo's workflow
+ * copies `landing/.` into the root and then removes `_site/README.md`, because that file is
+ * a maintainer note rather than a published asset. A reader that stops at the copy calls
+ * `/asterism/README.md` a file the site serves — a FALSE GREEN over a URL the deployed site
+ * answers with a 404, which is the one failure the asset lookup exists to avoid producing.
+ *
+ * Derived from the line that does the deleting, for the same reason `readLandingDir` is
+ * derived from the line that does the copying.
+ *
+ * Only `rm` lines that name something in the artifact are considered — a workflow is free
+ * to delete a scratch file, and that is not a statement about the site. One that mixes the
+ * two in a single command is REFUSED rather than half-read.
+ */
+export function readLandingRemovals(workflowText, rel = ".github/workflows/docs.yml") {
+  const removed = [];
+  for (const line of workflowText.split("\n")) {
+    const tokens = line.trim().split(/\s+/);
+    if (tokens[0] !== "rm") continue;
+    const operands = tokens.slice(1).filter((tok) => !tok.startsWith("-"));
+    const inArtifact = operands.filter((tok) => tok === "_site" || tok.startsWith("_site/"));
+    if (inArtifact.length === 0) continue;
+    if (inArtifact.length !== operands.length) {
+      refuse(
+        `${rel} deletes both artifact and non-artifact paths in one command (\`${line.trim()}\`);\n` +
+          `this reader cannot say which of them the site would have served.\n` +
+          `Teach scripts/lib/docs-scope.mjs before writing one.`,
+      );
+    }
+    for (const tok of inArtifact) removed.push(tok.replace(/^_site\/?/, "").replace(/\/+$/, ""));
+  }
+  return removed;
 }
 
 /**

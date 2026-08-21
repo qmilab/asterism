@@ -77,6 +77,7 @@ import {
   publishedPackages,
   publishedAssets,
   landingFiles,
+  readLandingRemovals,
   publishedPackagesWithoutReadme,
   readSiteConfig,
   siteUrlParts,
@@ -2020,6 +2021,41 @@ function report(total, tally, groups, coverageWork) {
       }
       if (!refused) scopeFailures.push(`  a workflow with ${why} was accepted instead of refused`);
     }
+
+    // Assembling the artifact has a third step — what the workflow DELETES from it — and
+    // reading only the copy makes a removed file read as one the site serves.
+    for (const [text, want, why] of [
+      ["      - run: |\n          cp -r landing/. _site/\n          rm -f _site/README.md\n", ["README.md"], "the shape this repo's workflow uses"],
+      ["          rm -rf _site/drafts/\n", ["drafts"], "a directory, with its trailing slash"],
+      ["          rm -f _site/a.html _site/b.html\n", ["a.html", "b.html"], "two operands in one command"],
+      ["          rm -rf node_modules\n", [], "an `rm` that does not touch the artifact"],
+      ["      - run: mkdocs build --strict\n", [], "a workflow that deletes nothing"],
+    ]) {
+      const got = readLandingRemovals(text);
+      if (JSON.stringify(got) !== JSON.stringify(want)) {
+        scopeFailures.push(`  ${why}: readLandingRemovals gave ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`);
+      }
+    }
+    {
+      let refused = false;
+      try {
+        execFileSync(
+          process.execPath,
+          ["-e", `import(${JSON.stringify(join(ROOT, "scripts/lib/docs-scope.mjs"))}).then((m) => m.readLandingRemovals(process.argv[1]))`, "          rm -f _site/a.html /tmp/scratch\n"],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd: ROOT },
+        );
+      } catch (err) {
+        refused = err.status === 2;
+      }
+      if (!refused) {
+        scopeFailures.push("  an `rm` mixing artifact and non-artifact paths was accepted instead of refused");
+      }
+    }
+    // …and the real workflow must still name one, or every assertion above is about a rule
+    // this repo does not exercise.
+    if (readLandingRemovals(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8")).length === 0) {
+      scopeFailures.push("  the real workflow deletes nothing from the artifact, so the removal rule is checked against nothing");
+    }
     // …and the control: the shape this repo actually uses is READ, not merely tolerated. A
     // parser that returned "landing" regardless would satisfy every check below.
     if (readLandingDir("      - run: |\n          cp -r pages/. _site/\n") !== "pages") {
@@ -2637,6 +2673,27 @@ function report(total, tally, groups, coverageWork) {
     }
     if (mapped.size !== 4) {
       siteFailures.push(`  servedAssets built ${mapped.size} entries from 4 files`);
+    }
+    // …and what the workflow removes comes back OUT, a removed directory taking everything
+    // beneath it. Without this a maintainer note the workflow drops by name reads as a file
+    // the site serves — a false green over a 404, which is what this lookup exists to stop.
+    const afterRemoval = servedAssets(
+      { docsPrefix: "/proj/pages/", siteRoot: "/proj/" },
+      "content",
+      ["content/img/x.png", "content/deep/theme.css"],
+      "site",
+      // `site/draftsX.html` is the control for the boundary: a removed DIRECTORY takes what
+      // is beneath it and nothing that merely starts with its name. Dropping it would be a
+      // live file quietly missing from the map, which surfaces as a red over a link that
+      // works — the same prefix-without-a-separator mistake the `docs_dir` boundary made.
+      ["site/logo.png", "site/README.md", "site/drafts/note.html", "site/draftsX.html"],
+      ["README.md", "drafts"],
+    );
+    for (const gone of ["README.md", "drafts/note.html"]) {
+      if (afterRemoval.has(gone)) siteFailures.push(`  servedAssets serves '${gone}', which the workflow deletes`);
+    }
+    for (const kept of ["logo.png", "pages/img/x.png", "draftsX.html"]) {
+      if (!afterRemoval.has(kept)) siteFailures.push(`  servedAssets dropped '${kept}', which nothing deletes`);
     }
 
     // Both halves of `site_url` are DERIVED, and each fails SILENTLY on its own: a wrong
@@ -3447,6 +3504,13 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
  * `site_url`, the workflow copies the landing directory into the artifact root one level
  * above it. Keyed by the path a URL asks for, so a lookup is an exact mapping rather than
  * a name match.
+ *
+ * …and then what the workflow DELETES is taken back out. Assembling the artifact has three
+ * steps, not two, and reading only the first two makes `/asterism/README.md` — a maintainer
+ * note the workflow removes by name — read as a file the site serves. A false green over a
+ * 404 is precisely what this lookup was added to stop producing, arriving one step later.
+ * Applied HERE rather than in either half's reader because a removal is written in artifact
+ * paths, which is what these keys already are, and can name either half.
  */
 function servedAssets(
   { docsPrefix, siteRoot } = landingPrefixes(),
@@ -3454,11 +3518,18 @@ function servedAssets(
   docsAssets = publishedAssets(),
   landingRoot = readLandingDir(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8")),
   landingAssets = landingFiles(),
+  removed = readLandingRemovals(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8")),
 ) {
   const served = new Map();
   const under = docsPrefix.slice(siteRoot.length);
   for (const rel of docsAssets) served.set(`${under}${rel.slice(`${dir}/`.length)}`, rel);
   for (const rel of landingAssets) served.set(rel.slice(`${landingRoot}/`.length), rel);
+  // A removed DIRECTORY takes everything beneath it, so this is a path-prefix test and not
+  // a set difference: `rm -rf _site/drafts` deletes every file under it, and each one would
+  // otherwise stay in this map on its own name.
+  for (const key of [...served.keys()]) {
+    if (removed.some((gone) => key === gone || key.startsWith(`${gone}/`))) served.delete(key);
+  }
   return served;
 }
 
