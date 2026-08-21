@@ -38,7 +38,15 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { anchorsOf, MKDOCS_RULE, anchorOf } from "./lib/anchors.mjs";
-import { ROOT, siteDir, siteUrlPath, publishedPages, readSiteConfig, publishedPredicate } from "./lib/docs-scope.mjs";
+import {
+  ROOT,
+  siteDir,
+  siteUrlPath,
+  usesDirectoryUrls,
+  publishedPages,
+  readSiteConfig,
+  publishedPredicate,
+} from "./lib/docs-scope.mjs";
 
 const SELF_TEST = process.argv.includes("--self-test");
 
@@ -72,7 +80,13 @@ for rel in pages:
     with open(os.path.join(root, rel), encoding='utf-8') as fh:
         html = md.convert(fh.read())
     anchors[rel] = re.findall(r'<h[1-6][^>]*\\bid="([^"]+)"', html)
-print(json.dumps({'docs_dir': docs_dir, 'site_url': cfg['site_url'], 'pages': pages, 'anchors': anchors}))
+print(json.dumps({
+    'docs_dir': docs_dir,
+    'site_url': cfg['site_url'],
+    'use_directory_urls': cfg['use_directory_urls'],
+    'pages': pages,
+    'anchors': anchors,
+}))
 `;
 
 /**
@@ -198,6 +212,7 @@ function selfTest(python) {
     const configText = [
       "site_name: Parity fixture",
       "docs_dir: pages",
+      "use_directory_urls: false",
       "exclude_docs: |",
       ...FIXTURE_EXCLUDES.map((p) => `  ${p}`),
       "",
@@ -218,6 +233,15 @@ function selfTest(python) {
     const parsed = readSiteConfig(configText);
     if (parsed.docsDir !== model.docs_dir) {
       failures.push(`  docs_dir: mkdocs says '${model.docs_dir}', this reader says '${parsed.docsDir}'`);
+    }
+    // The fixture config declares `use_directory_urls: false`, which is NOT mkdocs' default
+    // — so this compares two readers rather than two copies of the same constant, which is
+    // the whole reason the value is planted at the non-default.
+    if (parsed.useDirectoryUrls !== model.use_directory_urls) {
+      failures.push(
+        `  use_directory_urls: mkdocs says ${model.use_directory_urls}, this reader says` +
+          ` ${parsed.useDirectoryUrls}`,
+      );
     }
 
     const published = publishedPredicate(parsed);
@@ -321,6 +345,17 @@ if (SELF_TEST) {
     );
   }
 
+  // `use_directory_urls` decides which URL SHAPE names a page — `x/` or `x.html` — and a
+  // resolver reading it wrong accepts a URL the site answers with a 404. Same silent
+  // failure as `site_url`, one level down, and this repo leaves it at mkdocs' default,
+  // which is exactly the condition under which a constant and a reader look identical.
+  if (usesDirectoryUrls() !== model.use_directory_urls) {
+    failures.push(
+      `  use_directory_urls: mkdocs serves with ${model.use_directory_urls}, and the checkers` +
+        ` read ${usesDirectoryUrls()}.`,
+    );
+  }
+
   const pageFailures = comparePages(model, publishedPages());
   for (const line of pageFailures) failures.push(line);
 
@@ -340,6 +375,7 @@ if (SELF_TEST) {
 
   console.log(`docs_dir agrees with mkdocs: ${model.docs_dir}`);
   console.log(`site_url agrees with mkdocs: ${siteUrlPath()}`);
+  console.log(`use_directory_urls agrees with mkdocs: ${usesDirectoryUrls()}`);
   console.log(
     `The ${model.pages.length} pages this repo calls published are exactly the ${model.pages.length}` +
       ` mkdocs builds, \`exclude_docs\` included.`,

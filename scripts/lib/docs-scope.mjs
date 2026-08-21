@@ -47,11 +47,11 @@ function refuse(message) {
 }
 
 /**
- * `mkdocs.yml`, read for the two keys that decide what the site contains.
+ * `mkdocs.yml`, read for the keys that decide what the site contains and what it serves.
  *
  * Deliberately not a YAML parser: the config carries a `!!python/name:` tag that only
  * mkdocs' own loader resolves, so a general parser here would be a second thing to keep
- * correct. This reads the two keys it needs and REFUSES any shape it has not been shown to
+ * correct. This reads the keys it needs and REFUSES any shape it has not been shown to
  * handle, which is the difference between a port and a guess. `--self-test` runs it against
  * planted configs, including the shapes it must refuse.
  */
@@ -60,6 +60,7 @@ export function readSiteConfig(configText) {
   let docsDir;
   let exclude = null;
   let siteUrl;
+  let useDirectoryUrls;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -110,6 +111,26 @@ export function readSiteConfig(configText) {
       siteUrl = url[1].trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");
       continue;
     }
+    const dirUrls = /^use_directory_urls:\s*(.*)$/.exec(line);
+    if (dirUrls) {
+      // Which URL a page is SERVED at, which is a different question from which pages
+      // exist. On (mkdocs' default) `x.md` is served at `x/` and `x.html` is a 404; off,
+      // the reverse. A resolver that accepts both calls a real 404 fine, and does it
+      // silently — so this is read rather than assumed, and a value this has not been
+      // shown is refused rather than guessed at.
+      if (useDirectoryUrls !== undefined) {
+        refuse("mkdocs.yml declares `use_directory_urls` twice; this reader cannot say which one the site uses.");
+      }
+      const raw = dirUrls[1].trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "").toLowerCase();
+      if (raw !== "true" && raw !== "false") {
+        refuse(
+          `mkdocs.yml gives \`use_directory_urls: ${dirUrls[1].trim()}\`, and this reader only knows` +
+            ` \`true\` and \`false\`. Teach scripts/lib/docs-scope.mjs before using another value.`,
+        );
+      }
+      useDirectoryUrls = raw === "true";
+      continue;
+    }
     const ex = /^exclude_docs:\s*(.*)$/.exec(line);
     if (!ex) continue;
     if (exclude !== null) {
@@ -142,7 +163,13 @@ export function readSiteConfig(configText) {
 
   // Absent is not a mismatch: mkdocs defaults `docs_dir` to `docs`, which is what this repo
   // declares anyway.
-  return { docsDir: docsDir ?? "docs", exclude: exclude ?? [], siteUrl };
+  return {
+    docsDir: docsDir ?? "docs",
+    exclude: exclude ?? [],
+    siteUrl,
+    // Absent is mkdocs' own default, like `docs_dir` above.
+    useDirectoryUrls: useDirectoryUrls ?? true,
+  };
 }
 
 let CACHED;
@@ -163,17 +190,24 @@ function config() {
 }
 
 /**
- * The path the built docs are SERVED at, from `mkdocs.yml`'s `site_url` — `/asterism/docs/`.
+ * `site_url` split into the two halves a link into this site is resolved against: the
+ * HOST it is served from and the PATH it sits at under that host.
  *
- * The site's root page is hand-written HTML full of absolute links (`/asterism/docs/…`),
- * and deciding whether one of those resolves needs to know which prefix belongs to this
- * repo. Hard-coding it would be the one undeclared constant in a module built on
- * derivation, and getting it wrong is SILENT: every link falls through to "not ours", and
- * the pass reports that all zero of them resolve.
+ * Two kinds of link need this, and they need different halves. The site's root page is
+ * hand-written HTML full of host-relative links (`/asterism/docs/…`), which need only the
+ * path. A markdown page — README, the npm page, the changelog — cannot write one of those,
+ * because it is also read on GitHub and on npm, so it writes the whole URL
+ * (`https://qmilab.com/asterism/docs/…`) and the origin is what says whether that URL is
+ * ours to resolve at all.
  *
- * Always ends in a slash, so a prefix test cannot match a sibling directory.
+ * One parse for both, because the refusals are the valuable part and a second copy of them
+ * is a second thing to keep true. Hard-coding either half would be the one undeclared
+ * constant in a module built on derivation, and getting it wrong is SILENT: every link
+ * falls through to "not ours", and the pass reports that all zero of them resolve.
+ *
+ * The path always ends in a slash, so a prefix test cannot match a sibling directory.
  */
-export function siteUrlPath(cfg = config()) {
+export function siteUrlParts(cfg = config()) {
   const raw = cfg.siteUrl;
   if (!raw) {
     refuse(
@@ -187,7 +221,15 @@ export function siteUrlPath(cfg = config()) {
   } catch {
     refuse(`mkdocs.yml gives \`site_url: ${raw}\`, which is not a URL this can read a path out of.`);
   }
-  return url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+  return {
+    origin: url.origin,
+    path: url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`,
+  };
+}
+
+/** The path the built docs are SERVED at — `/asterism/docs/`. See `siteUrlParts`. */
+export function siteUrlPath(cfg = config()) {
+  return siteUrlParts(cfg).path;
 }
 
 /**
@@ -199,6 +241,16 @@ export function siteUrlPath(cfg = config()) {
  */
 export function siteDir(cfg = config()) {
   return cfg.docsDir;
+}
+
+/**
+ * Whether the built site serves `x.md` at `x/` (mkdocs' default) or at `x.html`.
+ *
+ * Takes the config for the same reason `siteDir` does: read against this repo's own,
+ * a reader and a constant give the same answer and nothing can tell them apart.
+ */
+export function usesDirectoryUrls(cfg = config()) {
+  return cfg.useDirectoryUrls;
 }
 
 /**

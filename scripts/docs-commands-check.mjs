@@ -77,6 +77,8 @@ import {
   publishedPackages,
   publishedPackagesWithoutReadme,
   readSiteConfig,
+  siteUrlParts,
+  usesDirectoryUrls,
 } from "./lib/docs-scope.mjs";
 const BIN = join(ROOT, "packages", "cli", "dist", "bin.js");
 const CORE = join(ROOT, "packages", "core", "dist", "index.js");
@@ -1131,7 +1133,7 @@ function readInlineLink(line, start) {
 }
 
 /**
- * Every internal link a file makes, in every form these pages actually use: markdown
+ * Every link a file makes, in every form these pages actually use: markdown
  * inline links AND images, reference definitions, and raw HTML `href`/`src` — README's
  * wordmark, both screenshots, and its "Watch it live" link are HTML, and the pass that
  * only understood markdown could not see any of them.
@@ -1155,8 +1157,14 @@ function readInlineLink(line, start) {
  *
  * A fenced block is skipped: a link inside a code listing is a sample, not a claim about
  * a file in this repo, and reporting it would manufacture a defect.
+ *
+ * EVERY target, external ones included, because two passes read this and they disagree
+ * about which is theirs. Resolving a path on disk cannot follow `https://`; resolving a
+ * link into this repo's own SITE can only follow `https://`. Filtering here would have
+ * left the second pass writing its own scanner, and the shapes it forgot are what this
+ * function's history is made of. Each caller says which targets are its own.
  */
-function* internalLinks(text) {
+function* linkTargets(text) {
   const htmlAttr =
     /<[a-zA-Z][^>]*?\s(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
   const refDef = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/;
@@ -1176,7 +1184,7 @@ function* internalLinks(text) {
         at = line.indexOf("](", at + 2);
         continue;
       }
-      if (!EXTERNAL_TARGET.test(parsed.dest)) yield { target: parsed.dest, line: i + 1 };
+      yield { target: parsed.dest, line: i + 1 };
       at = line.indexOf("](", parsed.end);
     }
     const ref = refDef.exec(line);
@@ -1184,7 +1192,17 @@ function* internalLinks(text) {
       ...[...line.matchAll(htmlAttr)].map((m) => m[1] ?? m[2] ?? m[3]),
       ...(ref ? [ref[1]] : []),
     ];
-    for (const target of targets) if (!EXTERNAL_TARGET.test(target)) yield { target, line: i + 1 };
+    for (const target of targets) yield { target, line: i + 1 };
+  }
+}
+
+/**
+ * The subset `checkLinks` resolves on disk: everything without a URI scheme, plus the
+ * unreadable shapes, which belong to whichever pass would have had to decide them.
+ */
+function* internalLinks(text) {
+  for (const link of linkTargets(text)) {
+    if (link.target === null || !EXTERNAL_TARGET.test(link.target)) yield link;
   }
 }
 
@@ -1784,6 +1802,19 @@ function report(total, tally, groups, coverageWork) {
     if (readSiteConfig("site_url: https://example.test/a/b/\n").siteUrl !== "https://example.test/a/b/") {
       scopeFailures.push("  a config declaring `site_url` was not read");
     }
+    // `use_directory_urls` decides which URL SHAPE names a page, and this repo leaves it at
+    // mkdocs' default — so a reader that answers `true` regardless satisfies every link
+    // assertion below while being a constant. Both directions, plus the default.
+    for (const [text, want, why] of [
+      ["use_directory_urls: false\n", false, "a config turning directory URLs off"],
+      ["use_directory_urls: true\n", true, "a config turning them on"],
+      ["use_directory_urls: False  # yaml's other spelling\n", false, "`False` with a trailing comment"],
+      ["site_name: X\n", true, "a config that does not mention them"],
+    ]) {
+      if (readSiteConfig(text).useDirectoryUrls !== want) {
+        scopeFailures.push(`  ${why} was read as ${readSiteConfig(text).useDirectoryUrls}`);
+      }
+    }
     // The shapes this reader REFUSES, each spawned because refusing is `process.exit(2)`.
     // Every one of them makes the prefix test match nothing, which is not an error anywhere
     // downstream — it is "no page is published", and the pass goes on reporting that every
@@ -1800,6 +1831,8 @@ function report(total, tally, groups, coverageWork) {
       ["docs_dir: /abs/docs", "an absolute path"],
       ["docs_dir: docs\ndocs_dir: pages", "two `docs_dir` keys"],
       ["site_url: https://a.test/x/\nsite_url: https://b.test/y/", "two `site_url` keys"],
+      ["use_directory_urls: true\nuse_directory_urls: false", "two `use_directory_urls` keys"],
+      ["use_directory_urls: maybe", "a `use_directory_urls` value that is not a boolean"],
       ["exclude_docs: [a, b]", "an inline YAML collection"],
     ];
     for (const [text, why] of MUST_REFUSE) {
@@ -1853,6 +1886,19 @@ function report(total, tally, groups, coverageWork) {
     }
     if (siteUrlPath(elsewhere) !== "/a/b/") {
       scopeFailures.push(`  siteUrlPath() ignored the config it was handed and answered '${siteUrlPath(elsewhere)}'`);
+    }
+    if (siteUrlParts(elsewhere).origin !== "https://example.test") {
+      scopeFailures.push(
+        `  siteUrlParts() ignored the config it was handed and answered '${siteUrlParts(elsewhere).origin}'`,
+      );
+    }
+    if (usesDirectoryUrls(readSiteConfig("use_directory_urls: false\n")) !== false) {
+      scopeFailures.push("  usesDirectoryUrls() ignored the config it was handed");
+    }
+    if (usesDirectoryUrls() !== real.useDirectoryUrls) {
+      scopeFailures.push(
+        `  usesDirectoryUrls() is ${usesDirectoryUrls()} where mkdocs.yml parses to ${real.useDirectoryUrls}`,
+      );
     }
     const fromConfig = publishedPredicate(real);
     for (const rel of trackedMarkdown()) {
@@ -2213,6 +2259,11 @@ function report(total, tally, groups, coverageWork) {
       ['<a href="/asterism/docs/walkthrough/#no-such-heading">a</a>', "a heading that does not", 1, 0],
       ['<a href="/manifesto">a</a>', "a page on the org site", 0, 1],
       ['<a href="https://github.com/qmilab/asterism">a</a>', "an external link", 0, 0],
+      ['<a href="https://qmilab.com/asterism/docs/walkthrough/">a</a>', "a whole URL naming a page this site builds", 0, 0, 1],
+      ['<a href="https://qmilab.com/asterism/docs/nosuchpage/">a</a>', "a whole URL naming one it does not", 1, 0, 1],
+      ['<a href="https://qmilab.com/asterism/docs/walkthrough/#no-such-heading">a</a>', "a whole URL at a heading it does not have", 1, 0, 1],
+      ['<a href="https://qmilab.com/manifesto">a</a>', "a whole URL on the org site", 0, 1, 0],
+      ['<a href="https://qmilab.com/asterism/">a</a><a href="/asterism/">b</a>', "a whole URL naming this page itself", 0, 0, 0],
       ['<a href="logo.png">a</a>', "a relative asset", 0, 0],
       ['<a href="#top">a</a>', "an in-page anchor", 0, 0],
       ["<a href='/asterism/docs/nosuchpage/'>a</a>", "a SINGLE-quoted href at a URL nothing builds", 1, 0],
@@ -2329,6 +2380,146 @@ function report(total, tally, groups, coverageWork) {
     console.log(
       "A link from the root page into this site is resolved against the pages mkdocs builds;" +
         " one into the org site is named undecidable rather than guessed at.",
+    );
+
+    // The same rule for the same URLs written the OTHER way — whole, by a markdown page
+    // that cannot write a host-relative one because it is also read on npm and on GitHub.
+    // Driven against a fixture site so nothing here depends on this repo's own `site_url`,
+    // and every case names what it plants.
+    const SITE = { origin: "https://example.test", path: "/proj/docs/" };
+    const sitePublished = new Set(["docs/index.md", "docs/concepts.md"]);
+    const siteLanding = ["site/index.html"];
+    const siteBodies = {
+      "docs/index.md": "# Docs\n",
+      // An em dash, because that is where the two renderers DISAGREE: mkdocs collapses the
+      // whitespace run around it to one hyphen, GitHub's rule leaves two. A fixture heading
+      // both agree on cannot tell whether this pass asks the renderer that serves the page.
+      "docs/concepts.md": "# Concepts\n\n## Claim 1 \u2014 separate memory\n",
+      "site/index.html": '<h2 id="quickstart">q</h2><h2 id="caf\u00e9">c</h2>',
+    };
+    const readFixture = (rel) => {
+      if (!(rel in siteBodies)) throw new Error(`the fixture has no ${rel}`);
+      return siteBodies[rel];
+    };
+    // [markdown, why, wantBroken, wantOffSite, wantChecked]
+    const siteFixture = [
+      ["[a](https://example.test/proj/docs/concepts/)", "a published page", 0, 0, 1],
+      ["[a](https://example.test/proj/docs/)", "the docs index", 0, 0, 1],
+      ["[a](https://example.test/proj/docs/concepts/#claim-1-separate-memory)", "a heading the site emits", 0, 0, 1],
+      ["[a](https://example.test/proj/docs/concepts/#claim-1--separate-memory)", "the same heading under GitHub's rule, which does not serve this URL", 1, 0, 1],
+      ["[a](https://example.test/proj/docs/concepts/#no-such-heading)", "a heading it does not", 1, 0, 1],
+      ["[a](https://example.test/proj/docs/nosuchpage/)", "a page nothing builds", 1, 0, 1],
+      // The site serves `concepts/`, so `concepts.html` is a 404 even though the source
+      // page it names is right there. A resolver that strips `.html` calls it fine.
+      ["[a](https://example.test/proj/docs/concepts.html)", "a real page at a URL directory URLs do not serve", 1, 0, 1],
+      ["[a](https://example.test/proj/)", "the site's root page", 0, 0, 1],
+      // A bare root must resolve, not fall out of the site: `[qmilab.com/asterism](…)` is
+      // how the changelog writes it, and reading that as the ORG site is a wrong answer
+      // wearing the shape of a deliberate one.
+      ["[a](https://example.test/proj)", "the site's root with no trailing slash", 0, 0, 1],
+      ["[a](https://example.test/proj/#quickstart)", "an id the root page has", 0, 0, 1],
+      ["[a](https://example.test/proj/#nowhere)", "an id it has not", 1, 0, 1],
+      // A browser decodes a fragment before matching an id, and `new URL` hands it back
+      // encoded. Only a landing page can have a non-ASCII id — the site's slug rule folds
+      // everything to ASCII — so this is the only shape that can tell the two apart.
+      ["[a](https://example.test/proj/#caf%C3%A9)", "a percent-encoded id the root page has", 0, 0, 1],
+      ["[a](https://example.test/manifesto)", "a page on the org site", 0, 1, 0],
+      ["[a](https://elsewhere.test/proj/docs/nosuchpage/)", "another host entirely", 0, 0, 0],
+      ["[a](./docs/nosuch.md)", "a relative link, which the other pass resolves", 0, 0, 0],
+      ["[a](mailto:x@example.test)", "a `mailto:`, which is not a URL to resolve", 0, 0, 0],
+      ['<a href="https://example.test/proj/docs/nosuchpage/">a</a>', "a raw HTML href", 1, 0, 1],
+      ["[a]: https://example.test/proj/docs/nosuchpage/", "a reference definition", 1, 0, 1],
+      // A URL inside a listing is a sample, and the day this reports one it starts
+      // manufacturing defects out of documentation.
+      ["```\n[a](https://example.test/proj/docs/nosuchpage/)\n```", "a link inside a fence", 0, 0, 0],
+    ];
+    const siteFailures = [];
+    for (const [md, why, wantBroken, wantOffSite, wantChecked] of siteFixture) {
+      const got = checkSiteLinks(
+        [["PAGE.md", md]],
+        sitePublished,
+        SITE,
+        siteLanding,
+        "site",
+        readFixture,
+      );
+      if (got.checked !== wantChecked) {
+        siteFailures.push(`  ${why}: counted ${got.checked} links checked, wanted ${wantChecked}`);
+      }
+      if (got.broken.length !== wantBroken || got.offSite.length !== wantOffSite) {
+        siteFailures.push(
+          `  ${why}: ${got.broken.length} broken / ${got.offSite.length} undecidable,` +
+            ` wanted ${wantBroken} / ${wantOffSite} — ${JSON.stringify([...got.broken, ...got.offSite])}`,
+        );
+      }
+    }
+    // A site whose served segment is NOT its source directory — the case the translation in
+    // `publishedPageFor` exists for, and the only shape that can kill it. This repo
+    // publishes `docs/` at `…/docs/`, so both names are the same word here and the rule is
+    // invisible to every other fixture.
+    const renamed = checkSiteLinks(
+      [["PAGE.md", "[a](https://example.test/proj/pages/deep/x/)[b](https://example.test/proj/pages/)"]],
+      new Set(["content/index.md", "content/deep/x.md"]),
+      { origin: "https://example.test", path: "/proj/pages/" },
+      [],
+      "site",
+      () => "# x\n",
+      "content",
+    );
+    if (renamed.broken.length !== 0 || renamed.checked !== 2) {
+      siteFailures.push(
+        `  a site whose \`docs_dir\` is not its URL segment: ${renamed.broken.length} broken /` +
+          ` ${renamed.checked} checked, wanted 0 / 2 — ${JSON.stringify(renamed.broken)}`,
+      );
+    }
+
+    // …and with directory URLs OFF the answer is the other way round, which is the only
+    // way to tell a derived `use_directory_urls` from a constant `true`.
+    const flatSite = checkSiteLinks(
+      [["PAGE.md", "[a](https://example.test/proj/docs/concepts.html)[b](https://example.test/proj/docs/concepts/)"]],
+      sitePublished,
+      SITE,
+      siteLanding,
+      "site",
+      readFixture,
+      "docs",
+      false,
+    );
+    if (flatSite.broken.length !== 0 || flatSite.checked !== 2) {
+      siteFailures.push(
+        `  a site with \`use_directory_urls: false\`: ${flatSite.broken.length} broken /` +
+          ` ${flatSite.checked} checked, wanted 0 / 2 — ${JSON.stringify(flatSite.broken)}`,
+      );
+    }
+
+    // Both halves of `site_url` are DERIVED, and each fails SILENTLY on its own: a wrong
+    // ORIGIN sends every link to another host and reports nothing at all, a wrong PATH
+    // sends every link to the org site and reports them undecidable. Proven by pointing
+    // each wrong one at the REAL corpus and watching `checked` go to zero — which is the
+    // signal `main` fails on.
+    const realMd = linkSourceFiles().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]);
+    const realPub = new Set(publishedPages());
+    const rightSite = checkSiteLinks(realMd, realPub);
+    if (rightSite.checked === 0) {
+      siteFailures.push("  this repo's own pages resolved zero links into this repo's own site");
+    }
+    for (const [parts, why] of [
+      [{ origin: "https://elsewhere.test", path: siteUrlPath() }, "a wrong origin"],
+      [{ origin: siteUrlParts().origin, path: "/elsewhere/docs/" }, "a wrong path"],
+    ]) {
+      const wrongSite = checkSiteLinks(realMd, realPub, parts);
+      if (wrongSite.checked !== 0) {
+        siteFailures.push(`  ${why} over the real pages still checked ${wrongSite.checked} links`);
+      }
+    }
+    if (siteFailures.length) {
+      console.log("\nSELF-TEST FAILED: the whole-URL link rule does not hold:");
+      for (const f of siteFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      "A markdown page's absolute link into this site is resolved against the pages the site" +
+        " serves; one to the same host outside it is named undecidable rather than guessed at.",
     );
 
     // The rendering rule, planted in both directions. The defect it exists to catch was
@@ -2892,6 +3083,35 @@ function report(total, tally, groups, coverageWork) {
     for (const u of landingLinks.offSite) console.log(`  ${u}`);
   }
 
+  const siteLinks = SELF_TEST ? { broken: [], offSite: [], checked: 1 } : checkSiteLinks();
+  if (siteLinks.checked === 0) {
+    // The same tripwire the root page has, for the same reason, and the caller makes the
+    // call for the same reason: only the code looking at the REAL corpus knows that this
+    // repo's pages do link into this repo's site. They do — the npm page's every link is
+    // one of these — so a zero means the prefix `site_url` derives no longer matches what
+    // the pages write, and every one of them went unlooked-at behind a green.
+    console.log(
+      `\nNOT ONE ABSOLUTE LINK INTO THIS SITE WAS CHECKED — no markdown page links to` +
+        ` a URL under \`${siteUrlParts().origin}${siteUrlPath().replace(/[^/]+\/$/, "")}\`,` +
+        ` derived from \`site_url\`. Either the site moved or the pages' links did.`,
+    );
+  }
+  if (siteLinks.broken.length) {
+    console.log(`\nBROKEN LINKS INTO THIS SITE (${siteLinks.broken.length}):`);
+    for (const b of siteLinks.broken) console.log(`  ${b}`);
+  } else if (!SELF_TEST) {
+    console.log(
+      `All ${siteLinks.checked} links from a markdown page into this site resolve to a page the` +
+        ` site serves, headings included.`,
+    );
+  }
+  if (siteLinks.offSite.length) {
+    console.log(
+      `\nLINKS TO THIS HOST THIS PASS CANNOT DECIDE (${siteLinks.offSite.length}):`,
+    );
+    for (const u of siteLinks.offSite) console.log(`  ${u}`);
+  }
+
   const renderGaps = SELF_TEST ? [] : checkTerminalRendering();
   if (renderGaps.length) {
     console.log(
@@ -2923,6 +3143,8 @@ function report(total, tally, groups, coverageWork) {
     catalogGaps.length ||
     landingLinks.broken.length ||
     landingLinks.checked === 0 ||
+    siteLinks.broken.length ||
+    siteLinks.checked === 0 ||
     renderGaps.length ||
     blockless.length
   ) {
@@ -3063,6 +3285,50 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
  * `<root>/` by `<dir>/index.html` — the same directory-URL shapes mkdocs uses, applied to
  * a directory copied verbatim rather than rendered.
  */
+/**
+ * A path under the site's root → the published markdown page mkdocs builds into it, or
+ * undefined.
+ *
+ * mkdocs' directory URLs: `<site_url>x/` is built from `<docs_dir>/x.md`, and `<site_url>`
+ * itself from `<docs_dir>/index.md`. The URL segment and the source directory are two
+ * different names, so the served path is TRANSLATED rather than assumed to match: a
+ * `docs_dir` rename must not silently stop resolving anything.
+ *
+ * Shared by the two passes that resolve a site URL — the root page's host-relative links
+ * and a markdown page's absolute ones. They were one rule written twice for about ten
+ * minutes, which is how long it took to notice that a second copy of this is a second
+ * place for a `docs_dir` rename to be missed.
+ *
+ * `dir` and `directoryUrls` are parameters and not just `siteDir()`/`usesDirectoryUrls()`
+ * because each was UNKILLABLE otherwise. The translation below was
+ * invisible here: this repo publishes `docs/` at `…/docs/`, so the served segment and the
+ * source directory are the same word and dropping the translation changes nothing any
+ * fixture built on this repo could see. A comment claiming a rename is handled, over a line
+ * no test can break, is the shape this file has already paid for more than once.
+ */
+function publishedPageFor(
+  pathPart,
+  published,
+  { docsPrefix, siteRoot, dir = siteDir(), directoryUrls = usesDirectoryUrls() },
+) {
+  // Which shape names a page is the SITE's answer, not both. Under directory URLs
+  // `concepts.md` is served at `concepts/`, and `concepts.html` is a 404 — so accepting
+  // `.html` here would report a dead link as resolving, which is the one failure mode this
+  // whole pass exists to remove. The mirror is deliberately NOT refused: with directory
+  // URLs off mkdocs still writes `x/index.html`, and a static host serves `x/` from it, so
+  // that shape is live either way.
+  if (directoryUrls && /\.html$/.test(pathPart)) return undefined;
+  const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
+  const served = docsPrefix.slice(siteRoot.length).replace(/\/$/, "");
+  const rel =
+    bare === served
+      ? dir
+      : bare.startsWith(`${served}/`)
+        ? `${dir}/${bare.slice(served.length + 1)}`
+        : bare;
+  return [`${rel}.md`, `${rel}/index.md`].find((c) => published.has(c));
+}
+
 function landingPageFor(dir, pages, pathPart) {
   const rel = pathPart.replace(/^\/+/, "").replace(/\/$/, "");
   const candidates = rel === "" ? ["index.html"] : [rel, `${rel}/index.html`, `${rel}.html`];
@@ -3076,10 +3342,10 @@ function idsIn(text) {
   );
 }
 
-/** `site_url` → the two prefixes the root page's links are read against. */
+/** `site_url` → the origin and the two prefixes the root page's links are read against. */
 function landingPrefixes() {
-  const docsPrefix = siteUrlPath();
-  return { docsPrefix, siteRoot: docsPrefix.replace(/[^/]+\/$/, "") };
+  const { origin, path: docsPrefix } = siteUrlParts();
+  return { origin, docsPrefix, siteRoot: docsPrefix.replace(/[^/]+\/$/, "") };
 }
 
 /**
@@ -3111,7 +3377,7 @@ function checkLandingLinks(
   // module built on derivation, and wrong it fails SILENTLY: every link falls through to
   // "not ours", and this reports that all zero of them resolve. A parameter so the
   // self-test can point a deliberately wrong prefix at the real page and see that happen.
-  { docsPrefix, siteRoot } = landingPrefixes(),
+  { origin, docsPrefix, siteRoot } = landingPrefixes(),
   // The directory the workflow DECLARES, not one inferred from the corpus. Inferring it as
   // the deepest shared directory is only right when some page sits at its top level: a site
   // whose pages all live under `landing/en/` infers `landing/en`, and then
@@ -3136,8 +3402,16 @@ function checkLandingLinks(
     // private attribute as a page link. A single-quoted `href` is the mirror failure and
     // the worse one, since an unmatched link is silently unchecked rather than loudly wrong.
     for (const m of text.matchAll(/<a\b([^>]*)>/gi)) {
-      const href = attrOf(m[1], "href");
+      let href = attrOf(m[1], "href");
       if (href === undefined) continue;
+      // A whole URL naming THIS site is the same link written the long way, and it went
+      // unchecked by BOTH passes: this one skips anything with a scheme, and the markdown
+      // pass never reads HTML on a page it does not consider markdown. Found by asking
+      // where else the shape the npm page needed could hide — this page already writes its
+      // own `canonical` and `og:url` that way. Normalized to the path so one rule decides.
+      if (origin && (href === origin || href.startsWith(`${origin}/`))) {
+        href = href.slice(origin.length) || "/";
+      }
       if (EXTERNAL_TARGET.test(href) || href.startsWith("mailto:") || href.startsWith("#")) continue;
       if (!href.startsWith("/")) continue; // a relative asset (logo.png) — not a page link
       const line = text.slice(0, m.index).split("\n").length;
@@ -3176,15 +3450,7 @@ function checkLandingLinks(
         continue;
       }
       checked++;
-      const bare = pathPart.replace(/\/$/, "").replace(/\.html$/, "");
-      // mkdocs' directory URLs: `<site_url>x/` is built from `<docs_dir>/x.md`, and
-      // `<site_url>` itself from `<docs_dir>/index.md`. The URL segment and the source
-      // directory are two different names, so the served path is translated rather than
-      // assumed to match: a `docs_dir` rename must not silently stop resolving anything.
-      const served = docsPrefix.slice(siteRoot.length).replace(/\/$/, "");
-      const rel2 = bare === served ? siteDir() : bare.startsWith(`${served}/`) ? `${siteDir()}/${bare.slice(served.length + 1)}` : bare;
-      const candidates = [`${rel2}.md`, `${rel2}/index.md`];
-      const target = candidates.find((c) => published.has(c));
+      const target = publishedPageFor(pathPart, published, { docsPrefix, siteRoot });
       if (!target) {
         broken.push(`${at}  ${href} — no published page builds that URL`);
         continue;
@@ -3201,6 +3467,100 @@ function checkLandingLinks(
   // is the REAL root page reaching zero that means the prefix is wrong, so the caller — the
   // one that knows it is looking at the real site — makes that call.
   return { broken, offSite, checked, siteRoot };
+}
+
+/**
+ * Every link a markdown page makes into this repo's OWN site, written as a whole URL.
+ *
+ * The markdown link pass cannot decide these and does not try: anything carrying a URI
+ * scheme is somebody else's to serve. But `https://qmilab.com/asterism/docs/concepts/` is
+ * not somebody else's — it is `docs/concepts.md` in this repo, reached the long way round,
+ * and it goes stale exactly like a relative link does. A renamed page or a reworded
+ * heading 404s a reader who arrived through it.
+ *
+ * These are written the long way for a reason, so this is not a shape to discourage. The
+ * page npm shows for `@qmilab/asterism` is read on npm, where a relative `./docs/x.md`
+ * resolves against the REPOSITORY rather than the site — the one case the markdown pass
+ * calls genuinely undecidable. Writing the whole URL is the fix for that, and it moved
+ * every one of that page's links out of reach of every check at once. Hence this pass.
+ *
+ * Three destinations, told apart the way the root page's pass tells them apart:
+ *
+ *   - under `<site_url>` — a published page, its `#anchor` judged by the site's renderer.
+ *   - under the site's root but above the docs — the hand-written landing page, its
+ *     `#anchor` judged against the ids in its HTML.
+ *   - the same host, outside this site (`/manifesto`, `/lodestar/`) — the org site, which
+ *     lives in another repo. Named as undecidable rather than guessed at.
+ *
+ * A different host is not reported at all: nodejs.org is not a claim this repo can check,
+ * and listing every one of them would bury the ones that are.
+ */
+function checkSiteLinks(
+  pages = linkSourceFiles().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]),
+  published = new Set(publishedPages()),
+  // DERIVED from `site_url`, both halves, for the reason `siteUrlParts` gives: a wrong
+  // prefix here fails silently, sending every link to "not ours" and reporting a green
+  // over nothing. A parameter so the self-test can drive a fixture site.
+  { origin, path: docsPrefix } = siteUrlParts(),
+  landingPages = publishedLandingPages(),
+  landingRoot = readLandingDir(readFileSync(join(ROOT, ".github", "workflows", "docs.yml"), "utf8")),
+  readPage = (rel) => readFileSync(join(ROOT, rel), "utf8"),
+  dir = siteDir(),
+  directoryUrls = usesDirectoryUrls(),
+) {
+  const siteRoot = docsPrefix.replace(/[^/]+\/$/, "");
+  const broken = [];
+  const offSite = [];
+  let checked = 0;
+
+  for (const [rel, text] of pages) {
+    for (const { target, line } of linkTargets(text)) {
+      if (target === null) continue;
+      let url;
+      // Which targets are this pass's own is decided by the PARSE, not by a second copy of
+      // the other pass's filter: only an absolute URL parses with no base, so a relative
+      // path, an in-page `#anchor` and a `mailto:` all fall out here, and a scheme this is
+      // not a resolver for falls out on the origin below.
+      try {
+        url = new URL(target);
+      } catch {
+        // A scheme this is not a URL parser for — `mailto:`, `ftp:`, a bare `//host/x`.
+        // Not ours either way, and the markdown pass already accounts for it.
+        continue;
+      }
+      if (url.origin !== origin) continue;
+      const at = `${rel}:${line}`;
+      // `https://host/asterism` and `https://host/asterism/` name the same page. Without
+      // this the bare form falls out of the site entirely and is reported as the ORG
+      // site's — a wrong answer that reads like a deliberate one.
+      const path = `${url.pathname}/` === siteRoot ? siteRoot : url.pathname;
+      if (!path.startsWith(siteRoot)) {
+        offSite.push(`${at}  ${target} — served by the org site, which is not in this repo`);
+        continue;
+      }
+      const pathPart = path.slice(siteRoot.length);
+      const fragment = decodeURIComponent(url.hash.slice(1));
+      checked++;
+      const landingTarget = landingPageFor(landingRoot, landingPages, pathPart);
+      if (landingTarget) {
+        if (fragment && !idsIn(readPage(landingTarget)).has(fragment)) {
+          broken.push(`${at}  ${target} — ${landingTarget} has no element with that id`);
+        }
+        continue;
+      }
+      const page = publishedPageFor(pathPart, published, { docsPrefix, siteRoot, dir, directoryUrls });
+      if (!page) {
+        broken.push(`${at}  ${target} — no published page builds that URL`);
+        continue;
+      }
+      if (fragment && !anchorsOf(readPage(page), MKDOCS_RULE).has(fragment)) {
+        // The site's renderer, because a site URL is only ever served by it — even when
+        // the page WRITING the link is one GitHub renders.
+        broken.push(`${at}  ${target} — ${page} has no heading with that id`);
+      }
+    }
+  }
+  return { broken, offSite, checked };
 }
 
 /** The `white-space` values that keep BOTH the line breaks and the column alignment. */
