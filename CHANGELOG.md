@@ -2,7 +2,7 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## 0.9.2
+## 0.9.2 — 2026-08-21
 
 The destructive-action gate has an exception, and most of the places that promised the gate did not mention it. An agent can **earn** the standing to take one capability without pausing — you are shown the evidence, you approve it, and `asterism trust <agent> show` lists what you granted — so once you accept such a grant, that one capability stops asking. The rule box on the concepts page, the npm page and `asterism trust --help` all said so. A dozen other statements, including the repository's front page and the walkthrough's own list of claims, described a pause that always happens.
 
