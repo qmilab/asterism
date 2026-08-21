@@ -16,6 +16,7 @@
 import type { PiModelConfig } from "@qmilab/asterism-adapter-pi";
 
 import type { AsterismConfig, ModelSettings } from "./config.js";
+import { envText } from "./env.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -222,8 +223,12 @@ export function resolveProviderAuth(
   model: Pick<PiModelConfig, "provider" | "baseUrl">,
 ): ProviderAuth {
   const keyVar = providerKeyEnvVar(model.provider);
-  const explicit = env[keyVar];
-  if (explicit !== undefined && explicit !== "") return { apiKey: explicit };
+  // Read through the one empty-is-unset rule, like every other variable in this module:
+  // an exported-but-empty key — or one holding only whitespace — is a cleared key, not a
+  // credential to send. `service install --capture-env` decides the same way, so it
+  // cannot report the key need satisfied by a value it then declines to capture.
+  const explicit = envText(env, keyVar);
+  if (explicit !== undefined) return { apiKey: explicit };
 
   const declaredKeyless = PROVIDER_DEFAULTS[model.provider]?.needsNoKey === true;
   if (declaredKeyless) {
@@ -236,8 +241,8 @@ export function resolveProviderAuth(
     };
   }
 
-  const shared = env[SHARED_KEY_ENV];
-  if (shared !== undefined && shared !== "") return { apiKey: shared };
+  const shared = envText(env, SHARED_KEY_ENV);
+  if (shared !== undefined) return { apiKey: shared };
   return {
     reason:
       `No API key configured for ${model.provider}. Set ${keyVar} (or ${SHARED_KEY_ENV}) — ` +
@@ -294,14 +299,66 @@ export function providerAuthPlan(
   };
 }
 
-/** The model coordinates carried by the ASTERISM_MODEL_* environment variables. */
+/**
+ * The model coordinates carried by the ASTERISM_MODEL_* environment variables.
+ *
+ * Read through {@link envText}, so a variable that exists and holds nothing — or holds
+ * only whitespace, which is what a copy-paste leaves — supplies nothing. The service env
+ * plan asks the same question when deciding whether capturing this variable would put a
+ * value in the file, and the two have to agree or it reports a need satisfied by a value
+ * it will not write. Read as merely-defined, `ASTERISM_MODEL_ID=` silently disabled a working
+ * configured model that `config show` went on displaying (#174). {@link mergeSettings}
+ * drops an empty field from every layer, so this is belt as well as braces — but the
+ * question `config show` asks about the environment is answered by the same rule, and
+ * having it stated where the variables are read is what keeps the two agreeing.
+ */
 function settingsFromEnv(env: Env): ModelSettings {
   const s: ModelSettings = {};
-  if (env.ASTERISM_MODEL_ID !== undefined) s.id = env.ASTERISM_MODEL_ID;
-  if (env.ASTERISM_MODEL_PROVIDER !== undefined) s.provider = env.ASTERISM_MODEL_PROVIDER;
-  if (env.ASTERISM_MODEL_BASE_URL !== undefined) s.baseUrl = env.ASTERISM_MODEL_BASE_URL;
-  if (env.ASTERISM_MODEL_API !== undefined) s.api = env.ASTERISM_MODEL_API;
+  const id = envText(env, "ASTERISM_MODEL_ID");
+  if (id !== undefined) s.id = id;
+  const provider = envText(env, "ASTERISM_MODEL_PROVIDER");
+  if (provider !== undefined) s.provider = provider;
+  const baseUrl = envText(env, "ASTERISM_MODEL_BASE_URL");
+  if (baseUrl !== undefined) s.baseUrl = baseUrl;
+  const api = envText(env, "ASTERISM_MODEL_API");
+  if (api !== undefined) s.api = api;
   return s;
+}
+
+/**
+ * One layer with its EMPTY fields dropped, so an empty coordinate is not a coordinate
+ * wherever it came from.
+ *
+ * The input boundaries refuse to create one — `config set` and `new` refuse an option
+ * given `""` (#174), and an emptied environment variable supplies nothing. But a config
+ * file written by an earlier version still holds what those used to accept, and nothing
+ * on read normalized it: `{"model":{"provider":""}}` went on producing
+ * `(provider: )` from `config show` and an untypeable `--provider  --base-url <url>`
+ * from `run`, and a per-agent `{"model":{"id":""}}` went on shadowing a perfectly good
+ * install default with nothing. Refusing to LOAD such a file would strand the operator —
+ * `config unset` reads it too — so it is normalized here instead, and `config show` then
+ * displays the layer that will actually be used.
+ *
+ * Exported because a surface that DESCRIBES a stored layer has to describe the same
+ * thing resolution reads from it. `config show`'s install-default line printed the file
+ * verbatim — `llama3.2 (provider: , base url: )` — one line above the per-agent lines
+ * reporting what those coordinates resolve to. One command, two answers.
+ */
+export function withoutEmptyFields(layer: ModelSettings): ModelSettings {
+  // Whitespace-only counts as empty here too — a stored coordinate made of spaces is
+  // never what was meant, and the environment layer reads the same way (`envText`).
+  const carried = (v: string | undefined): string | undefined =>
+    v !== undefined && v.trim().length > 0 ? v : undefined;
+  const out: ModelSettings = {};
+  const id = carried(layer.id);
+  if (id !== undefined) out.id = id;
+  const provider = carried(layer.provider);
+  if (provider !== undefined) out.provider = provider;
+  const baseUrl = carried(layer.baseUrl);
+  if (baseUrl !== undefined) out.baseUrl = baseUrl;
+  const api = carried(layer.api);
+  if (api !== undefined) out.api = api;
+  return out;
 }
 
 /**
@@ -323,7 +380,11 @@ function settingsFromEnv(env: Env): ModelSettings {
  */
 function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
   const out: ModelSettings = {};
-  for (const layer of layers) {
+  for (const raw of layers) {
+    // An empty field is dropped BEFORE the provider-change rule below reads it, so a
+    // stored `"provider": ""` cannot count as naming a different provider and discard a
+    // lower layer's endpoint on its way past.
+    const layer = withoutEmptyFields(raw);
     if (layer.id !== undefined) out.id = layer.id;
     if (layer.provider !== undefined) {
       // The provider the accumulated endpoint belongs to: the last explicit one,
@@ -341,6 +402,51 @@ function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
   return out;
 }
 
+/** Where a resolved coordinate came from, named as `config show` reports it. */
+export type ModelSource = "install default" | "environment" | "agent override";
+
+/**
+ * The layers resolution draws on, LOW → HIGH precedence, each named.
+ *
+ * Shared by {@link resolveModelConfig} and {@link modelIdSource} so the value a surface
+ * shows and the source it credits are read off ONE list. Restating the layering was how
+ * `config show` came to label an agent `[agent override]` whose override supplied
+ * nothing: the label tested `override.id !== undefined`, which an empty stored id
+ * satisfies, while resolution had already dropped it (#174).
+ */
+function modelLayers(
+  env: Env,
+  context: ModelResolutionContext,
+): { source: ModelSource; settings: ModelSettings }[] {
+  const { config, agentName } = context;
+  return [
+    { source: "install default", settings: config?.model ?? {} },
+    { source: "environment", settings: settingsFromEnv(env) },
+    {
+      source: "agent override",
+      settings: (agentName ? config?.agents?.[agentName]?.model : undefined) ?? {},
+    },
+  ];
+}
+
+/**
+ * Which layer supplies the model id that {@link resolveModelConfig} will use, or
+ * undefined when none does. The headline coordinate, so it is the one `config show`
+ * names — asked of the layers rather than re-derived beside them.
+ */
+export function modelIdSource(
+  env: Env,
+  context: ModelResolutionContext = {},
+): ModelSource | undefined {
+  let found: ModelSource | undefined;
+  // Low → high, so the last layer that supplies an id is the one that wins — the same
+  // order `mergeSettings` overwrites in.
+  for (const layer of modelLayers(env, context)) {
+    if (withoutEmptyFields(layer.settings).id !== undefined) found = layer.source;
+  }
+  return found;
+}
+
 /**
  * Resolve the model config from the config file, environment, and a per-agent
  * override, then apply provider defaults. See the module header for the
@@ -349,14 +455,7 @@ function mergeSettings(layers: readonly ModelSettings[]): ModelSettings {
  * environment-only resolution.
  */
 export function resolveModelConfig(env: Env, context: ModelResolutionContext = {}): ModelConfigResult {
-  const { config, agentName } = context;
-  const agentSettings = agentName ? config?.agents?.[agentName]?.model : undefined;
-  // Low → high precedence: install default, environment, per-agent override.
-  const merged = mergeSettings([
-    config?.model ?? {},
-    settingsFromEnv(env),
-    agentSettings ?? {},
-  ]);
+  const merged = mergeSettings(modelLayers(env, context).map((l) => l.settings));
 
   const id = merged.id;
   if (!id) {

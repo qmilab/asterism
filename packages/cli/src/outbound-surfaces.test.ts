@@ -243,6 +243,97 @@ test("`channel discord` hands the outbound host to the chat surface", async () =
   expect(captured?.outboundHost).toBe(h.host);
 });
 
+// --- the allow-list flag itself ------------------------------------------------
+
+test("a chat token that is only whitespace is a cleared token, on both transports", async () => {
+  // The reader and the capturer have to agree about what "set" means. `service install
+  // --capture-env` decides with `suppliesText`, which trims; this read was falsy-only,
+  // so `export ASTERISM_TELEGRAM_TOKEN="  "` was a token made of spaces here and nothing
+  // there — one install, two answers, narrowed to whitespace (#174).
+  const h = await install();
+  let started = false;
+  const startedIo = {
+    startTelegram: () => {
+      started = true;
+      return fakeChannel();
+    },
+    startDiscord: () => {
+      started = true;
+      return fakeChannel();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  };
+
+  for (const [transport, tokenVar, token] of [
+    ["telegram", "ASTERISM_TELEGRAM_TOKEN", "123456:fake-bot-token"],
+    ["discord", "ASTERISM_DISCORD_TOKEN", "fake-discord-token"],
+  ] as const) {
+    const err: string[] = [];
+    const io = { ...h.io, ...startedIo, env: { [tokenVar]: "   " }, err: (t: string) => err.push(t) };
+    expect(await runCli(["channel", transport, "personal"], io)).toBe(1);
+    expect(err.join("\n")).toContain(`Set ${tokenVar} to your bot token`);
+    expect(started).toBe(false);
+    // A real token still starts it — padded, and the padding is not what decides.
+    expect(
+      await runCli(["channel", transport, "personal"], {
+        ...io,
+        env: { [tokenVar]: ` ${token} ` },
+        err: () => {},
+      }),
+    ).toBe(0);
+    expect(started).toBe(true);
+    started = false;
+  }
+});
+
+test("a chat channel refuses an --allow that carries nothing, on both transports", async () => {
+  // The channels have no synopsis line of their own, so `unknown-flags.test.ts`'s derived
+  // sweep of "an option that refuses a missing value refuses an empty one" cannot reach
+  // them — it says so, and points here. `--allow ""` is what `--allow "$IDS"` expands to
+  // with the variable unset; taken as a value it started the bot with no allow-list at
+  // all, silently, where the operator had named one (#174).
+  const h = await install();
+  let started = false;
+  const startedIo = {
+    startTelegram: () => {
+      started = true;
+      return fakeChannel();
+    },
+    startDiscord: () => {
+      started = true;
+      return fakeChannel();
+    },
+    waitForShutdown: () => Promise.resolve(),
+  };
+
+  for (const [transport, tokenVar, token, noun] of [
+    ["telegram", "ASTERISM_TELEGRAM_TOKEN", "123456:fake-bot-token", "chat ids"],
+    ["discord", "ASTERISM_DISCORD_TOKEN", "fake-discord-token", "channel ids"],
+  ] as const) {
+    const io = { ...h.io, ...startedIo, env: { [tokenVar]: token }, err: () => {} };
+    // Every shape the option carries nothing in. `--allow "$IDS"` expands to the first
+    // when the variable is unset and the rest when it holds a stray space or the newline
+    // a `$(cat …)` leaves; `parseAllowList` trims and drops empties, so all of them
+    // produced an empty list — a bot started with no allow-list where one was named.
+    for (const nothing of ["", "  ", "\t", ","]) {
+      const err: string[] = [];
+      expect(
+        await runCli(["channel", transport, "personal", "--allow", nothing], {
+          ...io,
+          err: (t: string) => err.push(t),
+        }),
+      ).toBe(1);
+      expect(err.join("\n")).toContain(`The --allow option needs a value (a comma-separated list of ${noun})`);
+      // And the bot never started, so nothing was ever reachable without the list.
+      expect(started).toBe(false);
+    }
+    // The ordinary form still starts, so the refusal has not swallowed the flag.
+    expect(await runCli(["channel", transport, "personal", "--allow", "42"], io)).toBe(0);
+    expect(started).toBe(true);
+    started = false;
+  }
+});
+
 // --- and the honest negative --------------------------------------------------
 
 test("with no outbound host the tool is still offered, and says why it cannot call", async () => {

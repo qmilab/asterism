@@ -235,12 +235,12 @@ Nothing is saved unless you accept it.
 
 (1/2) convention · confidence 0.86
   New posts go in the posts/ folder.
-  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject): a
+  Keep this memory? [a]ccept / [e]dit / [r]eject / [q]uit (default: reject): a
   ✓ saved
 
 (2/2) procedural · confidence 0.78
   Delete old drafts once a post is published.
-  Keep this memory? [a]ccept / [e]dit / [r]eject (default: reject): r
+  Keep this memory? [a]ccept / [e]dit / [r]eject / [q]uit (default: reject): r
   ✗ rejected
 
 Done — 1 saved, 1 rejected.

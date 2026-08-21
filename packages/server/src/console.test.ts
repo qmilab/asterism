@@ -17,7 +17,8 @@ import type {
   RunOutput,
 } from "@qmilab/asterism-core";
 
-import { handleConsoleRequest } from "./console.ts";
+import { handleConsoleRequest, serveConsole } from "./console.ts";
+import { DEFAULT_HOSTNAME } from "./http.ts";
 import type { ConsoleDeps } from "./console.ts";
 
 let store: AsterismStore;
@@ -104,6 +105,30 @@ function deps(over: Partial<ConsoleDeps> = {}): ConsoleDeps {
   };
 }
 
+
+test("the console binds loopback for an empty hostname, and honours a real one", async () => {
+  // The install-wide operator surface reaches EVERY agent, so what it binds matters more
+  // than what `serve` binds, not less. `listen(port, "")` binds `::` — every interface —
+  // so an empty hostname must not read as an override (#174). Both directions, over a
+  // real socket: without the second half a binding that ignored `hostname` entirely
+  // would pass.
+  for (const [asked, expected] of [
+    ["", DEFAULT_HOSTNAME],
+    ["localhost", "localhost"],
+  ] as const) {
+    const running = await serveConsole({ ...deps(), port: 0, hostname: asked });
+    try {
+      expect(running.hostname).toBe(expected);
+      expect(running.url).toContain(expected);
+      const ok = await fetch(`${running.url}/agents`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(ok.status).toBe(200);
+    } finally {
+      running.stop();
+    }
+  }
+});
 
 /**
  * A bound outbound endpoint for `agent`, plus a host that records what was sent.

@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import type { AsterismConfig } from "./config.ts";
 import {
   isLoopbackUrl,
+  modelIdSource,
   needsNoApiKey,
   NO_API_KEY_PLACEHOLDER,
   PROVIDER_DEFAULTS,
@@ -553,4 +554,155 @@ test("with no model configured the plan is the default provider's", () => {
   expect(plan.vars).toEqual(["OPENAI_API_KEY", SHARED_KEY_ENV]);
   expect(plan.required).toBe(true);
   expect(providerAuthPlan({ OPENAI_API_KEY: "sk" }).satisfied).toBe(true);
+});
+
+// --- an environment variable that exists but is empty (#174) ------------------
+
+test("an empty model variable does not shadow the layer below it", () => {
+  const config: AsterismConfig = { model: { id: "llama3.2", provider: "ollama" } };
+  // `export ASTERISM_MODEL_ID=` is how a shell CLEARS a variable. Read as merely
+  // defined it silently disabled a working configured model — `run` reported no model
+  // at all while `config show` went on displaying one.
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "" }, { config });
+  expect(model?.id).toBe("llama3.2");
+  expect(model?.provider).toBe("ollama");
+  // And a real override still wins, so the rule has not just switched the layer off.
+  expect(resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o" }, { config }).model?.id).toBe("gpt-4o");
+});
+
+test("an empty provider variable never reaches a message as a provider name", () => {
+  const config: AsterismConfig = { model: { id: "llama3.2", provider: "ollama" } };
+  const { model, reason } = resolveModelConfig({ ASTERISM_MODEL_PROVIDER: "" }, { config });
+  // It used to resolve `provider: ""`, which has no built-in endpoint, so the refusal
+  // interpolated the empty name into its own advice: `--provider  --base-url <url>`, a
+  // flag whose value is the next flag — a command that cannot be typed.
+  expect(reason).toBeUndefined();
+  expect(model?.provider).toBe("ollama");
+  expect(model?.baseUrl).toBe(PROVIDER_DEFAULTS.ollama!.baseUrl);
+});
+
+test("an empty endpoint or protocol variable leaves the provider's own default standing", () => {
+  const { model } = resolveModelConfig({
+    ASTERISM_MODEL_ID: "llama3.2",
+    ASTERISM_MODEL_PROVIDER: "ollama",
+    ASTERISM_MODEL_BASE_URL: "",
+    ASTERISM_MODEL_API: "",
+  });
+  expect(model?.baseUrl).toBe(PROVIDER_DEFAULTS.ollama!.baseUrl);
+  expect(model?.api).toBeUndefined();
+});
+
+test("an empty API key variable is a cleared key, not a credential to send", () => {
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o" });
+  expect(resolveProviderAuth({ OPENAI_API_KEY: "" }, model!).apiKey).toBeUndefined();
+  // …and it falls through to the shared key rather than stopping at the empty one.
+  expect(resolveProviderAuth({ OPENAI_API_KEY: "", [SHARED_KEY_ENV]: "sk-shared" }, model!).apiKey).toBe(
+    "sk-shared",
+  );
+  expect(providerAuthPlan({ OPENAI_API_KEY: "" }, model).satisfied).toBe(false);
+});
+
+test("an empty coordinate already ON DISK is not a coordinate either", async () => {
+  // The input boundaries refuse to write one now, but a config file written by an
+  // earlier version still holds what they used to accept. Without normalizing on read,
+  // an install damaged by 0.9.0's `config set gpt-4o --provider ""` went on producing the
+  // untypeable `--provider  --base-url <url>` that #174 exists to remove.
+  const stored: AsterismConfig = {
+    model: { id: "llama3.2", provider: "", baseUrl: "", api: "" },
+  };
+  const { model, reason } = resolveModelConfig({}, { config: stored });
+  expect(reason).toBeUndefined();
+  expect(model).toEqual({
+    provider: "openai",
+    id: "llama3.2",
+    baseUrl: PROVIDER_DEFAULTS.openai!.baseUrl,
+  });
+});
+
+test("an empty per-agent override does not shadow the install default", async () => {
+  // What `new bot --model ""` wrote. The override is the more specific layer, so an empty
+  // id there disabled that agent for good: no install-wide `config set` reached it.
+  const stored: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "" } } },
+  };
+  const { model } = resolveModelConfig({}, { config: stored, agentName: "bot" });
+  expect(model?.id).toBe("llama3.2");
+  expect(model?.provider).toBe("ollama");
+  // And a real override still wins, so the layer has not simply been switched off.
+  const real: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "gpt-4o", provider: "openai" } } },
+  };
+  expect(resolveModelConfig({}, { config: real, agentName: "bot" }).model?.id).toBe("gpt-4o");
+});
+
+test("an empty stored provider does not discard the endpoint of the layer below", async () => {
+  // `mergeSettings` drops a lower layer's baseUrl when a higher one names a DIFFERENT
+  // provider. An empty provider is not a different provider, and reading it as one would
+  // throw away a custom endpoint on its way past.
+  const stored: AsterismConfig = {
+    model: { id: "local-13b", provider: "openai", baseUrl: "http://127.0.0.1:8080/v1" },
+    agents: { bot: { model: { provider: "" } } },
+  };
+  const { model } = resolveModelConfig({}, { config: stored, agentName: "bot" });
+  expect(model?.baseUrl).toBe("http://127.0.0.1:8080/v1");
+  expect(model?.provider).toBe("openai");
+});
+
+test("the source of the resolved model id is read off the layers that resolve it", () => {
+  const config: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "gpt-4o" } } },
+  };
+  expect(modelIdSource({}, {})).toBeUndefined();
+  expect(modelIdSource({}, { config })).toBe("install default");
+  expect(modelIdSource({ ASTERISM_MODEL_ID: "claude-opus-4-8" }, { config })).toBe("environment");
+  expect(modelIdSource({}, { config, agentName: "bot" })).toBe("agent override");
+  // Highest precedence wins even with every layer set.
+  expect(modelIdSource({ ASTERISM_MODEL_ID: "x" }, { config, agentName: "bot" })).toBe("agent override");
+  // An agent with no override of its own falls to the layer that does supply one.
+  expect(modelIdSource({}, { config, agentName: "other" })).toBe("install default");
+});
+
+test("a layer that supplies an EMPTY id is not credited with the resolved one", () => {
+  // The label and the value have to agree, and they did not: `override.id !== undefined`
+  // is satisfied by `""`, so an agent whose override was written by `new bot --model ""`
+  // was reported as running on its own override while resolution used the install default.
+  const damaged: AsterismConfig = {
+    model: { id: "llama3.2", provider: "ollama" },
+    agents: { bot: { model: { id: "" } } },
+  };
+  expect(modelIdSource({}, { config: damaged, agentName: "bot" })).toBe("install default");
+  expect(resolveModelConfig({}, { config: damaged, agentName: "bot" }).model?.id).toBe("llama3.2");
+  // Same for the environment layer and for the install default itself.
+  expect(modelIdSource({ ASTERISM_MODEL_ID: "" }, { config: damaged })).toBe("install default");
+  expect(modelIdSource({}, { config: { model: { id: "" } } })).toBeUndefined();
+});
+
+test("a coordinate or key made of whitespace supplies nothing, from the environment or from disk", () => {
+  const config: AsterismConfig = { model: { id: "llama3.2", provider: "ollama" } };
+  // The environment layer.
+  expect(resolveModelConfig({ ASTERISM_MODEL_ID: "   " }, { config }).model?.id).toBe("llama3.2");
+  expect(resolveModelConfig({ ASTERISM_MODEL_PROVIDER: "\t" }, { config }).model?.provider).toBe(
+    "ollama",
+  );
+  // The stored layer — what a hand-edited file, or an older version, can hold.
+  const padded: AsterismConfig = { model: { id: "llama3.2", provider: "ollama", baseUrl: "  " } };
+  expect(resolveModelConfig({}, { config: padded }).model?.baseUrl).toBe(
+    PROVIDER_DEFAULTS.ollama!.baseUrl,
+  );
+  // And the credential reads, which `service install --capture-env` has to agree with:
+  // reporting the key need satisfied by a value it will not write is how a service came
+  // to install cleanly and start with no key at all.
+  const { model } = resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o" });
+  expect(resolveProviderAuth({ OPENAI_API_KEY: " " }, model!).apiKey).toBeUndefined();
+  expect(providerAuthPlan({ OPENAI_API_KEY: "\n" }, model).satisfied).toBe(false);
+  // A key with padding around something is still a key — and the padding goes, because a
+  // newline on the end of a pasted key is the mistake this reading exists to forgive, not
+  // part of the credential. (An AGENT's own secret keeps its padding; that is `secrets
+  // add`'s rule, and a different question — see `env.ts`.)
+  expect(resolveProviderAuth({ OPENAI_API_KEY: " sk-real " }, model!).apiKey).toBe("sk-real");
+  expect(resolveProviderAuth({ OPENAI_API_KEY: "sk-abc\n" }, model!).apiKey).toBe("sk-abc");
+  expect(resolveModelConfig({ ASTERISM_MODEL_ID: "gpt-4o\n" }).model?.id).toBe("gpt-4o");
 });

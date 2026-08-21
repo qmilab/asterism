@@ -117,6 +117,15 @@ async function collectUsageLines(): Promise<Map<string, string[]>> {
       shapes.push([head, DUMMIES[0]!, sub, DUMMIES[1]!]);
       for (const flag of headFlags.get(head) ?? []) {
         shapes.push([head, sub, flag], [head, DUMMIES[0]!, sub, flag]);
+        // …and each flag WITH a value. Every value-bearing option is now refused before
+        // the positional check (#174), so a bare flag stops at "The --x option needs a
+        // value" and a usage line behind it stops being reachable — which is how this
+        // probe set quietly lost `api add`'s. A flag that carries something gets past the
+        // option check and reaches the arity complaint the line belongs to.
+        shapes.push(
+          [head, sub, flag, DUMMIES[0]!],
+          [head, DUMMIES[0]!, sub, flag, DUMMIES[1]!],
+        );
       }
     }
   }

@@ -99,6 +99,37 @@ async function part1CliUnderDeno() {
       refusedUnattended.includes("No value for NO_VALUE_ANYWHERE. Pass it inline"),
     );
 
+    // An option given an EMPTY value carries nothing, and the shipped binary refuses it
+    // (#174) — checked here rather than only through `runCli`, because this is the one
+    // place the built `bin.js` is typed at. Two of them, and the second is the one that
+    // mattered: `--host ""` did not fall back to the loopback default, it bound `::`,
+    // every interface.
+    const refusedEmpty = (args) => {
+      try {
+        asterism(work, args, "", 20_000);
+        return "";
+      } catch (err) {
+        if (err.code === "ETIMEDOUT") return "BLOCKED waiting for input";
+        return err.stderr?.toString() ?? "";
+      }
+    };
+    check(
+      "`config set --provider \"\"` is refused, naming the option",
+      refusedEmpty(["config", "set", "gpt-4o", "--provider", ""]).includes(
+        "The --provider option needs a value.",
+      ),
+    );
+    check(
+      "…and nothing was written: no model is configured after it",
+      asterism(work, ["config", "show"]).includes("Install default model: (none set)"),
+    );
+    check(
+      "`serve --host \"\"` is refused rather than binding every interface",
+      refusedEmpty(["serve", "personal", "--host", ""]).includes(
+        "The --host option needs a value.",
+      ),
+    );
+
     const list = asterism(work, ["list"]);
     check("list shows both agents", list.includes("personal") && list.includes("work"));
 

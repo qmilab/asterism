@@ -173,6 +173,36 @@ test("the no-key message points at running a model on your own machine", () => {
   expect(reason).toContain("ollama");
 });
 
+test("a key of only whitespace stops `run` too, not just `reflect`", () => {
+  // The invariant below is one-directional — reflect ⊆ run — so it cannot see `run`
+  // doing something `reflect` refuses, which is what happened here. The host reads the
+  // key through its own trimmed rule and found nothing; the SUBSTRATE was then asked
+  // whether it could authenticate, read the same variable untrimmed, said yes, and an
+  // adapter was built that sent a blank key. `reflect` refused. One install, two
+  // answers, on the path that costs money.
+  const saved = process.env.OPENAI_API_KEY;
+  try {
+    const env: Env = { ASTERISM_MODEL_ID: "gpt-4o-mini" };
+    for (const blank of ["", " ", "  ", "\t", "\n"]) {
+      process.env.OPENAI_API_KEY = blank;
+      const run = buildAdapter(env);
+      const reflect = buildReflectionProvider(env);
+      expect(`${JSON.stringify(blank)}: ${run.adapter !== undefined}`).toBe(
+        `${JSON.stringify(blank)}: false`,
+      );
+      expect(reflect.provider).toBeUndefined();
+      // …and refusing for the same stated reason, which is the rule they share.
+      expect(run.reason).toBe(reflect.reason);
+    }
+    // A key with padding around something real still runs — presence, not shape.
+    process.env.OPENAI_API_KEY = " sk-ambient\n";
+    expect(buildAdapter(env).adapter).toBeDefined();
+  } finally {
+    if (saved === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = saved;
+  }
+});
+
 test("whatever `reflect` can do, `run` can do — never the other way round", () => {
   // The honest invariant now that the substrate has credentials of its own:
   // reflect's reach is a SUBSET of run's. A setup reflect accepts must always be

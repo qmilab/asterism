@@ -189,6 +189,102 @@ describe("asterism service", () => {
     expect(text).not.toContain("Before it can work");
   });
 
+  test("--capture-env does not count an exported-but-empty variable as captured", async () => {
+    // `export ASTERISM_TELEGRAM_TOKEN=` is how a shell clears one. Counted as present it
+    // wrote a blank value into the service's env file AND reported the required need as
+    // met — so the operator was told nothing was missing and the service failed to start
+    // on the one thing that was (#174).
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "",
+        OPENAI_API_KEY: "sk-xyz",
+      },
+    });
+    const p = paths("writer", "telegram");
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+
+    const env = readFileSync(p.env, "utf8");
+    // Left as the commented placeholder it would be if the variable were absent…
+    expect(env).toContain("# ASTERISM_TELEGRAM_TOKEN=");
+    expect(env).not.toContain("ASTERISM_TELEGRAM_TOKEN=''");
+    // …the value that IS there is still captured…
+    expect(env).toContain("OPENAI_API_KEY='sk-xyz'");
+    // …it is not claimed as captured…
+    expect(text).toContain("Captured from your environment: OPENAI_API_KEY");
+    expect(text).not.toContain("Captured from your environment: ASTERISM_TELEGRAM_TOKEN");
+    // …and the operator is told what the service still needs before it can work.
+    expect(text).toContain("Before it can work");
+    expect(text).toContain("ASTERISM_TELEGRAM_TOKEN");
+  });
+
+  test("--capture-env does not capture a token that is only whitespace", async () => {
+    // The reader on the other side of this file trims before testing: `resolveHttpToken`
+    // does, and so do the chat channels now. So capturing `ASTERISM_HTTP_TOKEN="  "`
+    // reported a token captured, wrote a blank one, and left the service minting a
+    // DIFFERENT token — which every client pinned to the "captured" one is then rejected
+    // by. One install, two answers, narrowed to whitespace (#174).
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "   ",
+        OPENAI_API_KEY: " sk-padded ",
+      },
+    });
+    const p = paths("writer", "telegram");
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+
+    const env = readFileSync(p.env, "utf8");
+    expect(env).toContain("# ASTERISM_TELEGRAM_TOKEN=");
+    expect(env).not.toContain("ASTERISM_TELEGRAM_TOKEN='   '");
+    expect(text).not.toContain("Captured from your environment: ASTERISM_TELEGRAM_TOKEN");
+    // The TOKEN specifically among what is still missing, not merely that something is:
+    // a telegram service also needs a model here, so "Before it can work" appears either
+    // way and an assertion on it alone passes with the rule switched off — measured.
+    const missing = text.slice(text.indexOf("Before it can work"));
+    expect(missing).toContain("ASTERISM_TELEGRAM_TOKEN");
+
+    // A value with padding AROUND something is still a value, and is written verbatim —
+    // the rule decides whether anything is there, never what it is.
+    expect(env).toContain("OPENAI_API_KEY=' sk-padded '");
+    expect(text).toContain("OPENAI_API_KEY");
+  });
+
+  test("a key that is only whitespace is not a satisfied need either", async () => {
+    // The DERIVED needs — the model, and the API key — come from `resolveModelConfig` /
+    // `resolveProviderAuth` rather than from the `has` test above, so they were a second
+    // opinion about what counts as supplied. With `OPENAI_API_KEY=" "` (a space a paste
+    // left behind) the install reported the key need met, captured nothing, and the
+    // service started with no key — the restart loop this code exists to prevent.
+    const io = baseIo({
+      platform: "linux",
+      runCommand: makeRunner().run,
+      env: {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        ASTERISM_TELEGRAM_TOKEN: "tok-123",
+        ASTERISM_MODEL_ID: "gpt-4o-mini",
+        OPENAI_API_KEY: " ",
+      },
+    });
+    const p = paths("writer", "telegram");
+    const { code, text } = await run(io, ["service", "install", "writer", "--kind", "telegram", "--capture-env"]);
+    expect(code).toBe(0);
+
+    expect(readFileSync(p.env, "utf8")).not.toContain("OPENAI_API_KEY=' '");
+    expect(text).not.toContain("Captured from your environment: ASTERISM_TELEGRAM_TOKEN, ASTERISM_MODEL_ID, OPENAI_API_KEY");
+    const missing = text.slice(text.indexOf("Before it can work"));
+    expect(missing).toContain("OPENAI_API_KEY");
+  });
+
   test("--capture-env overwrites a loose-permission env file and leaves it 0600", async () => {
     const p = paths("writer", "serve");
     await run(baseIo({ platform: "linux", runCommand: makeRunner().run }), ["service", "install", "writer"]);

@@ -17,6 +17,27 @@ import { createHash, timingSafeEqual } from "node:crypto";
  */
 export const DEFAULT_HOSTNAME = "127.0.0.1";
 
+/**
+ * The interface to bind, from what the caller asked for.
+ *
+ * An EMPTY hostname is not an override and must not be read as one: `listen(port, "")`
+ * binds `::` — every interface — measured, which is the opposite of
+ * {@link DEFAULT_HOSTNAME} and of what the endpoint promises. The CLI refuses
+ * `--host ""` before it reaches here (#174), but both `serve` and `serveConsole` are
+ * exported and an embedder can pass one, so the reading is made here as well.
+ *
+ * Falling back rather than throwing is the right direction for a boundary: when we
+ * cannot tell what was meant, the strictest bind wins. Shared by both surfaces, like
+ * the default itself, so the two can never disagree about what counts as an override.
+ */
+export function resolveBindHost(hostname?: string): string {
+  // Blank, not merely empty: a hostname of spaces or a newline is the same class of input
+  // (`--host "$HOST"` with the variable holding whitespace) and the same premise applies —
+  // when we cannot tell what was meant, the strictest bind wins. The CLI refuses it
+  // upstream; this is the package's own reading, for an embedder that does not.
+  return hostname === undefined || hostname.trim().length === 0 ? DEFAULT_HOSTNAME : hostname;
+}
+
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;
 
 /** A JSON response with the given status. */

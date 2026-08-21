@@ -140,6 +140,24 @@ export function undeclaredOptions(parsed: ParsedArgs, allowed: readonly string[]
   ];
 }
 
+/**
+ * Whether an option CARRIES NOTHING — given with no value at all (which the parser reads
+ * as boolean `true`), or given one that is only whitespace.
+ *
+ * One predicate, because every site that spelled this out by hand drifted from every
+ * other. `--x "$VAR"` expands to `""` when the variable is unset and to `"  "` or `"\n"`
+ * when it holds a stray space or the newline a `$(cat …)` leaves — one mistake wearing
+ * two faces. Sites testing only `=== ""` let the second through: `api add --credential
+ * "  "` bound an endpoint to a credential key of two spaces, and `channel telegram
+ * --allow "  "` started a bot with no allow-list where one had been named.
+ *
+ * It decides PRESENCE only. A value with padding around something real is a value, and is
+ * kept exactly as typed.
+ */
+export function carriesNothing(value: string | true | undefined): boolean {
+  return value === true || (typeof value === "string" && value.trim().length === 0);
+}
+
 /** A flag's value when it was given as a string, else undefined. */
 export function stringFlag(value: string | true | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;

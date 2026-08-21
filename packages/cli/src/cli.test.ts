@@ -16,9 +16,9 @@ import type { RunningServer, ServeConsoleOptions, ServeOptions } from "@qmilab/a
 import type { ChannelHandle, DiscordOptions, TelegramOptions } from "@qmilab/asterism-channels";
 
 import { workspaceCapabilities } from "./capabilities.ts";
-import { runCli } from "./cli.ts";
-import type { CliIO, ReviewDecision, ReviewItem } from "./cli.ts";
-import { loadConfig } from "./config.ts";
+import { decideGrant, decideReview, decideTransition, runCli } from "./cli.ts";
+import type { CliIO, ReviewDecision, ReviewItem, TransitionDecision } from "./cli.ts";
+import { loadConfig, saveConfig } from "./config.ts";
 import type { ModelResolutionContext } from "./model-config.ts";
 import { dbPath, HOME_DIR_NAME } from "./paths.ts";
 import { VERSION } from "./version.ts";
@@ -105,6 +105,17 @@ async function withFinishedRun(h: Harness, agentName = "personal"): Promise<void
 async function capture(argv: string[], io: CliIO): Promise<string> {
   const lines: string[] = [];
   await runCli(argv, { ...io, out: (t) => lines.push(t) });
+  return lines.join("\n");
+}
+
+/**
+ * Both streams, in the order written — for the interactive review conversation, which is
+ * on stderr where the question is asked, while its closing summary is the command's
+ * result on stdout. A test that reads only one stream reads half of it.
+ */
+async function captureBoth(argv: string[], io: CliIO): Promise<string> {
+  const lines: string[] = [];
+  await runCli(argv, { ...io, out: (t) => lines.push(t), err: (t) => lines.push(t) });
   return lines.join("\n");
 }
 
@@ -286,7 +297,7 @@ test("trust --review grants an earned capability — only on an explicit yes", a
   seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
 
   h.io.reviewGrant = () => true; // ratify the proposal
-  const out = await capture(["trust", "cleaner", "--review"], h.io);
+  const out = await captureBoth(["trust", "cleaner", "--review"], h.io);
   expect(out).toContain("fs.delete");
   expect(out).toContain("1 granted");
 
@@ -296,15 +307,356 @@ test("trust --review grants an earned capability — only on an explicit yes", a
   expect(show).toContain("fs.delete");
 });
 
-test("trust --review grants nothing without a reviewer (the safe default)", async () => {
+test("api add names the option that carries nothing, before the arguments it lacks", async () => {
+  // The ordering rule every other verb was moved to in this release: an option you typed
+  // wrong is named, rather than reported as missing arguments you had not typed yet.
+  const h = harness();
+  await runCli(["init"], h.io);
+  for (const argv of [
+    ["api", "add", "--credential"],
+    ["api", "add", "--credential", ""],
+    ["api", "add", "writer", "issues", "https://api.example.com/x", "--credential"],
+  ]) {
+    h.err.length = 0;
+    expect(await runCli(argv, h.io)).toBe(1);
+    const said = h.err.join("\n");
+    expect(said).toContain("--credential <KEY>");
+    expect(said).not.toContain("Usage: asterism api add");
+  }
+  // With a credential given, the arity complaint is what is left to say.
+  h.err.length = 0;
+  expect(await runCli(["api", "add", "--credential", "GITHUB_TOKEN"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("Usage: asterism api add");
+
+  // …and an option NOT TYPED AT ALL is a different mistake. The ordering rule is about
+  // naming the option that is wrong; someone who typed nothing has no wrong option, and
+  // needs the usage line that names the whole shape of the command. Moving the check up
+  // took that away from them.
+  for (const argv of [["api", "add"], ["api", "add", "writer"]]) {
+    h.err.length = 0;
+    expect(await runCli(argv, h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("Usage: asterism api add <agent> <name> <https-url>");
+  }
+  // The one who typed the arguments and forgot the option is still told which option.
+  h.err.length = 0;
+  expect(await runCli(["api", "add", "writer", "issues", "https://api.example.com/x"], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("--credential <KEY>");
+});
+
+test("no answer and an empty answer are different things at a review prompt", async () => {
+  // The distinction the whole quit fix turns on, mapped where a test can reach it — the
+  // binary's hook is in `bin.ts`, which runs a command and exits, so this is the logic it
+  // calls rather than a copy of it.
+  const noEdit = (): Promise<string | undefined> => Promise.resolve(undefined);
+  // EOF: the terminal sent nothing (Ctrl-D, or it went away). A departure, not a verdict.
+  expect(await decideReview(undefined, noEdit)).toEqual({ kind: "quit" });
+  // An empty line: someone was there and pressed return, which the prompt calls reject.
+  expect(await decideReview("", noEdit)).toEqual({ kind: "reject" });
+  expect(await decideReview("r", noEdit)).toEqual({ kind: "reject" });
+  expect(await decideReview("anything else", noEdit)).toEqual({ kind: "reject" });
+  expect(await decideReview("a", noEdit)).toEqual({ kind: "accept" });
+  expect(await decideReview("ACCEPT", noEdit)).toEqual({ kind: "accept" });
+  expect(await decideReview("q", noEdit)).toEqual({ kind: "quit" });
+  expect(await decideReview("quit", noEdit)).toEqual({ kind: "quit" });
+  // The edit path asks again, and the same distinction holds on the second question.
+  expect(await decideReview("e", () => Promise.resolve("new text"))).toEqual({
+    kind: "edit",
+    content: "new text",
+  });
+  expect(await decideReview("e", () => Promise.resolve(""))).toEqual({ kind: "reject" });
+  expect(await decideReview("e", noEdit)).toEqual({ kind: "quit" });
+});
+
+test("and on a grant prompt, where anything but yes leaves it gated", () => {
+  expect(decideGrant(undefined)).toBe("quit");
+  expect(decideGrant("")).toBe(false); // an answer, and not a yes
+  expect(decideGrant("n")).toBe(false);
+  expect(decideGrant("y")).toBe(true);
+  expect(decideGrant("YES")).toBe(true);
+  expect(decideGrant("q")).toBe("quit");
+  expect(decideGrant("quit")).toBe("quit");
+});
+
+test("the same distinction on a transition prompt, where the default is skip", () => {
+  expect(decideTransition(undefined)).toBe("quit");
+  expect(decideTransition("")).toBe("skip");
+  expect(decideTransition("s")).toBe("skip");
+  expect(decideTransition("a")).toBe("apply");
+  expect(decideTransition("APPLY")).toBe("apply");
+  expect(decideTransition("q")).toBe("quit");
+});
+
+test("leaving stops the NEXT section, queued and live alike", async () => {
+  // The two remaining orderings, each its own branch: memories → objectives inside a
+  // QUEUE drain, and inside a LIVE pass. Both survived a mutation until this existed —
+  // the sibling test queues only memories, so neither branch was ever entered.
+  const queueBoth: ReflectionProvider = {
+    async reflect(i) {
+      return [{ memoryType: "semantic" as const, content: "a fact", confidence: 0.8, sourceRunId: i.transcript.runId }];
+    },
+    async proposeObjectives(i) {
+      return [{ content: "keep the notes tidy", confidence: 0.7, sourceRunId: i.transcript.runId }];
+    },
+  };
+
+  // --- queued: `--propose` fills both piles, `--review` drains them in order ---
+  const q = harness();
+  await withFinishedRun(q);
+  q.io.makeReflectionProvider = () => ({ provider: queueBoth });
+  await runCli(["reflect", "personal", "--propose"], q.io);
+  let seen: string[] = [];
+  q.io.review = (item: ReviewItem): ReviewDecision => {
+    seen.push(item.label);
+    return { kind: "quit" };
+  };
+  await runCli(["reflect", "personal", "--review"], q.io);
+  expect(seen).toEqual(["semantic"]); // asked once, about the memory, and stopped
+  // The queued objective is untouched — still awaiting a decision, not rejected.
+  expect(await capture(["objective", "list", "personal"], q.io)).toContain("proposed");
+
+  // --- live: no queue, so both halves are computed from the latest run ---
+  const l = harness();
+  await withFinishedRun(l);
+  l.io.makeReflectionProvider = () => ({ provider: queueBoth });
+  seen = [];
+  l.io.review = (item: ReviewItem): ReviewDecision => {
+    seen.push(item.label);
+    return { kind: "quit" };
+  };
+  await runCli(["reflect", "personal", "--review"], l.io);
+  expect(seen).toEqual(["semantic"]);
+  expect(await capture(["objective", "list", "personal"], l.io)).toContain("has no objectives yet");
+});
+
+test("leaving stops every later section too, model call included", async () => {
+  // `reflect --review` has SECTIONS: queued memories, then queued objectives, then
+  // suggested transitions. A quit that ended only the loop it was given in was not a
+  // quit — measured before this fix: the objective section asked again, and the
+  // transition section BUILT a provider and paid for a call to find something to ask
+  // about, after the operator had already left.
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([{ memoryType: "semantic", content: "fact one", confidence: 0.8 }]),
+  });
+  h.io.review = () => ({ kind: "accept" });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  let asked = 0;
+  let transitionsAsked = 0;
+  let built = 0;
+  h.io.review = (): ReviewDecision => {
+    asked++;
+    return { kind: "quit" };
+  };
+  h.io.reviewTransition = (): TransitionDecision => {
+    transitionsAsked++;
+    return "skip";
+  };
+  h.io.makeReflectionProvider = () => {
+    built++;
+    return { provider: fakeTransitionProvider() };
+  };
+
+  await runCli(["reflect", "personal", "--review"], h.io);
+  expect(asked).toBe(1); // one question, then it stopped
+  expect(transitionsAsked).toBe(0); // …and never reached the transition section…
+  expect(built).toBe(0); // …so it never built a model to find one to ask about.
+
+  // The objective the transition section would have retired is untouched.
+  expect(await capture(["objective", "list", "personal"], h.io)).not.toContain("· done");
+});
+
+test("leaving a queue review is not a decision — the rest of the pile survives", async () => {
+  // The regression this release's own fix introduced. Ctrl-D used to kill the process,
+  // which was ugly but left the queue intact. With the crash fixed, "no answer" flowed
+  // through as a REJECT — and a queued proposal's rejection is durable, so each keypress
+  // destroyed another one and the loop advanced to do it again.
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([
+      { memoryType: "semantic", content: "fact one", confidence: 0.8 },
+      { memoryType: "semantic", content: "fact two", confidence: 0.8 },
+      { memoryType: "semantic", content: "fact three", confidence: 0.8 },
+    ]),
+  });
+  h.io.review = () => ({ kind: "accept" });
+  await runCli(["reflect", "personal", "--propose"], h.io);
+
+  // Three queued. Quit on the first: none of them is settled, in either direction.
+  let asked = 0;
+  h.io.review = (): ReviewDecision => {
+    asked++;
+    return { kind: "quit" };
+  };
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["reflect", "personal", "--review"], h.io);
+  expect(asked).toBe(1); // it stopped rather than walking the rest
+  expect(h.err.join("\n")).toContain("stopped");
+  // The RESULT line says the review was abandoned, and how much is still waiting — on
+  // STDOUT, which is the only stream a redirect keeps. Under `reflect … --review >
+  // out.txt` — the redirect this release exists to make safe — `Done — 0 saved, 0
+  // rejected.` alone was indistinguishable from a review that genuinely settled nothing.
+  expect(h.out.join("\n")).toContain("Done — 0 saved, 0 rejected. Stopped early — 3 left for next time.");
+
+  const still = await capture(["memory", "inspect", "personal"], h.io);
+  expect(still).toContain("fact one");
+  expect(still).toContain("fact three");
+  // All three still awaiting a decision — none settled in either direction.
+  expect(still).not.toContain("rejected");
+  expect([...still.matchAll(/· proposed ·/g)]).toHaveLength(3);
+
+  // …and a REJECT is still a reject, so quitting has not disabled the decision.
+  h.io.review = (): ReviewDecision => ({ kind: "reject" });
+  await runCli(["reflect", "personal", "--review"], h.io);
+  const settled = await capture(["memory", "inspect", "personal"], h.io);
+  expect([...settled.matchAll(/· rejected ·/g)]).toHaveLength(3);
+  expect(settled).not.toContain("· proposed ·");
+});
+
+test("leaving a grant review stops it, rather than declining the rest one at a time", async () => {
+  // Nothing durable is at stake — a declined grant changes nothing, and a candidate is
+  // re-proposed next time — but readline closes only its own interface and leaves stdin
+  // open, so Ctrl-D answered the candidate in front of you and the loop built a fresh
+  // prompt for the next. A walk of N capabilities took N of them. The two sibling walks
+  // got a way out in this release; this is the third.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
+  seedCleanRecord(h, "cleaner", "fs.move", ["a", "b", "c"]);
+
+  let asked = 0;
+  h.io.reviewGrant = () => {
+    asked++;
+    return "quit";
+  };
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["trust", "cleaner", "--review"], h.io);
+  expect(asked).toBe(1); // asked once, then stopped
+  expect(h.err.join("\n")).toContain("stopped");
+  expect(h.out.join("\n")).toContain(
+    "Done — 0 granted, 0 left gated. Stopped early — 2 left for next time.",
+  );
+  // Neither capability was granted, and both are still proposed next time.
+  expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("No capabilities have earned");
+  h.io.reviewGrant = () => false;
+  expect(await captureBoth(["trust", "cleaner", "--review"], h.io)).toContain(
+    "Done — 0 granted, 2 left gated.",
+  );
+});
+
+test("what a reviewer is deciding ABOUT is written where the question is asked", async () => {
+  // The mirror of the bug this release fixes. `ask` moved to stderr; if the material the
+  // question is about stays on stdout, `trust cleaner --review > out.txt` at a terminal
+  // asks the operator to grant a permanent auto-approve for a destructive capability
+  // whose name went into the file. A question you can see about something you cannot is
+  // no better than one you cannot see.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
+  seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
+  h.io.reviewGrant = () => false;
+
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["trust", "cleaner", "--review"], h.io);
+  const asked = h.err.join("\n");
+  const result = h.out.join("\n");
+  // Everything the decision is about, beside the question.
+  expect(asked).toContain("fs.delete");
+  expect(asked).toContain("Nothing is granted unless you accept it");
+  expect(asked).toContain("left gated");
+  // The closing count is the command's RESULT, and stays on standard out.
+  expect(result).toContain("Done — 0 granted, 1 left gated.");
+  expect(result).not.toContain("fs.delete");
+});
+
+test("quitting a transition walk leaves the rest, and the result line says so", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  await runCli(["objective", "add", "personal", "tidy the notes folder"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  let asked = 0;
+  h.io.reviewTransition = (): TransitionDecision => {
+    asked++;
+    return "quit";
+  };
+
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["reflect", "personal", "--review"], h.io);
+  expect(asked).toBe(1);
+  expect(h.err.join("\n")).toContain("stopped");
+  // Every advisory this walk would have asked about, named on the result line — the only
+  // stream a redirect keeps.
+  expect(h.out.join("\n")).toContain("Done — 0 applied, 0 skipped. Stopped early — 2 left for next time.");
+  // Neither objective was retired.
+  const listed = await capture(["objective", "list", "personal"], h.io);
+  expect(listed).not.toContain("· done");
+});
+
+test("…and for an objective transition, which is the third review that asks", async () => {
+  // No reviewer flagged this one; the category did. `Apply this change?` was on stderr
+  // while the objective it names, and the confidence behind the suggestion, were on
+  // stdout — so a redirected run asked which objective to retire without showing which.
+  const h = harness();
+  await withFinishedRun(h);
+  await runCli(["objective", "add", "personal", "finish the blog migration"], h.io);
+  h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
+  h.io.reviewTransition = () => "skip";
+
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["reflect", "personal", "--review"], h.io);
+  const asked = h.err.join("\n");
+  expect(asked).toContain("finish the blog migration");
+  expect(asked).toContain("looks done");
+  expect(asked).toContain("These are suggestions");
+  expect(h.out.join("\n")).toContain("Done — 0 applied, 1 skipped.");
+  // Worked to the end, so nothing is reported as left.
+  expect(h.out.join("\n")).not.toContain("Stopped early");
+  expect(h.out.join("\n")).not.toContain("finish the blog migration");
+});
+
+test("the same holds for a memory review: the proposal is where its question is", async () => {
+  const h = harness();
+  await withFinishedRun(h);
+  h.io.makeReflectionProvider = () => ({
+    provider: fakeReflection([
+      { memoryType: "convention", content: "headings are sentence case", confidence: 0.9 },
+    ]),
+  });
+  h.io.review = () => ({ kind: "reject" });
+
+  h.out.length = 0;
+  h.err.length = 0;
+  await runCli(["reflect", "personal", "--review"], h.io);
+  expect(h.err.join("\n")).toContain("headings are sentence case");
+  expect(h.err.join("\n")).toContain("Nothing is saved unless you accept it");
+  expect(h.out.join("\n")).toContain("Done — 0 saved, 1 rejected");
+  expect(h.out.join("\n")).not.toContain("headings are sentence case");
+});
+
+test("trust --review grants nothing without a reviewer, and says so instead of reporting decisions nobody made", async () => {
   const h = harness();
   await runCli(["init"], h.io);
   await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
   seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
 
-  // No reviewGrant injected ⇒ every proposal is declined, nothing is granted.
-  const out = await capture(["trust", "cleaner", "--review"], h.io);
-  expect(out).toContain("0 granted");
+  // No reviewGrant injected ⇒ no human to ratify anything. The safe outcome is unchanged
+  // — nothing is granted — but the session is told to come back with a terminal rather
+  // than shown "0 granted, 1 left gated", which reads as a human having declined it.
+  const out = await captureBoth(["trust", "cleaner", "--review"], h.io);
+  expect(out).toContain("1 earned capability is waiting for cleaner");
+  expect(out).toContain("in an interactive terminal");
+  // The evidence walk is what the operator came for, and it is not shown to nobody.
+  expect(out).not.toContain("left gated");
   expect(await capture(["trust", "cleaner", "show"], h.io)).toContain("No capabilities have earned");
 });
 
@@ -312,7 +664,7 @@ test("trust --review reports plainly when nothing has been earned", async () => 
   const h = harness();
   await runCli(["init"], h.io);
   await runCli(["new", "cleaner", "--trust", "autonomous"], h.io);
-  const out = await capture(["trust", "cleaner", "--review"], h.io);
+  const out = await captureBoth(["trust", "cleaner", "--review"], h.io);
   expect(out).toContain("no capabilities have earned a standing grant yet");
 });
 
@@ -380,11 +732,11 @@ test("trust threshold raises the bar review applies — a record that earned now
   // A clean record over three distinct targets clears the default bar (3/2).
   seedCleanRecord(h, "cleaner", "fs.delete", ["dist", "build", "cache"]);
   h.io.reviewGrant = () => true;
-  expect(await capture(["trust", "cleaner", "--review"], h.io)).toContain("(1/1) fs.delete");
+  expect(await captureBoth(["trust", "cleaner", "--review"], h.io)).toContain("(1/1) fs.delete");
   // Revoke it, then raise the bar to 5 executions: the same record no longer proposes.
   await runCli(["trust", "cleaner", "revoke", "fs.delete"], h.io);
   await runCli(["trust", "cleaner", "threshold", "--clean", "5"], h.io);
-  expect(await capture(["trust", "cleaner", "--review"], h.io)).toContain("no capabilities have earned");
+  expect(await captureBoth(["trust", "cleaner", "--review"], h.io)).toContain("no capabilities have earned");
 });
 
 test("trust threshold --unset clears the override, then is a no-op", async () => {
@@ -1216,7 +1568,7 @@ test("reflect proposes typed memories and persists only what the human accepts",
   h.io.review = (item: ReviewItem): ReviewDecision =>
     item.index === 1 ? { kind: "accept" } : { kind: "reject" };
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("1 saved, 1 rejected");
 
   // The accepted memory is saved as accepted; the rejected one was never written.
@@ -1229,12 +1581,48 @@ test("reflect proposes typed memories and persists only what the human accepts",
 test("reflect saves nothing without an explicit accept (the safe default)", async () => {
   const h = harness();
   await withFinishedRun(h);
+  let proposed = 0;
   h.io.makeReflectionProvider = () => ({
     provider: fakeReflection([{ memoryType: "semantic", content: "a fact", confidence: 0.8 }]),
   });
-  // No reviewer injected: every proposal must be rejected, nothing persisted.
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  // A reviewer IS present and declines: every proposal is rejected, nothing persisted.
+  h.io.review = () => ({ kind: "reject" });
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("0 saved");
+  // Worked to the end, so the result line must not claim it was abandoned.
+  expect(out).not.toContain("Stopped early");
+  expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
+
+  // With NOBODY to decide, it does not reject on their behalf and report it — it says so
+  // and stops, before asking the model for proposals nobody will answer for (#172).
+  delete h.io.review;
+  let built = 0;
+  h.io.makeReflectionProvider = () => {
+    built++;
+    return {
+      provider: {
+        async reflect(input) {
+          proposed++;
+          return [
+            {
+              memoryType: "semantic" as const,
+              content: "a fact",
+              confidence: 0.8,
+              sourceRunId: input.transcript.runId,
+            },
+          ];
+        },
+      },
+    };
+  };
+  const unattended = await captureBoth(["reflect", "personal", "--review"], h.io);
+  expect(unattended).toContain("nobody here to review");
+  expect(unattended).toContain("--propose");
+  expect(unattended).not.toContain("0 saved");
+  // The provider is BUILT — so a missing model is still diagnosed and still exits 1 —
+  // and then never ASKED, which is the part that costs money.
+  expect(built).toBe(1);
+  expect(proposed).toBe(0);
   expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
 });
 
@@ -1252,7 +1640,7 @@ test("reflect blocks a poisoned proposal at the firewall even if the human accep
   });
   h.io.review = (): ReviewDecision => ({ kind: "accept" });
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("memory firewall flagged"); // warned before the decision
   expect(out).toContain("blocked by the memory firewall"); // refused on accept
   expect(out).toContain("1 blocked");
@@ -1272,7 +1660,7 @@ test("reflect lets the human edit a flagged proposal into a safe memory", async 
   });
   h.io.review = (): ReviewDecision => ({ kind: "edit", content: "the user prefers concise summaries" });
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("saved (edited)");
 
   const mem = await capture(["memory", "inspect", "personal"], h.io);
@@ -1312,7 +1700,7 @@ test("reflect reports when there is no run with output to reflect on", async () 
   h.io.makeReflectionProvider = () => ({
     provider: fakeReflection([{ memoryType: "semantic", content: "unused", confidence: 0.5 }]),
   });
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("no completed run with output");
 });
 
@@ -1330,7 +1718,7 @@ test("reflect rejects an empty edit rather than saving a blank memory", async ()
     provider: fakeReflection([{ memoryType: "semantic", content: "a fact", confidence: 0.8 }]),
   });
   h.io.review = (): ReviewDecision => ({ kind: "edit", content: "   " });
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("rejected (empty after edit)");
   expect(out).toContain("0 saved");
   expect(await capture(["memory", "inspect", "personal"], h.io)).toContain("no memories yet");
@@ -1350,7 +1738,7 @@ test("reflect ignores a proposal whose type is not a reviewable memory type", as
     },
   });
   h.io.review = (): ReviewDecision => ({ kind: "accept" });
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("Ignored 1 proposal");
   expect(out).toContain("1 saved");
 
@@ -1393,7 +1781,7 @@ test("reflect --propose then --review drains the queue and needs no model to do 
     throw new Error("a model was built while draining the queue");
   };
   h.io.review = (): ReviewDecision => ({ kind: "accept" });
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("queued");
   expect(out).toContain("1 saved");
 
@@ -1412,7 +1800,9 @@ test("reflect --review suggests finishing an objective the run completed, and ap
   h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
   h.io.reviewTransition = () => "apply";
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  h.out.length = 0;
+  h.err.length = 0;
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("looks finished");
   expect(out).toContain("looks done");
   expect(out).toContain("1 applied");
@@ -1429,7 +1819,7 @@ test("reflect --review leaves an objective unchanged when the suggestion is skip
   h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
   h.io.reviewTransition = () => "skip";
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("looks finished");
   expect(out).toContain("0 applied, 1 skipped");
   // Still active — only an explicit apply changes it.
@@ -1443,7 +1833,7 @@ test("reflect --review surfaces no transition suggestion (and changes nothing) w
   // No `reviewTransition` hook wired ⇒ the transition step short-circuits: nothing surfaced, nothing applied.
   h.io.makeReflectionProvider = () => ({ provider: fakeTransitionProvider() });
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).not.toContain("looks finished");
   expect(await capture(["objective", "list", "personal"], h.io)).not.toContain("· done");
 });
@@ -1481,7 +1871,7 @@ test("reflect --review surfaces a transition from an OLDER queued run, not just 
   // is judged even though R2 is now latest, so the migration completion still surfaces.
   h.io.review = (): ReviewDecision => ({ kind: "reject" });
   h.io.reviewTransition = () => "apply";
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("looks finished");
   expect(out).toContain("1 applied");
   expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
@@ -1521,7 +1911,7 @@ test("reflect --review catches an older run that queued ONLY an objective propos
   // queued objective's sourceRunId (it left no memory), so the migration completion still surfaces.
   h.io.review = (): ReviewDecision => ({ kind: "reject" });
   h.io.reviewTransition = () => "apply";
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("looks finished");
   expect(out).toContain("1 applied");
   expect(await capture(["objective", "list", "personal"], h.io)).toContain("· done");
@@ -1540,7 +1930,7 @@ test("reflect --review skips a stale transition instead of overwriting a concurr
     return "apply";
   };
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("looks finished");
   expect(out).toContain("the objective changed elsewhere — skipped");
   expect(out).toContain("0 applied, 1 skipped");
@@ -1559,7 +1949,7 @@ test("reflect --review drains the queue by rejecting too (a refused proposal lea
   await runCli(["reflect", "personal", "--propose"], h.io);
 
   h.io.review = (): ReviewDecision => ({ kind: "reject" });
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("0 saved, 1 rejected");
   // Nothing active; a second review finds the queue empty and falls back to live compute.
   expect(await capture(["memory", "inspect", "personal"], h.io)).not.toContain("accepted");
@@ -1575,7 +1965,7 @@ test("reflect --review leaves a queued pile intact when run non-interactively (n
 
   // io.review is unset here — a piped / cron-launched session. Draining would persist a
   // reject, so the command must REFUSE to drain and leave the pile untouched.
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("waiting");
   expect(out).not.toContain("rejected");
   const mem = await capture(["memory", "inspect", "personal"], h.io);
@@ -1606,7 +1996,7 @@ test("reflect --review reports a concurrently-settled proposal as skipped, not s
     return { kind: "accept" };
   };
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("already reviewed elsewhere");
   expect(out).toContain("0 saved");
   // The CLI did not activate it — the concurrent reject stands.
@@ -1682,7 +2072,7 @@ test("reflect --propose queues objectives as inert proposals; --review accepts t
     throw new Error("a model was built while draining the objective queue");
   };
   h.io.review = (): ReviewDecision => ({ kind: "accept" });
-  const reviewOut = await capture(["reflect", "personal", "--review"], h.io);
+  const reviewOut = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(reviewOut).toContain("1 saved");
 
   // Now it frames: active + accepted.
@@ -1700,7 +2090,7 @@ test("reflect --review (live) proposes objectives from the latest run for accept
   h.io.review = (item: ReviewItem): ReviewDecision =>
     item.label === "objective" ? { kind: "accept" } : { kind: "reject" };
 
-  const out = await capture(["reflect", "personal", "--review"], h.io);
+  const out = await captureBoth(["reflect", "personal", "--review"], h.io);
   expect(out).toContain("proposed objective");
   expect(out).toContain("1 saved");
 
@@ -2860,6 +3250,227 @@ test("config set rejects a value-bearing flag given with no value", async () => 
   await runCli(["init"], h.io);
   expect(await runCli(["config", "set", "gpt-4o", "--provider"], h.io)).toBe(1);
   expect(h.err.join("\n")).toContain("--provider");
+});
+
+test("config set rejects a flag given an EMPTY value, and stores nothing", async () => {
+  // `--provider "$UNSET"` expands to this. Taken literally it wrote `"provider": ""` to
+  // the config file, after which `config show` printed `(provider: )` and `run` refused
+  // with `--provider  --base-url <url>` — a flag whose value is the next flag (#174).
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+
+  for (const flag of ["model", "provider", "base-url", "api", "agent"]) {
+    h.err.length = 0;
+    expect(await runCli(["config", "set", "gpt-4o", `--${flag}`, ""], h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain(`--${flag} option needs a value`);
+  }
+  // An empty positional model id too — skipping it would take `config set "" --provider x`
+  // as a request to set only the provider, dropping the coordinate that was typed at.
+  h.err.length = 0;
+  expect(await runCli(["config", "set", ""], h.io)).toBe(1);
+  expect(h.err.join("\n")).toContain("model id needs a value");
+
+  // Nothing was written by any of them: the working configuration is untouched.
+  expect(loadConfig(homeOf(h)).model).toEqual({ id: "llama3.2", provider: "ollama" });
+});
+
+test("config set refuses a value made of whitespace, which the reader would discard", async () => {
+  // The writer must not accept what the reader throws away. `withoutEmptyFields` drops a
+  // stored coordinate whose `trim()` is empty, so `config set "  "` reported a model set
+  // and the very next `config show` reported none — the same one-command-two-answers
+  // shape, reached through whitespace instead of `""`.
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+  for (const argv of [
+    ["config", "set", "  "],
+    ["config", "set", "gpt-4o", "--provider", "  "],
+    ["config", "set", "gpt-4o", "--base-url", "\t"],
+    ["config", "set", "gpt-4o", "--agent", " "],
+  ]) {
+    h.err.length = 0;
+    expect(await runCli(argv, h.io)).toBe(1);
+    expect(h.err.join("\n")).toContain("needs a value");
+  }
+  expect(loadConfig(homeOf(h)).model).toEqual({ id: "llama3.2", provider: "ollama" });
+  // A value with padding AROUND something is still a value, and is kept as typed — the
+  // rule decides whether anything is there, never what it is.
+  expect(await runCli(["config", "set", " gpt-4o "], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).model?.id).toBe(" gpt-4o ");
+  expect(await runCli(["config", "set", "gpt-4o", "--provider", " openai "], h.io)).toBe(0);
+  expect(loadConfig(homeOf(h)).model?.provider).toBe(" openai ");
+});
+
+test("config show reports an environment override only when it supplies something", async () => {
+  const env: Record<string, string | undefined> = {};
+  const h = harness(env);
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "propose"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+
+  // Exported and empty. `config show` used to report an active override while `run`
+  // reported no model at all — one install, two answers (#174).
+  env.ASTERISM_MODEL_ID = "";
+  const empty = await capture(["config", "show"], h.io);
+  expect(empty).not.toContain("Environment override");
+  expect(empty).toContain("writer  →  llama3.2 (provider: ollama)  [install default]");
+
+  // …and the same for whitespace, which is what the resolver reads it as. This line kept
+  // an untrimmed rule of its own after every consumer moved to the trimming one, and said
+  // "set" over a per-agent line reading `[unset]` — the same defect, inside its own fix.
+  for (const blank of ["  ", "\t", "\n"]) {
+    env.ASTERISM_MODEL_ID = blank;
+    const shown = await capture(["config", "show"], h.io);
+    expect(shown).not.toContain("Environment override");
+    expect(shown).toContain("writer  →  llama3.2 (provider: ollama)  [install default]");
+  }
+
+  // A real value still overrides, and still says so.
+  env.ASTERISM_MODEL_ID = "gpt-4o";
+  const real = await capture(["config", "show"], h.io);
+  expect(real).toContain("Environment override");
+  expect(real).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
+
+  // …and it names what it actually beats. "Overrides the config file" is not true of the
+  // whole file — a per-agent model is IN that file and wins — and this line sits directly
+  // above the per-agent lines that say so.
+  await runCli(["new", "pinned", "--trust", "propose"], h.io);
+  await runCli(["config", "set", "claude-opus-4-8", "--agent", "pinned"], h.io);
+  const withPin = await capture(["config", "show"], h.io);
+  expect(withPin).toContain("overrides the install default (an agent's own model still wins)");
+  expect(withPin).not.toContain("overrides the config file");
+  expect(withPin).toContain("pinned  →  claude-opus-4-8 (provider: ollama)  [agent override]");
+  expect(withPin).toContain("writer  →  gpt-4o (provider: ollama)  [environment]");
+});
+
+test("…and the same for a per-agent override, which was one branch short", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "bot", "--trust", "propose"], h.io);
+  const home = homeOf(h);
+  const damaged = loadConfig(home);
+  damaged.agents = { bot: { model: { provider: "" } } };
+  saveConfig(home, damaged);
+
+  // `config show` credits this agent's model to no override at all, so reporting one
+  // cleared here would be the same file described two ways — the defect the install
+  // default branch was fixed for, one branch along.
+  expect(await capture(["config", "show"], h.io)).toContain("bot  →  (no model — set one)  [unset]");
+  const cleared = await capture(["config", "unset", "--agent", "bot"], h.io);
+  expect(cleared).toContain("Removed an empty model override for agent \"bot\"");
+  expect(cleared).not.toContain("Cleared the model override");
+  expect(loadConfig(home).agents?.bot).toBeUndefined();
+
+  // A real override still clears, and still says so.
+  await runCli(["config", "set", "gpt-4o", "--agent", "bot"], h.io);
+  expect(await capture(["config", "unset", "--agent", "bot"], h.io)).toContain(
+    'Cleared the model override for agent "bot".',
+  );
+});
+
+test("config unset removes an empty stored entry, and does not call it a cleared setting", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  const home = homeOf(h);
+  const damaged = loadConfig(home);
+  damaged.model = { provider: "" };
+  saveConfig(home, damaged);
+
+  // `config show` reports this file as "(none set)". Saying "Cleared the install default
+  // model" here would have one command describe one file two ways.
+  expect(await capture(["config", "show"], h.io)).toContain("Install default model: (none set)");
+  const cleared = await capture(["config", "unset"], h.io);
+  expect(cleared).toContain("Removed an empty install default model entry");
+  expect(cleared).not.toContain("Cleared the install default model.");
+  // Removed all the same — this is the operator's way out of such a file.
+  expect(loadConfig(home).model).toBeUndefined();
+
+  // A real setting still clears, and still says so.
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+  expect(await capture(["config", "unset"], h.io)).toContain("Cleared the install default model.");
+});
+
+test("config show credits the layer that supplies the model, on a config an older version damaged", async () => {
+  const h = harness();
+  await runCli(["init"], h.io);
+  await runCli(["new", "bot", "--trust", "propose"], h.io);
+  await runCli(["new", "other", "--trust", "propose"], h.io);
+  await runCli(["config", "set", "llama3.2", "--provider", "ollama"], h.io);
+  // What `new bot --model ""` wrote before this release refused it. The empty override no
+  // longer shadows the default — and the label must not credit it either, or the same
+  // command reports a model and a source that disagree about where it came from.
+  const home = homeOf(h);
+  const damaged = loadConfig(home);
+  damaged.agents = { bot: { model: { id: "" } } };
+  saveConfig(home, damaged);
+
+  const shown = await capture(["config", "show"], h.io);
+  expect(shown).toContain("bot  →  llama3.2 (provider: ollama)  [install default]");
+  expect(shown).toContain("other  →  llama3.2 (provider: ollama)  [install default]");
+
+  // The line above them describes the same layer, so it must describe it the same way:
+  // the file's bytes read `(provider: , base url: )`, and printing that beside per-agent
+  // lines reporting what those coordinates resolve to is one command, two answers.
+  const alsoDamaged = loadConfig(home);
+  alsoDamaged.model = { id: "llama3.2", provider: "ollama", baseUrl: "", api: "" };
+  saveConfig(home, alsoDamaged);
+  const head = await capture(["config", "show"], h.io);
+  expect(head).toContain("Install default model: llama3.2 (provider: ollama)");
+  expect(head).not.toContain("base url: )");
+  expect(head).not.toContain("api: )");
+  // And a model whose every coordinate is empty is no model at all.
+  const emptyDefault = loadConfig(home);
+  emptyDefault.model = { id: "", provider: "" };
+  saveConfig(home, emptyDefault);
+  expect(await capture(["config", "show"], h.io)).toContain("Install default model: (none set)");
+  saveConfig(home, damaged);
+  // A REAL override is still credited, so the label has not simply stopped naming one.
+  // (The provider still comes from the install default — the override names only an id,
+  // and the merge is field-wise.)
+  await runCli(["config", "set", "gpt-4o", "--agent", "bot"], h.io);
+  expect(await capture(["config", "show"], h.io)).toContain("bot  →  gpt-4o (provider: ollama)  [agent override]");
+});
+
+test("config show calls the embeddings endpoint configured on exactly the terms the runtime does", async () => {
+  const env: Record<string, string | undefined> = {};
+  const h = harness(env);
+  await runCli(["init"], h.io);
+  await runCli(["new", "writer", "--trust", "propose"], h.io);
+  const shown = async (): Promise<boolean> =>
+    (await capture(["config", "show"], h.io)).includes("local-embeddings endpoint configured");
+
+  // `buildEmbeddingRecallProvider` needs BOTH, trimmed, and refuses the run otherwise —
+  // so every case below is what it would do, not a second opinion about it. Reporting a
+  // half-configured endpoint as configured is the same one-install-two-answers shape as
+  // the model override (#174): the line said configured, the run said not configured.
+  expect(await shown()).toBe(false);
+
+  env.ASTERISM_RECALL_EMBED_URL = "http://localhost:11434/v1/embeddings";
+  expect(await shown()).toBe(false); // the URL alone is not an endpoint
+  env.ASTERISM_RECALL_EMBED_MODEL = "";
+  expect(await shown()).toBe(false); // …nor with the model emptied
+  env.ASTERISM_RECALL_EMBED_MODEL = "   ";
+  expect(await shown()).toBe(false); // …nor whitespace, which the builder trims away
+
+  // Half-configured is its own state, and the actionable one: silence over a variable
+  // the operator did export left them a single variable from a working endpoint with no
+  // hint of it, and a hard failure at run time.
+  env.ASTERISM_RECALL_EMBED_MODEL = undefined;
+  const half = await capture(["config", "show"], h.io);
+  expect(half).toContain("local-embeddings endpoint incomplete — also set ASTERISM_RECALL_EMBED_MODEL");
+  expect(half).not.toContain("endpoint configured");
+
+  env.ASTERISM_RECALL_EMBED_MODEL = "nomic-embed-text";
+  expect(await shown()).toBe(true); // both, and only then
+  expect(await capture(["config", "show"], h.io)).not.toContain("incomplete");
+  // Named, so a report that says "configured" without saying what would fail.
+  const both = await capture(["config", "show"], h.io);
+  expect(both).toContain("ASTERISM_RECALL_EMBED_URL, ASTERISM_RECALL_EMBED_MODEL");
+
+  env.ASTERISM_RECALL_EMBED_URL = "";
+  expect(await shown()).toBe(false); // and it goes back when either is cleared
+  expect(await capture(["config", "show"], h.io)).toContain("also set ASTERISM_RECALL_EMBED_URL");
 });
 
 test("config recall-budget sets a per-agent budget, persisted in the kernel store", async () => {

@@ -305,6 +305,25 @@ describe("hasSubstrateCredential", () => {
     });
   });
 
+  test("a key of only whitespace is absent — the substrate would send it as a key", () => {
+    // A cleared `export`, or a `$(cat key.txt)` that produced nothing, leaves the
+    // variable defined and blank. Answering "yes, I can authenticate" for one made the
+    // host build an adapter that then sent the blank key and failed at the first request
+    // with an opaque error — while `reflect`, which reads the same variable through the
+    // host's own trimmed rule, correctly refused. One install, two answers, on the path
+    // that costs money.
+    for (const blank of ["", " ", "  ", "\t", "\n"]) {
+      withEnv("OPENAI_API_KEY", blank, () => {
+        expect(hasSubstrateCredential("openai")).toBe(false);
+      });
+    }
+    // Padding AROUND a key is still a key — the rule decides presence, not shape, and
+    // the substrate sends whatever it finds.
+    withEnv("OPENAI_API_KEY", " sk-test\n", () => {
+      expect(hasSubstrateCredential("openai")).toBe(true);
+    });
+  });
+
   test("says no for a provider the substrate has never heard of", () => {
     // Includes the locally-served providers, which is why the host's refusal for
     // one aimed at a remote endpoint cannot be overturned here today — and why

@@ -55,12 +55,18 @@ async function advertisedVerbs(cwd: string): Promise<string[]> {
  * every `asterism config <sub>` line as a line about bare `config`, and then demands
  * that `config` accept `--provider`.
  */
-function synopsisFlags(helpText: string, invocation: string): { flags: string[]; named: boolean } {
+function synopsisFlags(helpText: string, invocation: string): {
+  flags: string[];
+  /** Those the synopsis shows taking a value — `--credential <KEY>`, `--soul <name|path>`. */
+  valued: string[];
+  named: boolean;
+} {
   const lines = helpText.split("\n");
   const end = lines.findIndex((l) => l.trim() === "");
   const synopsis = lines.slice(0, end === -1 ? lines.length : end);
   const [head, sub] = invocation.split(" ");
   const flags: string[] = [];
+  const valued: string[] = [];
   let taking = false;
   let named = false;
   for (const line of synopsis) {
@@ -71,9 +77,17 @@ function synopsisFlags(helpText: string, invocation: string): { flags: string[];
       if (taking) named = true;
     } else if (line.startsWith("asterism ")) taking = false;
     else if (!/^\s/.test(line)) taking = false; // an indented line continues the one above
-    if (taking) flags.push(...(line.match(/--[a-z][\w-]*/g) ?? []));
+    if (taking) {
+      flags.push(...(line.match(/--[a-z][\w-]*/g) ?? []));
+      // A flag the synopsis shows with a placeholder after it takes a value. This is the
+      // DECLARED signal, and it is needed alongside the behavioural one below: an option
+      // whose refusal is worded its own way — `api add needs --credential <KEY>` — is not
+      // recognised by "does the bare form say it needs a value", and `--credential "  "`
+      // therefore went unchecked and bound an endpoint to a credential key of two spaces.
+      valued.push(...(line.match(/--[a-z][\w-]*(?=[= ]*[<[])/g) ?? []));
+    }
   }
-  return { flags: [...new Set(flags)], named };
+  return { flags: [...new Set(flags)], valued: [...new Set(valued)], named };
 }
 
 /**
@@ -183,6 +197,89 @@ describe("every advertised verb refuses an option it does not take", () => {
     expect(typed).toBeGreaterThan(40);
     // And what it could NOT derive is named, not silently dropped.
     expect(unnamed.sort()).toEqual(NO_SYNOPSIS_OF_ITS_OWN);
+  });
+
+  test("every option that refuses a MISSING value refuses an EMPTY one the same way", async () => {
+    // The other half of "an option you typed is not discarded in silence" (#174). An
+    // option given no value at all parses as boolean `true` and has been refused since
+    // 0.8.0; an option given an EMPTY value — what `--host "$HOST"` expands to with the
+    // variable unset or cleared — fell through as a real value, and what happened next
+    // varied by verb. `config set gpt-4o --provider ""` wrote it to the config file;
+    // `new bot --model ""` wrote a per-agent override that shadows the install default
+    // with nothing; `serve writer --host ""` bound `::`, every interface, where the
+    // documented default is loopback.
+    //
+    // Which options take a value is DERIVED from the binary, not listed: an option whose
+    // bare form says it needs one is an option that takes one. So a flag added tomorrow
+    // is covered the moment it refuses a missing value, and no list can fall behind.
+    const verbs = await advertisedVerbs(cwd);
+    const missed: string[] = [];
+    const seen: string[] = [];
+    let checked = 0;
+    for (const verb of verbs) {
+      const path = verb.split(" ");
+      const { flags, valued } = synopsisFlags(await helpText(cwd, path), verb);
+      for (const flag of flags) {
+        const bare = await run(cwd, [...path, flag]);
+        // Value-bearing by EITHER signal: the synopsis shows it with a placeholder, or its
+        // bare form says it needs a value. Each misses what the other catches — the
+        // synopsis does not describe `channel`'s pair, and a verb wording its own refusal
+        // is invisible to the behavioural test. A genuine boolean (`--review`, `--follow`,
+        // `--unset`, `--headless`) satisfies neither.
+        const bearsValue = valued.includes(flag) || (bare.code !== 0 && /needs a value/.test(bare.text));
+        if (!bearsValue) continue;
+        checked++;
+        seen.push(`${verb} ${flag}`);
+        // Both shapes an option carries nothing in: exactly empty, and only whitespace.
+        // `--x "$VAR"` expands to the first when the variable is unset and the second
+        // when it holds a stray space or the newline a `$(cat …)` leaves — one mistake
+        // wearing two faces, and checking only the first is how four verbs kept an
+        // untrimmed rule of their own after the shared one started trimming.
+        for (const nothing of ["", "  ", "\t", "\n"]) {
+          const empty = await run(cwd, [...path, flag, nothing]);
+          // The SAME first line, not merely a non-zero exit: these are one mistake, and
+          // a verb that refuses for some other reason (an unknown enum value, say) is
+          // describing the expansion instead of the mistake.
+          const same = empty.text.split("\n")[0] === bare.text.split("\n")[0];
+          if (empty.code === 0 || !same) {
+            missed.push(
+              `  asterism ${verb} ${flag} ${JSON.stringify(nothing)}` +
+                `\n    → exit ${empty.code}: ${empty.text.split("\n")[0]}` +
+                `\n    (bare form said: ${bare.text.split("\n")[0]})`,
+            );
+          }
+        }
+      }
+    }
+    expect(missed.join("\n")).toBe("");
+    // A derivation that found nothing would pass the assertion above over zero options —
+    // and one that quietly found FEWER would pass it too. So: a floor on the count, and
+    // the options whose empty form actually did damage, named. A verb that starts
+    // checking its positionals before its options drops out of this sweep silently, which
+    // is how four of these were missed on the first pass.
+    expect(checked).toBeGreaterThan(20);
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        "new --soul", // resolved an empty path as a soul directory
+        "new --model", // wrote an override that shadows the install default with nothing
+        "new --trust",
+        "config set --provider", // wrote `"provider": ""`, then advised an untypeable command
+        "config set --base-url", // shadowed a working provider default with nothing
+        "serve --host", // bound `::` — every interface — instead of loopback
+        "dashboard --host",
+        "connect --mode", // grants a permissioned channel
+        "disconnect --mode",
+        "service install --kind",
+        "memory inspect --type",
+        "events tail --type",
+        // Recognised only by the SYNOPSIS signal: `api add` words its own refusal
+        // ("needs --credential <KEY>"), so "does the bare form say it needs a value"
+        // never saw it — and `--credential "  "` bound an endpoint to a credential key
+        // of two spaces. Named here so dropping that signal cannot narrow this sweep in
+        // silence, which is how it lost four verbs once already.
+        "api add --credential",
+      ]),
+    );
   });
 
   test("the refusal comes before the usage complaint, so it names the real mistake", async () => {

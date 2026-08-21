@@ -86,7 +86,13 @@ export interface PiAdapterOptions {
  */
 export function hasSubstrateCredential(provider: string): boolean {
   try {
-    return getEnvApiKey(provider) !== undefined;
+    // BLANK is absent. A variable holding only whitespace is what a copy-paste or a
+    // cleared `export` leaves, and the substrate will send it as a key — so answering
+    // "yes, I can authenticate" for one makes the host build an adapter that then
+    // fails at the first request with an opaque error. The host applies the same
+    // reading to the keys it knows (`envText`), and `reflect` already refused where
+    // `run` went ahead: one install, two answers, on the path that costs money.
+    return (getEnvApiKey(provider)?.trim() ?? "") !== "";
   } catch {
     // An unknown provider is not an error here, just an absence.
     return false;

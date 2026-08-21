@@ -180,6 +180,11 @@ These override the saved default. **Where a model comes from**, most specific
 first: an agent's own model → `ASTERISM_MODEL_*` → the saved install default →
 built-in provider settings.
 
+A variable that is **set but empty** — `export ASTERISM_MODEL_ID=`, which is how a
+shell clears one — supplies nothing, and the layer below it shows through. That
+holds for the API-key variables too: an emptied key is a cleared key, not a
+credential to send.
+
 ### API keys
 
 The key is read from the provider's own variable, falling back to a generic one:

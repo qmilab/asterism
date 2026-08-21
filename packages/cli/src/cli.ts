@@ -104,10 +104,24 @@ import { DashboardClient } from "./dashboard/client.js";
 import { runDashboard } from "./dashboard/tui.js";
 import type { TerminalIO } from "./dashboard/tui.js";
 
-import { helpRequested, intFlag, parseArgs, stringFlag, undeclaredOptions } from "./args.js";
+import {
+  carriesNothing,
+  helpRequested,
+  intFlag,
+  parseArgs,
+  stringFlag,
+  undeclaredOptions,
+} from "./args.js";
 import type { ParsedArgs } from "./args.js";
 import type { AsterismConfig, ModelSettings } from "./config.js";
 import { loadConfig, saveConfig } from "./config.js";
+import {
+  ambientValue,
+  EMBED_ENDPOINT_VARS,
+  embeddingEndpoint,
+  missingEmbeddingVars,
+  suppliesText,
+} from "./env.js";
 import {
   formatActionSummary,
   formatAgentList,
@@ -131,7 +145,12 @@ import {
 } from "./format.js";
 import { COMMAND_HELP, USAGE } from "./help.js";
 import type { ModelResolutionContext } from "./model-config.js";
-import { providerAuthPlan, resolveModelConfig } from "./model-config.js";
+import {
+  modelIdSource,
+  providerAuthPlan,
+  resolveModelConfig,
+  withoutEmptyFields,
+} from "./model-config.js";
 import {
   isServiceKind,
   launchdLabel,
@@ -178,11 +197,20 @@ export interface ReviewItem {
   findings: readonly FirewallFinding[];
 }
 
-/** The reviewer's verdict on one proposed memory or objective during `reflect --review`. */
+/**
+ * The reviewer's verdict on one proposed memory or objective during `reflect --review`.
+ *
+ * `quit` STOPS the walk without deciding this item, leaving it and everything after it
+ * exactly as it was. It exists because a decision and a departure are different things
+ * and a queued proposal's rejection is DURABLE: reading "the operator left" as "the
+ * operator rejected it" destroys the pile one keypress at a time. `TransitionDecision`
+ * has had this since it was written; the memory walk did not.
+ */
 export type ReviewDecision =
   | { kind: "accept" }
   | { kind: "edit"; content: string }
-  | { kind: "reject" };
+  | { kind: "reject" }
+  | { kind: "quit" };
 
 /** A suggested objective status transition presented during `reflect --review` (Type B, advisory). */
 export interface TransitionReviewItem {
@@ -201,6 +229,74 @@ export interface TransitionReviewItem {
 
 /** The operator's verdict on a suggested transition: apply it, skip it, or stop reviewing the rest. */
 export type TransitionDecision = "apply" | "skip" | "quit";
+
+/**
+ * Map one typed answer to a review verdict — the mapping the binary's `review` hook uses,
+ * here rather than there because it is logic and `bin.ts` cannot be imported by a test
+ * (it runs a command and exits).
+ *
+ * The distinction that matters is between NO answer and an EMPTY one, and it is the whole
+ * of a defect this release introduced. `ask` returns undefined when the terminal sent EOF
+ * — Ctrl-D, or the terminal going away — and `""` when someone was there and pressed
+ * return. Collapsing them made a departure into a rejection, and a queued proposal's
+ * rejection is DURABLE: each keypress destroyed another one and the loop advanced to do
+ * it again. An empty line still means reject, which is what the prompt says it means.
+ *
+ * `askEdit` is consulted only for an edit, and its own EOF stops the walk too.
+ */
+export async function decideReview(
+  answer: string | undefined,
+  askEdit: () => Promise<string | undefined>,
+): Promise<ReviewDecision> {
+  if (answer === undefined) return { kind: "quit" };
+  const choice = answer.toLowerCase();
+  if (choice === "a" || choice === "accept" || choice === "y" || choice === "yes") {
+    return { kind: "accept" };
+  }
+  if (choice === "q" || choice === "quit") return { kind: "quit" };
+  if (choice === "e" || choice === "edit") {
+    const edited = await askEdit();
+    if (edited === undefined) return { kind: "quit" };
+    return edited.length > 0 ? { kind: "edit", content: edited } : { kind: "reject" };
+  }
+  return { kind: "reject" };
+}
+
+/**
+ * The same mapping for an earned standing grant. A grant needs an explicit yes, so
+ * anything that is not one leaves the capability gated — except a departure, which stops
+ * the walk rather than declining the rest on the operator's behalf.
+ */
+export function decideGrant(answer: string | undefined): GrantDecision {
+  if (answer === undefined) return "quit";
+  const choice = answer.toLowerCase();
+  if (choice === "q" || choice === "quit") return "quit";
+  return /^y(es)?$/i.test(answer);
+}
+
+/**
+ * The same mapping for a suggested objective transition. Nothing here is durable — a skip
+ * changes nothing — but leaving should not silently work through the rest of the list.
+ */
+export function decideTransition(answer: string | undefined): TransitionDecision {
+  if (answer === undefined) return "quit";
+  const choice = answer.toLowerCase();
+  if (choice === "a" || choice === "apply" || choice === "y" || choice === "yes") return "apply";
+  if (choice === "q" || choice === "quit") return "quit";
+  return "skip";
+}
+
+/**
+ * The operator's verdict on one earned capability: grant it, leave it gated, or stop.
+ *
+ * `"quit"` is here for the same reason the review and transition walks have one — a
+ * departure is not a decision. Nothing is lost without it (a declined grant changes
+ * nothing, and a candidate is re-proposed next time), but Ctrl-D answered only the
+ * candidate in front of you: readline closes its own interface and leaves stdin open, so
+ * the loop built a fresh one and asked again, and a walk of N capabilities took N
+ * Ctrl-Ds. Measured, after a comment here claimed the opposite.
+ */
+export type GrantDecision = boolean | "quit";
 
 /** A proposed standing grant presented for ratification during `trust <agent> --review`. */
 export interface StandingReviewItem {
@@ -360,11 +456,17 @@ export interface CliIO {
   ) => TransitionDecision | Promise<TransitionDecision>;
   /**
    * Ratify a proposed standing grant during `trust <agent> --review` — return true
-   * to grant the capability an auto-approve standing, false to leave it gated. Absent
-   * ⇒ reject every proposal, so nothing is granted without an explicit yes (the same
-   * safe default as `confirm`/`review`; earning autonomy is itself a reviewable act).
+   * to grant the capability an auto-approve standing, false to leave it gated, or
+   * `"quit"` to stop the walk without deciding this one.
+   *
+   * ABSENT ⇒ the review does not run: the command names how many capabilities are
+   * waiting and stops, walking nothing and declining nothing. (It used to walk every
+   * candidate and report `Done — 0 granted, N left gated`, which reads as a human
+   * having declined them.) Nothing is granted without an explicit yes either way —
+   * earning autonomy is itself a reviewable act — and a candidate that has earned one
+   * is re-proposed on the next review.
    */
-  reviewGrant?: (item: StandingReviewItem) => boolean | Promise<boolean>;
+  reviewGrant?: (item: StandingReviewItem) => GrantDecision | Promise<GrantDecision>;
   /** Open the kernel store at a path. Absent ⇒ the real local SQLite store. */
   openStore?: (path: string) => AsterismStore;
   /**
@@ -590,6 +692,50 @@ function rejectUnknownFlags(
 }
 
 /**
+ * Refuse a value-bearing option that was given no value — the sibling of
+ * {@link rejectUnknownFlags}, in the same `if (!…) return 1;` shape.
+ *
+ * TWO ways an option carries nothing, and they are one mistake:
+ *
+ * - Given with no value at all (`--host`), which the parser reads as boolean `true`.
+ * - Given an EMPTY value (`--host ""`), which is what `--host "$HOST"` expands to when
+ *   the variable is unset or has been cleared — or one made only of whitespace, which is
+ *   what `--host "$HOST"` expands to when the variable holds a stray space or a newline.
+ *   The same test, because the reader on the other side discards both: `config set "  "`
+ *   was accepted and reported set, and the very next `config show` said nothing was.
+ *
+ * Both used to be handled differently, and the second was handled nowhere: it fell
+ * through as a real value, and what happened next varied by verb. `config set gpt-4o
+ * --provider ""` wrote `"provider": ""` to the config file, after which `config show`
+ * displayed `(provider: )` and every run failed. `new bot --model ""` wrote an empty
+ * per-agent override that shadows the install default with nothing, so that agent could
+ * never run — and setting an install default afterwards did not reach it, because the
+ * override is the more specific layer (measured; only replacing or clearing that one
+ * agent's override recovers). And `serve writer --host ""` bound `::` — every interface
+ * — where the operator had asked for one address and the documented default is loopback
+ * only (#174).
+ *
+ * This is deliberately NOT the rule for an environment variable, which is ambient and
+ * whose emptiness means "not supplied" (see `env.ts`). An option is something the
+ * operator typed on this command line: the honest answer is that it carries nothing,
+ * not to act as though they never typed it. Clearing a stored setting is `--unset` /
+ * `config unset`, which says so — the distinction #159 settled for the other setters.
+ */
+function rejectValuelessFlags(
+  parsed: ParsedArgs,
+  flags: readonly string[],
+  io: CliIO,
+): boolean {
+  for (const flag of flags) {
+    if (carriesNothing(parsed.flags[flag])) {
+      io.err(`The --${flag} option needs a value.`);
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Build the run substrate from the IO's override or, lazily, from the resolved
  * model. The single seam either run-bearing command (`run`, `serve`) reaches the
  * model through, so the two cannot drift in how it is wired — the same reason the
@@ -752,6 +898,11 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, NEW_FLAGS, "new", NEW_USAGE, io)) return 1;
+  // A value-bearing flag carrying nothing must not silently fall back to a default —
+  // `new bot --trust` must not quietly create a `propose` agent the user did not ask
+  // for, and `new bot --model ""` must not write a per-agent override that shadows the
+  // install default with nothing and can never be run.
+  if (!rejectValuelessFlags(parsed, NEW_FLAGS, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(NEW_USAGE);
@@ -762,15 +913,6 @@ async function cmdNew(args: string[], io: CliIO): Promise<number> {
       `Invalid agent name "${name}". Use letters, digits, dot, dash, or underscore (no spaces or slashes).`,
     );
     return 1;
-  }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently falling back to a default — `new bot --trust` must not
-  // quietly create a `propose` agent the user did not ask for.
-  for (const flag of NEW_FLAGS) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
   }
   const role = stringFlag(parsed.flags.role) ?? "";
   const trustLevel = stringFlag(parsed.flags.trust) ?? "propose";
@@ -918,35 +1060,63 @@ async function cmdTrustReview(name: string, io: CliIO): Promise<number> {
       return 0;
     }
 
-    io.out(
+    // No reviewer wired ⇒ no human to ratify anything (the binary wires this only where
+    // there is a terminal to ask at). Say so and stop, rather than walking every
+    // candidate and printing "0 granted, N left gated" — a summary of decisions nobody
+    // took, which reads as a human having declined them. Nothing is lost: a candidate
+    // that has earned a grant is re-proposed on the next review. The queue drain's
+    // refusal, applied to a surface that persists nothing (#172).
+    if (!io.reviewGrant) {
+      io.out(
+        `${candidates.length} earned ${candidates.length === 1 ? "capability is" : "capabilities are"} waiting for ${name}.`,
+      );
+      io.out(`Run \`asterism trust ${name} --review\` in an interactive terminal to decide them.`);
+      return 0;
+    }
+    const review = io.reviewGrant;
+
+    // The walk goes to STDERR, where the question is asked. Splitting them was the mirror
+    // of the bug this release fixes: with the prompt on stderr and the evidence on stdout,
+    // `trust bot --review > out.txt` at a terminal asked the operator to grant a permanent
+    // auto-approve for a destructive capability whose NAME had gone into the file. Only
+    // the closing count is the command's result. This loop runs only with a reviewer
+    // wired (refused above otherwise), so nothing scripted moves.
+    io.err(
       `Reviewing ${candidates.length} earned ${candidates.length === 1 ? "capability" : "capabilities"} for ${name}.`,
     );
-    io.out("Granting one lets that capability act without pausing for you — until a");
-    io.out("regression takes it back. Nothing is granted unless you accept it.");
+    io.err("Granting one lets that capability act without pausing for you — until a");
+    io.err("regression takes it back. Nothing is granted unless you accept it.");
+    io.err("Answer [q]uit at any point to stop; the rest keep for next time.");
 
-    // Absent reviewer ⇒ reject everything: nothing is granted without an explicit yes.
-    const review = io.reviewGrant ?? ((): boolean => false);
     let granted = 0;
     let declined = 0;
+    let left = 0;
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i]!;
-      io.out("");
-      io.out(`(${i + 1}/${candidates.length}) ${c.capability}`);
-      io.out(`  ${c.basis}`);
+      io.err("");
+      io.err(`(${i + 1}/${candidates.length}) ${c.capability}`);
+      io.err(`  ${c.basis}`);
 
       const accept = await review({ index: i + 1, total: candidates.length, capability: c.capability, basis: c.basis });
+      if (accept === "quit") {
+        io.err("  · stopped — the rest are left as they were");
+        left = candidates.length - i;
+        break;
+      }
       if (!accept) {
         declined++;
-        io.out("  ✗ left gated");
+        io.err("  ✗ left gated");
         continue;
       }
       store.setCapabilityStanding(agent.id, c.capability, "standing-grant", c.basis);
       granted++;
-      io.out("  ✓ granted — acts without pausing from now on");
+      io.err("  ✓ granted — acts without pausing from now on");
     }
 
-    io.out("");
-    io.out(`Done — ${granted} granted, ${declined} left gated.`);
+    io.out(
+      `Done — ${granted} granted, ${declined} left gated.` +
+        `${left > 0 ? ` Stopped early — ${left} left for next time.` : ""}`,
+    );
     return 0;
   });
 }
@@ -1529,6 +1699,18 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
   const endpointName = parsed.positionals[1];
   const url = parsed.positionals[2];
   const credential = parsed.flags.credential;
+  // Before the positional check, like every other verb — but only for an option that WAS
+  // typed and carries nothing (`--credential`, which parses to `true`, or `--credential
+  // ""`). That is the case the ordering rule is about: name the option that is wrong
+  // rather than the arguments the operator has not reached yet.
+  //
+  // An ABSENT `--credential` is a different mistake, and moving it up here cost `asterism
+  // api add` its usage line — the one thing that names the whole shape of the command to
+  // someone who typed it with nothing at all. It is answered below, after the arity check.
+  if (carriesNothing(credential)) {
+    io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
+    return Promise.resolve(1);
+  }
   if (!name || !endpointName || !url) {
     io.err("Usage: asterism api add <agent> <name> <https-url> --credential <KEY>");
     return Promise.resolve(1);
@@ -1539,9 +1721,9 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
     );
     return Promise.resolve(1);
   }
-  // `--credential` with no value parses to `true`, which must not become the string
-  // "true" and silently bind a credential nobody stored.
-  if (typeof credential !== "string" || credential.length === 0) {
+  // Not given at all. The usage line above has already covered the operator who typed
+  // nothing; this is the one who typed the arguments and forgot the option.
+  if (typeof credential !== "string") {
     io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
     return Promise.resolve(1);
   }
@@ -1701,16 +1883,6 @@ function cmdApiRemove(parsed: ParsedArgs, io: CliIO): Promise<number> {
 }
 
 // --- secrets add -----------------------------------------------------------
-
-/**
- * A value from a source that merely EXISTS rather than one the operator typed — the
- * environment, a pipe. Empty means nothing was supplied, so the caller moves on to the
- * next source; an empty inline argument is not run through this, because typing one is
- * a statement and looking past it would substitute a value the operator never named.
- */
-function ambientValue(value: string | undefined): string | undefined {
-  return value !== undefined && value.length > 0 ? value : undefined;
-}
 
 async function cmdSecretsAdd(args: string[], io: CliIO): Promise<number> {
   if (args[0] === "--help" || args[0] === "-h") {
@@ -2351,26 +2523,28 @@ function cmdConnect(args: string[], io: CliIO): Promise<number> {
   ) {
     return Promise.resolve(1);
   }
+  // The only mode in T1 is handoff; an ABSENT `--mode` defaults to it so the common case
+  // needs no flag. But `--mode` with NO value parses as boolean `true` — a malformed
+  // invocation (`--mode`, or `--mode --artifact-only`, where the next dash-token is read as
+  // its own flag) — and `--mode ""` carries nothing either. Since connect grants a
+  // permissioned channel, reject both loudly rather than silently opening the default
+  // connection (the absent case is `undefined`, which still correctly defaults).
+  // [Codex review P2: reject a missing connect mode value.]
+  const modeFlag = parsed.flags.mode;
+  if (carriesNothing(modeFlag)) {
+    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
+    return Promise.resolve(1);
+  }
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
   if (!fromName || !toName) {
     io.err(CONNECT_USAGE);
     return Promise.resolve(1);
   }
-  // The only mode in T1 is handoff; an ABSENT `--mode` defaults to it so the common case
-  // needs no flag. But `--mode` with NO value parses as boolean `true` — a malformed
-  // invocation (`--mode`, or `--mode --artifact-only`, where the next dash-token is read as
-  // its own flag). Since connect grants a permissioned channel, reject that loudly rather
-  // than silently opening the default connection (the absent case is `undefined`, which
-  // still correctly defaults). [Codex review P2: reject a missing connect mode value.]
-  const modeFlag = parsed.flags.mode;
-  if (modeFlag === true) {
-    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
-    return Promise.resolve(1);
-  }
   // Validate any value given so an unimplemented mode is a clear error, not a silent
-  // connection nothing can use.
-  const mode = modeFlag ?? "handoff";
+  // connection nothing can use. `carriesNothing` above has already refused the bare and
+  // blank forms; the `typeof` is the narrowing a predicate cannot give.
+  const mode = typeof modeFlag === "string" ? modeFlag : "handoff";
   if (!(CONNECTION_MODES as readonly string[]).includes(mode)) {
     io.err(`Unknown connection mode "${mode}". Supported: ${CONNECTION_MODES.join(", ")}.`);
     return Promise.resolve(1);
@@ -2437,22 +2611,24 @@ function cmdDisconnect(args: string[], io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["mode"], "disconnect", DISCONNECT_USAGE, io)) {
     return Promise.resolve(1);
   }
+  // `--mode` with no value parses as boolean `true` (`--mode`, or `--mode --foo` where the
+  // next dash-token is read as its own flag), and `--mode ""` carries nothing either. Reject
+  // both loudly rather than falling through to inference, which would silently withdraw a
+  // channel the operator did not name. Mirrors `connect`'s handling of the same mistake.
+  const modeFlag = parsed.flags.mode;
+  if (carriesNothing(modeFlag)) {
+    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
+    return Promise.resolve(1);
+  }
   const fromName = parsed.positionals[0];
   const toName = parsed.positionals[1];
   if (!fromName || !toName) {
     io.err(DISCONNECT_USAGE);
     return Promise.resolve(1);
   }
-  // `--mode` with no value parses as boolean `true` (`--mode`, or `--mode --foo` where the
-  // next dash-token is read as its own flag). Reject it loudly rather than falling through to
-  // inference, which would silently withdraw a channel the operator did not name. Mirrors
-  // `connect`'s handling of the same malformed invocation.
-  const modeFlag = parsed.flags.mode;
-  if (modeFlag === true) {
-    io.err(`--mode needs a value (one of: ${CONNECTION_MODES.join(", ")}).`);
-    return Promise.resolve(1);
-  }
-  if (modeFlag !== undefined && !(CONNECTION_MODES as readonly string[]).includes(modeFlag)) {
+  // `typeof` rather than `!== undefined`: `carriesNothing` has already refused the bare
+  // and blank forms, but it is a predicate, not a type guard, so the narrowing is here.
+  if (typeof modeFlag === "string" && !(CONNECTION_MODES as readonly string[]).includes(modeFlag)) {
     io.err(`Unknown connection mode "${modeFlag}". Supported: ${CONNECTION_MODES.join(", ")}.`);
     return Promise.resolve(1);
   }
@@ -3556,29 +3732,23 @@ async function cmdMemoryInspect(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, MEMORY_FLAGS, "memory inspect", MEMORY_USAGE, io)) return 1;
+  // A value-bearing flag carrying nothing must not silently drop the filter and show
+  // the unfiltered view.
+  if (!rejectValuelessFlags(parsed, MEMORY_FLAGS, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(MEMORY_USAGE);
     return 1;
   }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently dropping the filter and showing the unfiltered view.
-  for (const flag of MEMORY_FLAGS) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
-  }
   const typeRaw = stringFlag(parsed.flags.type);
   const reviewRaw = stringFlag(parsed.flags["review-state"]);
+  // An empty or blank `--run=` (an unset shell variable) is refused by
+  // `rejectValuelessFlags` above, in the same words — `run` is one of MEMORY_FLAGS. It
+  // used to be checked again here, with a comment explaining why; measured unreachable
+  // (removing it changed nothing), and a check whose comment outlives its reason is the
+  // failure this repo keeps re-encountering. What it guarded still matters: every run id
+  // begins with "", so a blank prefix would match the sole run or trip an ambiguity error.
   const runRef = stringFlag(parsed.flags.run);
-  // An empty `--run=` (e.g. an unset shell variable) must be rejected like a missing
-  // value, not treated as a prefix — every run id begins with "", so it would
-  // silently match the sole run or trip an ambiguity error on several.
-  if (runRef !== undefined && runRef.trim() === "") {
-    io.err("The --run option needs a value.");
-    return 1;
-  }
 
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
@@ -3640,18 +3810,14 @@ async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
   ) {
     return 1;
   }
+  // A value-bearing flag carrying nothing must not silently drop the filter — nor be
+  // taken as one, which is how `--type ""` came to report "no activity matching type=".
+  // (`--follow` is a genuine boolean.)
+  if (!rejectValuelessFlags(parsed, EVENTS_VALUE_FLAGS, io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(EVENTS_USAGE);
     return 1;
-  }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently dropping the filter. (`--follow` is a genuine boolean.)
-  for (const flag of EVENTS_VALUE_FLAGS) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
   }
   // A `--limit` that is not a non-negative integer is an error, not a silently
   // ignored value that would show the whole log instead of the cap asked for.
@@ -3665,14 +3831,10 @@ async function cmdEventsTail(args: string[], io: CliIO): Promise<number> {
   }
   const type = stringFlag(parsed.flags.type);
   const sinceId = stringFlag(parsed.flags.since);
+  // Refused above by `rejectValuelessFlags` — `run` is one of EVENTS_VALUE_FLAGS — in the
+  // same words this used to print for itself. See the note in `memory inspect`.
   const runRef = stringFlag(parsed.flags.run);
   const follow = parsed.flags.follow === true;
-  // An empty `--run=` (e.g. an unset shell variable) must be rejected like a missing
-  // value, not treated as a prefix that matches every run id.
-  if (runRef !== undefined && runRef.trim() === "") {
-    io.err("The --run option needs a value.");
-    return 1;
-  }
 
   return withHomeStore(io, async (store) => {
     const agent = findAgentByName(store, name);
@@ -3819,15 +3981,24 @@ async function runReflectReview(
   // A persisted queue (from `--propose`) is drained, never re-computed: if EITHER queue has
   // rows we are in drain mode, and we drain whichever kinds have rows — no model needed.
   let code = 0;
+  // Set by any section the operator LEFT part-way through. Every later section is then
+  // skipped: a quit that ended only the loop it was given in was not a quit — measured,
+  // one quit at memory 1 of 2 went on to ask about the queued objective, and then built a
+  // model and paid for a call to find a transition to ask about.
+  let quit = false;
+  const section = (outcome: SectionOutcome): void => {
+    code = outcome.code || code;
+    quit = quit || outcome.quit;
+  };
   if (queuedMemories.length > 0 || queuedObjectives.length > 0) {
     if (queuedMemories.length > 0) {
-      code = (await reviewQueueDrain(io, store, agent, name, queuedMemories)) || code;
+      section(await reviewQueueDrain(io, store, agent, name, queuedMemories));
     }
-    if (queuedObjectives.length > 0) {
-      code = (await reviewObjectiveQueueDrain(io, store, agent, name, queuedObjectives)) || code;
+    if (queuedObjectives.length > 0 && !quit) {
+      section(await reviewObjectiveQueueDrain(io, store, agent, name, queuedObjectives));
     }
   } else {
-    code = (await reviewLive(io, store, home, agent, name)) || code;
+    section(await reviewLive(io, store, home, agent, name));
   }
   // Type B (advisory): after reviewing what reflection PROPOSED TO ADD (memories + new objectives),
   // surface any EXISTING active objective recent work looks to have FINISHED, and let the operator
@@ -3842,6 +4013,7 @@ async function runReflectReview(
   // completion is judged only against the latest run. Closing it fully would need either the persisted
   // proposed-transition shape (the fork settled as advisory-only) or judging all recently-reflected
   // runs (a different, re-judging selection model) — both deliberately out of scope (world-model.md §14).
+  if (quit) return code;
   const queuedRunIds = [
     ...new Set(
       [
@@ -3854,6 +4026,22 @@ async function runReflectReview(
   return code;
 }
 
+/**
+ * What one section of `reflect --review` did: its exit code, and whether the operator LEFT
+ * part-way through rather than working to the end.
+ *
+ * The second half exists because `reflect --review` has SECTIONS — queued memories, then
+ * queued objectives, then suggested transitions — and a quit that ended only the loop it
+ * was given in was not a quit. Measured: one quit at memory 1 of 2 went on to ask about
+ * the queued objective, and then BUILT a reflection provider and paid for a call to find
+ * a transition to ask about. "Everything after it is left as it was" has to mean
+ * everything.
+ */
+interface SectionOutcome {
+  code: number;
+  quit: boolean;
+}
+
 /** The running tally a review loop returns, formatted into the closing `Done — …` line. */
 interface ReviewCounts {
   accepted: number;
@@ -3862,6 +4050,17 @@ interface ReviewCounts {
   errored: number;
   /** Proposals another surface settled mid-review — the write didn't happen here (queue only). */
   stale: number;
+  /**
+   * The operator LEFT rather than working through the batch — an explicit quit, or the
+   * terminal sending EOF. Carried out of the loop because `reflect --review` has more
+   * than one section: without it a quit in the first ended that loop and the next one
+   * asked again, and the transitions section went as far as BUILDING a model and paying
+   * for a call to find something to ask about. "Everything after it is left as it was"
+   * has to mean everything, not everything in this section (#172).
+   */
+  quit: boolean;
+  /** How many were left undecided by that departure — the one in hand plus the rest. */
+  left: number;
 }
 
 /**
@@ -3904,30 +4103,47 @@ async function driveReviewLoop(
   accept: (i: number, content: string, edited: boolean) => DrainOutcome,
   warnEditRescreen = false,
 ): Promise<ReviewCounts> {
+  // The whole walk is written to STDERR, where the question is asked.
+  //
+  // Splitting them was the mirror of the bug this release fixes: moving the prompt to
+  // stderr and leaving the proposal on stdout meant `reflect writer --review > out.txt`
+  // at a terminal asked for a decision about text that had gone into the file. A
+  // question you can see about something you cannot is no better than one you cannot
+  // see. This loop runs ONLY with a reviewer wired — both callers refuse without one —
+  // so nothing scripted is moved; the closing summary stays on stdout, as the result.
+  //
   // Absent reviewer ⇒ reject everything: nothing is accepted without an explicit yes.
   const review = io.review ?? ((): ReviewDecision => ({ kind: "reject" }));
-  const counts: ReviewCounts = { accepted: 0, rejected: 0, blocked: 0, errored: 0, stale: 0 };
+  const counts: ReviewCounts = {
+    accepted: 0,
+    rejected: 0,
+    blocked: 0,
+    errored: 0,
+    stale: 0,
+    quit: false,
+    left: 0,
+  };
   // Record a rejection, accounting a concurrent settle as skipped rather than rejected.
   const recordReject = (i: number, emptyEdit: boolean): void => {
     if (reject(i) === "stale") {
       counts.stale++;
-      io.out("  · already reviewed elsewhere — skipped");
+      io.err("  · already reviewed elsewhere — skipped");
     } else {
       counts.rejected++;
-      io.out(emptyEdit ? "  ✗ rejected (empty after edit)" : "  ✗ rejected");
+      io.err(emptyEdit ? "  ✗ rejected (empty after edit)" : "  ✗ rejected");
     }
   };
   for (let i = 0; i < total; i++) {
     const v = view(i);
 
-    io.out("");
-    io.out(
+    io.err("");
+    io.err(
       `(${i + 1}/${total}) ${v.label}` +
         (v.confidence !== undefined ? ` · confidence ${v.confidence}` : ""),
     );
-    io.out(`  ${v.content}`);
+    io.err(`  ${v.content}`);
     if (v.findings.length > 0) {
-      io.out(
+      io.err(
         `  ⚠ the memory firewall flagged this (${v.findings
           .map((f) => f.rule)
           .join(", ")}) — edit to remove the flagged content, or reject it.`,
@@ -3944,6 +4160,14 @@ async function driveReviewLoop(
       findings: v.findings,
     });
 
+    // A departure, not a decision: leave this item and everything after it untouched —
+    // including the sections that come after this loop, which is what `quit` carries out.
+    if (decision.kind === "quit") {
+      io.err("  · stopped — the rest are left as they were");
+      counts.quit = true;
+      counts.left = total - i;
+      break;
+    }
     if (decision.kind === "reject") {
       recordReject(i, false);
       continue;
@@ -3960,7 +4184,7 @@ async function driveReviewLoop(
     if (edited && warnEditRescreen) {
       const editVerdict = screenMemory(content);
       if (!editVerdict.ok) {
-        io.out(
+        io.err(
           `  ⚠ your edit still trips the memory firewall (${editVerdict.findings
             .map((f) => f.rule)
             .join(", ")}).`,
@@ -3972,22 +4196,22 @@ async function driveReviewLoop(
       // poisoned write regardless of approval — caught below and counted, not fatal.
       if (accept(i, content, edited) === "stale") {
         counts.stale++;
-        io.out("  · already reviewed elsewhere — skipped");
+        io.err("  · already reviewed elsewhere — skipped");
       } else {
         counts.accepted++;
-        io.out(edited ? "  ✓ saved (edited)" : "  ✓ saved");
+        io.err(edited ? "  ✓ saved (edited)" : "  ✓ saved");
       }
     } catch (err) {
       if (err instanceof MemoryFirewallError) {
         counts.blocked++;
-        io.out(
+        io.err(
           `  ⛔ blocked by the memory firewall — not saved (${err.findings
             .map((f) => f.rule)
             .join(", ")})`,
         );
       } else {
         counts.errored++;
-        io.out(`  ⛔ could not save: ${errorMessage(err)}`);
+        io.err(`  ⛔ could not save: ${errorMessage(err)}`);
       }
     }
   }
@@ -4001,7 +4225,13 @@ function printReviewSummary(io: CliIO, c: ReviewCounts): void {
     `Done — ${c.accepted} saved, ${c.rejected} rejected` +
       `${c.blocked > 0 ? `, ${c.blocked} blocked` : ""}` +
       `${c.errored > 0 ? `, ${c.errored} errored` : ""}` +
-      `${c.stale > 0 ? `, ${c.stale} already reviewed elsewhere` : ""}.`,
+      `${c.stale > 0 ? `, ${c.stale} already reviewed elsewhere` : ""}.` +
+      // The result line has to say the review was ABANDONED. It is the only thing on
+      // stdout, so under `reflect writer --review > out.txt` — the exact redirect this
+      // release exists to make safe — `Done — 0 saved, 0 rejected.` was indistinguishable
+      // from a review that genuinely settled nothing, while four proposals sat waiting.
+      // "A departure is not a decision" has to hold on the line that reports the outcome.
+      `${c.quit ? ` Stopped early — ${c.left} left for next time.` : ""}`,
   );
 }
 
@@ -4017,7 +4247,7 @@ async function reviewQueueDrain(
   agent: Agent,
   name: string,
   queued: Memory[],
-): Promise<number> {
+): Promise<SectionOutcome> {
   // Draining a persisted proposal is a DURABLE decision: a reject transitions the row to
   // `rejected`, not a discard. So in a non-interactive session (no reviewer wired — e.g. a
   // piped or cron-launched `reflect --review`) the safe-default reject would silently wipe
@@ -4028,13 +4258,14 @@ async function reviewQueueDrain(
       `${queued.length} proposed ${queued.length === 1 ? "memory is" : "memories are"} waiting for ${name}.`,
     );
     io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal to go through them.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
-  io.out(
+  // The preamble to a question goes where the question goes — see `driveReviewLoop`.
+  io.err(
     `Reviewing ${queued.length} queued ${queued.length === 1 ? "memory" : "memories"} for ${name}.`,
   );
-  io.out("These were proposed unattended; nothing is active unless you accept it.");
+  io.err("These were proposed unattended; nothing is active unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,
@@ -4066,7 +4297,7 @@ async function reviewQueueDrain(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /**
@@ -4082,19 +4313,19 @@ async function reviewObjectiveQueueDrain(
   agent: Agent,
   name: string,
   queued: Objective[],
-): Promise<number> {
+): Promise<SectionOutcome> {
   if (!io.review) {
     io.out(
       `${queued.length} proposed ${queued.length === 1 ? "objective is" : "objectives are"} waiting for ${name}.`,
     );
     io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal to go through them.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
-  io.out(
+  io.err(
     `Reviewing ${queued.length} queued ${queued.length === 1 ? "objective" : "objectives"} for ${name}.`,
   );
-  io.out("These were proposed unattended; nothing frames a run unless you accept it.");
+  io.err("These were proposed unattended; nothing frames a run unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,
@@ -4116,7 +4347,7 @@ async function reviewObjectiveQueueDrain(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /**
@@ -4131,14 +4362,14 @@ async function reviewLive(
   home: string,
   agent: Agent,
   name: string,
-): Promise<number> {
+): Promise<SectionOutcome> {
   // Check for a reflectable run BEFORE building the model, so an agent with nothing to reflect
   // on is told so without needing a model configured. Both sections re-select the same run (the
   // shared kernel helpers own that policy); this early check only gates the model build.
   const target = store.runs.latestWithOutput(agent.id);
   if (!target || target.output === undefined) {
     io.out(`${name} has no completed run with output to reflect on yet.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
   // Build the reflection provider (a hosted model) once — both the memory and objective sections
@@ -4149,14 +4380,34 @@ async function reviewLive(
     : (await import("./reflect-model.js")).buildReflectionProvider(io.env, context);
   if (!made.provider) {
     io.err(made.reason ?? "No model configured for reflection.");
-    return 1;
+    return { code: 1, quit: false };
   }
   const provider = made.provider;
 
-  const memCode = await reviewMemoryLive(io, store, agent, name, target, provider);
-  const objCode = await reviewObjectiveLive(io, store, agent, name, target, provider);
+  // No reviewer wired ⇒ nobody to decide, so every proposal would be rejected and the
+  // command would end by reporting decisions nobody took — the queue drain's refusal, and
+  // `trust --review`'s, applied to the last surface that still did it (#172).
+  //
+  // The position is chosen, not incidental. AFTER the cheap "nothing to reflect on" test,
+  // so an agent with no runs is told that rather than sent to find a terminal it does not
+  // need. AFTER the provider build, which is client construction and makes no request, so
+  // a scripted session still gets the "no model configured" diagnostic and its exit 1
+  // rather than having it hidden behind this. And BEFORE the first proposal, which is the
+  // paid call — a session that can decide nothing must not buy answers it will discard.
+  if (!io.review) {
+    io.out(`${name} has a run to reflect on, but there is nobody here to review what it proposes.`);
+    io.out(`Run \`asterism reflect ${name} --review\` in an interactive terminal, or`);
+    io.out(`\`asterism reflect ${name} --propose\` to queue proposals for review later.`);
+    return { code: 0, quit: false };
+  }
+
+  const mem = await reviewMemoryLive(io, store, agent, name, target, provider);
+  // A departure in the first half stops the second: the objectives it would ask about are
+  // left exactly as they were, which is what quitting means.
+  if (mem.quit) return mem;
+  const obj = await reviewObjectiveLive(io, store, agent, name, target, provider);
   // Either section failing (a model error) surfaces as a non-zero exit; both clean ⇒ 0.
-  return memCode || objCode;
+  return { code: mem.code || obj.code, quit: obj.quit };
 }
 
 /** The live memory section of {@link reviewLive}: propose memories for `target`, review, persist accepts. */
@@ -4167,33 +4418,33 @@ async function reviewMemoryLive(
   name: string,
   target: Run,
   provider: ReflectionProvider,
-): Promise<number> {
+): Promise<SectionOutcome> {
   let usable: readonly ReviewableProposal[];
   let ignored: number;
   try {
     const result = await proposeReviewableMemories(store, agent, provider, { runId: target.id });
     if (result.kind === "no_run") {
       io.out(`${name} has no completed run with output to reflect on yet.`);
-      return 0;
+      return { code: 0, quit: false };
     }
     usable = result.proposals;
     ignored = result.ignored;
   } catch (err) {
     io.err(`Reflection failed: ${errorMessage(err)}`);
-    return 1;
+    return { code: 1, quit: false };
   }
   if (usable.length === 0) {
     io.out(`${name}: nothing worth remembering from run ${shortId(target.id)}.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
-  io.out(
+  io.err(
     `Reviewing ${usable.length} proposed ${usable.length === 1 ? "memory" : "memories"} for ${name} (from run ${shortId(target.id)}).`,
   );
   if (ignored > 0) {
-    io.out(`(Ignored ${ignored} proposal(s) with a non-reviewable memory type.)`);
+    io.err(`(Ignored ${ignored} proposal(s) with a non-reviewable memory type.)`);
   }
-  io.out("Nothing is saved unless you accept it.");
+  io.err("Nothing is saved unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,
@@ -4228,7 +4479,7 @@ async function reviewMemoryLive(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /** The live objective section of {@link reviewLive}: propose objectives for `target`, review, persist accepts. */
@@ -4239,25 +4490,25 @@ async function reviewObjectiveLive(
   name: string,
   target: Run,
   provider: ReflectionProvider,
-): Promise<number> {
+): Promise<SectionOutcome> {
   let usable: readonly ReviewableObjectiveProposal[];
   try {
     const result = await proposeReviewableObjectives(store, agent, provider, { runId: target.id });
-    if (result.kind === "no_run") return 0;
+    if (result.kind === "no_run") return { code: 0, quit: false };
     usable = result.proposals;
   } catch (err) {
     io.err(`Objective reflection failed: ${errorMessage(err)}`);
-    return 1;
+    return { code: 1, quit: false };
   }
   if (usable.length === 0) {
     io.out(`${name}: nothing worth proposing as a standing objective from run ${shortId(target.id)}.`);
-    return 0;
+    return { code: 0, quit: false };
   }
 
-  io.out(
+  io.err(
     `Reviewing ${usable.length} proposed ${usable.length === 1 ? "objective" : "objectives"} for ${name} (from run ${shortId(target.id)}).`,
   );
-  io.out("Nothing frames a run unless you accept it.");
+  io.err("Nothing frames a run unless you accept it.");
 
   const counts = await driveReviewLoop(
     io,
@@ -4277,7 +4528,7 @@ async function reviewObjectiveLive(
   );
 
   printReviewSummary(io, counts);
-  return 0;
+  return { code: 0, quit: counts.quit };
 }
 
 /**
@@ -4329,18 +4580,23 @@ async function reviewObjectiveTransitions(
   }
   if (advisories.length === 0) return 0;
 
-  io.out("");
-  io.out(
+  // The conversation goes where the question goes — the third instance of the split
+  // round 2 found in the other two reviews, and the only one no reviewer flagged. The
+  // suggestion and its confidence were on stdout while "Apply this change?" was on
+  // stderr, so a redirected run asked which objective to retire without showing which.
+  io.err("");
+  io.err(
     `${advisories.length} of ${name}'s objectives ${advisories.length === 1 ? "looks" : "look"} finished, based on recent runs.`,
   );
-  io.out("These are suggestions — an objective only changes if you apply it.");
+  io.err("These are suggestions — an objective only changes if you apply it.");
 
   let applied = 0;
   let skipped = 0;
+  let left = 0;
   for (let i = 0; i < advisories.length; i++) {
     const a = advisories[i]!;
-    io.out("");
-    io.out(
+    io.err("");
+    io.err(
       `(${i + 1}/${advisories.length}) "${a.objective.content}" (${shortId(a.objective.id)}) looks ${a.proposedStatus}` +
         ` · confidence ${a.confidence}`,
     );
@@ -4353,12 +4609,13 @@ async function reviewObjectiveTransitions(
       confidence: a.confidence,
     });
     if (decision === "quit") {
-      io.out("  · stopped");
+      io.err("  · stopped");
+      left = advisories.length - i;
       break;
     }
     if (decision !== "apply") {
       skipped++;
-      io.out("  · skipped");
+      io.err("  · skipped");
       continue;
     }
     // Apply through the GUARDED audited path: the CAS flips the status only if the objective is still
@@ -4368,14 +4625,17 @@ async function reviewObjectiveTransitions(
     const result = store.applyObjectiveTransition(agent.id, a.objective.id, a.proposedStatus);
     if (result && result.status === a.proposedStatus) {
       applied++;
-      io.out(`  ✓ marked ${a.proposedStatus}`);
+      io.err(`  ✓ marked ${a.proposedStatus}`);
     } else {
       skipped++;
-      io.out("  · the objective changed elsewhere — skipped");
+      io.err("  · the objective changed elsewhere — skipped");
     }
   }
-  io.out("");
-  io.out(`Done — ${applied} applied, ${skipped} skipped.`);
+  // Only the count is the result.
+  io.out(
+    `Done — ${applied} applied, ${skipped} skipped.` +
+      `${left > 0 ? ` Stopped early — ${left} left for next time.` : ""}`,
+  );
   return 0;
 }
 
@@ -4562,15 +4822,32 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
     const config = loadConfig(home);
     io.out(`Configuration  (${configPath(home)})`);
     io.out("");
+    // What the install default SUPPLIES, not the file's bytes. An empty coordinate is
+    // dropped the same way resolution drops it, so this line cannot read
+    // `llama3.2 (provider: , base url: )` while the per-agent lines below report what
+    // those same coordinates resolve to (#174).
+    const installDefault = withoutEmptyFields(config.model ?? {});
     io.out(
-      hasSettings(config.model)
-        ? `Install default model: ${describeModel(config.model)}`
+      hasSettings(installDefault)
+        ? `Install default model: ${describeModel(installDefault)}`
         : "Install default model: (none set)",
     );
 
-    const envSet = MODEL_ENV_VARS.filter((k) => io.env[k] !== undefined);
+    // The rule the RESOLVER reads — `settingsFromEnv` reads these same four through
+    // `envText`, so this must too. A variable that exists and carries nothing supplies
+    // nothing, and reporting it as an override here while `run` ignores it is how one
+    // install described itself two ways (#174). It described itself two ways a second
+    // time when this line kept an untrimmed rule of its own after the resolver moved.
+    const envSet = MODEL_ENV_VARS.filter((k) => suppliesText(io.env, k));
     if (envSet.length > 0) {
-      io.out(`Environment override:  ${envSet.join(", ")} set — overrides the config file.`);
+      // What it actually beats. "Overrides the config file" is not true of the whole
+      // file: a per-agent model is IN that file and wins over the environment, and this
+      // line sits directly above the per-agent lines that say so — one command answering
+      // one question two ways, which is the shape #174 exists to remove.
+      io.out(
+        `Environment override:  ${envSet.join(", ")} set — overrides the install default` +
+          " (an agent's own model still wins).",
+      );
     }
 
     io.out("");
@@ -4580,17 +4857,13 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
       io.out("  (no agents yet)");
     } else {
       for (const agent of agents) {
-        const override = config.agents?.[agent.name]?.model;
         const { model } = resolveModelConfig(io.env, { config, agentName: agent.name });
         const resolved = model ? `${model.id} (provider: ${model.provider})` : "(no model — set one)";
-        // Name the source of the resolved id — the headline coordinate.
-        const source = hasSettings(override) && override.id !== undefined
-          ? "agent override"
-          : io.env.ASTERISM_MODEL_ID !== undefined
-            ? "environment"
-            : config.model?.id !== undefined
-              ? "install default"
-              : "unset";
+        // Name the source of the resolved id — the headline coordinate. Asked of the
+        // resolver's own layers, not re-derived here: each clause of the hand-written
+        // version tested `!== undefined` on its layer, so an empty stored id credited a
+        // layer that supplied nothing while resolution used the one below it (#174).
+        const source = modelIdSource(io.env, { config, agentName: agent.name }) ?? "unset";
         io.out(`  ${agent.name}  →  ${resolved}  [${source}]`);
       }
     }
@@ -4723,11 +4996,20 @@ function cmdConfigShow(parsed: ParsedArgs, io: CliIO): Promise<number> {
             : `  ${agent.name}  →  ${DEFAULT_RECALL_PROVIDER_LABEL}  [default]`,
         );
       }
-      const embedSet = ["ASTERISM_RECALL_EMBED_URL", "ASTERISM_RECALL_EMBED_MODEL"].filter(
-        (k) => io.env[k] !== undefined,
-      );
+      // Asked of the module that BUILDS the endpoint, not restated here. This line used
+      // to filter the two names on "is it set", so either variable alone reported the
+      // endpoint configured while a run on an opted-in agent refused with "the endpoint is
+      // not configured" — one install, two answers, which is the shape #174 exists to
+      // remove. It needs BOTH, and it trims.
+      const embedSet = embeddingEndpoint(io.env) ? EMBED_ENDPOINT_VARS : [];
+      const embedMissing = missingEmbeddingVars(io.env);
       if (embedSet.length > 0) {
         io.out(`  (local-embeddings endpoint configured: ${embedSet.join(", ")})`);
+      } else if (embedMissing.length > 0) {
+        // The third state, and the actionable one: something is set and it is not enough.
+        // Saying nothing here left an operator one variable away from a working endpoint
+        // with no hint of it, and a hard failure at run time.
+        io.out(`  (local-embeddings endpoint incomplete — also set ${embedMissing.join(", ")})`);
       }
     }
 
@@ -5304,16 +5586,30 @@ function cmdConfigSet(parsed: ParsedArgs, io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["agent", ...MODEL_FLAGS], "config set", CONFIG_SET_USAGE, io)) {
     return Promise.resolve(1);
   }
-  for (const flag of ["agent", ...MODEL_FLAGS] as const) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return Promise.resolve(1);
-    }
-  }
+  // An option given with NO value, and one given an EMPTY value, are refused the same
+  // way: neither carries a coordinate. The empty form is what `--provider "$UNSET"`
+  // expands to, and taking it literally wrote `"provider": ""` into the config file —
+  // after which `config show` displayed `(provider: )` and `run` refused with advice
+  // that could not be typed, `--provider  --base-url <url>`, a flag whose value is the
+  // next flag (#174). `--base-url ""` was worse: it shadowed a working provider default
+  // with nothing, breaking a configuration that had been fine without the flag.
+  //
+  // Refused rather than skipped, unlike an empty environment variable (see `env.ts`).
+  // The operator named this option on this command line; the honest answer is that it
+  // carries nothing, not to act as though they never typed it. Clearing a setting is
+  // `config unset`, which says so — the distinction #159 settled for the other setters.
+  if (!rejectValuelessFlags(parsed, ["agent", ...MODEL_FLAGS], io)) return Promise.resolve(1);
   // The model id may be given positionally (`config set gpt-4o`) or via --model;
   // the positional is the ergonomic form. Other coordinates are flags only.
   const settings = modelSettingsFromFlags(parsed);
   const positionalId = parsed.positionals[1];
+  // The same rule for the positional form of the id. Skipping it instead would take
+  // `config set "" --provider ollama` as a request to set only the provider, dropping
+  // the coordinate the operator had actually typed at.
+  if (positionalId !== undefined && positionalId.trim().length === 0) {
+    io.err("The model id needs a value.");
+    return Promise.resolve(1);
+  }
   if (positionalId !== undefined) settings.id = positionalId;
   if (!hasSettings(settings)) {
     // The same constant the option refusal above prints. A second copy of this line drifted
@@ -5356,10 +5652,7 @@ function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["agent"], "config unset", CONFIG_UNSET_USAGE, io)) {
     return Promise.resolve(1);
   }
-  if (parsed.flags.agent === true) {
-    io.err("The --agent option needs a value.");
-    return Promise.resolve(1);
-  }
+  if (!rejectValuelessFlags(parsed, ["agent"], io)) return Promise.resolve(1);
   const agentName = stringFlag(parsed.flags.agent);
 
   return withHomeStore(io, (_store, home) => {
@@ -5369,20 +5662,40 @@ function cmdConfigUnset(parsed: ParsedArgs, io: CliIO): Promise<number> {
         io.out(`No model override set for agent "${agentName}".`);
         return 0;
       }
+      // Same distinction as the install-default branch below: `config show` reports an
+      // override that supplies nothing as no override at all, so reporting one cleared
+      // here would have the command describe the same file two ways.
+      const suppliedOverride = hasSettings(
+        withoutEmptyFields(config.agents[agentName]?.model ?? {}),
+      );
       const agents = { ...config.agents };
       delete agents[agentName];
       config.agents = agents;
       saveConfig(home, config);
-      io.out(`Cleared the model override for agent "${agentName}".`);
+      io.out(
+        suppliedOverride
+          ? `Cleared the model override for agent "${agentName}".`
+          : `Removed an empty model override for agent "${agentName}" — it was already supplying nothing.`,
+      );
       return 0;
     }
     if (config.model === undefined) {
       io.out("No install default model set.");
       return 0;
     }
+    // A stored entry that supplies nothing — `{"model":{"provider":""}}`, which an
+    // earlier version would write — is still REMOVED, because this is the operator's way
+    // out of one. But `config show` reports it as "(none set)", so saying "Cleared the
+    // install default model" here would have the same command describe the same file two
+    // ways: nothing was set, and then something was cleared.
+    const supplied = hasSettings(withoutEmptyFields(config.model));
     delete config.model;
     saveConfig(home, config);
-    io.out("Cleared the install default model.");
+    io.out(
+      supplied
+        ? "Cleared the install default model."
+        : "Removed an empty install default model entry — it was already supplying nothing.",
+    );
     return 0;
   });
 }
@@ -5398,18 +5711,15 @@ async function cmdServe(args: string[], io: CliIO): Promise<number> {
   // A mistyped `--port` used to bind the DEFAULT port and print that URL as if it were
   // the one asked for — the same silent substitution the bad-VALUE check below refuses.
   if (!rejectUnknownFlags(parsed, ["port", "host"], "serve", SERVE_USAGE, io)) return 1;
+  // A value-bearing flag carrying nothing must not silently bind something the user did
+  // not ask for. `--host ""` is the sharp one: it does not fall back to the loopback
+  // default, it binds `::` — every interface — so an unset variable in `--host "$HOST"`
+  // would put the endpoint on the network (#174).
+  if (!rejectValuelessFlags(parsed, ["port", "host"], io)) return 1;
   const name = parsed.positionals[0];
   if (!name) {
     io.err(SERVE_USAGE);
     return 1;
-  }
-  // A value-bearing flag given with no value parses as boolean `true`. Reject it
-  // rather than silently binding a default the user did not ask for.
-  for (const flag of ["port", "host"] as const) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
   }
   const host = stringFlag(parsed.flags.host);
   // A `--port` with a value that is not a valid port (non-numeric, or out of
@@ -5558,12 +5868,7 @@ async function cmdDashboard(args: string[], io: CliIO): Promise<number> {
   // Refused before the terminal check, so a mistyped `--headless` is named as the
   // mistake rather than reported as "this needs a TTY" — which is true, and useless.
   if (!rejectUnknownFlags(parsed, DASHBOARD_FLAGS, "dashboard", DASHBOARD_USAGE, io)) return 1;
-  for (const flag of ["token", "port", "host"] as const) {
-    if (parsed.flags[flag] === true) {
-      io.err(`The --${flag} option needs a value.`);
-      return 1;
-    }
-  }
+  if (!rejectValuelessFlags(parsed, ["token", "port", "host"], io)) return 1;
   const headless = parsed.flags.headless === true;
   const urlArg = parsed.positionals[0];
   const tokenFlag = stringFlag(parsed.flags.token);
@@ -5766,15 +6071,21 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["allow"], "channel telegram", TELEGRAM_USAGE, io)) return 1;
+  // Refuse exactly what the READER discards. `parseAllowList` trims each segment and
+  // drops the empties, so `--allow ""`, `--allow "  "` and `--allow ","` all reach it as
+  // an empty list — a bot started with no allow-list at all where one had been named.
+  // Testing the option's text alone caught the first two and let the third through.
+  const allowFlag = parsed.flags.allow;
+  if (
+    allowFlag !== undefined &&
+    (carriesNothing(allowFlag) || parseAllowList(stringFlag(allowFlag)).length === 0)
+  ) {
+    io.err("The --allow option needs a value (a comma-separated list of chat ids).");
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (!name) {
     io.err(TELEGRAM_USAGE);
-    return 1;
-  }
-  // A value-bearing flag given bare parses as boolean `true`; reject it rather than
-  // silently treating "--allow" as no allow-list.
-  if (parsed.flags.allow === true) {
-    io.err("The --allow option needs a value (a comma-separated list of chat ids).");
     return 1;
   }
 
@@ -5785,7 +6096,12 @@ async function cmdChannelTelegram(args: string[], io: CliIO): Promise<number> {
   const startTelegram = io.startTelegram;
 
   // The bot token is a secret: it comes from the environment, never config or a flag.
-  const token = io.env[TELEGRAM_TOKEN_ENV];
+  // Trimmed, so `export ASTERISM_TELEGRAM_TOKEN="  "` is a cleared token rather than a token
+  // made of spaces — the same reading `service install --capture-env` uses when deciding
+  // whether this variable supplies anything, and the same one `resolveHttpToken` has
+  // always used for the HTTP token. The trimmed value is what is sent, which also
+  // forgives the newline a copy-paste leaves on the end.
+  const token = io.env[TELEGRAM_TOKEN_ENV]?.trim();
   if (!token) {
     io.err(
       `Set ${TELEGRAM_TOKEN_ENV} to your bot token (create a bot with @BotFather) before starting the channel.`,
@@ -5885,15 +6201,21 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["allow"], "channel discord", DISCORD_USAGE, io)) return 1;
+  // Refuse exactly what the READER discards. `parseAllowList` trims each segment and
+  // drops the empties, so `--allow ""`, `--allow "  "` and `--allow ","` all reach it as
+  // an empty list — a bot started with no allow-list at all where one had been named.
+  // Testing the option's text alone caught the first two and let the third through.
+  const allowFlag = parsed.flags.allow;
+  if (
+    allowFlag !== undefined &&
+    (carriesNothing(allowFlag) || parseAllowList(stringFlag(allowFlag)).length === 0)
+  ) {
+    io.err("The --allow option needs a value (a comma-separated list of channel ids).");
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (!name) {
     io.err(DISCORD_USAGE);
-    return 1;
-  }
-  // A value-bearing flag given bare parses as boolean `true`; reject it rather than
-  // silently treating "--allow" as no allow-list.
-  if (parsed.flags.allow === true) {
-    io.err("The --allow option needs a value (a comma-separated list of channel ids).");
     return 1;
   }
 
@@ -5904,7 +6226,12 @@ async function cmdChannelDiscord(args: string[], io: CliIO): Promise<number> {
   const startDiscord = io.startDiscord;
 
   // The bot token is a secret: it comes from the environment, never config or a flag.
-  const token = io.env[DISCORD_TOKEN_ENV];
+  // Trimmed, so `export ASTERISM_DISCORD_TOKEN="  "` is a cleared token rather than a token
+  // made of spaces — the same reading `service install --capture-env` uses when deciding
+  // whether this variable supplies anything, and the same one `resolveHttpToken` has
+  // always used for the HTTP token. The trimmed value is what is sent, which also
+  // forgives the newline a copy-paste leaves on the end.
+  const token = io.env[DISCORD_TOKEN_ENV]?.trim();
   if (!token) {
     io.err(
       `Set ${DISCORD_TOKEN_ENV} to your bot token (create one in the Discord Developer Portal) before starting the channel.`,
@@ -6073,11 +6400,14 @@ function serviceTitle(agentName: string, kind: ServiceKind): string {
 /** Resolve a `--kind` flag into a ServiceKind. A bare/unknown value is an error. */
 function parseServiceKind(value: string | true | undefined): { kind?: ServiceKind; error?: string } {
   if (value === undefined) return { kind: "serve" };
-  if (value === true) {
+  // Given with no value, or given an EMPTY one (`--kind "$KIND"` with the variable
+  // unset) — the same mistake, so the same answer, rather than falling through to
+  // `Unknown service kind ""`, which describes the expansion instead of the mistake.
+  if (carriesNothing(value)) {
     return { error: "The --kind option needs a value (serve, telegram, or discord)." };
   }
-  if (!isServiceKind(value)) {
-    return { error: `Unknown service kind "${value}". Use serve, telegram, or discord.` };
+  if (typeof value !== "string" || !isServiceKind(value)) {
+    return { error: `Unknown service kind "${String(value)}". Use serve, telegram, or discord.` };
   }
   return { kind: value };
 }
@@ -6138,7 +6468,12 @@ function serviceEnvPlan(
   const config = loadConfig(home);
   const { model } = resolveModelConfig(io.env, { config, agentName });
   const auth = providerAuthPlan(io.env, model);
-  const has = (name: string): boolean => io.env[name] !== undefined;
+  // Whether capturing would put a VALUE in the service's env file. An exported-but-empty
+  // variable would be captured as nothing, so counting it as satisfied told the operator
+  // a required need was met and left the service failing to start on it. Whitespace-only
+  // counts as nothing too, because the readers on the other side of the file trim before
+  // testing — see `suppliesText`.
+  const has = (name: string): boolean => suppliesText(io.env, name);
 
   const vars: EnvVarSpec[] = [];
   const needs: ServiceEnvNeed[] = [];
@@ -6289,15 +6624,15 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["kind", "capture-env"], "service install", SERVICE_INSTALL_USAGE, io)) {
     return 1;
   }
-  const name = parsed.positionals[0];
-  if (!name) {
-    io.err(SERVICE_INSTALL_USAGE);
-    return 1;
-  }
   const captureEnv = parsed.flags["capture-env"] === true;
   const { kind, error } = parseServiceKind(parsed.flags.kind);
   if (error || !kind) {
     io.err(error ?? "A service kind is required.");
+    return 1;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err(SERVICE_INSTALL_USAGE);
     return 1;
   }
 
@@ -6338,7 +6673,13 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     chmodSync(paths.baseDir, 0o700); // the dir holds the private env file and wrapper
     const envPlan = serviceEnvPlan(io, home, agent.name, kind, captureEnv);
     if (captureEnv) {
-      writeFileAtomic(paths.envFile, renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) => io.env[n]), 0o600);
+      writeFileAtomic(
+        paths.envFile,
+        renderEnvFile(serviceTitle(agent.name, kind), envPlan.vars, (n) =>
+          suppliesText(io.env, n) ? io.env[n] : undefined,
+        ),
+        0o600,
+      );
     } else if (!existsSync(paths.envFile)) {
       writeFileAtomic(paths.envFile, renderEnvTemplate(serviceTitle(agent.name, kind), envPlan.vars), 0o600);
     } else {
@@ -6406,7 +6747,7 @@ async function cmdServiceInstall(args: string[], io: CliIO): Promise<number> {
     io.out(`  Keeps \`asterism ${display}\` running and restarts it if it fails.`);
     io.out(`  Env file (0600): ${paths.envFile}`);
     if (captureEnv) {
-      const captured = envPlan.vars.filter((v) => io.env[v.name] !== undefined).map((v) => v.name);
+      const captured = envPlan.vars.filter((v) => suppliesText(io.env, v.name)).map((v) => v.name);
       io.out(
         captured.length > 0
           ? `  Captured from your environment: ${captured.join(", ")}`
@@ -6468,12 +6809,9 @@ async function cmdServiceStatus(args: string[], io: CliIO): Promise<number> {
     return 0;
   }
   if (!rejectUnknownFlags(parsed, ["kind"], "service status", SERVICE_STATUS_USAGE, io)) return 1;
-  const name = parsed.positionals[0];
-  if (!name) {
-    io.err(SERVICE_STATUS_USAGE);
-    return 1;
-  }
-  // With no --kind, status reports across every kind; with one, only that kind.
+  // With no --kind, status reports across every kind; with one, only that kind. Resolved
+  // before the positional check so a `--kind` carrying nothing names itself, rather than
+  // being reported as a missing agent name (the ordering `rejectUnknownFlags` documents).
   let filterKind: ServiceKind | undefined;
   if (parsed.flags.kind !== undefined) {
     const { kind, error } = parseServiceKind(parsed.flags.kind);
@@ -6482,6 +6820,11 @@ async function cmdServiceStatus(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
     filterKind = kind;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err(SERVICE_STATUS_USAGE);
+    return 1;
   }
   const platform = servicePlatform(io);
   if (!platform) {
@@ -6530,11 +6873,6 @@ async function cmdServiceUninstall(args: string[], io: CliIO): Promise<number> {
   if (!rejectUnknownFlags(parsed, ["kind"], "service uninstall", SERVICE_UNINSTALL_USAGE, io)) {
     return 1;
   }
-  const name = parsed.positionals[0];
-  if (!name) {
-    io.err(SERVICE_UNINSTALL_USAGE);
-    return 1;
-  }
   let filterKind: ServiceKind | undefined;
   if (parsed.flags.kind !== undefined) {
     const { kind, error } = parseServiceKind(parsed.flags.kind);
@@ -6543,6 +6881,11 @@ async function cmdServiceUninstall(args: string[], io: CliIO): Promise<number> {
       return 1;
     }
     filterKind = kind;
+  }
+  const name = parsed.positionals[0];
+  if (!name) {
+    io.err(SERVICE_UNINSTALL_USAGE);
+    return 1;
   }
   const platform = servicePlatform(io);
   if (!platform) {
