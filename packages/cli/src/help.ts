@@ -275,8 +275,8 @@ capability for it.
 
 The agent can read, write, and delete files in its own workspace. Reading and
 writing run according to its autonomy level; deleting is destructive, so the run
-stops and asks you first — and a 'propose' agent does not delete at all, it tells
-you what it would have deleted.
+stops and asks you first unless you have allowed it — and a 'propose' agent does
+not delete at all, it tells you what it would have deleted.
 
 Activity streams as it happens, and a run that can act on its own ends with a
 short summary of what it did, withheld, or paused on. (Progress goes to standard

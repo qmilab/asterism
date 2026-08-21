@@ -2280,6 +2280,21 @@ function report(total, tally, groups, coverageWork) {
           "  can never [earn](#earned-autonomy-per-capability-grants) a standing grant — sending\n" +
           "  a credential somewhere is the one thing this product will not learn to do on its own.\n",
         []],
+      // Codex R4, pinned from the other side. Requiring a quantifier is a DECISION — without
+      // it 43 sentences report — and these are the shapes that decision protects. Each is
+      // real shipped help, and each is true whether or not the capability is allow-listed:
+      // a conditional, a verb description that presupposes the pause, and a statement about
+      // how bounded an approval is. If the quantifier requirement is ever dropped, these
+      // three fail, and the 43-sentence cost is visible instead of argued about.
+      ["mentions the gate CONDITIONALLY rather than promising it",
+        "When a destructive action pauses a run, confirm it later with `asterism confirm` — the run picks up and finishes the action you approved.",
+        []],
+      ["describes the verb that resolves a pause that already happened",
+        "Confirm the destructive action a run paused on, and let the run finish.",
+        []],
+      ["says how BOUNDED an approval is, which holds either way",
+        "You approve only the action it paused on — nothing else is unlocked. A further destructive step pauses again for its own confirmation: the same kind of action aimed at a new target.",
+        []],
       // Codex R3, pinned. Naming all three levels and then promising a confirmation puts
       // `propose` in the frame just as firmly as the words "at every level" — and there is
       // no confirmation there, there is a plan. `README.md`'s feature table did exactly this.

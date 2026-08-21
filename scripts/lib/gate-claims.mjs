@@ -32,6 +32,16 @@
 // a guarantee. A passing reference silences it not by adding a clause but by becoming
 // RELATIVE ("this surface changes nothing about the gate"), which is true whether or not
 // the capability is allow-listed and has no mirror to install later.
+//
+// That restriction is MEASURED, not assumed, because a sentence explaining why a check is
+// narrow is exactly where this repo has hidden defects before. Dropping the quantifier
+// requirement — firing on any pause promise about a destructive action — reports **43**
+// sentences across the pages and the shipped help. Reading them: two were real overclaims
+// and were fixed; the rest are conditional ("WHEN a destructive action pauses a run,
+// confirm it with…"), or descriptions of a verb that presupposes a pause already happened,
+// or statements about how BOUNDED an approval is — all true whether or not the capability
+// is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
+// this explicitly ruled out.
 
 /**
  * Strip the typography and read the CLAIM.
