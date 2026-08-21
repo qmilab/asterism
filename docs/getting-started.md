@@ -205,7 +205,8 @@ dial up as you come to trust an agent:
 The one thing worth saying twice: **`notify` does not ask before acting.** It
 acts, then notifies. If you want approval *before* anything happens, use
 `propose`. And the gate holds at every level: `notify` and `autonomous` stop and
-ask before an irreversible step, and `propose` never takes one at all.
+ask before an irreversible step — unless you have allowed that capability for the
+agent — and `propose` never takes one at all.
 
 Change a level any time:
 

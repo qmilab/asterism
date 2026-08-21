@@ -128,10 +128,11 @@ removed.
 
 ## The destructive-action gate still applies
 
-A service does not loosen the [trust model](./concepts.md#trust-levels) one bit. A
-destructive action still pauses for your explicit confirmation, exactly as it does
-at the keyboard — even for an `autonomous` agent. With no one watching, an HTTP run
-parks at `awaiting_confirmation` and waits until you approve it
+A service does not loosen the [trust model](./concepts.md#trust-levels) one bit. The
+[destructive-action gate](./concepts.md#the-destructive-action-gate) reaches exactly
+the verdict it would have reached at the keyboard, for the same agent and the same
+action. With no one watching, an HTTP run parks at `awaiting_confirmation` and waits
+until you approve it
 [out of band over HTTP](./http.md); a chat run asks in the chat for a
 `/confirm` reply. Always-on does not mean unattended approval.
 

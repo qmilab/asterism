@@ -270,7 +270,8 @@ exactly like the agent's own.`,
 
 Put an agent to work on a task, framed by its role, character, skills, and the
 memories it has accepted. What it may do on its own depends on its autonomy level;
-a destructive action never happens without you.
+a destructive action never happens without you, unless you have allowed that
+capability for it.
 
 The agent can read, write, and delete files in its own workspace. Reading and
 writing run according to its autonomy level; deleting is destructive, so the run
@@ -363,9 +364,10 @@ level, framed by ITS OWN memory and skills — and hands back only its final res
 asking agent never sees the other's memory, secrets, files, or how it got there.
 
 Because the work runs as the receiving agent, that agent's protections apply: a
-destructive action pauses for your confirmation according to the RECEIVING agent's
-autonomy, no matter how much autonomy the asking agent has. A handoff can never be a way
-around another agent's limits. If it pauses, confirm it on the receiving agent:
+destructive action answers to the RECEIVING agent's own gate, and to nothing the asking
+agent holds — no matter how much autonomy the asking agent was given. A handoff can
+never be a way around another agent's limits. If it pauses, confirm it on the
+receiving agent:
   asterism confirm <to> <run>
 
 Open the channel first if you haven't:
@@ -382,8 +384,8 @@ made, not its words.
 
 Everything true of \`handoff\` is true here: the receiving agent does the work in its own
 workspace, at its own autonomy level, framed by its own memory and skills. Its protections
-apply too — a destructive action pauses for your confirmation according to the RECEIVING
-agent's autonomy, no matter how much autonomy the asking agent has.
+apply too — a destructive action answers to the RECEIVING agent's own gate, and to
+nothing the asking agent holds, no matter how much autonomy it was given.
 
 What comes back is narrower. You get each file's path and size, and whether it still
 exists. You do NOT get the receiving agent's words, its memory, or the contents of those
@@ -625,12 +627,13 @@ never a way to see another agent's.
 
 A trace exists only for an agent you opted in with
 \`asterism config cognition-provider <agent> lodestar\`. It is observe-only: recording a
-trace never changes what an agent may do (a destructive action still pauses for the
-same confirmation). By default the trace records references only — which tool ran,
-whether it succeeded, how much it returned — never the contents of a tool's input or
-output. You can opt in to recording the redacted CONTENT of what each tool returned with
-\`asterism config cognition-capture <agent> content\`; even then, the input arguments are
-never kept, common secret shapes (keys, tokens, passwords, private keys) are scrubbed out,
+trace never changes what an agent may do (the destructive-action gate reaches the same
+verdict with a trace running as without one). By default the trace records references
+only — which tool ran, whether it succeeded, how much it returned — never the contents
+of a tool's input or output. You can opt in to recording the redacted CONTENT of what
+each tool returned with \`asterism config cognition-capture <agent> content\`; even then,
+the input arguments are never kept, common secret shapes (keys, tokens, passwords,
+private keys) are scrubbed out,
 and the captured text is bounded and stripped of terminal-control characters. That scrub is
 best-effort, not a guarantee — leave content capture off for an agent that routinely handles
 secrets you cannot risk in an audit record. The trace is kept in the install's own storage,
@@ -766,10 +769,10 @@ in order — so you can review it after the fact with \`asterism trace\`. The de
 off (no trace). Opt an agent into \`lodestar\` to record one, kept locally in the
 install's own storage (outside the agent's workspace, so the agent cannot tamper with
 its own record) and never shared with another agent. It is observe-only: the trace
-records what a run did, it never changes what the agent is allowed to do — a destructive
-action still pauses for the same confirmation. This first version records references
-only (which tool ran, success or failure, output size) — never the contents of a tool's
-input or output, so it cannot leak a secret.
+records what a run did, it never changes what the agent is allowed to do — the
+destructive-action gate reaches the same verdict with a trace running as without one.
+This first version records references only (which tool ran, success or failure, output
+size) — never the contents of a tool's input or output, so it cannot leak a secret.
 
 Options for \`set\`:
   --provider <name>   Provider name. Default: openai. Naming one of these is
@@ -795,9 +798,10 @@ API keys are never stored here. Keep them in the environment (e.g. OPENAI_API_KE
 
 Offer one agent over a local HTTP endpoint, with the same separation guarantees as
 the command line. The endpoint serves only this agent — it is never a way to reach
-another. A destructive action still pauses for confirmation even with no one at the
-keyboard: the run waits, and you approve it out of band — POST to its confirm
-endpoint, or run \`asterism confirm\`.
+another. The destructive-action gate reaches the verdict it would have reached at the
+keyboard, and nobody at the keyboard does not mean nobody approves: a run it stops
+waits, and you approve it out of band — POST to its confirm endpoint, or run
+\`asterism confirm\`.
 
 Every request needs an access token: Authorization: Bearer <token>. On first serve
 a token is generated, saved (owner-only), and printed once; later serves reuse it.
@@ -855,9 +859,9 @@ Reach one agent from a chat app, with the same separation guarantees as the comm
 line. The bot drives only this agent — it is never a way to reach another.
 
 Only the chats you allow can use the bot. A message from anywhere else is refused and
-told its own id, so you can decide whether to allow it. A destructive action still
-pauses for your confirmation: the bot asks in the chat, and you reply \`/confirm\` to
-approve just that action — the same gate you get at the keyboard.
+told its own id, so you can decide whether to allow it. The destructive-action gate
+reaches the verdict it would have reached at the keyboard: when it stops a run, the bot
+asks in the chat, and you reply \`/confirm\` to approve just that action.
 
 Telegram:
   1. Create a bot with @BotFather in Telegram and copy its token.
@@ -918,9 +922,10 @@ you. Edit it, then restart the service as install tells you.
                   the 0600 file, only when you ask) and overwrites the file on each
                   use. Without it, nothing secret is ever written for you.
 
-A destructive action still pauses for your confirmation. With no one at the keyboard,
-an HTTP run waits until you approve it out of band (POST its confirm endpoint, or run
-\`asterism confirm\`); a chat run asks in the chat for a \`/confirm\` reply.
+The destructive-action gate reaches the verdict it would have reached at the keyboard.
+With no one there, a run it stops waits until you approve it out of band (POST its
+confirm endpoint, or run \`asterism confirm\`); a chat run asks in the chat for a
+\`/confirm\` reply.
 
 Supported on macOS and Linux.`,
 };

@@ -2,6 +2,22 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.9.2
+
+The destructive-action gate has an exception, and most of the places that promised the gate did not mention it. An agent can **earn** the standing to take one capability without pausing — you are shown the evidence, you approve it, and `asterism trust <agent> show` lists what you granted — so once you accept such a grant, that one capability stops asking. The rule box on the concepts page, the threat model, the npm page and `asterism trust --help` all said so. A dozen other statements, including the repository's front page and the walkthrough's own list of claims, described a pause that always happens.
+
+### Fixed
+
+- **Every guarantee about the destructive-action gate now names its exception.** Where copy promises that a destructive action stops for you *whatever the agent's autonomy*, it now finishes the sentence: *unless you have allowed that capability for it*. `README.md`, the walkthrough's fourth claim, the getting-started trust section, the concepts page and `asterism run --help` each stated the guarantee without it.
+
+  This sentence has now been wrong in both directions. Until 0.5.0 it claimed a pause at **every** trust level, which is false at `propose` — that level withholds the action and hands you a plan, so nothing is ever asked. Fixing that put the missing half into four surfaces and left the rest carrying the half they already had. Both halves now travel together, in the same sentence, wherever the claim is made, and a check reads every page the project publishes as well as the help the binary actually prints — so the next statement of the gate is measured against what the gate does rather than against the last statement of it.
+
+- **The places that merely mention the gate now say what they actually mean.** The container, service, `serve`, `channel`, `service install` and cognition-trace passages were each making a point about *their own surface* — that running in a container, or as a background service, or with a trace recording, does not loosen anything — and they made it by restating the gate, which put half the rule in a dozen more places to keep in step. They now say the thing they were always for: the gate reaches the verdict it would have reached at the keyboard, whatever that verdict is.
+
+  The same for handing work to another agent. `handoff` and `artifact` said a destructive action pauses according to the receiving agent's autonomy; what they are promising is that the receiving agent's own gate decides and the asking agent's autonomy buys nothing, which is true whether that gate stops the run or not.
+
+- **What is *not* qualified, deliberately.** A call an agent makes through another agent's tool always pauses, at `notify` and at `autonomous`, and standing can never buy it out — the one destructive action with no exception. The threat model says so without qualification, and still does.
+
 ## 0.9.1 — 2026-08-21
 
 Two ways Asterism could act on something you had not said. A question it needed answered was written to standard output while only standard input decided whether to ask, so redirecting a run's output put the destructive-action confirmation in the file and left you at a blank screen waiting on a question you could not see. And a value that was empty — a cleared environment variable, an option given `""` — was read as a value you had chosen, which is how one install came to report a configured model to `config show` and none to `run`, and how `--host ""` came to bind every interface. Alongside them, the page npm shows for `@qmilab/asterism` now describes the product you would be installing.

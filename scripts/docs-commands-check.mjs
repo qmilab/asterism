@@ -63,6 +63,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
+import { gateOverclaims, GATE_RULE_ADVICE } from "./lib/gate-claims.mjs";
 import {
   ROOT,
   siteDir,
@@ -2221,6 +2222,238 @@ function report(total, tally, groups, coverageWork) {
         ` in code spans, and on nothing else — prose mentions included.`,
     );
 
+    // The destructive-action gate rule. Every case below is a real sentence this repo has
+    // shipped, or the correct one it was replaced with — no invented shapes, because the
+    // question is not whether a regular expression works, it is whether THIS copy is judged
+    // right. The `false` rows matter more than the `true` ones: a gate that reports a
+    // correct sentence gets the correct sentence "fixed" until the gate agrees, which has
+    // happened in this file once already, to four working links.
+    const GATE_CASES = [
+      // --- must fire -------------------------------------------------------------------
+      ["states the guarantee bare (README, before #177)",
+        "but before anything **destructive**, even an `autonomous` agent **pauses for your confirmation**.",
+        ["no-exception"]],
+      ["states claim 4 bare (walkthrough, before #177)",
+        "Even an `autonomous` agent **pauses for confirmation before a destructive\naction** — the gate is independent of trust level.",
+        ["no-exception"]],
+      ["promises a pause at every level with no allow-list and no `propose`",
+        "The gate holds at every level: a destructive action always pauses for your confirmation.",
+        ["every-level", "no-exception"]],
+      // The typography controls. `*every*` and `**pauses**` are the same words a reader
+      // sees, and the first version of this sweep could not see them at all.
+      ["hides the quantifier behind emphasis",
+        "The gate pauses *every* **destructive** action, whatever the agent's trust level.",
+        ["no-exception"]],
+      ["hides it behind HTML, as the landing page must",
+        "<p>before anything <strong>destructive</strong>, even an <code>autonomous</code> agent pauses for your confirmation.</p>",
+        ["no-exception"]],
+      // A colon introduces the rest of the claim. Splitting on it put the quantifier in one
+      // fragment and the promise in the other, and a live defect read as clean.
+      ["wears a colon between the quantifier and the promise",
+        "And the gate holds at every level: `notify` and `autonomous` stop and ask before an irreversible step.",
+        ["every-level", "no-exception"]],
+      // `by default` has to be anchored to the pause. Unanchored it excused four bare
+      // guarantees from three pages away.
+      ["has an unrelated `By default` sentence beside it",
+        "Even an `autonomous` agent pauses before a **destructive** action. By default the trace records references only.",
+        ["no-exception"]],
+      // The topic can be set by the sentence BEFORE the promise — which is how most of this
+      // copy actually reads. Requiring the word `destructive` inside the claim itself let
+      // this shape through silently.
+      ["names the destructive thing in the sentence before the guarantee",
+        "Deleting a file is irreversible. Even an `autonomous` agent pauses for your confirmation.",
+        ["no-exception"]],
+      ["makes the same universal promise about something that is not the gate",
+        "Every request needs an access token, at every level, and the server always asks for your confirmation of the fingerprint.",
+        []],
+      // The quantifiers below are each the sole one in their row too, and each is a sentence
+      // this repo actually shipped until #177 removed it — a regression suite of the shapes
+      // that were really written, not of shapes imagined for the regex.
+      ["quantifies with `no matter how` alone (the handoff sentence, before #177)",
+        "a destructive action stops for your confirmation according to the **receiving** agent's autonomy, no matter how much autonomy the asking agent has.",
+        ["no-exception"]],
+      ["quantifies with `autonomous included` alone (README's table row)",
+        "Dialable trust with a hard stop for your confirmation before anything irreversible, `autonomous` included.",
+        ["no-exception"]],
+      ["quantifies with `every destructive action` alone",
+        "The gate pauses every destructive action.",
+        ["no-exception"]],
+      ["quantifies with `always pauses` alone",
+        "A destructive action always pauses for your confirmation.",
+        ["no-exception"]],
+      ["quantifies with `gate holds` alone",
+        "Whatever else changes, the gate holds — a destructive action pauses for your confirmation.",
+        ["every-level", "no-exception"]],
+      ["carries the exception as `earn the standing`, the only marker in the sentence",
+        "A destructive action always pauses, but an agent can earn the standing to take one specific capability without that pause.",
+        []],
+      // Naming `propose` is not the same as saying what it does INSTEAD. A version that
+      // accepted the bare word would pass this, and the sentence is still false at `propose`.
+      ["lists `propose` among the levels without saying it withholds",
+        "The gate holds at every level — `propose`, `notify`, `autonomous` — and a destructive action always pauses, unless you have allowed that capability.",
+        ["every-level"]],
+      // Presentation, pinned because it is the difference between a readable report and a
+      // wall: a finding is truncated with an ellipsis rather than printed whole.
+      ["is far longer than the report can show",
+        `A destructive action always pauses for your confirmation, ${"and this clause runs on and on, ".repeat(12)}forever.`,
+        ["no-exception"]],
+      // Each quantifier below is the ONLY one in its row. Every other row that uses these
+      // phrasings pairs them with a second quantifier, so dropping any one of them changed
+      // no result — the rule read as covered while three of its branches were untested.
+      ["quantifies with `whatever the agent's trust level` alone",
+        "A destructive action stops and asks you first, whatever the agent's trust level.",
+        ["no-exception"]],
+      ["quantifies with `regardless of autonomy` alone",
+        "An action classified destructive pauses for explicit confirmation regardless of the agent's autonomy level.",
+        ["no-exception"]],
+      ["quantifies with `independent of trust level` alone",
+        "A deletion pauses for your confirmation; the gate is independent of trust level.",
+        ["no-exception"]],
+      // …and each spelling of the EXCEPTION, likewise isolated. The rule box says `unless
+      // you have specifically allowed`, which satisfies two branches at once; on its own
+      // each of these is the only thing standing between a real sentence and a false red.
+      ["carries the exception as `allow-listed`, with no `unless`",
+        "A destructive action pauses regardless of the agent's autonomy level; a capability allow-listed for that agent is the one thing that skips it.",
+        []],
+      ["carries it as `specifically allowed`, with no `unless`",
+        "A destructive action pauses regardless of the agent's autonomy level; a capability you specifically allowed skips it.",
+        []],
+      ["carries it as `unless ... granted`",
+        "A destructive action pauses regardless of the agent's autonomy level, unless you granted that capability to the agent.",
+        []],
+      // `never happens without you` is the binary's front-door phrasing and the npm page's.
+      // Every fixture using it was a PASSING one, so dropping that quantifier changed no
+      // result and the guard for the most-read sentence in the product was untested.
+      ["uses the front-door phrasing with no exception at all",
+        "A **destructive** action — deleting files, force-pushing, spending, sending — never happens without you.",
+        ["no-exception"]],
+      // Universal AND about destruction, but promising nothing — the walkthrough's own
+      // section heading. Without this row, the pause verb could stop being required and
+      // every other case would still pass.
+      ["is a heading that says the gate FIRES without promising a pause",
+        "## Claim 4 — the destructive gate fires regardless of trust",
+        []],
+      // `still pauses` was the shape of nine of the nineteen sentences this slice found —
+      // the passing references on the container, service, channel, serve and trace
+      // surfaces. Without a row for it, dropping that quantifier survives every other case.
+      ["says the gate STILL pauses on some other surface",
+        "A destructive action still pauses for explicit confirmation, even for an `autonomous` agent.",
+        ["no-exception"]],
+      // The window has to be a window. With no row where the exception sits FAR from the
+      // claim, `NEARBY` can be set to anything — including the whole file — and nothing
+      // notices; a clause three paragraphs down would then excuse a bare guarantee.
+      ["puts its `unless` clause a long way from the claim",
+        "Even an `autonomous` agent pauses before a **destructive** action.\n\n" +
+          `${"Filler about tokens, ports and workspaces. ".repeat(12)}\n\n` +
+          "Unless you have allowed that capability for the agent, that is.",
+        ["no-exception"]],
+
+      // --- must NOT fire ---------------------------------------------------------------
+      ["is the rule box, which carries both halves in one sentence",
+        "> A **destructive** action never happens without you — *whatever the agent's\n> trust level* — unless you have specifically allowed that capability for it.",
+        []],
+      ["puts the guarantee and its `unless` in consecutive sentences, as AUTONOMY_HELP does",
+        "A destructive action never happens without you. At 'notify' and 'autonomous'\nthe run stops and asks first, unless you have allowed that capability for it.",
+        []],
+      // The landing page states the exception by its CONTRAPOSITIVE. A pattern demanding
+      // the positive spelling called the site's front page broken.
+      ["states the exception as `a capability you have not allowed it`",
+        "before anything destructive, whatever the agent's trust level, nothing happens without you: notify and autonomous stop and ask, and neither acts unasked on a capability you have not allowed it.",
+        []],
+      ["says the pause is the default and names what buys it out",
+        "The gate pauses *every* destructive action by default — but an agent can **earn** the standing to take one specific capability without that pause.",
+        []],
+      // The shape this slice moved the passing references TO: relative, and therefore true
+      // whether or not the capability is allow-listed. This row is what stops the fix for
+      // one half from being pressure to paste a clause onto every mention of the gate.
+      ["makes the claim relative instead of absolute",
+        "A container loosens the trust model not one bit. The destructive-action gate reaches exactly the verdict it would have reached at the keyboard, for the same agent and the same action.",
+        []],
+      ["names `propose` alongside an every-level claim that carries the exception",
+        "The gate holds at every level: `notify` and `autonomous` stop and ask — unless you have allowed that capability for the agent — and `propose` never takes one at all.",
+        []],
+      ["describes one recording, without claiming anything universal",
+        "A terminal recording: an autonomous agent writes a file without asking, then pauses for confirmation before deleting one.",
+        []],
+      ["says nothing about the gate at all",
+        "Every request needs an access token. On first serve a token is generated and printed once.",
+        []],
+      // Evidence blocks quote TEST TITLES, and `check:safety-case` requires each to match a
+      // test that ran and passed. If this could fire inside one, the cheapest way to green
+      // it would be to rename a kernel test until a prose gate agreed.
+      ["quotes a test title inside an Evidence block",
+        '> **Evidence** — `bun test packages/core/src/delegation.test.ts`\n> - "a delegated call always pauses — at notify AND at autonomous, and standing cannot buy it out"\n',
+        []],
+      ["quotes one in a block whose header this reader cannot parse",
+        '> **Evidence** – `bun test x.test.ts`\n> - "an autonomous agent still pauses on a destructive action"\n',
+        []],
+      ["makes a bare guarantee in prose right AFTER an Evidence block closes",
+        '> **Evidence** — `bun test x.test.ts`\n> - "a real test title"\n\nEven an `autonomous` agent pauses for your confirmation before a destructive action.',
+        ["no-exception"]],
+    ];
+    const gateFailures = [];
+    for (const [why, text, wantRules] of GATE_CASES) {
+      const got = gateOverclaims(text).map((f) => f.rule).sort();
+      const want = [...wantRules].sort();
+      if (JSON.stringify(got) !== JSON.stringify(want)) {
+        gateFailures.push(
+          `  copy that ${why}\n      want: ${JSON.stringify(want)}\n      got:  ${JSON.stringify(got)}`,
+        );
+      }
+    }
+    // WHERE a finding is, not just that there is one. Nothing above could tell a correct
+    // line number from one off by any amount, and the line is the whole value of the report
+    // to the person fixing it. Two claims, four lines apart, with a blank line between —
+    // which also pins the blank line as a claim boundary, so a paragraph cannot be swallowed
+    // into its neighbour and reported at the wrong place.
+    const twoClaims = [
+      "# A page",                                     // 1
+      "",                                             // 2
+      "Even an `autonomous` agent pauses before a **destructive** action.", // 3
+      "",                                             // 4
+      "A deletion always pauses for your confirmation.", // 5
+    ].join("\n");
+    const twoLines = gateOverclaims(twoClaims).map((f) => f.line);
+    if (JSON.stringify(twoLines) !== JSON.stringify([3, 5])) {
+      gateFailures.push(`  two claims four lines apart were reported at ${JSON.stringify(twoLines)}, not [3,5]`);
+    }
+    // …and a very long sentence is cut rather than printed whole, or one bad page fills the
+    // terminal and the rest of the report scrolls away.
+    const longOne = gateOverclaims(
+      `A destructive action always pauses for your confirmation, ${"and on ".repeat(80)}forever.`,
+    )[0];
+    if (!longOne || !longOne.sentence.endsWith("...") || longOne.sentence.length > 240) {
+      gateFailures.push(`  a ${longOne ? longOne.sentence.length : 0}-character finding was not truncated for the report`);
+    }
+
+    // The rule this one grew out of, asserted as a CAPABILITY rather than trusted: the
+    // sentence `help.test.ts` has forbidden since #139 must still be caught here, or
+    // widening the corpus quietly narrowed the rule.
+    if (!gateOverclaims("A destructive action pauses for confirmation at every trust level.").some((f) => f.rule === "every-level")) {
+      gateFailures.push("  the `pauses at every trust level` sentence `help.test.ts` forbids is not caught here");
+    }
+    if (gateFailures.length) {
+      console.log("\nSELF-TEST FAILED: the destructive-action gate rule does not hold:");
+      for (const f of gateFailures) console.log(f);
+      process.exit(1);
+    }
+    // …and it is pointed at something. A rule that is right about an empty corpus reports
+    // zero forever, which is exactly how the sentence it forbids came to be live in
+    // `docs/getting-started.md` while a guard for it passed in `packages/cli`.
+    const gatePages = userFacingPages();
+    const gateVerbs = advertisedVerbSet(coverageWork);
+    if (gatePages.length === 0 || gateVerbs.size === 0) {
+      console.log(
+        `\nSELF-TEST FAILED: the gate rule reads ${gatePages.length} pages and ${gateVerbs.size} help screens.`,
+      );
+      process.exit(1);
+    }
+    console.log(
+      `The destructive-action gate rule holds on ${GATE_CASES.length} real sentences, fires inside` +
+        ` emphasis, markup and colons, never inside an Evidence citation, and reads` +
+        ` ${gatePages.length} pages plus ${gateVerbs.size} help screens.`,
+    );
+
     // The `Commands:` extraction, on the shapes that decide whether a derived verb list is
     // trustworthy. An empty answer is what a killed `--help` used to produce, and every
     // pass built on it reads "no verbs" as "nothing to report" — so the empty case is
@@ -3255,6 +3488,21 @@ function report(total, tally, groups, coverageWork) {
     );
   }
 
+  const gateSources = SELF_TEST ? [] : gateClaimSources(coverageWork);
+  const gateClaims = checkGateClaims(gateSources);
+  if (gateClaims.length) {
+    console.log(
+      `\nTHE DESTRUCTIVE-ACTION GATE, PROMISED WIDER THAN IT FIRES (${gateClaims.length}) —` +
+        ` a sentence stating the gate as a guarantee has to carry what the kernel actually does:`,
+    );
+    for (const g of gateClaims) console.log(`  ${g}`);
+  } else if (!SELF_TEST) {
+    console.log(
+      `Every guarantee about the destructive-action gate across ${gateSources.length} pages and` +
+        ` help screens names its exception.`,
+    );
+  }
+
   // A page in the corpus whose terminal blocks this could not find at all. Reported rather
   // than counted as zero: for the HTML half the answer "no commands" is far more often "the
   // markup changed" than it is true, and a checker reading nothing while printing a green
@@ -3345,6 +3593,7 @@ function report(total, tally, groups, coverageWork) {
     readmeless.length ||
     providerGaps.length ||
     catalogGaps.length ||
+    gateClaims.length ||
     landingLinks.broken.length ||
     landingLinks.checked === 0 ||
     siteLinks.broken.length ||
@@ -3480,6 +3729,50 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
     );
   }
   return gaps;
+}
+
+/**
+ * The destructive-action gate is the product's headline safety claim, and it is stated in
+ * prose on nearly every page. `scripts/lib/gate-claims.mjs` holds the rule and the reasons;
+ * this is the corpus.
+ *
+ * The corpus is the point. A guard for exactly this already existed — `help.test.ts` forbids
+ * "pauses at every trust level", which is false at `propose` — and it read the binary's help
+ * CONSTANTS and nothing else. So the very sentence it forbids was live in
+ * `docs/getting-started.md`, where it could not see it, and the same page's neighbours had
+ * drifted the other way. A rule that is right about a corpus that is wrong reports zero
+ * forever. Here it reads every page a user meets AND the help the binary actually prints —
+ * rendered, per verb, not the constants it is built from.
+ *
+ * Both directions are checked at once because this defect has now been shipped in both, the
+ * second one written by the fix for the first (#139 → #176 → #177). Two guards in two files
+ * would let that happen a third time; one predicate over one corpus cannot.
+ */
+function checkGateClaims(sources) {
+  const found = [];
+  for (const [label, text] of sources) {
+    for (const claim of gateOverclaims(text)) {
+      found.push(`${label}:${claim.line} [${claim.rule}] ${claim.sentence}\n      → ${GATE_RULE_ADVICE[claim.rule]}`);
+    }
+  }
+  return found;
+}
+
+/**
+ * What the gate pass reads: every page a user meets, plus the rendered help of every verb
+ * the root help advertises (and the root help itself).
+ *
+ * Derived from `advertisedVerbSet` — the same list the command-coverage pass uses — rather
+ * than from a list of the verbs that happen to mention the gate today. Eleven verbs mention
+ * it now; a twelfth that starts to is exactly the case a hand-kept list misses.
+ */
+function gateClaimSources(work) {
+  const pages = userFacingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]);
+  const help = [["asterism --help", helpFor(work, "")]];
+  for (const verb of [...advertisedVerbSet(work)].sort()) {
+    help.push([`asterism ${verb} --help`, helpFor(work, verb)]);
+  }
+  return [...pages, ...help];
 }
 
 /**

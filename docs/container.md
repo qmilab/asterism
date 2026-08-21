@@ -157,9 +157,10 @@ with `-e`, exactly as it is sourced from the environment everywhere else in Aste
 
 ## The destructive-action gate still applies
 
-A container loosens the [trust model](./concepts.md#trust-levels) not one bit. A
-destructive action still pauses for explicit confirmation, even for an `autonomous`
-agent. With no terminal attached, an HTTP run parks at `awaiting_confirmation` and
+A container loosens the [trust model](./concepts.md#trust-levels) not one bit. The
+[destructive-action gate](./concepts.md#the-destructive-action-gate) reaches exactly
+the verdict it would have reached at the keyboard, for the same agent and the same
+action. With no terminal attached, an HTTP run parks at `awaiting_confirmation` and
 waits until you approve it [out of band over HTTP](./http.md); a chat run
 asks for a `/confirm` reply. Running in a container does not mean unattended approval.
 

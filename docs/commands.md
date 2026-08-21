@@ -738,9 +738,9 @@ level, framed by **its own** memory and skills — and hands back only its final
 The asking agent never sees the other's memory, secrets, files, or how it got there.
 
 Because the work runs as the receiving agent, that agent's protections apply: a
-destructive action stops for your confirmation according to the **receiving** agent's
-autonomy, no matter how much autonomy the asking agent has. A handoff can never be a
-way around another agent's limits. If it pauses, confirm it on the receiving agent:
+destructive action answers to the **receiving** agent's own gate, and to nothing the
+asking agent holds — no matter how much autonomy the asking agent was given. A handoff
+can never be a way around another agent's limits. If it pauses, confirm it on the receiving agent:
 
 ```
 asterism confirm <to> <run>
@@ -1219,9 +1219,10 @@ is never a way to see another agent's.
 
 A trace exists only for an agent you opt in with
 [`config cognition-provider <agent> lodestar`](#config). It is **observe-only**:
-recording a trace never changes what an agent may do — a destructive action still
-pauses for the same confirmation. By default it records **references only** (which tool
-ran, whether it succeeded, how much it returned) — never the contents of a tool's input
+recording a trace never changes what an agent may do — the destructive-action gate
+reaches the same verdict with a trace running as without one. By default it records
+**references only** (which tool ran, whether it succeeded, how much it returned) —
+never the contents of a tool's input
 or output. You can additionally record the **redacted content** each tool returned with
 [`config cognition-capture <agent> content`](#config); even then, input arguments are
 never kept, common secret shapes (keys, tokens, passwords, private keys) are scrubbed,

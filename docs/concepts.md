@@ -84,8 +84,10 @@ There is one rule that overrides trust at every level:
 > At `notify` and `autonomous` the run stops and asks. A `propose` agent does
 > not take one at all; it hands you the plan instead.
 
-An `autonomous` agent will still stop and ask before doing something
-irreversible. "Destructive" is an explicit, tested classification, not a
+The exception is narrow, and it is always something you granted: one capability,
+one agent, proposed to you for approval and revocable — see
+[Earned autonomy](#earned-autonomy). Everything else stops.
+"Destructive" itself is an explicit, tested classification, not a
 judgment call. It includes, at minimum:
 
 - deleting, overwriting, renaming, or moving your files;
@@ -301,8 +303,9 @@ it on for one agent with [`config cognition-provider <agent> lodestar`](./comman
 and it pairs with [Lodestar](https://github.com/qmilab/lodestar).
 
 Two properties keep it honest. It is **observe-only** — recording a trace never changes
-what an agent may do; a destructive action still pauses for the same confirmation. And
-it is kept in the install's own storage, **outside the agent's workspace**, so the agent
+what an agent may do; the destructive-action gate reaches the same verdict with a trace
+running as without one. And it is kept in the install's own storage, **outside the
+agent's workspace**, so the agent
 cannot reach or tamper with its own record. By default the trace records *references
 only* — which tool ran, whether it succeeded, how much it returned — never the contents
 of a tool's input or output. You can additionally record the **redacted content** each
