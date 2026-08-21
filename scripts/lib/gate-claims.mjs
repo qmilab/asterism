@@ -57,21 +57,68 @@ export function plainClaim(text) {
 }
 
 /**
- * Split into claims.
+ * The blocks a reader takes in as separate statements: a paragraph, a table row, a list
+ * item, a heading.
  *
- * A colon is NOT a boundary. `And the gate holds at every level: notify and autonomous
- * stop and ask` is one claim wearing a colon, and splitting on it put the quantifier in one
- * fragment and the promise in the other, so neither fragment matched and a live defect in
- * `docs/getting-started.md` read as clean. Em dashes and semicolons are internal for the
- * same reason. Only `.`, `!`, `?` and a blank line end a claim.
+ * This is a CLAIM boundary as much as a scope for qualifiers. `README.md`'s feature table
+ * puts a whole feature on one line, and a sentence splitter alone ran the gate row together
+ * with the row above it — so the claim's offset landed in the previous row and the block
+ * scoping below judged it against the wrong text. A row is not a continuation of the row
+ * before it.
+ */
+function blocks(text) {
+  const lines = text.split("\n");
+  const starts = [];
+  let at = 0;
+  for (const line of lines) {
+    starts.push(at);
+    at += line.length + 1;
+  }
+  // A row, a bullet, a numbered item or a heading BEGINS a block. Its wrapped continuation
+  // lines do not, so a table cell or list item that spans lines stays whole.
+  const opens = (line) => /^\s*(?:\||[-*+]\s|\d+[.)]\s|#{1,6}\s)/.test(line);
+  const out = [];
+  let first = null;
+  const close = (i) => {
+    if (first !== null) out.push([starts[first], starts[i] + lines[i].length]);
+    first = null;
+  };
+  lines.forEach((line, i) => {
+    if (/^\s*$/.test(line)) {
+      if (i > 0) close(i - 1);
+      first = null;
+      return;
+    }
+    if (opens(line)) {
+      if (i > 0) close(i - 1);
+      first = i;
+      return;
+    }
+    if (first === null) first = i;
+  });
+  if (first !== null) close(lines.length - 1);
+  return out;
+}
+
+/**
+ * Split into claims, block by block.
+ *
+ * A colon is NOT a sentence boundary. `And the gate holds at every level: notify and
+ * autonomous stop and ask` is one claim wearing a colon, and splitting on it put the
+ * quantifier in one fragment and the promise in the other, so neither matched and a live
+ * defect in `docs/getting-started.md` read as clean. Em dashes and semicolons are internal
+ * for the same reason. Only `.`, `!`, `?` — and the end of a block — end a claim.
  */
 function claims(text) {
   const out = [];
-  let at = 0;
-  for (const piece of text.split(/(?<=[.!?])\s+|\n\n+/)) {
-    const idx = text.indexOf(piece, at);
-    if (idx >= 0) at = idx + piece.length;
-    out.push({ text: piece, offset: idx < 0 ? at : idx });
+  for (const [from, to] of blocks(text)) {
+    const slice = text.slice(from, to);
+    let at = 0;
+    for (const piece of slice.split(/(?<=[.!?])\s+/)) {
+      const idx = slice.indexOf(piece, at);
+      if (idx >= 0) at = idx + piece.length;
+      out.push({ text: piece, offset: from + (idx < 0 ? at : idx), block: [from, to] });
+    }
   }
   return out;
 }
@@ -198,6 +245,14 @@ const PROPOSE_QUALIFIED = /\bpropose\b[^.]{0,120}(never|not|no)\b|(never|not|no)
  * sentence: the binary's own `AUTONOMY_HELP` — the site this repo holds up as the model —
  * puts the guarantee and its `unless` in two consecutive sentences, and a gate that failed
  * the model site would be measuring its own preference, not the truth.
+ *
+ * Distance is only half of it. A qualifier qualifies a claim when a reader takes the two as
+ * ONE statement, and no character count expresses that: `README.md`'s feature table put "a
+ * hard stop for your confirmation … `autonomous` included" in one row and "an agent can
+ * earn the right to take one capability without pausing" in the NEXT, forty characters
+ * away — so a bare guarantee was excused by a different row about a different feature. The
+ * walkthrough's numbered claims did the same across items 3 and 4. Both read as green. So
+ * the window is also clipped to the claim's own {@link blocks} block.
  */
 export const NEARBY = 150;
 
@@ -210,13 +265,18 @@ export const NEARBY = 150;
 export function gateOverclaims(text) {
   const masked = maskEvidenceBlocks(text);
   const found = [];
-  for (const { text: piece, offset } of claims(masked)) {
+  for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
     const claim = plainClaim(piece);
     if (!claim) continue;
     if (!UNIVERSAL.some((re) => re.test(claim))) continue;
     if (!PAUSE.test(claim)) continue;
 
-    const window = plainClaim(masked.slice(Math.max(0, offset - NEARBY), offset + piece.length + NEARBY));
+    const window = plainClaim(
+      masked.slice(
+        Math.max(blockFrom, offset - NEARBY),
+        Math.min(blockTo, offset + piece.length + NEARBY),
+      ),
+    );
     if (!DESTRUCTIVE.test(window)) continue;
     const line = masked.slice(0, offset).split("\n").length;
     const sentence = claim.length > 240 ? `${claim.slice(0, 237)}...` : claim;

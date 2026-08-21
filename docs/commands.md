@@ -158,7 +158,8 @@ Set writer to autonomous.
 Records an `agent.trust_changed` event. Remember: `notify` and `autonomous` both act
 without asking first. Only the
 [destructive-action gate](./concepts.md#the-destructive-action-gate) still pauses
-them — and `propose` withholds the action rather than asking about it.
+them — unless the agent has [earned](#earned-autonomy-per-capability-grants) standing
+on that capability — and `propose` withholds the action rather than asking about it.
 
 ### Earned autonomy — per-capability grants
 
@@ -1820,8 +1821,8 @@ Installed service "writer (telegram)".
 ```
 
 The **destructive-action gate still fires** in a service exactly as it does at the
-keyboard: an HTTP run parks at `awaiting_confirmation` until you approve it out of
-band, and a chat run asks for a `/confirm` reply. A background service never
+keyboard: a run it stops parks at `awaiting_confirmation` until you approve it out
+of band, and a chat run asks for a `/confirm` reply. A background service never
 loosens that gate. See the [run-as-a-service guide](./service.md) for the full
 setup, the boot-start note, and how a service finds the right install.
 

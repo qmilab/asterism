@@ -14,6 +14,8 @@ The destructive-action gate has an exception, and most of the places that promis
 
 - **The places that merely mention the gate now say what they actually mean.** The container, service, `serve`, `channel`, `service install` and cognition-trace passages were each making a point about *their own surface* — that running in a container, or as a background service, or with a trace recording, does not loosen anything — and they made it by restating the gate, which put half the rule in a dozen more places to keep in step. They now say the thing they were always for: the gate reaches the verdict it would have reached at the keyboard, whatever that verdict is.
 
+  Their unattended-run sentences went with them. Each said an HTTP run *parks at `awaiting_confirmation`* when nobody is watching — but if the capability is one you allowed, the run does not park at all, it just goes. They now say that a run **the gate stops** parks, which is the case they were describing.
+
   The same for handing work to another agent. `handoff` and `artifact` said a destructive action pauses according to the receiving agent's autonomy; what they are promising is that the receiving agent's own gate decides and the asking agent's autonomy buys nothing, which is true whether that gate stops the run or not.
 
 - **The threat model's headline sentence now holds at all three levels.** It said a destructive action *"pauses for explicit confirmation regardless of the agent's autonomy level"*, and carried the allow-list exception — but a `propose` agent is not asked either: the action is withheld and you get a plan. It now says such an action never *runs* without your explicit confirmation, which is true at every level, and names what `notify`, `autonomous` and `propose` each do.

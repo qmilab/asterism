@@ -2266,6 +2266,49 @@ function report(total, tally, groups, coverageWork) {
       ["makes the same universal promise about something that is not the gate",
         "Every request needs an access token, at every level, and the server always asks for your confirmation of the fingerprint.",
         []],
+      // Codex R2, pinned. A qualifier in a NEIGHBOURING block is not a qualifier: each of
+      // these is a real pair this repo shipped, where the bare guarantee sat in one table
+      // row or list item and the thing excusing it sat in the next.
+      ["is a table row whose exception is in the row BELOW it",
+        "| **Dialable trust + a destructive-action gate** | `propose` / `notify` / `autonomous` — with a hard stop for your confirmation before anything irreversible, `autonomous` included. |\n" +
+          "| **Earned trust contracts** | An agent can *earn* the right to take one capability without pausing. |\n",
+        ["no-exception"]],
+      ["is a numbered claim whose `propose` half is in the claim ABOVE it",
+        "3. A `propose` agent **returns a plan it never runs**; an `autonomous` agent\n   **acts**.\n" +
+          "4. Even an `autonomous` agent **pauses for confirmation before a destructive\n   action** — the gate is independent of trust level, and only a capability you\n   have allowed that agent skips it.\n",
+        ["every-level"]],
+      ["is separated from its exception by a `###` heading",
+        "Only the destructive-action gate still pauses them.\n\n### Earned autonomy\n\nThe gate pauses every destructive action by default.\n",
+        ["no-exception"]],
+      // …and with NO blank line around the heading, which is the only case where the
+      // heading rule does the work rather than the blank-line rule. An ATX heading may
+      // interrupt a paragraph, so a reader sees a new section either way.
+      ["is separated from its exception by a heading with no blank line",
+        "Only the destructive-action gate still pauses them.\n### Earned autonomy\nThe gate pauses every destructive action by default.\n",
+        ["no-exception"]],
+      // The window is still a WINDOW inside a long block. Nothing else varies `NEARBY` now
+      // that the block clips it — every other row's block is shorter than 150 characters,
+      // so the distance could be set to the whole file and no fixture would notice.
+      ["is one long paragraph with its exception far past the window",
+        "Even an `autonomous` agent pauses before a **destructive** action. " +
+          `${"It runs in its own workspace and keeps a reviewable record of what it did. ".repeat(4)}` +
+          "That is unless you have allowed that capability for it.",
+        ["no-exception"]],
+      // …and the control that keeps block scoping from becoming same-sentence scoping. This
+      // is `AUTONOMY_HELP` verbatim: one paragraph, guarantee and `unless` in consecutive
+      // sentences. A rule that failed the site this repo holds up as the model would be
+      // measuring its own preference.
+      ["is one paragraph carrying the guarantee and its `unless` in consecutive sentences",
+        "  A destructive action — deleting files, force-pushing, reading out a secret,\n" +
+          "  spending, sending — never happens without you. At 'notify' and 'autonomous'\n" +
+          "  the run stops and asks first, unless you have allowed that capability for it.\n" +
+          "  A 'propose' agent does not take one at all; it hands you the plan instead.",
+        []],
+      // A wrapped table cell or list item is still ONE block; a splitter that treated every
+      // line as a block would cut a claim in half and report neither side.
+      ["wraps one list item across lines, with its exception on the second",
+        "- Even an `autonomous` agent pauses before a **destructive** action,\n  unless you have allowed that capability for it.\n",
+        []],
       // Codex's finding, pinned. A level-wide pause claim that DOES carry the allow-list
       // exception was silently exempt from the `propose` half, because only one of the five
       // level-wide spellings was tested for it. `docs/threat-model.md`'s own headline
