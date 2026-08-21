@@ -2235,7 +2235,7 @@ function report(total, tally, groups, coverageWork) {
         ["no-exception"]],
       ["states claim 4 bare (walkthrough, before #177)",
         "Even an `autonomous` agent **pauses for confirmation before a destructive\naction** — the gate is independent of trust level.",
-        ["no-exception"]],
+        ["every-level", "no-exception"]],
       ["promises a pause at every level with no allow-list and no `propose`",
         "The gate holds at every level: a destructive action always pauses for your confirmation.",
         ["every-level", "no-exception"]],
@@ -2243,7 +2243,7 @@ function report(total, tally, groups, coverageWork) {
       // sees, and the first version of this sweep could not see them at all.
       ["hides the quantifier behind emphasis",
         "The gate pauses *every* **destructive** action, whatever the agent's trust level.",
-        ["no-exception"]],
+        ["every-level", "no-exception"]],
       ["hides it behind HTML, as the landing page must",
         "<p>before anything <strong>destructive</strong>, even an <code>autonomous</code> agent pauses for your confirmation.</p>",
         ["no-exception"]],
@@ -2265,6 +2265,20 @@ function report(total, tally, groups, coverageWork) {
         ["no-exception"]],
       ["makes the same universal promise about something that is not the gate",
         "Every request needs an access token, at every level, and the server always asks for your confirmation of the fingerprint.",
+        []],
+      // Codex's finding, pinned. A level-wide pause claim that DOES carry the allow-list
+      // exception was silently exempt from the `propose` half, because only one of the five
+      // level-wide spellings was tested for it. `docs/threat-model.md`'s own headline
+      // sentence was exactly this, and it is one of the four surfaces the issue held up as
+      // correct — half-right, and the half it was missing had no test.
+      ["is level-wide and carries the exception, but never says what `propose` does",
+        "A destructive action pauses for explicit confirmation regardless of the agent's autonomy level, unless that capability has been allow-listed for that agent.",
+        ["every-level"]],
+      // The SAME quantifier over the weaker promise is true at every level, because at
+      // `propose` the action does not happen — it is withheld. Only the verb separates them,
+      // and this row is what stops the fix above from reporting the rule box.
+      ["is level-wide over `never happens without you`, which is true at `propose` too",
+        "A **destructive** action never happens without you — *whatever the agent's trust level* — unless you have specifically allowed that capability for it.",
         []],
       // The quantifiers below are each the sole one in their row too, and each is a sentence
       // this repo actually shipped until #177 removed it — a regression suite of the shapes
@@ -2302,24 +2316,24 @@ function report(total, tally, groups, coverageWork) {
       // no result — the rule read as covered while three of its branches were untested.
       ["quantifies with `whatever the agent's trust level` alone",
         "A destructive action stops and asks you first, whatever the agent's trust level.",
-        ["no-exception"]],
+        ["every-level", "no-exception"]],
       ["quantifies with `regardless of autonomy` alone",
         "An action classified destructive pauses for explicit confirmation regardless of the agent's autonomy level.",
-        ["no-exception"]],
+        ["every-level", "no-exception"]],
       ["quantifies with `independent of trust level` alone",
         "A deletion pauses for your confirmation; the gate is independent of trust level.",
-        ["no-exception"]],
+        ["every-level", "no-exception"]],
       // …and each spelling of the EXCEPTION, likewise isolated. The rule box says `unless
       // you have specifically allowed`, which satisfies two branches at once; on its own
       // each of these is the only thing standing between a real sentence and a false red.
       ["carries the exception as `allow-listed`, with no `unless`",
-        "A destructive action pauses regardless of the agent's autonomy level; a capability allow-listed for that agent is the one thing that skips it.",
+        "A destructive action pauses regardless of the agent's autonomy level — a `propose` agent does not take one at all — and a capability allow-listed for that agent is the one thing that skips it.",
         []],
       ["carries it as `specifically allowed`, with no `unless`",
-        "A destructive action pauses regardless of the agent's autonomy level; a capability you specifically allowed skips it.",
+        "A destructive action pauses regardless of the agent's autonomy level — a `propose` agent does not take one at all — and a capability you specifically allowed skips it.",
         []],
       ["carries it as `unless ... granted`",
-        "A destructive action pauses regardless of the agent's autonomy level, unless you granted that capability to the agent.",
+        "A destructive action pauses regardless of the agent's autonomy level — a `propose` agent does not take one at all — unless you granted that capability to the agent.",
         []],
       // `never happens without you` is the binary's front-door phrasing and the npm page's.
       // Every fixture using it was a PASSING one, so dropping that quantifier changed no
@@ -2358,7 +2372,7 @@ function report(total, tally, groups, coverageWork) {
       // The landing page states the exception by its CONTRAPOSITIVE. A pattern demanding
       // the positive spelling called the site's front page broken.
       ["states the exception as `a capability you have not allowed it`",
-        "before anything destructive, whatever the agent's trust level, nothing happens without you: notify and autonomous stop and ask, and neither acts unasked on a capability you have not allowed it.",
+        "before anything <strong>destructive</strong>, <em>whatever</em> the agent's trust level, nothing happens without you: <code>notify</code> and <code>autonomous</code> stop and ask, <code>propose</code> does not take the action at all, and neither acts unasked on a capability you have not allowed it.",
         []],
       ["says the pause is the default and names what buys it out",
         "The gate pauses *every* destructive action by default — but an agent can **earn** the standing to take one specific capability without that pause.",

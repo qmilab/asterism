@@ -158,7 +158,7 @@ Set writer to autonomous.
 Records an `agent.trust_changed` event. Remember: `notify` and `autonomous` both act
 without asking first. Only the
 [destructive-action gate](./concepts.md#the-destructive-action-gate) still pauses
-them — that gate is independent of trust level.
+them — and `propose` withholds the action rather than asking about it.
 
 ### Earned autonomy — per-capability grants
 

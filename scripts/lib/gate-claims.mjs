@@ -112,23 +112,25 @@ export function maskEvidenceBlocks(text) {
  * as a promise rather than as an example.
  */
 /**
- * The quantifier that attaches to the LEVEL — the one shape that is false in BOTH
- * directions, so it is named once and used twice: as a quantifier below, and as the test
- * for the `every-level` rule. Two spellings of one pattern is how a fix lands on one of
- * them and not the other.
+ * Every way this repo quantifies over the three LEVELS. Named once and used twice — as a
+ * quantifier below, and as half the test for the `every-level` rule — because two
+ * spellings of one pattern is how a fix lands on one of them and not the other.
  *
- * Matches `at every level`, `at every trust level`, `for all autonomy levels` — the
- * optional word is what a version allowing only `trust` missed, and it was false in
- * exactly the same way.
+ * The first version listed only `at every … level(s)`, and the other four spellings were
+ * quantifiers but not level-wide tests. So `pauses … regardless of the agent's autonomy
+ * level` — the threat model's own headline sentence — was never checked for the `propose`
+ * half at all, while the identical claim spelled `at every trust level` was. Equivalent
+ * sentences have to be judged equivalently or the rule is a rule about phrasing.
+ *
+ * `(\s+\w+)?` is what lets `at every TRUST level` and `for all AUTONOMY levels` match; a
+ * version allowing only the word `trust` missed the other, and it was false the same way.
  */
-const EVERY_LEVEL = /\b(at|for) (every|any|all)(\s+\w+)? levels?\b|\bgate holds\b/i;
+const LEVEL_WIDE =
+  /\b(at|for) (every|any|all)(\s+\w+)? levels?\b|\bgate holds\b|whatever (the agent'?s?|its) (trust|autonomy) level|regardless of (the agent'?s? |its )?(trust|autonomy)|independent of (the )?(trust|autonomy)/i;
 
 const UNIVERSAL = [
   /\beven (an?|the) (autonomous|notify)\b/i,
-  /whatever (the agent'?s?|its) (trust|autonomy) level/i,
-  /regardless of (the agent'?s? |its )?(trust|autonomy)/i,
-  EVERY_LEVEL,
-  /independent of (the )?(trust|autonomy)/i,
+  LEVEL_WIDE,
   /\bautonomous included\b/i,
   /never happens without you/i,
   /\balways (pauses|stops|asks)\b/i,
@@ -137,9 +139,24 @@ const UNIVERSAL = [
   /\bno matter (how|what|which)\b/i,
 ];
 
-/** The promise itself — that the run stops and puts the decision to a human. */
-const PAUSE =
-  /\bpauses?\b|\bpaused\b|stops? (dead )?(and asks?|to ask|before)|asks? (you )?first|your confirmation|explicit confirmation|needs? confirmation|never happens without you|stop and ask/i;
+/**
+ * The run STOPS and puts the decision to a human — the promise that is false at `propose`,
+ * where the action is withheld and nothing is ever asked.
+ *
+ * Kept apart from {@link PAUSE} because the difference decides the `every-level` rule. "A
+ * destructive action never happens without you, whatever the agent's trust level" is TRUE
+ * at `propose` — it does not happen. "A destructive action pauses for confirmation,
+ * whatever the agent's trust level" is FALSE there. Same quantifier, opposite verdicts, and
+ * only the verb tells them apart.
+ */
+const PAUSE_VERB =
+  /\bpauses?\b|\bpaused\b|stops? (dead )?(and asks?|to ask)|stop and ask|asks? (you )?first|your confirmation|explicit confirmation|needs? confirmation/i;
+
+/**
+ * …or the weaker promise that it does not happen behind your back, which IS true at every
+ * level. Derived from {@link PAUSE_VERB} rather than repeated, so widening one widens both.
+ */
+const PAUSE = new RegExp(`${PAUSE_VERB.source}|never happens without you|stops? before`, "i");
 
 /**
  * The claim is about the destructive gate, not about some other pause.
@@ -204,9 +221,10 @@ export function gateOverclaims(text) {
     const line = masked.slice(0, offset).split("\n").length;
     const sentence = claim.length > 240 ? `${claim.slice(0, 237)}...` : claim;
 
-    // A pause asserted at EVERY level has to say what `propose` does instead, because at
-    // `propose` there is no pause to wait for.
-    if (EVERY_LEVEL.test(claim) && !PROPOSE_QUALIFIED.test(window)) {
+    // A pause asserted across the LEVELS has to say what `propose` does instead, because
+    // at `propose` there is no pause to wait for. It is the pause VERB that makes the
+    // claim false there — the same quantifier over "never happens without you" is true.
+    if (LEVEL_WIDE.test(claim) && PAUSE_VERB.test(claim) && !PROPOSE_QUALIFIED.test(window)) {
       found.push({ line, rule: "every-level", sentence });
     }
     if (!EXCEPTION.test(window)) {
