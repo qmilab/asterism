@@ -2,7 +2,7 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## 0.9.1
+## 0.9.1 — 2026-08-21
 
 Two ways Asterism could act on something you had not said. A question it needed answered was written to standard output while only standard input decided whether to ask, so redirecting a run's output put the destructive-action confirmation in the file and left you at a blank screen waiting on a question you could not see. And a value that was empty — a cleared environment variable, an option given `""` — was read as a value you had chosen, which is how one install came to report a configured model to `config show` and none to `run`, and how `--host ""` came to bind every interface. Alongside them, the page npm shows for `@qmilab/asterism` now describes the product you would be installing.
 
