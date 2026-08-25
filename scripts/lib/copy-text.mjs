@@ -10,12 +10,14 @@
 // for one idea kept in two spellings: #139's `every-level` guard and #177's shared rule drew
 // apart until the older one was blind to three shapes the newer one caught, and #176 restated
 // half of a claim the other half's fix had corrected. A rule that knows about `<style>` and a
-// rule beside it that does not is the same setup. Codex found it in the vocabulary rule; the
-// gate rule had it too, and neither had a live instance — which is exactly when it is cheap
-// to fix.
+// rule beside it that does not is the same setup.
 //
-// Everything here is LENGTH- and NEWLINE-preserving, because both callers report a line
-// number computed from an offset into the masked text.
+// Every function here answers one question — *would a reader meet these characters?* — and
+// the answer depends on the RENDERER, which is why `maskHiddenMarkup` takes the page's kind.
+// The same three characters are a block boundary in one and invisible in the other.
+//
+// Both callers report a line number computed from an offset into the masked text, so nothing
+// here may change how many NEWLINES the text has.
 
 /**
  * Blank a span to spaces, keeping its LENGTH and — the part that is easy to miss — its
@@ -32,72 +34,77 @@ export function blank(text) {
 }
 
 /**
- * The character a hidden line is left holding, so that removing its words does not turn it
- * into a BLANK line.
+ * The character a hidden line is left holding on an HTML page, so that removing its words
+ * does not turn it into a BLANK line.
  *
- * Blanking to spaces alone was not enough, and the failure it caused is the one this file
- * cares most about — a red over correct copy. The gate rule reads a paragraph as one block
- * and a blank line as the end of it, so an HTML comment sitting between a guarantee and its
- * `unless` clause inside one `<p>` closed the claim early and reported the qualified
+ * Blanking to spaces alone was not enough there, and the failure it caused is the one this
+ * file cares most about — a red over correct copy. The gate rule reads a paragraph as one
+ * block and a blank line as the end of it, so an HTML comment sitting between a guarantee and
+ * its `unless` clause inside one `<p>` closed the claim early and reported the qualified
  * sentence as unqualified. The browser shows one paragraph; the checker saw two.
- * [Codex review R2 P2.]
  *
  * Anything non-blank would do; this one cannot be typed by accident, opens no list, table
  * row or heading, and ends no sentence. Both rules strip it before they match or print, so
  * it is invisible in a report.
- *
- * ⚠ A line that was ALREADY empty stays empty, so a hidden region containing a blank line
- * still ends a block. That is a TRADE, taken deliberately and with a count. In HTML the
- * browser renders one paragraph, so this is a false red waiting to happen; in MARKDOWN a
- * blank line really does end the block, and filling it would join two separate paragraphs
- * into one — a false GREEN, on 23 of the 24 pages in the corpus, to remove a false red on the
- * 1 that is HTML. Neither shape occurs in this repo's copy today; a fixture pins the
- * behaviour so the trade can be re-argued against a real instance rather than re-derived.
- * [Codex review R3 P2 — taken as the measurement, not as the change.]
- *
- * ⚠ This is for markup a reader never MEETS. `gate-claims.mjs` also blanks `> **Evidence**`
- * citations, to spaces, and that difference is deliberate rather than an oversight: a
- * citation is a rendered blockquote, so it really is a boundary between two things a reader
- * takes in separately, and a sentence on the far side of one does not qualify a claim on
- * this side. Measured — a claim, a citation, then an `unless` still reports, and should.
- * Filling those lines instead would buy a false green.
  */
 export const HIDDEN_FILLER = "\u0000";
 
 /**
- * The spans of a markdown page that are CODE — fenced blocks and inline spans.
+ * Blank a span for an HTML page: every line it touches ends up non-blank, EMPTY lines
+ * included.
+ *
+ * An empty line inside a comment is still inside the comment, so a browser still renders one
+ * paragraph. Filling it makes the text one character longer, which is fine — the invariant
+ * these rules need is the NEWLINE count, not the length, because a line number is a count of
+ * newlines and the line a report quotes is looked up by index.
+ */
+function blankHiddenHtml(span) {
+  return span
+    .split("\n")
+    .map((line) => HIDDEN_FILLER + " ".repeat(Math.max(0, line.length - 1)))
+    .join("\n");
+}
+
+/**
+ * The spans of a page that are CODE — a fenced block, or an inline span.
  *
  * A page showing an HTML example puts real, visible characters on the screen. `<!-- … -->`
  * inside a fence is not markup the browser hides; it is a picture of markup, and a reader
  * meets every character of it. The word rule already treats a fence as copy — `kernel` in a
- * code span fires — so the hidden-markup masking has to agree with it, or one rule reads a
- * fence and the other erases it. [Codex review R3 P2.]
+ * code span fires — so the masking has to agree with it, or one rule reads a fence and the
+ * other erases it.
  *
  * Fenced blocks first, so a backtick inside one cannot start an inline span.
+ *
+ * ⚠ Markdown's OTHER code block — four spaces of indent — is deliberately not here, and the
+ * reason is a measurement rather than an oversight. This repo has **zero** of them and
+ * **three** mkdocs admonitions (`!!! note`), whose bodies are indented by exactly four
+ * spaces and are prose. Adding the rule would classify three passages a reader meets as
+ * styled notes as "code", to protect none that exist. [Codex review R4 P2, taken as the
+ * measurement and not as the change.]
  */
-function codeRanges(text) {
+export function codeRanges(text) {
   const ranges = [];
   for (const m of text.matchAll(/^[ \t]*(`{3,}|~{3,})[\s\S]*?^[ \t]*\1[ \t]*$/gm)) {
     ranges.push([m.index, m.index + m[0].length]);
   }
   for (const m of text.matchAll(/`+[^`\n]*`+/g)) {
-    if (!ranges.some(([a, b]) => m.index < b && m.index + m[0].length > a)) {
-      ranges.push([m.index, m.index + m[0].length]);
-    }
+    if (!inRanges(m.index, ranges)) ranges.push([m.index, m.index + m[0].length]);
   }
   return ranges;
 }
 
-/** Blank a span, leaving each line that HAD content non-blank. See {@link HIDDEN_FILLER}. */
-function blankHidden(span) {
-  return span
-    .split("\n")
-    .map((line) => (line.length === 0 ? line : HIDDEN_FILLER + " ".repeat(line.length - 1)))
-    .join("\n");
+/** Is this offset inside one of the ranges? */
+function inRanges(at, ranges) {
+  return ranges.some(([a, b]) => at >= a && at < b);
 }
 
+/** Every region of a page a reader never meets: an HTML comment, a `<style>`, a `<script>`. */
+const HIDDEN_REGION =
+  /<!--[\s\S]*?-->|<style\b[^>]*>[\s\S]*?<\/style>|<script\b[^>]*>[\s\S]*?<\/script>/gi;
+
 /**
- * Blank the regions of a page a reader never meets: HTML comments, `<style>`, `<script>`.
+ * Blank the regions a reader never meets.
  *
  * A rule about what the copy says must not fire on a CSS class called `.registry-grid`, on a
  * design-token comment, or on the note at the top of `landing/index.html` explaining which
@@ -105,36 +112,33 @@ function blankHidden(span) {
  * prose gate reaching into a stylesheet is the "wrong instrument certifies the damage"
  * failure this repo has already paid for once, on four correct links.
  *
- * Comments first: a `<style>` block can be commented out, and blanking the comment takes the
- * whole thing with it either way. An unterminated `<!--` matches nothing and is left alone,
- * which errs toward reporting rather than toward hiding.
+ * `html` decides whether a hidden region is also a BLOCK BOUNDARY, and the two renderers
+ * genuinely disagree:
+ *
+ *   - **HTML.** A comment is invisible; the paragraph around it is one paragraph. Its lines
+ *     must not go blank, or a claim is cut off from the clause that qualifies it.
+ *   - **Markdown.** `<!--` at the start of a line opens an HTML *block*, which interrupts the
+ *     paragraph — so there the blank line is CORRECT, and filling it would let a promise in
+ *     one paragraph be excused by an `unless` in the next. A comment in the MIDDLE of a line
+ *     is inline, and blanking it leaves the surrounding prose on the line, so that case comes
+ *     out right with no special handling.
+ *
+ * Getting this from the caller rather than guessing is the same discipline the anchor rule
+ * keeps: which renderer serves the page decides how the page is read. [Codex review R4 P2.]
+ *
+ * One pass over one regex, so every offset here is an offset into the text as given —
+ * chaining three replacements only works while each preserves length, and the HTML branch
+ * does not.
  */
-export function maskHiddenMarkup(text) {
-  // Every replacement below preserves LENGTH, so the ranges stay valid across all three.
+export function maskHiddenMarkup(text, { html = false } = {}) {
   const code = codeRanges(text);
-  const hide = (m, at) =>
-    code.some(([a, b]) => at < b && at + m.length > a) ? m : blankHidden(m);
-  return text
-    .replace(/<!--[\s\S]*?-->/g, hide)
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, hide)
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, hide);
-}
-
-/**
- * A multi-word phrase that may WRAP, but only once.
- *
- * Prose here is hard-wrapped, so a phrase that sits on one line today is split across two
- * after the next rewrap — a matcher that could not read across the break would fire on the
- * orphaned half of a page that is correct. But `\s+` reads across far too much: it spans a
- * BLANK line, so `## Container` followed by a paragraph opening `Registry controls the tool
- * list` matched as one phrase and masked a real claim out of existence.
- * [Codex review R2 P2.]
- *
- * One hard wrap is the whole allowance: horizontal space, at most one newline, horizontal
- * space. Two newlines are a new block, and a new block is a new statement.
- */
-export function wrappablePhrase(...words) {
-  return new RegExp(`\\b${words.join("[^\\S\\n]*\\n?[^\\S\\n]*")}\\b`, "gi");
+  return text.replace(HIDDEN_REGION, (region, at) =>
+    // Only the OPENER's position counts. A `<script>` whose body contains a backtick — a
+    // template literal, say — makes `codeRanges` see an inline span INSIDE the script, and an
+    // overlap test would then preserve the whole script and report words no reader sees.
+    // [Codex review R4 P2.]
+    inRanges(at, code) ? region : html ? blankHiddenHtml(region) : blank(region),
+  );
 }
 
 /**
@@ -145,23 +149,65 @@ export function wrappablePhrase(...words) {
  * Google and every social preview show. Golden rule 7 covers "any user-facing string", and
  * these are strings a person meets without ever viewing source — `landing/index.html`
  * carries sixteen of them, including its Open Graph description, which is marketing copy and
- * exactly the kind that drifts. Blanking the whole tag hid all of it. [Codex review R3 P2.]
+ * exactly the kind that drifts. Blanking the whole tag hid all of it.
+ *
+ * The name must BEGIN at an attribute boundary. `\b` alone matches the tail of
+ * `data-title="…"`, which is implementation state a reader never meets, and restoring that
+ * as copy is a red over a page that is correct. [Codex review R4 P2.]
  *
  * The rest of the tag goes: an element name, a class, an href are not sentences.
  */
-const VISIBLE_ATTRIBUTE = /\b(?:alt|title|aria-label|content)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+const VISIBLE_ATTRIBUTE =
+  /(?<![-\w])(?:alt|title|aria-label|content)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 
-/** Blank every tag, keeping the values in {@link VISIBLE_ATTRIBUTE}. Length-preserving. */
-export function blankTags(text) {
-  return text.replace(/<\/?[a-z][^>]*>/gi, (tag) => {
+/**
+ * A tag, read the way a parser reads one: a `>` inside a quoted attribute does not end it.
+ *
+ * `<a title="x > y" class="kernel-box">` stopped at the `>` in the title, leaving
+ * ` class="kernel-box">` behind as prose — internal vocabulary reported on a page where no
+ * reader meets it. [Codex review R4 P2.]
+ */
+const TAG = /<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+
+/**
+ * Blank every tag, keeping the values in {@link VISIBLE_ATTRIBUTE}. Length-preserving.
+ *
+ * A tag inside a code example is left alone entirely: `<div class="kernel-box">` shown in a
+ * fence is a picture of a tag, and every character of it is on the screen — including the
+ * attribute a reader would never meet in a rendered page. [Codex review R4 P2.]
+ */
+export function blankTags(text, code = codeRanges(text)) {
+  return text.replace(TAG, (tag, at) => {
+    if (inRanges(at, code)) return tag;
     let out = blank(tag);
     for (const m of tag.matchAll(VISIBLE_ATTRIBUTE)) {
       const value = m[1] ?? m[2] ?? "";
       // The value's offset inside the tag: the whole match, less the closing quote and the
-      // value itself.
-      const at = m.index + m[0].length - value.length - 1;
-      out = out.slice(0, at) + value + out.slice(at + value.length);
+      // value itself. Using the attribute NAME's offset instead is five characters out, and
+      // nothing notices until a tag wraps and the value lands on the next line.
+      const valueAt = m.index + m[0].length - value.length - 1;
+      out = out.slice(0, valueAt) + value + out.slice(valueAt + value.length);
     }
     return out;
   });
+}
+
+/**
+ * A multi-word phrase that may WRAP, but only once.
+ *
+ * Prose here is hard-wrapped, so a phrase that sits on one line today is split across two
+ * after the next rewrap — a matcher that could not read across the break would fire on the
+ * orphaned half of a page that is correct. But `\s+` reads across far too much: it spans a
+ * BLANK line, so `## Container` followed by a paragraph opening `Registry controls the tool
+ * list` matched as one phrase and masked a real claim out of existence.
+ *
+ * One hard wrap is the whole allowance: horizontal space, at most one newline, horizontal
+ * space. Two newlines are a new block, and a new block is a new statement.
+ *
+ * Each word is a regex FRAGMENT, so a sense can cover the same inflections the word list
+ * does — `container registries` is the allowed meaning just as much as `container registry`,
+ * and a sense that knew only the singular reported the plural. [Codex review R4 P2.]
+ */
+export function wrappablePhrase(...words) {
+  return new RegExp(`\\b${words.join("[^\\S\\n]*\\n?[^\\S\\n]*")}\\b`, "gi");
 }

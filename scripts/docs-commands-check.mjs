@@ -2496,6 +2496,13 @@ function report(total, tally, groups, coverageWork) {
       ["quotes a test title inside an Evidence block",
         '> **Evidence** — `bun test packages/core/src/delegation.test.ts`\n> - "a delegated call always pauses — at notify AND at autonomous, and standing cannot buy it out"\n',
         []],
+      // A multi-line comment INSIDE a citation block. Hiding it before the citations are
+      // masked blanks the `>` prefixes of its continuation lines, so the citation reader sees
+      // a line that no longer begins with `>`, ends the block there, and reads the quoted
+      // TEST TITLES below it as public claims. Order decides it. [Codex review R4 P2.]
+      ["puts a multi-line comment inside an Evidence block, above the titles",
+        '> **Evidence** — `bun test x.test.ts`\n> <!-- a note\n> spanning two lines -->\n> - "an autonomous agent always pauses on a destructive action"\n',
+        []],
       ["quotes one in a block whose header this reader cannot parse",
         '> **Evidence** – `bun test x.test.ts`\n> - "an autonomous agent still pauses on a destructive action"\n',
         []],
@@ -2520,29 +2527,32 @@ function report(total, tally, groups, coverageWork) {
       // [Codex review R2 P2.]
       ["puts a multi-line comment between a guarantee and its `unless`, inside one paragraph",
         "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n  a maintainer note about this section\n-->\nUnless you have allowed that capability for it.</p>",
-        []],
+        [], { html: true }],
+      // …EMPTY lines inside that comment included. An empty line is still inside the
+      // comment, so the browser still renders one paragraph — and filling it costs a
+      // character of length, which nothing here needs, where a line number is a count of
+      // newlines. [Codex review R3 P2, resolved in R4 once the page's kind was known.]
+      ["puts one with an EMPTY line in it between a guarantee and its `unless`",
+        "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n\n  a note\n-->\nUnless you have allowed that capability for it.</p>",
+        [], { html: true }],
+      // …and the SAME text read as markdown must fire, because there `<!--` at the start of
+      // a line opens an HTML block and the `unless` is a different paragraph. One renderer's
+      // invisible comment is the other's block boundary. [Codex review R4 P2.]
+      ["puts a comment between the two in MARKDOWN, where it ends the paragraph",
+        "A destructive action never happens without you, at every trust level.\n<!--\n  a note\n-->\nUnless you have allowed that capability for it.",
+        ["no-exception"]],
       // The same attribute values the vocabulary rule reads: a gate promise in an Open Graph
       // description is a promise made to everyone who sees the link previewed.
       ["makes a bare guarantee in the description a social preview shows",
         "<meta property=\"og:description\" content=\"A destructive action never happens without you.\" />",
-        ["no-exception"]],
-      // ⚠ A hidden region whose line was ALREADY EMPTY still ends a block, and that is a
-      // decision rather than an oversight. In HTML the browser renders one paragraph, so this
-      // row is a known false red; in MARKDOWN — 23 of the 24 pages — a blank line really does
-      // end the block, and filling it would join two separate paragraphs and buy a false
-      // green on every one of them. No instance exists in this repo's copy. Pinned so the
-      // trade is falsifiable rather than merely explained. [Codex review R3 P2, taken as the
-      // measurement and not as the change.]
-      ["puts a comment with an EMPTY line between a guarantee and its `unless`",
-        "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n\n  a note\n-->\nUnless you have allowed that capability for it.</p>",
         ["no-exception"]],
       ["makes a bare guarantee in prose right AFTER an Evidence block closes",
         '> **Evidence** — `bun test x.test.ts`\n> - "a real test title"\n\nEven an `autonomous` agent pauses for your confirmation before a destructive action.',
         ["no-exception"]],
     ];
     const gateFailures = [];
-    for (const [why, text, wantRules] of GATE_CASES) {
-      const got = gateOverclaims(text).map((f) => f.rule).sort();
+    for (const [why, text, wantRules, opts] of GATE_CASES) {
+      const got = gateOverclaims(text, opts ?? {}).map((f) => f.rule).sort();
       const want = [...wantRules].sort();
       if (JSON.stringify(got) !== JSON.stringify(want)) {
         gateFailures.push(
@@ -2617,6 +2627,29 @@ function report(total, tally, groups, coverageWork) {
     if (!gateOverclaims("A destructive action pauses for confirmation at every trust level.").some((f) => f.rule === "every-level")) {
       gateFailures.push("  the `pauses at every trust level` sentence #139 fixed in eight places is not caught here");
     }
+    // The page's KIND, as the PASS reads it off a label. Without this the flag could be wired
+    // to a constant — every source markdown, or every source HTML — and every row above would
+    // still pass, because each of them passes its own option directly.
+    //
+    // ⚠ This block first sat in the vocabulary section, after the check that reads
+    // `gateFailures` had already run, so it could not fail. A mutation making every source
+    // markdown survived it. [Codex review R4 P2; the dead placement found by the sweep.]
+    const commentBetween =
+      "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n" +
+      "<!--\n  a note\n-->\nUnless you have allowed that capability for it.</p>";
+    for (const [label, want] of [
+      ["landing/index.html", 0],
+      ["docs/commands.md", 1],
+      ["asterism run --help", 1],
+    ]) {
+      const got = checkGateClaims([[label, commentBetween]]).length;
+      if (got !== want) {
+        gateFailures.push(
+          `  one paragraph with a comment in it reported ${got} time(s) under \`${label}\`, not ${want}`,
+        );
+      }
+    }
+
     if (gateFailures.length) {
       console.log("\nSELF-TEST FAILED: the destructive-action gate rule does not hold:");
       for (const f of gateFailures) console.log(f);
@@ -2802,14 +2835,14 @@ function report(total, tally, groups, coverageWork) {
       // preview show. Blanking the whole tag hid all of it. [Codex review R3 P2.]
       ["hides the word in an image's alt text",
         "<img src=\"assets/img/dashboard.png\" alt=\"The dashboard, where the kernel decides.\">",
-        ["kernel"]],
+        ["kernel"], { html: true }],
       ["hides it in the Open Graph description a social preview shows",
         "<meta property=\"og:description\" content=\"Agents whose boundary the kernel enforces.\" />",
-        ["kernel"]],
+        ["kernel"], { html: true }],
       // …but a class, an id and an href are not sentences, and must stay out.
       ["puts it in a class name and an href, which no reader meets",
         "<a class=\"registry-grid\" id=\"kernel-box\" href=\"/adapter/substrate\">Read on</a>",
-        []],
+        [], { html: true }],
       // A fenced example is a PICTURE of markup: every character is on the screen, and the
       // word rule already treats a fence as copy. [Codex review R3 P2.]
       ["shows hidden markup inside a fenced example, where a reader reads it",
@@ -2818,13 +2851,44 @@ function report(total, tally, groups, coverageWork) {
       ["shows it in an inline code span",
         "Write `<!-- the kernel -->` at the top of the file.",
         ["kernel"]],
+      // A `<script>` whose body holds a backtick — a template literal — used to look like an
+      // inline code span to the fence reader, which then preserved the whole script and
+      // reported words no reader meets. Only the region's OPENER decides.
+      // [Codex review R4 P2.]
+      ["puts a backtick inside a script, which is not a code span",
+        "<script>\n  const label = `the kernel decides`;\n</script>\n<p>Agents run alone.</p>",
+        [], { html: true }],
+      // A tag shown INSIDE a code example is a picture of a tag: every character is on the
+      // screen, the attribute a rendered page would hide included. [Codex review R4 P2.]
+      ["shows a tag with an internal word in its class, inside a fence",
+        "```html\n<div class=\"kernel-box\">Hello</div>\n```",
+        ["kernel"]],
+      ["shows one in an inline code span",
+        "Write `<div class=\"registry-grid\">` at the top.",
+        ["registry"]],
+      // …but a real tag on a real page keeps its class hidden — and a `>` inside a quoted
+      // attribute does not end the tag, which used to leave the class behind as prose.
+      // [Codex review R4 P2.]
+      ["hides a class behind a quoted `>` in a title",
+        "<a title=\"more x > y\" class=\"kernel-box\" id=\"registry\">Read on</a>",
+        [], { html: true }],
+      // `data-title` is implementation state. A word boundary alone matched the tail of it
+      // and restored the value as copy. [Codex review R4 P2.]
+      ["puts internal words in data- attributes nobody meets",
+        "<div data-title=\"kernel\" data-content=\"registry\" data-alt=\"substrate\">ok</div>",
+        [], { html: true }],
+      // The allowed sense has to cover the same inflections the word list does.
+      // [Codex review R4 P2.]
+      ["names container registries in the plural",
+        "The image is mirrored across two container registries.",
+        []],
       ["says nothing about the machine at all",
         "Every agent starts with the standard toolkit, and staying that way is perfectly normal.",
         []],
     ];
     const vocabFailures = [];
-    for (const [why, text, wantWords] of VOCAB_CASES) {
-      const got = vocabularyLeaks(text, { packageNames: NPM_NAMES }).map((f) => f.word).sort();
+    for (const [why, text, wantWords, opts] of VOCAB_CASES) {
+      const got = vocabularyLeaks(text, { packageNames: NPM_NAMES, ...opts }).map((f) => f.word).sort();
       const want = [...wantWords].sort();
       if (JSON.stringify(got) !== JSON.stringify(want)) {
         vocabFailures.push(
@@ -2858,20 +2922,25 @@ function report(total, tally, groups, coverageWork) {
     //     first, so a report that came out in word order rather than reading order fails
     //     here. Findings are collected per word, so without the sort a page's second word is
     //     listed after every occurrence of its first.
+    //   · a multi-line COMMENT above them is masked rather than deleted, so its lines still
+    //     count — deleting it would keep every finding and move both of them up by three.
     const vocabLines = vocabularyLeaks(
       [
-        "The image is published to the GitHub Container", // 1
-        "Registry, multi-arch.",                          // 2
-        "",                                               // 3
-        "The substrate is swappable.",                    // 4
-        "",                                               // 5
-        "The kernel decides.",                            // 6
+        "<!-- a maintainer note",                         // 1
+        "     spanning three lines",                      // 2
+        "     about this page -->",                       // 3
+        "The image is published to the GitHub Container", // 4
+        "Registry, multi-arch.",                          // 5
+        "",                                               // 6
+        "The substrate is swappable.",                    // 7
+        "",                                               // 8
+        "The kernel decides.",                            // 9
       ].join("\n"),
     ).map((f) => `${f.line}:${f.word}`);
-    if (JSON.stringify(vocabLines) !== JSON.stringify(["4:substrate", "6:kernel"])) {
+    if (JSON.stringify(vocabLines) !== JSON.stringify(["7:substrate", "9:kernel"])) {
       vocabFailures.push(
-        `  two words below a wrapped container-registry mention were reported at ${JSON.stringify(vocabLines)},` +
-          ` not ["4:substrate","6:kernel"]`,
+        `  two words below a comment and a wrapped container-registry mention were reported at` +
+          ` ${JSON.stringify(vocabLines)}, not ["7:substrate","9:kernel"]`,
       );
     }
 
@@ -2952,6 +3021,29 @@ function report(total, tally, groups, coverageWork) {
         `  one sentence in three sources — one of them exempt — was reported ${throughThePass.length} time(s):` +
           `\n      ${JSON.stringify(throughThePass)}`,
       );
+    }
+
+    // …and the pass itself hides one, whichever page it is on. The vocabulary rule takes no
+    // page kind: that flag decides whether a hidden region is a block BOUNDARY, and a rule
+    // about single words has no blocks. Threading it here changed no answer any fixture could
+    // vary — a parameter nothing can vary is a claim, not a check — so it was removed.
+    const inHiddenComment = "<p>Agents run alone.</p>\n<!--\n  the kernel decides\n-->";
+    for (const label of ["landing/index.html", "docs/commands.md"]) {
+      const got = checkCopyVocabulary([[label, inHiddenComment]], NPM_NAMES).length;
+      if (got !== 0) {
+        vocabFailures.push(`  a word inside a comment reported ${got} time(s) under \`${label}\``);
+      }
+    }
+    // …and the LINE the pass reports is the line in the file, which is only true while the
+    // comment above it is masked rather than removed. Asserted through the pass, because
+    // everything above calls the rule directly and a pass that mangled its input first would
+    // pass all of it.
+    const belowComment = checkCopyVocabulary(
+      [["docs/commands.md", "<!-- a note\n     over two lines -->\n\nThe kernel decides."]],
+      NPM_NAMES,
+    );
+    if (!belowComment[0]?.startsWith("docs/commands.md:4 [kernel]")) {
+      vocabFailures.push(`  a word below a two-line comment was reported as ${JSON.stringify(belowComment[0])}`);
     }
 
     // THE EXEMPTION, in both directions.
@@ -4304,11 +4396,24 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
 function checkGateClaims(sources) {
   const found = [];
   for (const [label, text] of sources) {
-    for (const claim of gateOverclaims(text)) {
+    for (const claim of gateOverclaims(text, { html: isHtmlSource(label) })) {
       found.push(`${label}:${claim.line} [${claim.rule}] ${claim.sentence}\n      → ${GATE_RULE_ADVICE[claim.rule]}`);
     }
   }
   return found;
+}
+
+/**
+ * Is this source served as HTML rather than markdown?
+ *
+ * It decides whether an HTML comment is a block boundary — invisible in a browser, a
+ * paragraph break in markdown — so it decides whether a qualifying clause on the far side of
+ * one still qualifies the claim. Read from the label, which is a path for a page and a
+ * command for a help screen; a help screen is neither renderer's, and markdown's reading is
+ * the conservative one. See `scripts/lib/copy-text.mjs`. [Codex review R4 P2.]
+ */
+function isHtmlSource(label) {
+  return label.endsWith(".html");
 }
 
 /**

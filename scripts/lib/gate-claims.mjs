@@ -318,10 +318,11 @@ export const NEARBY = 150;
 /**
  * Every overclaim in one page of copy.
  *
- * `text` is raw — markdown, HTML, or the binary's own `--help` output. Returns
+ * `text` is raw — markdown, HTML, or the binary's own `--help` output; `html` says which,
+ * because a hidden region is a block boundary in one and invisible in the other. Returns
  * `{ line, rule, sentence }`, `rule` being `every-level` or `no-exception`.
  */
-export function gateOverclaims(text) {
+export function gateOverclaims(text, { html = false } = {}) {
   // What a reader never meets goes first: an HTML comment, a stylesheet, a script. The
   // landing page is hand-written HTML with thirteen comments and an inlined stylesheet, and
   // a note in one of them saying "a destructive action always pauses for your confirmation"
@@ -331,7 +332,11 @@ export function gateOverclaims(text) {
   // leaving the other is precisely the mirror this file exists because of.
   //
   // Length- and newline-preserving, because the line numbers below are offsets into this.
-  const masked = maskEvidenceBlocks(maskHiddenMarkup(text));
+  // Evidence blocks FIRST. A multi-line HTML comment inside one would otherwise have its
+  // `>` prefixes blanked away, so the citation reader saw a line that no longer began with
+  // `>`, ended the block there, and read the quoted TEST TITLES below it as public claims.
+  // [Codex review R4 P2.]
+  const masked = maskHiddenMarkup(maskEvidenceBlocks(text), { html });
   const found = [];
   for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
     const claim = plainClaim(piece);

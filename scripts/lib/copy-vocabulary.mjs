@@ -47,7 +47,7 @@
 // "manufactures defects" failure this file exists to avoid — to catch one site that cost six
 // words. The site was taken; the rule was not.
 
-import { blank, blankTags, HIDDEN_FILLER, maskHiddenMarkup, wrappablePhrase } from "./copy-text.mjs";
+import { blank, blankTags, codeRanges, HIDDEN_FILLER, maskHiddenMarkup, wrappablePhrase } from "./copy-text.mjs";
 
 /**
  * The words, each with the sense it is allowed in.
@@ -109,7 +109,7 @@ export const INTERNAL_VOCABULARY = [
     // meets that phrase everywhere. The forbidden one is the TOOL registry — the scoped list
     // of capabilities a run is handed.
     pattern: /\bregistr(?:y|ies)\b/gi,
-    senses: [wrappablePhrase("container", "registry")],
+    senses: [wrappablePhrase("container", "registr(?:y|ies)")],
     instead:
       "a container registry is fine; the tool registry is not — say which tools the agent has",
   },
@@ -171,7 +171,10 @@ function flatten(text) {
   // be asking someone to rename a CSS class to satisfy a prose gate. Shared with the
   // destructive-action rule, which had the same blind spot over the same page.
   // [Codex review R1 P2.]
-  return blankTags(maskHiddenMarkup(text))
+  // Code ranges come from the ORIGINAL text and are shared by both steps: a fence survives
+  // hidden-markup masking, and the tag inside it has to survive tag-blanking too.
+  const masked = maskHiddenMarkup(text);
+  return blankTags(masked, codeRanges(masked))
     // …and `blankTags` keeps what a reader meets without viewing source: `alt`, `title`,
     // `aria-label`, and a `<meta>` `content`. Blanking the whole tag hid the landing page's
     // Open Graph description, which is marketing copy in a social preview.
@@ -216,7 +219,11 @@ export function readableLine(text) {
 /**
  * Every internal-vocabulary word in one piece of copy.
  *
- * `text` is raw — markdown, HTML, or the binary's own `--help` output. `packageNames` are
+ * `text` is raw — markdown, HTML, or the binary's own `--help` output. It does NOT take the
+ * page's kind, which `gateOverclaims` does: that flag decides whether a hidden region is a
+ * BLOCK boundary, and a rule about single words has no blocks. Threading it here changed no
+ * answer a fixture could vary, and a parameter nothing can vary is a claim rather than a
+ * check — the sweep said so before this comment did. `packageNames` are
  * the names npm publishes this repo under; each is masked before the scan, because a
  * package's name is what a reader types to install it rather than something the copy chose
  * to say. A caller that is not looking at a page passes none.
