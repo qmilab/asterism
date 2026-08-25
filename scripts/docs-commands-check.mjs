@@ -84,6 +84,7 @@ import {
   publishedPackages,
   publishedPackageNames,
   publishedPackageDescriptions,
+  siteCopyStrings,
   publishedAssets,
   landingFiles,
   readLandingRemovals,
@@ -2527,17 +2528,25 @@ function report(total, tally, groups, coverageWork) {
       // [Codex review R2 P2.]
       ["puts a multi-line comment between a guarantee and its `unless`, inside one paragraph",
         "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n  a maintainer note about this section\n-->\nUnless you have allowed that capability for it.</p>",
-        [], { html: true }],
+        [], { kind: "html" }],
       // …EMPTY lines inside that comment included. An empty line is still inside the
       // comment, so the browser still renders one paragraph — and filling it costs a
       // character of length, which nothing here needs, where a line number is a count of
       // newlines. [Codex review R3 P2, resolved in R4 once the page's kind was known.]
       ["puts one with an EMPTY line in it between a guarantee and its `unless`",
         "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n\n  a note\n-->\nUnless you have allowed that capability for it.</p>",
-        [], { html: true }],
+        [], { kind: "html" }],
       // …and the SAME text read as markdown must fire, because there `<!--` at the start of
       // a line opens an HTML block and the `unless` is a different paragraph. One renderer's
       // invisible comment is the other's block boundary. [Codex review R4 P2.]
+      // …but a comment that starts AFTER visible text is inline, and Python-Markdown keeps the
+      // paragraph whole around it. Asked directly:
+      //   'claim <!--\nnote\n--> unless allowed' → <p>claim <!--\nnote\n--> unless allowed</p>
+      // Blanking its continuation lines made them paragraph breaks and reported a correctly
+      // qualified claim as an overclaim. [Codex review R5 P2.]
+      ["puts an INLINE multi-line comment between the two, in markdown",
+        "Even an `autonomous` agent pauses before a **destructive** action <!--\n  a note\n--> unless you have allowed that capability for it.",
+        []],
       ["puts a comment between the two in MARKDOWN, where it ends the paragraph",
         "A destructive action never happens without you, at every trust level.\n<!--\n  a note\n-->\nUnless you have allowed that capability for it.",
         ["no-exception"]],
@@ -2638,9 +2647,13 @@ function report(total, tally, groups, coverageWork) {
       "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n" +
       "<!--\n  a note\n-->\nUnless you have allowed that capability for it.</p>";
     for (const [label, want] of [
+      // HTML: one paragraph, the comment invisible inside it.
       ["landing/index.html", 0],
+      // Markdown: `<!--` opens a block, so the `unless` below is a different paragraph.
       ["docs/commands.md", 1],
-      ["asterism run --help", 1],
+      // A help screen is neither: no comments, no tags, so the whole thing is one claim and
+      // the `unless` is right there in it. [Codex review R5 P2.]
+      ["asterism run --help", 0],
     ]) {
       const got = checkGateClaims([[label, commentBetween]]).length;
       if (got !== want) {
@@ -2661,11 +2674,34 @@ function report(total, tally, groups, coverageWork) {
     const gatePages = userFacingPages();
     const gateVerbs = advertisedVerbSet(coverageWork);
     const gateDescriptions = publishedPackageDescriptions();
-    if (gatePages.length === 0 || gateVerbs.size === 0 || gateDescriptions.length === 0) {
+    // The site's OWN strings — its name, its meta description, its nav labels — are published
+    // by mkdocs and live in no file this otherwise reads. [Codex review R5 P2.]
+    const gateSiteStrings = siteCopyStrings();
+    if (
+      gatePages.length === 0 ||
+      gateVerbs.size === 0 ||
+      gateDescriptions.length === 0 ||
+      gateSiteStrings.length === 0
+    ) {
       console.log(
         `\nSELF-TEST FAILED: the copy rules read ${gatePages.length} pages,` +
-          ` ${gateDescriptions.length} npm descriptions and ${gateVerbs.size} help screens.`,
+          ` ${gateDescriptions.length} npm descriptions, ${gateSiteStrings.length} site strings` +
+          ` and ${gateVerbs.size} help screens.`,
       );
+      process.exit(1);
+    }
+    // …and the reader really does find the three kinds in a config shaped like this one, or
+    // it is a scan that returns nothing while the pass reports a green over it.
+    const plantedSite = siteCopyStrings(
+      'site_name: A Site\nsite_description: One line.\nnav:\n  - Home: index.md\n  - Guides:\n      - Models: models.md\n',
+    );
+    const wantSite = [
+      ["mkdocs.yml (site_name)", "A Site"],
+      ["mkdocs.yml (site_description)", "One line."],
+      ["mkdocs.yml (nav)", "Home\nGuides\nModels"],
+    ];
+    if (JSON.stringify(plantedSite) !== JSON.stringify(wantSite)) {
+      console.log(`\nSELF-TEST FAILED: the site-string reader returned ${JSON.stringify(plantedSite)}`);
       process.exit(1);
     }
     // …and the SET, asserted against the function that builds it rather than against its
@@ -2675,16 +2711,35 @@ function report(total, tally, groups, coverageWork) {
     // this costs no child process; the real halves are checked non-empty above.
     const shape = userFacingCopy(null, {
       pages: ["README.md"],
-      descriptions: [["x/package.json (description)", "a one-line description"]],
+      descriptions: [
+        ["x/package.json (description)", "a one-line description"],
+        ["mkdocs.yml (site_name)", "A Site"],
+      ],
       verbs: ["run"],
       help: (verb) => `help for ${verb || "the root"}`,
     }).map(([label]) => label);
     const wantShape = [
       "README.md",
       "x/package.json (description)",
+      "mkdocs.yml (site_name)",
       "asterism --help",
       "asterism run --help",
     ];
+    // …and with the strings left to their DEFAULT, both sources are reached. Without this the
+    // assembler could stop asking for either and the row above — which supplies its own —
+    // would not notice. Driven with no verbs and a stub help, so it costs no child process.
+    const defaulted = userFacingCopy(null, { pages: [], verbs: [], help: () => "" }).map(
+      ([label]) => label,
+    );
+    for (const [what, prefix] of [
+      ["an npm description", "packages/"],
+      ["a string from the site's own config", "mkdocs.yml ("],
+    ]) {
+      if (!defaulted.some((label) => label.startsWith(prefix))) {
+        console.log(`\nSELF-TEST FAILED: the copy corpus reaches for no ${what}.`);
+        process.exit(1);
+      }
+    }
     if (JSON.stringify(shape) !== JSON.stringify(wantShape)) {
       console.log(
         `\nSELF-TEST FAILED: the copy corpus assembled ${JSON.stringify(shape)},` +
@@ -2695,8 +2750,9 @@ function report(total, tally, groups, coverageWork) {
     console.log(
       `The destructive-action gate rule holds on ${GATE_CASES.length} real sentences, fires inside` +
         ` emphasis, markup and colons, never inside an Evidence citation, and reads` +
-        ` ${gatePages.length} pages, ${gateDescriptions.length} npm descriptions and` +
-        ` ${gateVerbs.size} help screens — every half, checked on the function that assembles them.`,
+        ` ${gatePages.length} pages, ${gateDescriptions.length} npm descriptions,` +
+        ` ${gateSiteStrings.length} site strings and ${gateVerbs.size} help screens — every part,` +
+        ` checked on the function that assembles them.`,
     );
 
     // --- golden rule 7: internal architecture vocabulary ------------------------------
@@ -2835,14 +2891,14 @@ function report(total, tally, groups, coverageWork) {
       // preview show. Blanking the whole tag hid all of it. [Codex review R3 P2.]
       ["hides the word in an image's alt text",
         "<img src=\"assets/img/dashboard.png\" alt=\"The dashboard, where the kernel decides.\">",
-        ["kernel"], { html: true }],
+        ["kernel"], { kind: "html" }],
       ["hides it in the Open Graph description a social preview shows",
         "<meta property=\"og:description\" content=\"Agents whose boundary the kernel enforces.\" />",
-        ["kernel"], { html: true }],
+        ["kernel"], { kind: "html" }],
       // …but a class, an id and an href are not sentences, and must stay out.
       ["puts it in a class name and an href, which no reader meets",
         "<a class=\"registry-grid\" id=\"kernel-box\" href=\"/adapter/substrate\">Read on</a>",
-        [], { html: true }],
+        [], { kind: "html" }],
       // A fenced example is a PICTURE of markup: every character is on the screen, and the
       // word rule already treats a fence as copy. [Codex review R3 P2.]
       ["shows hidden markup inside a fenced example, where a reader reads it",
@@ -2857,7 +2913,7 @@ function report(total, tally, groups, coverageWork) {
       // [Codex review R4 P2.]
       ["puts a backtick inside a script, which is not a code span",
         "<script>\n  const label = `the kernel decides`;\n</script>\n<p>Agents run alone.</p>",
-        [], { html: true }],
+        [], { kind: "html" }],
       // A tag shown INSIDE a code example is a picture of a tag: every character is on the
       // screen, the attribute a rendered page would hide included. [Codex review R4 P2.]
       ["shows a tag with an internal word in its class, inside a fence",
@@ -2871,17 +2927,48 @@ function report(total, tally, groups, coverageWork) {
       // [Codex review R4 P2.]
       ["hides a class behind a quoted `>` in a title",
         "<a title=\"more x > y\" class=\"kernel-box\" id=\"registry\">Read on</a>",
-        [], { html: true }],
+        [], { kind: "html" }],
       // `data-title` is implementation state. A word boundary alone matched the tail of it
       // and restored the value as copy. [Codex review R4 P2.]
       ["puts internal words in data- attributes nobody meets",
         "<div data-title=\"kernel\" data-content=\"registry\" data-alt=\"substrate\">ok</div>",
-        [], { html: true }],
+        [], { kind: "html" }],
       // The allowed sense has to cover the same inflections the word list does.
       // [Codex review R4 P2.]
       ["names container registries in the plural",
         "The image is mirrored across two container registries.",
         []],
+      // A help synopsis is PLAIN text. `<adapter>` is a placeholder, not a tag, and reading it
+      // as one erased the word in the corpus this rule started from. [Codex review R5 P2.]
+      ["puts an internal word in a help synopsis placeholder",
+        "Usage: asterism config <adapter> [options]",
+        ["adapter"], { kind: "plain" }],
+      ["shows comment markers as a literal string, which plain text is full of",
+        "Usage: asterism note add <text>    e.g. asterism note add '<!-- the kernel -->'",
+        ["kernel"], { kind: "plain" }],
+      ["is an npm description, which has no markup either",
+        "The engine behind Asterism: the kernel, scoped memory, and the event log.",
+        ["kernel"], { kind: "plain" }],
+      // A link's DESTINATION is a path this repo chose for a heading, not a sentence it wrote
+      // for a reader — and the safety case really does have headings with these words in
+      // them. The words the link is written ON are copy, and still fire.
+      // [Codex review R5 P2.]
+      ["links to a heading whose anchor names the machine",
+        "See [the threat model](./threat-model.md#what-the-kernel-enforces) for the detail.",
+        []],
+      ["carries the word in a reference definition's URL",
+        "See [the model][tm] for detail.\n\n[tm]: ./threat-model.md#the-kernel-substrate-boundary",
+        []],
+      // An AUTOLINK is not a tag: markdown renders `<https://…>` with the URL itself as the
+      // visible link text, so every character of it is copy. A tag scan that accepted any
+      // name at all swallowed it. (Added while fixing the plain-text case, not asked for —
+      // and nothing exercised it until a mutation said so.)
+      ["writes the URL as an autolink, which renders as its own text",
+        "Read <https://example.com/the-kernel-notes> for the detail.",
+        ["kernel"]],
+      ["names it in the words the link is written on",
+        "See [what the kernel enforces](./threat-model.md#detail) for the detail.",
+        ["kernel"]],
       ["says nothing about the machine at all",
         "Every agent starts with the standard toolkit, and staying that way is perfectly normal.",
         []],
@@ -3034,6 +3121,19 @@ function report(total, tally, groups, coverageWork) {
         vocabFailures.push(`  a word inside a comment reported ${got} time(s) under \`${label}\``);
       }
     }
+    // …and the pass hands the rule the source's KIND. Every row above passes its own, so a
+    // pass that dropped the argument would leave a help screen read as markdown — and its
+    // `<placeholder>` erased as if it were a tag — with all of them still green.
+    const helpPlaceholder = checkCopyVocabulary(
+      [["asterism config --help", "Usage: asterism config <adapter> [options]"]],
+      NPM_NAMES,
+    );
+    if (helpPlaceholder.length !== 1) {
+      vocabFailures.push(
+        `  a help synopsis naming <adapter> reported ${helpPlaceholder.length} time(s), not 1`,
+      );
+    }
+
     // …and the LINE the pass reports is the line in the file, which is only true while the
     // comment above it is masked rather than removed. Asserted through the pass, because
     // everything above calls the rule directly and a pass that mangled its input first would
@@ -4124,7 +4224,7 @@ function report(total, tally, groups, coverageWork) {
   } else if (!SELF_TEST) {
     console.log(
       `Every guarantee about the destructive-action gate across ${copySources.length} pages, npm` +
-        ` descriptions and help screens names its exception.`,
+        ` descriptions, site strings and help screens names its exception.`,
     );
   }
 
@@ -4141,7 +4241,7 @@ function report(total, tally, groups, coverageWork) {
   } else if (!SELF_TEST) {
     const exempt = copySources.filter(([label]) => isVocabularyExempt(label)).length;
     console.log(
-      `No page, npm description or help screen a user meets names an internal part` +
+      `No page, npm description, site string or help screen a user meets names an internal part` +
         ` (${VOCABULARY_WORDS.join(", ")}) — ${copySources.length - exempt} read, ${exempt} exempt` +
         ` (the safety case, where naming the part that enforces a guarantee IS the document).`,
     );
@@ -4396,7 +4496,7 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
 function checkGateClaims(sources) {
   const found = [];
   for (const [label, text] of sources) {
-    for (const claim of gateOverclaims(text, { html: isHtmlSource(label) })) {
+    for (const claim of gateOverclaims(text, { kind: sourceKind(label) })) {
       found.push(`${label}:${claim.line} [${claim.rule}] ${claim.sentence}\n      → ${GATE_RULE_ADVICE[claim.rule]}`);
     }
   }
@@ -4404,16 +4504,18 @@ function checkGateClaims(sources) {
 }
 
 /**
- * Is this source served as HTML rather than markdown?
+ * How is this source RENDERED — as HTML, as markdown, or not at all?
  *
- * It decides whether an HTML comment is a block boundary — invisible in a browser, a
- * paragraph break in markdown — so it decides whether a qualifying clause on the far side of
- * one still qualifies the claim. Read from the label, which is a path for a page and a
- * command for a help screen; a help screen is neither renderer's, and markdown's reading is
- * the conservative one. See `scripts/lib/copy-text.mjs`. [Codex review R4 P2.]
+ * It decides two things a text rule cannot guess: whether an HTML comment is a block boundary
+ * (invisible in a browser, a paragraph break in markdown), and whether angle brackets are
+ * markup at all. A help screen and an npm description are PLAIN: `asterism config <adapter>`
+ * is a synopsis, not a tag, and reading it as one erased a word this rule exists to find.
+ * See `scripts/lib/copy-text.mjs`. [Codex review R4, R5 P2.]
  */
-function isHtmlSource(label) {
-  return label.endsWith(".html");
+function sourceKind(label) {
+  if (label.endsWith(".html")) return "html";
+  if (label.endsWith(".md")) return "markdown";
+  return "plain";
 }
 
 /**
@@ -4446,7 +4548,7 @@ function userFacingCopy(work, { pages = null, descriptions = null, verbs = null,
   // dependent package shows — copy a reader meets before opening the README that is already
   // here. A set built from files could never notice a string that is not one.
   // [Codex review R3 P2.]
-  sources.push(...(descriptions ?? publishedPackageDescriptions()));
+  sources.push(...(descriptions ?? [...publishedPackageDescriptions(), ...siteCopyStrings()]));
   sources.push(["asterism --help", readHelp("")]);
   for (const verb of verbs ?? [...advertisedVerbSet(work)].sort()) {
     sources.push([`asterism ${verb} --help`, readHelp(verb)]);
@@ -4472,7 +4574,7 @@ function checkCopyVocabulary(sources, packageNames = publishedPackageNames()) {
   const found = [];
   for (const [label, text] of sources) {
     if (isVocabularyExempt(label)) continue;
-    for (const leak of vocabularyLeaks(text, { packageNames })) {
+    for (const leak of vocabularyLeaks(text, { packageNames, kind: sourceKind(label) })) {
       found.push(`${label}:${leak.line} [${leak.word}] ${leak.sentence}\n      → ${leak.instead}`);
     }
   }

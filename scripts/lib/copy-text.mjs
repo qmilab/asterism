@@ -130,15 +130,69 @@ const HIDDEN_REGION =
  * chaining three replacements only works while each preserves length, and the HTML branch
  * does not.
  */
-export function maskHiddenMarkup(text, { html = false } = {}) {
+export function maskHiddenMarkup(text, { kind = "markdown" } = {}) {
+  // PLAIN text is not markup. A help screen and an npm description have no comments, no
+  // stylesheet and no script — and pretending otherwise is how `Usage: asterism config
+  // <adapter>` came to be erased as if it were a tag, in the very corpus this rule started
+  // from. [Codex review R5 P2.]
+  if (kind === "plain") return text;
   const code = codeRanges(text);
-  return text.replace(HIDDEN_REGION, (region, at) =>
+  return text.replace(HIDDEN_REGION, (region, at) => {
     // Only the OPENER's position counts. A `<script>` whose body contains a backtick — a
     // template literal, say — makes `codeRanges` see an inline span INSIDE the script, and an
     // overlap test would then preserve the whole script and report words no reader sees.
     // [Codex review R4 P2.]
-    inRanges(at, code) ? region : html ? blankHiddenHtml(region) : blank(region),
-  );
+    if (inRanges(at, code)) return region;
+    return startsABlock(text, at, kind) ? blank(region) : blankHiddenHtml(region);
+  });
+}
+
+/**
+ * Does a hidden region beginning at `at` also begin a BLOCK — that is, does removing it split
+ * what a reader sees into two?
+ *
+ * In HTML, never: a comment is invisible and the paragraph closes around it.
+ *
+ * In markdown it depends on where the region starts, and this is Python-Markdown's own rule
+ * rather than a guess. Asked directly:
+ *
+ *   'claim <!--\nnote\n--> unless allowed'    → <p>claim <!--\nnote\n--> unless allowed</p>
+ *   'claim\n<!--\nnote\n-->\nunless allowed'  → <p>claim</p> <!--…--> <p>unless allowed</p>
+ *
+ * A comment that OPENS a line is an HTML block and interrupts the paragraph; one that starts
+ * after visible text is inline and does not. Blanking an inline one's continuation lines made
+ * them blank lines, so a correctly qualified claim was cut off from its `unless` and reported
+ * as an overclaim. [Codex review R5 P2.]
+ */
+function startsABlock(text, at, kind) {
+  if (kind !== "markdown") return false;
+  const lineStart = text.lastIndexOf("\n", at - 1) + 1;
+  return /^[ \t]*$/.test(text.slice(lineStart, at));
+}
+
+/**
+ * Blank what a markdown link points AT, keeping the words it is written on.
+ *
+ * `[the threat model](./threat-model.md#what-the-kernel-enforces)` shows a reader four words
+ * and none of them is the one in the URL. The destination is a path this repo chose for a
+ * heading, not a sentence it wrote for a reader — and the safety case really does have
+ * headings with these words in them, so a cross-reference to one would be reported as public
+ * copy naming the machine. [Codex review R5 P2.]
+ *
+ * HTML needs no equivalent: an `href` lives inside a tag, and `blankTags` already drops
+ * everything in a tag but the handful of attributes a reader meets.
+ */
+export function maskLinkDestinations(text, { kind = "markdown" } = {}) {
+  if (kind !== "markdown") return text;
+  const code = codeRanges(text);
+  return text
+    .replace(/\]\(([^)\n]*)\)/g, (whole, dest, at) =>
+      inRanges(at, code) ? whole : `](${blank(dest)})`,
+    )
+    // …and a reference definition, whose whole line is a destination.
+    .replace(/^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(\S.*)$/gm, (whole, head, dest, at) =>
+      inRanges(at, code) ? whole : head + blank(dest),
+    );
 }
 
 /**
@@ -166,8 +220,11 @@ const VISIBLE_ATTRIBUTE =
  * `<a title="x > y" class="kernel-box">` stopped at the `>` in the title, leaving
  * ` class="kernel-box">` behind as prose — internal vocabulary reported on a page where no
  * reader meets it. [Codex review R4 P2.]
+ *
+ * The NAME has to look like a tag name, so an autolink — `<https://example.com/x>`, which
+ * markdown renders as visible link text — is not mistaken for one.
  */
-const TAG = /<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+const TAG = /<\/?[a-z][a-z0-9-]*(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi;
 
 /**
  * Blank every tag, keeping the values in {@link VISIBLE_ATTRIBUTE}. Length-preserving.
@@ -176,7 +233,10 @@ const TAG = /<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>/gi;
  * fence is a picture of a tag, and every character of it is on the screen — including the
  * attribute a reader would never meet in a rendered page. [Codex review R4 P2.]
  */
-export function blankTags(text, code = codeRanges(text)) {
+export function blankTags(text, code = codeRanges(text), { kind = "markdown" } = {}) {
+  // PLAIN text has no tags. `<agent>`, `<from>`, `<adapter>` are placeholders in a help
+  // synopsis, and blanking them erased a word this rule exists to find. [Codex review R5 P2.]
+  if (kind === "plain") return text;
   return text.replace(TAG, (tag, at) => {
     if (inRanges(at, code)) return tag;
     let out = blank(tag);

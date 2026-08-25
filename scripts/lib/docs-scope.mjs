@@ -618,6 +618,53 @@ export function publishedPackageDescriptions() {
     .map(({ dir, description }) => [`${dir || "."}/package.json (description)`, description]);
 }
 
+/**
+ * The strings `mkdocs.yml` itself puts in front of a reader.
+ *
+ * `site_name` is the header of every page and the browser tab; `site_description` becomes the
+ * `<meta name="description">` a search result quotes; a nav LABEL is what the sidebar calls a
+ * page. None of them is in any file this repo checks, so a forbidden word in one would be
+ * published while `check:docs` stayed green — the same shape as the package READMEs and the
+ * npm descriptions before them. [Codex review R5 P2.]
+ *
+ * ⚠ Read by a line scan, not by mkdocs. `check:docs` must run with no Python, and
+ * `check:mkdocs-parity` — which does ask mkdocs — compares `docs_dir`, `exclude_docs` and
+ * `use_directory_urls`, not these. So a nav written as a YAML flow sequence, or a label with
+ * a colon in it, would be read as one string or missed; this repo's nav is 17 plain
+ * `- Label: page.md` lines and its two site strings are plain scalars.
+ */
+export function siteCopyStrings(configText) {
+  let text = configText;
+  if (text === undefined) {
+    try {
+      text = readFileSync(join(ROOT, "mkdocs.yml"), "utf8");
+    } catch (err) {
+      refuse(`mkdocs.yml puts strings in front of a reader and could not be read (${err.message}).`);
+    }
+  }
+  const out = [];
+  const scalar = (key) => {
+    const m = new RegExp(`^${key}:\\s*(.*)$`, "m").exec(text);
+    const value = m?.[1]?.trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");
+    if (value) out.push([`mkdocs.yml (${key})`, value]);
+  };
+  scalar("site_name");
+  scalar("site_description");
+
+  const lines = text.split("\n");
+  const navAt = lines.findIndex((line) => /^nav:\s*$/.test(line));
+  if (navAt >= 0) {
+    const labels = [];
+    for (let i = navAt + 1; i < lines.length; i++) {
+      if (/^\S/.test(lines[i])) break;
+      const m = /^\s+-\s+([^:]+):/.exec(lines[i]);
+      if (m) labels.push(m[1].trim().replace(/^["']|["']$/g, ""));
+    }
+    if (labels.length) out.push(["mkdocs.yml (nav)", labels.join("\n")]);
+  }
+  return out;
+}
+
 /** Every published manifest, as `{ dir, name, description }` — one scan, three questions. */
 function publishedManifests() {
   const out = [];

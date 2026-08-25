@@ -47,7 +47,15 @@
 // "manufactures defects" failure this file exists to avoid — to catch one site that cost six
 // words. The site was taken; the rule was not.
 
-import { blank, blankTags, codeRanges, HIDDEN_FILLER, maskHiddenMarkup, wrappablePhrase } from "./copy-text.mjs";
+import {
+  blank,
+  blankTags,
+  codeRanges,
+  HIDDEN_FILLER,
+  maskHiddenMarkup,
+  maskLinkDestinations,
+  wrappablePhrase,
+} from "./copy-text.mjs";
 
 /**
  * The words, each with the sense it is allowed in.
@@ -165,7 +173,7 @@ function mask(text, pattern) {
  * not on the raw text, and this preserves length precisely so the offsets it produces are
  * still offsets into the real file.
  */
-function flatten(text) {
+function flatten(text, kind) {
   // What the markup HIDES goes first and whole: a reader never meets a comment, a
   // stylesheet or a script, and a rule about what the copy SAYS that fired on one would
   // be asking someone to rename a CSS class to satisfy a prose gate. Shared with the
@@ -173,8 +181,8 @@ function flatten(text) {
   // [Codex review R1 P2.]
   // Code ranges come from the ORIGINAL text and are shared by both steps: a fence survives
   // hidden-markup masking, and the tag inside it has to survive tag-blanking too.
-  const masked = maskHiddenMarkup(text);
-  return blankTags(masked, codeRanges(masked))
+  const masked = maskLinkDestinations(maskHiddenMarkup(text, { kind }), { kind });
+  return blankTags(masked, codeRanges(masked), { kind })
     // …and `blankTags` keeps what a reader meets without viewing source: `alt`, `title`,
     // `aria-label`, and a `<meta>` `content`. Blanking the whole tag hid the landing page's
     // Open Graph description, which is marketing copy in a social preview.
@@ -204,9 +212,9 @@ const ENTITIES = {
  * One line of the original, as a reader would see it — for the report, where collapsing
  * whitespace is what makes a finding legible rather than a problem.
  */
-export function readableLine(text) {
+export function readableLine(text, kind = "markdown") {
   return (
-    flatten(text)
+    flatten(text, kind)
       .replace(/\s+/g, " ")
       // Markup sits between a word and its punctuation more often than not —
       // `<strong>kernel</strong>,` blanks to `kernel ,` — and a report that quotes a sentence
@@ -219,21 +227,19 @@ export function readableLine(text) {
 /**
  * Every internal-vocabulary word in one piece of copy.
  *
- * `text` is raw — markdown, HTML, or the binary's own `--help` output. It does NOT take the
- * page's kind, which `gateOverclaims` does: that flag decides whether a hidden region is a
- * BLOCK boundary, and a rule about single words has no blocks. Threading it here changed no
- * answer a fixture could vary, and a parameter nothing can vary is a claim rather than a
- * check — the sweep said so before this comment did. `packageNames` are
+ * `text` is raw, and `kind` says how to read it — `"markdown"`, `"html"`, or `"plain"` for a
+ * help screen or an npm description, which are not markup at all and must not have their
+ * `<placeholders>` read as tags. `packageNames` are
  * the names npm publishes this repo under; each is masked before the scan, because a
  * package's name is what a reader types to install it rather than something the copy chose
  * to say. A caller that is not looking at a page passes none.
  *
  * Returns `{ line, word, sentence, instead }`, one per occurrence.
  */
-export function vocabularyLeaks(text, { packageNames = [] } = {}) {
+export function vocabularyLeaks(text, { packageNames = [], kind = "markdown" } = {}) {
   // Markup out first, and same-length, so a phrase split by emphasis or tags is still one
   // phrase and a line number is still a line number.
-  let masked = flatten(text);
+  let masked = flatten(text, kind);
   // LONGEST FIRST, and this is not a tidiness preference: `@qmilab/asterism` is itself a
   // published name and a prefix of all seven others, so masking it first leaves
   // `-adapter-pi` standing and reports the adapter's own npm page — a red over a correct
@@ -281,7 +287,7 @@ export function vocabularyLeaks(text, { packageNames = [] } = {}) {
       // The line the word sits on, as a reader would see it: enough to recognise the
       // sentence without opening the file, and truncated so one bad page cannot fill the
       // terminal and scroll the rest of the report away.
-      const sentence = readableLine(lines[line - 1] ?? "");
+      const sentence = readableLine(lines[line - 1] ?? "", kind);
       found.push({
         line,
         word,

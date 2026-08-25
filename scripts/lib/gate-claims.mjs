@@ -43,7 +43,7 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
-import { blankTags, HIDDEN_FILLER, maskHiddenMarkup } from "./copy-text.mjs";
+import { blankTags, HIDDEN_FILLER, maskHiddenMarkup, maskLinkDestinations } from "./copy-text.mjs";
 
 /**
  * Strip the typography and read the CLAIM.
@@ -57,11 +57,11 @@ import { blankTags, HIDDEN_FILLER, maskHiddenMarkup } from "./copy-text.mjs";
  * HTML tags go too, because the landing page — the page a reader arrives at FIRST — is
  * hand-written HTML, and it carried this exact defect.
  */
-export function plainClaim(text) {
+export function plainClaim(text, kind = "markdown") {
   // Tags out — but NOT the attribute values a reader meets without viewing source. The
   // landing page's Open Graph description is the sentence a social preview shows, and a gate
   // promise made there is made to a reader. See `blankTags`. [Codex review R3 P2.]
-  return blankTags(text)
+  return blankTags(text, undefined, { kind })
     // The filler a masked-out comment or stylesheet leaves on each of its lines, so that a
     // hidden region cannot split a visible paragraph. Out before anything is matched or
     // printed. See `copy-text.mjs`.
@@ -318,11 +318,12 @@ export const NEARBY = 150;
 /**
  * Every overclaim in one page of copy.
  *
- * `text` is raw — markdown, HTML, or the binary's own `--help` output; `html` says which,
- * because a hidden region is a block boundary in one and invisible in the other. Returns
+ * `text` is raw, and `kind` says how to read it — `"markdown"`, `"html"`, or `"plain"` for a
+ * help screen, which is not markup. It decides whether a hidden region is a block boundary,
+ * which decides whether a clause on the far side of one still qualifies the claim. Returns
  * `{ line, rule, sentence }`, `rule` being `every-level` or `no-exception`.
  */
-export function gateOverclaims(text, { html = false } = {}) {
+export function gateOverclaims(text, { kind = "markdown" } = {}) {
   // What a reader never meets goes first: an HTML comment, a stylesheet, a script. The
   // landing page is hand-written HTML with thirteen comments and an inlined stylesheet, and
   // a note in one of them saying "a destructive action always pauses for your confirmation"
@@ -336,10 +337,10 @@ export function gateOverclaims(text, { html = false } = {}) {
   // `>` prefixes blanked away, so the citation reader saw a line that no longer began with
   // `>`, ended the block there, and read the quoted TEST TITLES below it as public claims.
   // [Codex review R4 P2.]
-  const masked = maskHiddenMarkup(maskEvidenceBlocks(text), { html });
+  const masked = maskLinkDestinations(maskHiddenMarkup(maskEvidenceBlocks(text), { kind }), { kind });
   const found = [];
   for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
-    const claim = plainClaim(piece);
+    const claim = plainClaim(piece, kind);
     if (!claim) continue;
     if (!UNIVERSAL.some((re) => re.test(claim)) && !levelWide(claim)) continue;
     if (!PAUSE.test(claim)) continue;
@@ -349,6 +350,7 @@ export function gateOverclaims(text, { html = false } = {}) {
         Math.max(blockFrom, offset - NEARBY),
         Math.min(blockTo, offset + piece.length + NEARBY),
       ),
+      kind,
     );
     if (!DESTRUCTIVE.test(window)) continue;
     const line = masked.slice(0, offset).split("\n").length;
