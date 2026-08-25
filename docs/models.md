@@ -159,7 +159,7 @@ proxy; that is unambiguous, and it is honoured.
 The provider key talks to your model. It is **not** an agent-scoped credential:
 it is never stored in the config file, never handed to an agent, and never
 readable through one. Credentials that belong to an agent are added per agent
-with [`asterism secrets add`](./commands.md#secrets-add), live in the kernel's
+with [`asterism secrets add`](./commands.md#secrets-add), live in Asterism's own
 store under that agent's name, and are never shared with another agent.
 
 The full list of environment variables, and where a model comes from when several

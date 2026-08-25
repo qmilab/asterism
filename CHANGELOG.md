@@ -2,6 +2,22 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
+## 0.9.3
+
+Asterism's own documentation kept calling part of Asterism "the kernel". It is the name the code uses for the component that holds identity, trust and the destructive-action gate, and it means nothing to someone deciding whether to run an agent on their laptop — the point of that component is that *Asterism* decides what an agent may do, not the operating system and not the model. Eight passages said the word out loud, including the first paragraph a reader meets on the project's own site.
+
+### Fixed
+
+- **The pages a reader meets now name the product, not its parts.** The repository's front page, the site's landing page, the five-claims walkthrough, the getting-started and dashboard pages, the models page and two passages in the command reference each named an internal component where they could say what actually happens: *"today's boundary is enforced by Asterism itself, not by the operating system"*, *"the model drives the agent, and Asterism decides what it may actually do"*. Nothing about the product changed; the sentences now describe it in the words a reader already has.
+
+  The one place that keeps every one of those words is the [threat model](https://qmilab.com/asterism/docs/threat-model/), where naming the component that enforces a guarantee is the whole point of the document.
+
+- **`asterism api add` refuses a reserved credential key in its own words.** Binding an endpoint to one of Asterism's own internal credentials has always been refused, but the refusal came straight from the storage layer — *"reserved for the kernel's own internal use"*, a sentence written for someone embedding the library. It now answers the way `secrets add` and `capabilities set` already did: *The credential key "…" is reserved for internal use — no endpoint can be bound to send it.*
+
+- **The check that was meant to prevent all of this now reads the copy people actually read.** A test had refused this vocabulary since the CLI was first written, under the name "public copy" — and it read the CLI's help text and nothing else, so every page the project publishes was invisible to it. It now runs over each of them, over the site's landing page, over every package's npm page and over the help the binary really prints — fifty-nine surfaces, where it used to read the help text and nothing else.
+
+  Two words it used to refuse are allowed where they mean something else — a *container registry* is not the internal one, and an adapter package's npm page has to be able to print its own name. A third, **memory firewall**, came off the list entirely: it is what Asterism calls that feature to your face, in the CLI, the dashboard and the local endpoint, and a list that forbids what the product says out loud is wrong about the word.
+
 ## 0.9.2 — 2026-08-21
 
 The destructive-action gate has an exception, and most of the places that promised the gate did not mention it. An agent can **earn** the standing to take one capability without pausing — you are shown the evidence, you approve it, and `asterism trust <agent> show` lists what you granted — so once you accept such a grant, that one capability stops asking. The rule box on the concepts page, the npm page and `asterism trust --help` all said so. A dozen other statements, including the repository's front page and the walkthrough's own list of claims, described a pause that always happens.

@@ -26,6 +26,8 @@ The codebase has three bands:
 6. **Replaceable substrate.** Treat Pi as disposable. All Pi-specific code lives in `adapter-pi` behind `RuntimeAdapter`. Nothing outside that package may import Pi.
 7. **Public copy stays clean.** README, CLI help text, and any user-facing string sell the *behavioral outcome* ("distinct agents, dialable autonomy, reviewable memory, separate lives"). No internal architecture vocabulary in user-facing text.
 
+   The words this forbids live in **`scripts/lib/copy-vocabulary.mjs`**, each beside the sense it is still allowed in, and `check:docs` applies it to every page a user meets *and* to the help the binary prints. Read it before adding a word or a page: a *container* registry and a package's published npm name are not the internal ones, `docs/threat-model.md` is exempt because a safety case has to name what enforces a guarantee, and **`firewall` is deliberately not on the list** — "the memory firewall" is what this product calls that feature out loud, in the CLI, the dashboard and the HTTP endpoint. A list that forbids what the product says is wrong about the word. The guard for this rule read the CLI's help text and nothing else, from the day the CLI was written until #183 — which is how `kernel` came to sit in eight passages of published copy, the site's own front page among them.
+
 ---
 
 ## Package layout (Bun workspaces monorepo)

@@ -303,8 +303,8 @@ $ asterism dashboard
 
 From there you can see the roster, dial autonomy up or down, **approve or decline**
 a paused action, and review proposed memories — all without leaving the view. It
-holds no powers of its own; it's a thin client over the same kernel surface the
-command line uses, so every boundary still applies. See [Dashboard](./dashboard.md).
+holds no powers of its own; it's a thin client over the same surface the command
+line uses, so every boundary still applies. See [Dashboard](./dashboard.md).
 
 ## Where to go next
 

@@ -118,7 +118,7 @@ Full docs live in [`docs/`](./docs/) ([browse the site](https://qmilab.com/aster
 
 **Reference** — [Command reference](./docs/commands.md)
 
-**Deep dive** — [Five-claims walkthrough](./docs/walkthrough.md): the separation guarantees proven end to end · [Threat model](./docs/threat-model.md): what the kernel enforces, the test behind each claim, and what today's boundary does not contain.
+**Deep dive** — [Five-claims walkthrough](./docs/walkthrough.md): the separation guarantees proven end to end · [Threat model](./docs/threat-model.md): what Asterism enforces, the test behind each claim, and what today's boundary does not contain.
 
 ## Continuous, reviewable learning
 

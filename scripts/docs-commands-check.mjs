@@ -65,6 +65,12 @@ import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import { gateOverclaims, GATE_RULE_ADVICE, TRUST_LEVEL_NAMES } from "./lib/gate-claims.mjs";
 import {
+  vocabularyLeaks,
+  isVocabularyExempt,
+  VOCABULARY_WORDS,
+  VOCABULARY_EXEMPT_PAGES,
+} from "./lib/copy-vocabulary.mjs";
+import {
   ROOT,
   siteDir,
   siteUrlPath,
@@ -76,6 +82,7 @@ import {
   publishedPages,
   publishedPredicate,
   publishedPackages,
+  publishedPackageNames,
   publishedAssets,
   landingFiles,
   readLandingRemovals,
@@ -2549,10 +2556,12 @@ function report(total, tally, groups, coverageWork) {
     }
 
     // The rule this one grew out of, asserted as a CAPABILITY rather than trusted: the
-    // sentence `help.test.ts` has forbidden since #139 must still be caught here, or
-    // widening the corpus quietly narrowed the rule.
+    // sentence #139 fixed in eight places must still be caught here, or widening the corpus
+    // quietly narrowed the rule. (A hand-written guard for exactly this lived in
+    // `help.test.ts` until #183 measured that it caught nothing this does not and missed
+    // three shapes this does — including two #177 had to fix by hand.)
     if (!gateOverclaims("A destructive action pauses for confirmation at every trust level.").some((f) => f.rule === "every-level")) {
-      gateFailures.push("  the `pauses at every trust level` sentence `help.test.ts` forbids is not caught here");
+      gateFailures.push("  the `pauses at every trust level` sentence #139 fixed in eight places is not caught here");
     }
     if (gateFailures.length) {
       console.log("\nSELF-TEST FAILED: the destructive-action gate rule does not hold:");
@@ -2570,10 +2579,258 @@ function report(total, tally, groups, coverageWork) {
       );
       process.exit(1);
     }
+    // …and the SET, asserted against the function that builds it rather than against its
+    // ingredients. Both copy rules read `userFacingCopy`, and the two checks above only ever
+    // saw `userFacingPages()` and `advertisedVerbSet()` — so deleting either half from the
+    // assembler left every rule reading half a corpus behind a green. Driven with stubs so
+    // this costs no child process; the real halves are checked non-empty above.
+    const shape = userFacingCopy(null, {
+      pages: ["README.md"],
+      verbs: ["run"],
+      help: (verb) => `help for ${verb || "the root"}`,
+    }).map(([label]) => label);
+    const wantShape = ["README.md", "asterism --help", "asterism run --help"];
+    if (JSON.stringify(shape) !== JSON.stringify(wantShape)) {
+      console.log(
+        `\nSELF-TEST FAILED: the copy corpus assembled ${JSON.stringify(shape)},` +
+          ` not ${JSON.stringify(wantShape)} — a half of it is missing.`,
+      );
+      process.exit(1);
+    }
     console.log(
       `The destructive-action gate rule holds on ${GATE_CASES.length} real sentences, fires inside` +
         ` emphasis, markup and colons, never inside an Evidence citation, and reads` +
-        ` ${gatePages.length} pages plus ${gateVerbs.size} help screens.`,
+        ` ${gatePages.length} pages plus ${gateVerbs.size} help screens — both halves, checked` +
+        ` on the function that assembles them.`,
+    );
+
+    // --- golden rule 7: internal architecture vocabulary ------------------------------
+    //
+    // Every row is a REAL sentence from this repo (or the sentence a fix replaced), never a
+    // paraphrase. A paraphrase of mine was inert on the gate rule two slices ago — "always
+    // asks" is not a pause verb, so the mutation it was meant to kill survived the fix I had
+    // just made — and the tell was that nothing changed when I "fixed" it.
+    //
+    // The rows that must NOT fire are the more valuable half here. A word list is one
+    // sed away from firing on a container registry, on a package's own npm page, or on the
+    // name the product itself uses for a feature, and a red over correct copy is the worse
+    // failure of the two: a green merely misses something, while a red gets a correct
+    // sentence "fixed" until the checker agrees.
+    const NPM_NAMES = publishedPackageNames();
+    const VOCAB_CASES = [
+      // --- must fire ------------------------------------------------------------------
+      ["names the kernel in the walkthrough's own claim (fixed by #183)",
+        "  agent, and the kernel decides what it may actually do.",
+        ["kernel"]],
+      ["names it twice in one wrapped sentence",
+        "[environment](./installation.md#api-keys)); the per-agent kernel settings are kept in\nthe kernel store, scoped to each agent.",
+        ["kernel", "kernel"]],
+      ["names it inside HTML on the site's front page (fixed by #183)",
+        "              to come, and so is <strong>stronger execution isolation</strong>: today's boundary is\n              enforced by the kernel, not by the operating system, and the",
+        ["kernel"]],
+      ["carries the safety case's thesis on a page that is NOT the safety case",
+        "**The kernel/substrate boundary** is what keeps the model loop from being the",
+        ["kernel", "substrate"]],
+      ["names the TOOL registry, which is the internal one",
+        "filters them by trust level, and hands the substrate a finished registry. The",
+        ["registry", "substrate"]],
+      ["names the adapter as a component rather than as a package",
+        "The adapter never holds a credential and never reaches the store.",
+        ["adapter"]],
+      ["uses a plural",
+        "Two kernels, two substrates, two registries, two adapters.",
+        ["adapter", "kernel", "registry", "substrate"]],
+
+      // --- must NOT fire --------------------------------------------------------------
+      // `firewall` came OFF the list, and this is the sentence that decides it: the product
+      // calls the feature "the memory firewall" to the reader's face, on this page and in
+      // the binary, the dashboard and the HTTP endpoint. Putting the word back turns this
+      // row red, which is the only reason the decision is a decision.
+      ["calls the feature by the name the product uses for it",
+        "a **memory firewall** that flags anything unsafe to remember before you ever see",
+        []],
+      ["says `the firewall` a second time, as the page does",
+        "a flagged one anyway, the firewall still refuses to save it (`⛔ blocked`).",
+        []],
+      // A CONTAINER registry is a different thing spelled the same way.
+      ["names a container registry",
+        "The released image is published to the GitHub Container Registry and runs **natively on",
+        []],
+      // …and the same phrase after a rewrap. Without `\s+` in the sense, the orphaned half
+      // is reported and `container.md` goes red on a line that is correct.
+      ["names one that a rewrap split across two lines",
+        "The released image is published to the GitHub Container\nRegistry and runs natively on both architectures.",
+        []],
+      // …and the same phrase with markup between its two words. This is why the scan runs
+      // on a flattened copy rather than on the raw text: `container <em>registry</em>` is
+      // one phrase to a reader and two strings to a matcher, and the site's front page is
+      // hand-written HTML throughout.
+      ["names one with emphasis between the two words",
+        "The released image is published to the GitHub **Container** Registry.",
+        []],
+      ["names one with an HTML tag between them",
+        "<p>published to the GitHub Container <em>registry</em>, multi-arch</p>",
+        []],
+      ["names one with a non-breaking space between them",
+        "<p>published to the GitHub Container&nbsp;Registry, multi-arch</p>",
+        []],
+      ["is the adapter package's own npm page, which opens with its published name",
+        "# @qmilab/asterism-adapter-pi\n",
+        []],
+      ["is the other adapter package's page",
+        "# @qmilab/asterism-adapter-lodestar\n",
+        []],
+      ["mentions the umbrella package beside the adapter one",
+        "This is an internal building block. To use Asterism, install the umbrella package: [`@qmilab/asterism`](https://www.npmjs.com/package/@qmilab/asterism).\n",
+        []],
+      ["says nothing about the machine at all",
+        "Every agent starts with the standard toolkit, and staying that way is perfectly normal.",
+        []],
+    ];
+    const vocabFailures = [];
+    for (const [why, text, wantWords] of VOCAB_CASES) {
+      const got = vocabularyLeaks(text, { packageNames: NPM_NAMES }).map((f) => f.word).sort();
+      const want = [...wantWords].sort();
+      if (JSON.stringify(got) !== JSON.stringify(want)) {
+        vocabFailures.push(
+          `  copy that ${why}\n      want: ${JSON.stringify(want)}\n      got:  ${JSON.stringify(got)}`,
+        );
+      }
+    }
+
+    // The npm names are masked LONGEST FIRST, and this is the row that says why.
+    // `@qmilab/asterism` is itself a published name and a prefix of all seven others, so a
+    // reader that masked in the order git happened to list them would blank the prefix and
+    // leave `-adapter-pi` standing — a red over the adapter's own npm page, the exact
+    // failure the rows above exist to prevent. Passed shortest-first on purpose.
+    const shortestFirst = [...NPM_NAMES].sort((a, b) => a.length - b.length);
+    if (vocabularyLeaks("# @qmilab/asterism-adapter-pi\n", { packageNames: shortestFirst }).length) {
+      vocabFailures.push(
+        "  the adapter package's own npm page was reported when the names arrived shortest-first",
+      );
+    }
+
+    // WHERE, not just whether, and in what ORDER. The line is the whole value of the report
+    // to the person fixing it, and nothing else here could tell a correct line number from
+    // one off by any amount.
+    //
+    // Two more properties ride on this one fixture, because both are invisible without it:
+    //
+    //   · the allowed sense is masked ACROSS a line break, so a mask that shortened the text
+    //     instead of blanking it would swallow that newline and report both words one line
+    //     early — every other row has its finding on line 1, where no offset can be wrong;
+    //   · `substrate` is reported BEFORE `kernel` even though the word list has `kernel`
+    //     first, so a report that came out in word order rather than reading order fails
+    //     here. Findings are collected per word, so without the sort a page's second word is
+    //     listed after every occurrence of its first.
+    const vocabLines = vocabularyLeaks(
+      [
+        "The image is published to the GitHub Container", // 1
+        "Registry, multi-arch.",                          // 2
+        "",                                               // 3
+        "The substrate is swappable.",                    // 4
+        "",                                               // 5
+        "The kernel decides.",                            // 6
+      ].join("\n"),
+    ).map((f) => `${f.line}:${f.word}`);
+    if (JSON.stringify(vocabLines) !== JSON.stringify(["4:substrate", "6:kernel"])) {
+      vocabFailures.push(
+        `  two words below a wrapped container-registry mention were reported at ${JSON.stringify(vocabLines)},` +
+          ` not ["4:substrate","6:kernel"]`,
+      );
+    }
+
+    // …and WHAT it prints. A finding on the site's front page comes out of hand-written HTML,
+    // so a report quoting the raw line hands the reader a mouthful of tags to search for —
+    // and an entity has to keep its character rather than become a hole, because the landing
+    // page writes its dashes as `&mdash;` and the reader searches the page for the sentence
+    // this quotes.
+    const htmlFinding = vocabularyLeaks(
+      "<p>enforced by the <strong>kernel</strong>,   not the OS &mdash; see the threat model</p>",
+    )[0];
+    if (htmlFinding?.sentence !== "enforced by the kernel, not the OS — see the threat model") {
+      vocabFailures.push(`  an HTML finding was reported as ${JSON.stringify(htmlFinding?.sentence)}`);
+    }
+
+    // A package name is matched LITERALLY. Every name this repo publishes today is free of
+    // regex metacharacters, so nothing real can tell an escaped name from an unescaped one —
+    // and an unescaped `.` in some later name would blank a DIFFERENT string and exempt a
+    // real leak. Driven with a synthetic name for exactly that reason.
+    if (!vocabularyLeaks("the aXb-adapter runs the turn", { packageNames: ["a.b-adapter"] }).some(
+      (f) => f.word === "adapter",
+    )) {
+      vocabFailures.push("  a package name was matched as a pattern rather than literally");
+    }
+
+    // …and a very long line is cut rather than printed whole.
+    const longLine = vocabularyLeaks(`The kernel ${"and on ".repeat(80)}forever.`)[0];
+    if (!longLine || !longLine.sentence.endsWith("...") || longLine.sentence.length > 200) {
+      vocabFailures.push(
+        `  a ${longLine ? longLine.sentence.length : 0}-character finding was not truncated for the report`,
+      );
+    }
+
+    // The rule this one replaced, asserted as a CAPABILITY rather than trusted: the words
+    // `help.test.ts` refused before #183 must still be caught, or widening the corpus
+    // quietly narrowed the rule.
+    for (const word of ["kernel", "adapter", "registry", "substrate"]) {
+      if (!vocabularyLeaks(`This is handled by the ${word}.`).some((f) => f.word === word)) {
+        vocabFailures.push(`  \`${word}\`, refused in the CLI help since the CLI existed, is not caught here`);
+      }
+    }
+
+    // The exemption as the PASS applies it, not just as the list declares it. Without this,
+    // `isVocabularyExempt` could be made to return true for everything — every page exempt,
+    // the real corpus reporting nothing, the build green — and the rows above would not
+    // notice, because they call the predicate directly and never go through the pass.
+    const exemptLabel = VOCABULARY_EXEMPT_PAGES[0];
+    const sameSentence = "The kernel decides what it may actually do.";
+    const throughThePass = checkCopyVocabulary(
+      [
+        [exemptLabel, sameSentence],
+        ["docs/commands.md", sameSentence],
+        ["asterism run --help", sameSentence],
+      ],
+      NPM_NAMES,
+    );
+    if (throughThePass.length !== 2 || throughThePass.some((f) => f.startsWith(`${exemptLabel}:`))) {
+      vocabFailures.push(
+        `  one sentence in three sources — one of them exempt — was reported ${throughThePass.length} time(s):` +
+          `\n      ${JSON.stringify(throughThePass)}`,
+      );
+    }
+
+    // THE EXEMPTION, in both directions.
+    //
+    // `docs/threat-model.md` is exempt by name because naming the enforcing component is
+    // the point of a safety case. An exemption is only honest if it is still needed and
+    // still narrow, so both halves are checked: the page must really carry the vocabulary
+    // (an exemption for a page that no longer does is dead and should be deleted), and it
+    // must be a page this corpus actually reads (one naming a path nothing reads exempts
+    // nothing and hides the fact).
+    const vocabPages = userFacingPages();
+    for (const rel of VOCABULARY_EXEMPT_PAGES) {
+      if (!vocabPages.includes(rel)) {
+        vocabFailures.push(`  \`${rel}\` is exempt from the vocabulary rule but is not a page this reads`);
+        continue;
+      }
+      const leaks = vocabularyLeaks(readFileSync(join(ROOT, rel), "utf8"), { packageNames: NPM_NAMES });
+      if (leaks.length === 0) {
+        vocabFailures.push(
+          `  \`${rel}\` is exempt from the vocabulary rule and no longer needs to be — delete the exemption`,
+        );
+      }
+    }
+    if (vocabFailures.length) {
+      console.log("\nSELF-TEST FAILED: the internal-vocabulary rule does not hold:");
+      for (const f of vocabFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      `Golden rule 7 holds on ${VOCAB_CASES.length} real sentences — it fires on the ${VOCABULARY_WORDS.join(", ")}` +
+        ` through emphasis and markup, and never on a container registry, a published package's own` +
+        ` name, or the memory firewall the product names out loud; ${VOCABULARY_EXEMPT_PAGES.length} page is` +
+        ` exempt and still needs to be.`,
     );
 
     // The `Commands:` extraction, on the shapes that decide whether a derived verb list is
@@ -3610,8 +3867,8 @@ function report(total, tally, groups, coverageWork) {
     );
   }
 
-  const gateSources = SELF_TEST ? [] : gateClaimSources(coverageWork);
-  const gateClaims = checkGateClaims(gateSources);
+  const copySources = SELF_TEST ? [] : userFacingCopy(coverageWork);
+  const gateClaims = checkGateClaims(copySources);
   if (gateClaims.length) {
     console.log(
       `\nTHE DESTRUCTIVE-ACTION GATE, PROMISED WIDER THAN IT FIRES (${gateClaims.length}) —` +
@@ -3620,8 +3877,27 @@ function report(total, tally, groups, coverageWork) {
     for (const g of gateClaims) console.log(`  ${g}`);
   } else if (!SELF_TEST) {
     console.log(
-      `Every guarantee about the destructive-action gate across ${gateSources.length} pages and` +
+      `Every guarantee about the destructive-action gate across ${copySources.length} pages and` +
         ` help screens names its exception.`,
+    );
+  }
+
+  const vocabulary = checkCopyVocabulary(copySources);
+  if (vocabulary.length) {
+    console.log(
+      `\nINTERNAL ARCHITECTURE VOCABULARY IN PUBLIC COPY (${vocabulary.length}) — a page or a help` +
+        ` screen names a part of the machine where it could name what the product does.` +
+        `\n  If the word means something ELSE here — a container registry, a package's published` +
+        ` name — add the sense to scripts/lib/copy-vocabulary.mjs rather than rewording copy` +
+        ` that is already right:`,
+    );
+    for (const v of vocabulary) console.log(`  ${v}`);
+  } else if (!SELF_TEST) {
+    const exempt = copySources.filter(([label]) => isVocabularyExempt(label)).length;
+    console.log(
+      `No page or help screen a user meets names an internal part` +
+        ` (${VOCABULARY_WORDS.join(", ")}) — ${copySources.length - exempt} read, ${exempt} exempt` +
+        ` (the safety case, where naming the part that enforces a guarantee IS the document).`,
     );
   }
 
@@ -3716,6 +3992,7 @@ function report(total, tally, groups, coverageWork) {
     providerGaps.length ||
     catalogGaps.length ||
     gateClaims.length ||
+    vocabulary.length ||
     landingLinks.broken.length ||
     landingLinks.checked === 0 ||
     siteLinks.broken.length ||
@@ -3881,20 +4158,61 @@ function checkGateClaims(sources) {
 }
 
 /**
- * What the gate pass reads: every page a user meets, plus the rendered help of every verb
- * the root help advertises (and the root help itself).
+ * THE CORPUS: every page a user meets, plus the rendered help of every verb the root help
+ * advertises (and the root help itself). Labelled by the path or the command that produced
+ * it, so a finding says where to go.
  *
  * Derived from `advertisedVerbSet` — the same list the command-coverage pass uses — rather
- * than from a list of the verbs that happen to mention the gate today. Eleven verbs mention
- * it now; a twelfth that starts to is exactly the case a hand-kept list misses.
+ * than from a list of the verbs that happen to say the thing today. Eleven verbs mention the
+ * gate now; a twelfth that starts to is exactly the case a hand-kept list misses.
+ *
+ * ONE corpus, shared by every pass that asks what the copy SAYS, because the corpus is where
+ * both of those rules have been wrong. The destructive-gate rule was right about the binary's
+ * help and blind to the pages (#177); the internal-vocabulary rule was right about the same
+ * help and blind to the same pages, front page included (#183) — the second found by
+ * auditing the first as a category. Two rules, one blind spot: the set is named once and read
+ * by both, and a pass that wants a different one has to say so out loud.
  */
-function gateClaimSources(work) {
-  const pages = userFacingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]);
-  const help = [["asterism --help", helpFor(work, "")]];
-  for (const verb of [...advertisedVerbSet(work)].sort()) {
-    help.push([`asterism ${verb} --help`, helpFor(work, verb)]);
+function userFacingCopy(work, { pages = null, verbs = null, help = null } = {}) {
+  // The three sources are injectable so the self-test can assert the SHAPE of what this
+  // assembles without spawning thirty-six help screens. That is not a convenience: the
+  // corpus check that existed before this read `userFacingPages()` and `advertisedVerbSet()`
+  // — the INGREDIENTS — and a sweep that deleted either half from this function left both
+  // rules reading half a corpus with every fixture still green. A guarantee about a set has
+  // to be asserted against the thing that builds the set.
+  const readPage = (rel) => readFileSync(join(ROOT, rel), "utf8");
+  const readHelp = help ?? ((verb) => helpFor(work, verb));
+  const sources = (pages ?? userFacingPages()).map((rel) => [rel, readPage(rel)]);
+  sources.push(["asterism --help", readHelp("")]);
+  for (const verb of verbs ?? [...advertisedVerbSet(work)].sort()) {
+    sources.push([`asterism ${verb} --help`, readHelp(verb)]);
   }
-  return [...pages, ...help];
+  return sources;
+}
+
+/**
+ * Golden rule 7: public copy sells the behavioural outcome, not the architecture.
+ * `scripts/lib/copy-vocabulary.mjs` holds the word list, the senses each word is still
+ * allowed in, and the reasons; this is the corpus and the exemption.
+ *
+ * The corpus is the point here for the second time. A guard for exactly this already existed
+ * and was already named "public copy" — `help.test.ts` refused five words in `USAGE`,
+ * `AUTONOMY_HELP` and `COMMAND_HELP`, and read nothing else — so `kernel` sat in eight
+ * passages of published copy, including the site's own front page, where it could not see
+ * them.
+ *
+ * The safety case is exempt BY NAME rather than by the corpus stopping short of it, which is
+ * the difference between a decision and an accident; see `VOCABULARY_EXEMPT_PAGES`.
+ */
+function checkCopyVocabulary(sources, packageNames = publishedPackageNames()) {
+  const found = [];
+  for (const [label, text] of sources) {
+    if (isVocabularyExempt(label)) continue;
+    for (const leak of vocabularyLeaks(text, { packageNames })) {
+      found.push(`${label}:${leak.line} [${leak.word}] ${leak.sentence}\n      → ${leak.instead}`);
+    }
+  }
+  return found;
 }
 
 /**

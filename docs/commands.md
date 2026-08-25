@@ -1419,8 +1419,8 @@ default model, and give any single agent its own model, its own recall or workin
 limits, its own recall provider, or a [cognition trace](#trace) when you want it to
 differ. The model settings live in `.asterism/config.json` and hold **only** which
 model to use — never an API key (keys stay in the
-[environment](./installation.md#api-keys)); the per-agent kernel settings are kept in
-the kernel store, scoped to each agent.
+[environment](./installation.md#api-keys)); the per-agent settings are kept in
+Asterism's local store, scoped to each agent.
 
 | Form | What it does |
 |---|---|
@@ -1664,10 +1664,9 @@ $ asterism dashboard
 
 The dashboard is a **thin client** — it holds no logic of its own. Every action is
 one request to a small local console endpoint that spans your agents, the same
-kernel-backed surface the CLI and [`serve`](#serve) use, so it inherits the exact
-same trust enforcement, destructive-action gate, and agent boundary. Reviewing
-memory needs a configured model (it runs reflection on demand); the rest works
-without one.
+surface the CLI and [`serve`](#serve) use, so it inherits the exact same trust
+enforcement, destructive-action gate, and agent boundary. Reviewing memory needs a
+configured model (it runs reflection on demand); the rest works without one.
 
 | Option | Default | Description |
 |---|---|---|

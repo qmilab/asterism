@@ -580,7 +580,28 @@ export function readLandingDir(workflowText, rel = ".github/workflows/docs.yml")
  * way and a checker that disagreed with it would be checking a different product.
  */
 export function publishedPackages() {
-  const dirs = [];
+  return publishedManifests()
+    .map(({ dir }) => dir)
+    .filter(Boolean);
+}
+
+/**
+ * The names npm publishes this repo under — `@qmilab/asterism`, `@qmilab/asterism-core`,
+ * and the rest.
+ *
+ * The same scan as {@link publishedPackages}, reading the other field, because a package's
+ * NAME is a thing copy is allowed to say where the component behind it is not: `adapter-pi`'s
+ * README is the npm page for `@qmilab/asterism-adapter-pi`, and its first line has to be that
+ * name. Derived rather than listed, so renaming a package cannot leave a stale spelling
+ * exempt from a rule that reads it.
+ */
+export function publishedPackageNames() {
+  return publishedManifests().map(({ name }) => name);
+}
+
+/** Every published manifest, as `{ dir, name }` — one scan, two questions. */
+function publishedManifests() {
+  const out = [];
   let listed;
   try {
     listed = execFileSync("git", ["ls-files", "-z", "--", "*package.json"], { cwd: ROOT, encoding: "utf8" });
@@ -595,9 +616,18 @@ export function publishedPackages() {
       refuse(`${rel} could not be parsed (${err.message}), so this cannot say whether npm publishes it.`);
     }
     if (manifest.private === true) continue;
-    dirs.push(rel === "package.json" ? "" : rel.slice(0, -"/package.json".length));
+    if (typeof manifest.name !== "string" || manifest.name === "") {
+      // npm cannot publish a manifest with no name, so this is a broken tree rather than one
+      // more package to skip — and skipping it quietly would leave whatever reads these names
+      // recognising one fewer of them, which is a false red on that package's own page.
+      refuse(`${rel} is published (it is not \`private\`) but declares no \`name\`.`);
+    }
+    out.push({
+      dir: rel === "package.json" ? "" : rel.slice(0, -"/package.json".length),
+      name: manifest.name,
+    });
   }
-  return dirs.filter(Boolean);
+  return out;
 }
 
 /**

@@ -1727,6 +1727,17 @@ function cmdApiAdd(parsed: ParsedArgs, io: CliIO): Promise<number> {
     io.err("asterism api add needs --credential <KEY> — which of the agent's stored credentials this endpoint sends.");
     return Promise.resolve(1);
   }
+  // A reserved key, refused HERE and in the product's own words. The kernel refuses it too
+  // — `bindEndpoint` throws, and that backstop is what actually protects the reserved
+  // namespace — but its message is written for an embedder and names the machine
+  // ("reserved for the kernel's own internal use"), and `io.err(err.message)` below puts it
+  // on a user's terminal verbatim. `secrets add` and `capabilities set` already answer the
+  // same mistake in plain English; this was the one route to a reserved key that did not.
+  // Refused before the store is opened, because the answer cannot depend on anything in it.
+  if (isReservedSecretKey(credential)) {
+    io.err(`The credential key "${credential}" is reserved for internal use — no endpoint can be bound to send it.`);
+    return Promise.resolve(1);
+  }
   return withHomeStore(io, (store) => {
     const agent = findAgentByName(store, name);
     if (!agent) return noAgent(io, name);

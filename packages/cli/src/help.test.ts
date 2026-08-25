@@ -5,6 +5,10 @@ import { AUTONOMY_HELP, COMMAND_HELP, USAGE } from "./help.ts";
 // one of it. See the test that uses it for why that matters.
 // @ts-expect-error — a checker's plain-JS helper, deliberately outside the package graph.
 import { gateOverclaims } from "../../../scripts/lib/gate-claims.mjs";
+// Golden rule 7's word list, shared with `check:docs` for the same reason and after the
+// same failure. See the test that uses it.
+// @ts-expect-error — a checker's plain-JS helper, deliberately outside the package graph.
+import { vocabularyLeaks } from "../../../scripts/lib/copy-vocabulary.mjs";
 import { formatStandingList } from "./format.ts";
 import { PROVIDER_DEFAULTS } from "./model-config.ts";
 
@@ -57,39 +61,31 @@ test("help describes the destructive-action gate, and which levels actually stop
   expect(AUTONOMY_HELP).toContain("propose");
 });
 
-test("no user-facing copy claims a destructive action pauses at EVERY trust level", () => {
-  // It does not: `propose` withholds the action and returns a plan — nothing is asked.
-  // The claim was false in eight places across the product and the docs at once, so it
-  // is guarded by shape rather than by remembering each site (`trust.ts` resolves
-  // destructive → "withhold" under propose, → "confirm" otherwise).
-  const allCopy = [USAGE, AUTONOMY_HELP, ...Object.values(COMMAND_HELP)].join("\n");
-  for (const sentence of allCopy.split(/(?<=[.:])\s+/)) {
-    // Any qualifier between the quantifier and "level" — `at every autonomy level` slipped
-    // through a version of this that only allowed the word "trust", and it was false in
-    // exactly the same way.
-    const universal =
-      /\b(at|for) (every|any|all)(\s+\w+)? levels?\b|regardless of (its )?trust/i.test(sentence);
-    const pauses = /\bpause|\bstops? and asks?|\basks? (you )?first|confirmation/i.test(sentence);
-    expect(
-      universal && pauses,
-      `copy claims a pause at every level, which is false at 'propose': ${sentence.trim()}`,
-    ).toBe(false);
-  }
-});
-
-test("no user-facing copy promises the destructive gate without its allow-list exception", () => {
-  // The mirror of the test above, and the reason both are here: correcting the `propose`
-  // overclaim (#139) is what wrote this one (#176 → #177). `decideGate` consults
-  // `autoApprove` BEFORE it decides to pause, and `run.ts` fills that set from earned
-  // standing grants — so an operator who accepted a `trust <agent> --review` grant on
-  // `fs.delete` gets deletions with no prompt, and copy that promises otherwise is wrong
-  // in the operator's favour right up until it matters.
+test("the CLI's help states the destructive-action gate no more widely than it fires", () => {
+  // Two ways one sentence can promise more than the gate delivers, and this product has
+  // shipped both:
   //
-  // The rule itself lives in `scripts/lib/gate-claims.mjs` and is shared with `check:docs`,
-  // which applies it to every page a user meets and to the help the binary actually PRINTS.
-  // One implementation on purpose: two guards for one sentence are how the correction for
-  // half of it shipped without the other half. This test is the fast half — it needs no
-  // build — and covers the constants those help screens are rendered from.
+  //   every-level    "a destructive action pauses at every trust level" — false at
+  //                  `propose`, which withholds the action and hands over a plan (#139).
+  //   no-exception   "even an `autonomous` agent pauses", with no mention of the
+  //                  allow-list — false for a capability the operator granted standing to,
+  //                  which `trust <agent> --review` really does (#176 → #177).
+  //
+  // The second was written by the correction for the first, which is why both live in ONE
+  // predicate — `scripts/lib/gate-claims.mjs`, shared with `check:docs`, which applies it to
+  // every page a user meets and to the help the binary actually PRINTS. This test is the
+  // fast half: it needs no build, and it covers the constants those help screens are
+  // rendered from.
+  //
+  // ⚠ There used to be a SECOND test here, hand-writing the `every-level` half in its own
+  // regexes — the guard #139 left behind, kept when #177 built the shared rule beside it.
+  // It had already drifted, exactly as one predicate in two spellings does. Measured before
+  // removing it: over the 61 sources both rules read, each fires zero times, so nothing live
+  // was resting on it — and it MISSED three shapes this one catches, two of them real
+  // defects #177 had to fix by hand (`whatever the agent's trust level`, `the gate holds at
+  // every level:` with the promise after the colon, and a row naming all three levels before
+  // promising a stop). What it caught and this does not is a level-wide pause promise with
+  // no destructive word anywhere in its block, which is not a claim about this gate.
   for (const [name, copy] of [
     ["USAGE", USAGE],
     ["AUTONOMY_HELP", AUTONOMY_HELP],
@@ -130,10 +126,33 @@ test("`trust show` does not promise a `propose` agent a pause it will never see"
   }
 });
 
-test("public copy carries no internal architecture vocabulary", () => {
-  const allCopy = [USAGE, AUTONOMY_HELP, ...Object.values(COMMAND_HELP)].join("\n");
-  for (const forbidden of [/\bkernel\b/i, /\badapter\b/i, /\bfirewall\b/i, /\bregistry\b/i, /\bsubstrate\b/i]) {
-    expect(allCopy).not.toMatch(forbidden);
+test("the CLI's help carries no internal architecture vocabulary", () => {
+  // Golden rule 7: public copy sells the behavioural outcome, not the architecture.
+  //
+  // This test used to BE the rule — five words, refused in the help constants, under the
+  // name "public copy". Golden rule 7 says "README, CLI help text, and any user-facing
+  // string", and the corpus was the second of those. So `kernel` sat in eight passages of
+  // published copy, the site's own front page among them, where a guard reading three
+  // string constants could not see it. The same shape as the destructive-gate test above,
+  // discovered by auditing that one as a category (#177 → #183).
+  //
+  // The rule now lives in `scripts/lib/copy-vocabulary.mjs` — with the sense each word is
+  // still ALLOWED in, which is the half a flat list could not express — and `check:docs`
+  // applies it to every page a user meets and to the help the binary actually PRINTS. One
+  // implementation on purpose. This is the fast half: it needs no build, and it covers the
+  // constants those help screens are rendered from.
+  //
+  // No package names are passed: a published package's name is legitimate on its own npm
+  // page, and nothing in the help has cause to name one.
+  for (const [name, copy] of [
+    ["USAGE", USAGE],
+    ["AUTONOMY_HELP", AUTONOMY_HELP],
+    ...Object.entries(COMMAND_HELP),
+  ] as [string, string][]) {
+    expect(
+      vocabularyLeaks(copy).map((f: { word: string; sentence: string }) => `${name}: [${f.word}] ${f.sentence}`),
+      `${name} names a part of the machine where it could name what the product does`,
+    ).toEqual([]);
   }
 });
 
