@@ -47,7 +47,7 @@
 // "manufactures defects" failure this file exists to avoid — to catch one site that cost six
 // words. The site was taken; the rule was not.
 
-import { blank, maskHiddenMarkup } from "./copy-text.mjs";
+import { blank, HIDDEN_FILLER, maskHiddenMarkup, wrappablePhrase } from "./copy-text.mjs";
 
 /**
  * The words, each with the sense it is allowed in.
@@ -57,10 +57,10 @@ import { blank, maskHiddenMarkup } from "./copy-text.mjs";
  * every entry carries the allowed sense next to the forbidden one, so the judgement is
  * written down where it fires instead of living in whoever last edited a page.
  *
- * `senses` are phrases masked out of the text BEFORE the word is looked for. They allow
- * `\s+` between words on purpose: markdown prose is hard-wrapped, so a phrase that sits on
- * one line today is split across two after the next rewrap, and a rule that could not read
- * across the break would fire on the orphaned half of a page that is correct.
+ * `senses` are phrases masked out of the text BEFORE the word is looked for, built with
+ * {@link wrappablePhrase} so that one hard wrap between the words is still the same phrase
+ * and a BLANK LINE is not — a paragraph break starts a new statement, and `\s+` spanning one
+ * masked a real claim out of existence.
  *
  * `firewall` used to be the fifth entry and is deliberately gone. **"The memory firewall"**
  * is what the product calls the thing, to the reader's face, in every surface that has one:
@@ -109,7 +109,7 @@ export const INTERNAL_VOCABULARY = [
     // meets that phrase everywhere. The forbidden one is the TOOL registry — the scoped list
     // of capabilities a run is handed.
     pattern: /\bregistr(?:y|ies)\b/gi,
-    senses: [/\bcontainer\s+registry\b/gi],
+    senses: [wrappablePhrase("container", "registry")],
     instead:
       "a container registry is fine; the tool registry is not — say which tools the agent has",
   },
@@ -181,6 +181,8 @@ function flatten(text) {
       const ch = ENTITIES[m.toLowerCase()] ?? "";
       return ch + " ".repeat(m.length - ch.length);
     })
+    // The filler a hidden line is left holding, out before anything reads or prints this.
+    .replace(new RegExp(HIDDEN_FILLER, "g"), " ")
     .replace(/[*_`>]/g, " ");
 }
 
@@ -245,11 +247,17 @@ export function vocabularyLeaks(text, { packageNames = [] } = {}) {
   // way, one word short of this. The self-test carries that URL as a fixture, so the choice
   // is falsifiable instead of merely explained.
   //
-  // `.` is not a boundary either, so a name ending a sentence is still a name.
+  // `.` is a boundary only when no name character follows it — see the lookahead below.
   const NAME_CHAR = "[A-Za-z0-9_-]";
   for (const name of [...packageNames].sort((a, b) => b.length - a.length)) {
     const literal = name.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
-    masked = mask(masked, new RegExp(`(?<!${NAME_CHAR})${literal}(?!${NAME_CHAR})`, "gi"));
+    // A DOT continues the token when a name character follows it and ends a sentence when
+    // one does not. `@qmilab/asterism-adapter-pi.next` is not a package this publishes, and
+    // treating its dot as a boundary blanked the real name out of the middle of it —
+    // `adapter` with it — so the leak went unreported. `Install …-adapter-pi.` at the end of
+    // a sentence is still the name. [Codex review R2 P2.]
+    const after = `(?!${NAME_CHAR}|\\.${NAME_CHAR})`;
+    masked = mask(masked, new RegExp(`(?<!${NAME_CHAR})${literal}${after}`, "gi"));
   }
   for (const { senses } of INTERNAL_VOCABULARY) {
     for (const sense of senses) masked = mask(masked, sense);

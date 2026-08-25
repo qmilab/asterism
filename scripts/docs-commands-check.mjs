@@ -2512,6 +2512,14 @@ function report(total, tally, groups, coverageWork) {
       ["says it in the visible text beside both",
         "<!-- a note -->\n<style>.x{}</style>\n<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.</p>",
         ["no-exception"]],
+      // Blanking a hidden region must not turn its lines into BLANK ones: a paragraph is one
+      // block, a blank line ends it, and a comment sitting between a guarantee and its
+      // `unless` clause inside one `<p>` closed the claim before the qualifier and reported
+      // correct copy as an unqualified promise. The browser shows one paragraph.
+      // [Codex review R2 P2.]
+      ["puts a multi-line comment between a guarantee and its `unless`, inside one paragraph",
+        "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n  a maintainer note about this section\n-->\nUnless you have allowed that capability for it.</p>",
+        []],
       ["makes a bare guarantee in prose right AFTER an Evidence block closes",
         '> **Evidence** — `bun test x.test.ts`\n> - "a real test title"\n\nEven an `autonomous` agent pauses for your confirmation before a destructive action.',
         ["no-exception"]],
@@ -2550,6 +2558,14 @@ function report(total, tally, groups, coverageWork) {
     if (JSON.stringify(twoLines) !== JSON.stringify([6, 8])) {
       gateFailures.push(`  two claims below a two-line comment were reported at ${JSON.stringify(twoLines)}, not [6,8]`);
     }
+    // The same for the gate rule's report — it shares the masking, so it shares the filler.
+    const inlineNote = gateOverclaims(
+      "<p>Even an <code>autonomous</code> agent <!-- inline note --> pauses before a <strong>destructive</strong> action.</p>",
+    )[0];
+    if (inlineNote?.sentence !== "Even an autonomous agent pauses before a destructive action.") {
+      gateFailures.push(`  a claim beside an inline comment was reported as ${JSON.stringify(inlineNote?.sentence)}`);
+    }
+
     // …and a very long sentence is cut rather than printed whole, or one bad page fills the
     // terminal and the rest of the report scrolls away.
     const longOne = gateOverclaims(
@@ -2665,6 +2681,19 @@ function report(total, tally, groups, coverageWork) {
       ["names a package-ish token that only starts with a published name",
         "See @qmilab/asterism-adapter-pipeline for the experimental build.",
         ["adapter"]],
+      // …and the same shape one character narrower. A dot CONTINUES the token when a name
+      // character follows it, which is what makes `…-adapter-pi.next` not a published name;
+      // the row below keeps a dot that ends a sentence from being read the same way.
+      // [Codex review R2 P2.]
+      ["extends a published name through a dot",
+        "See @qmilab/asterism-adapter-pi.next for the experimental build.",
+        ["adapter"]],
+      // ⚠ This row was inert first time round: it wrapped the name in backticks, so the
+      // character after it was a backtick and the sentence-ending DOT — the whole point of
+      // the row — was never exercised. A mutation making a dot never end a name survived it.
+      ["ends a sentence with a published name",
+        "Install @qmilab/asterism-adapter-pi. Then point the CLI at it.",
+        []],
       ["uses a plural",
         "Two kernels, two substrates, two registries, two adapters.",
         ["adapter", "kernel", "registry", "substrate"]],
@@ -2693,6 +2722,13 @@ function report(total, tally, groups, coverageWork) {
       // on a flattened copy rather than on the raw text: `container <em>registry</em>` is
       // one phrase to a reader and two strings to a matcher, and the site's front page is
       // hand-written HTML throughout.
+      // …but ONE wrap is the whole allowance. `\s+` between the words spans a blank line too,
+      // so a heading `## Container` followed by a paragraph opening `Registry …` masked a
+      // real claim out of existence — the exemption swallowing a sentence rather than a
+      // phrase. [Codex review R2 P2.]
+      ["puts `Container` and `Registry` in two different blocks",
+        "## Container\n\nRegistry controls the tool list an agent is handed.",
+        ["registry"]],
       ["names one with emphasis between the two words",
         "The released image is published to the GitHub **Container** Registry.",
         []],
@@ -2804,6 +2840,14 @@ function report(total, tally, groups, coverageWork) {
     )[0];
     if (htmlFinding?.sentence !== "enforced by the kernel, not the OS — see the threat model") {
       vocabFailures.push(`  an HTML finding was reported as ${JSON.stringify(htmlFinding?.sentence)}`);
+    }
+
+    // The filler a hidden region leaves behind must never reach a REPORT. It exists only so
+    // that blanking a comment cannot split a visible paragraph; a reader searching the page
+    // for the sentence this quotes would not find it with a NUL in the middle.
+    const inlineComment = vocabularyLeaks("<p>enforced by the kernel</p> <!-- maintainer note -->")[0];
+    if (inlineComment?.sentence !== "enforced by the kernel") {
+      vocabFailures.push(`  a finding beside an inline comment was reported as ${JSON.stringify(inlineComment?.sentence)}`);
     }
 
     // A package name is matched LITERALLY. Every name this repo publishes today is free of

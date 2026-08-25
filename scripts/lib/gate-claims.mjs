@@ -43,7 +43,7 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
-import { maskHiddenMarkup } from "./copy-text.mjs";
+import { HIDDEN_FILLER, maskHiddenMarkup } from "./copy-text.mjs";
 
 /**
  * Strip the typography and read the CLAIM.
@@ -59,6 +59,10 @@ import { maskHiddenMarkup } from "./copy-text.mjs";
  */
 export function plainClaim(text) {
   return text
+    // The filler a masked-out comment or stylesheet leaves on each of its lines, so that a
+    // hidden region cannot split a visible paragraph. Out before anything is matched or
+    // printed. See `copy-text.mjs`.
+    .replace(new RegExp(HIDDEN_FILLER, "g"), " ")
     .replace(/<\/?[a-z][^>]*>/gi, " ")
     .replace(/&mdash;/g, "—")
     .replace(/&nbsp;/g, " ")
