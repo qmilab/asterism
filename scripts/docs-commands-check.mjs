@@ -64,6 +64,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import { gateOverclaims, GATE_RULE_ADVICE, TRUST_LEVEL_NAMES } from "./lib/gate-claims.mjs";
+import { codeRanges } from "./lib/copy-text.mjs";
 import {
   vocabularyLeaks,
   isVocabularyExempt,
@@ -2908,6 +2909,33 @@ function report(total, tally, groups, coverageWork) {
       // …and `content` is a meta tag's attribute. RDFa puts one on ordinary elements, where it
       // OVERRIDES the visible text for a metadata consumer rather than being shown — the
       // reader meets the element's text, which is scanned anyway.
+      // A backtick in HTML is a backtick. Reading it as a code span preserved the comment
+      // beside it and reported words no reader meets. [Codex review R7 P2.]
+      ["writes backticks around a comment on an HTML page",
+        "<p>Type `<!-- the kernel -->` to hide a note.</p>",
+        [], { kind: "html" }],
+      // HTML allows an unquoted attribute value, and a screen reader still reads it out.
+      // [Codex review R7 P2.]
+      ["writes its alt text without quotes",
+        "<img src=dashboard.png alt=kernel>",
+        ["kernel"], { kind: "html" }],
+      // A backtick on an HTML page is a backtick, for TAGS as well as comments: the class
+      // inside this one is not on the screen, and reading the backticks as a code span would
+      // preserve the tag and report it.
+      // …and in HTML a tag MAY span a blank line: there is no paragraph to end, so the class
+      // stays inside the tag and out of sight. The markdown rule must not follow it here.
+      ["breaks a tag across a blank line on an HTML page",
+        '<div\n\nclass="kernel-box">Agents run alone.</div>',
+        [], { kind: "html" }],
+      ["writes backticks around a tag on an HTML page",
+        '<p>Type `<div class="kernel-box">` to open one.</p>',
+        [], { kind: "html" }],
+      // `data-name` is not `name`. The `\b` that let it through is the bug R4 fixed in the
+      // attribute reader, left standing in the meta-key reader written to use it.
+      // [Codex review R7 P2.]
+      ["puts an asset path beside a data-name that only looks like a key",
+        '<meta data-name="description" content="https://x/adapter-card.png">',
+        [], { kind: "html" }],
       ["carries an RDFa `content` override on an ordinary element",
         '<span property="og:title" content="the kernel decides">Asterism</span>',
         [], { kind: "html" }],
@@ -2922,6 +2950,29 @@ function report(total, tally, groups, coverageWork) {
       // word rule already treats a fence as copy. [Codex review R3 P2.]
       ["shows hidden markup inside a fenced example, where a reader reads it",
         "```html\n<!-- the kernel decides what it may do -->\n```",
+        ["kernel"]],
+      // …and an inline span may WRAP. Python-Markdown renders it as one `<code>` across two
+      // lines, so every character is still on the screen; excluding newlines from the span
+      // reader turned it back into a comment and erased it. Asked the renderer.
+      // [Codex review R7 P2.]
+      // A blank line ends the paragraph, and with it the span AND the comment: the renderer
+      // escapes the markers and puts `kernel` on the screen. Found by chasing a surviving
+      // mutation to the renderer rather than reported.
+      ["puts a blank line inside what looked like a code span",
+        "Write `<!-- the\n\nkernel decides -->` here.",
+        ["kernel"]],
+      // …while a BLOCK comment may hold a blank line and stays a comment. The renderer says
+      // so; the two cases differ only in where the region starts.
+      // …and the same for a TAG. The renderer escapes what a blank line leaves behind, so the
+      // class is visible text. Found by chasing a surviving mutation, not reported.
+      ["puts a blank line inside what looked like a tag",
+        'Type `<div\n\nclass="kernel-box">` to open one.',
+        ["kernel"]],
+      ["puts a blank line inside a block comment, which survives it",
+        "Text.\n\n<!--\nnote\n\nthe kernel decides\n-->\n\nMore text.",
+        []],
+      ["shows hidden markup in a code span that wraps across a line",
+        "Write `<!-- the\nkernel decides -->` at the top.",
         ["kernel"]],
       ["shows it in an inline code span",
         "Write `<!-- the kernel -->` at the top of the file.",
@@ -2987,6 +3038,16 @@ function report(total, tally, groups, coverageWork) {
         ["kernel"]],
       // …but a link's optional TITLE is not part of its destination: markdown renders it as a
       // tooltip, so a reader meets it. [Codex review R6 P2.]
+      // Markdown allows balanced parentheses in a destination — the renderer takes the whole
+      // thing as the URL. Stopping at the first `)` left the tail standing as prose.
+      // [Codex review R7 P2.]
+      ["links to a path with parentheses in it",
+        "See [the detail](./foo(bar)-kernel-notes.md) for more.",
+        []],
+      // …and a `](` with no closing paren is not a link, so the words after it are prose.
+      ["opens a destination it never closes",
+        "See [the detail](./a.md#kernel-notes and more prose after it.",
+        ["kernel"]],
       ["puts the word in a link's tooltip title",
         'See [the threat model](./threat-model.md#detail "what the kernel enforces").',
         ["kernel"]],
@@ -3070,15 +3131,38 @@ function report(total, tally, groups, coverageWork) {
       vocabFailures.push(`  an HTML finding was reported as ${JSON.stringify(htmlFinding?.sentence)}`);
     }
 
+    // The code-span reader itself, because everything downstream now keeps the same blank-line
+    // rule and no page-level input can tell the two apart. A span may WRAP and may not span a
+    // BLANK line — the renderer escapes the backticks there and puts the text on the screen.
+    for (const [why, text, want] of [
+      ["a span that wraps once", "Write `<!-- the\nkernel -->` here.", 1],
+      ["a span split by a blank line", "Write `<!-- the\n\nkernel -->` here.", 0],
+      ["a span on one line", "Write `<!-- kernel -->` here.", 1],
+    ]) {
+      const got = codeRanges(text).length;
+      if (got !== want) vocabFailures.push(`  ${why} gave ${got} code range(s), not ${want}`);
+    }
+
     // An attribute value is put back at ITS offset inside the blanked tag, not at the offset
     // of the attribute NAME. The two differ by five characters and nothing notices — until a
     // tag wraps and the value sits on the next line, when the difference is the line number
     // the report sends the reader to. Every other fixture here has a one-line tag.
-    const wrappedTag = vocabularyLeaks(
-      ["<img", '  src="dashboard.png"', "  alt=", '       "The dashboard, where the kernel decides.">'].join("\n"),
-    ).map((f) => `${f.line}:${f.word}`);
-    if (JSON.stringify(wrappedTag) !== JSON.stringify(["4:kernel"])) {
-      vocabFailures.push(`  a word in a wrapped tag's alt text was reported at ${JSON.stringify(wrappedTag)}, not ["4:kernel"]`);
+    for (const [why, lines] of [
+      ["quoted", ["<img", '  src="dashboard.png"', "  alt=", '       "The dashboard, where the kernel decides.">']],
+      // …and UNQUOTED, where the value has no closing quote to count back from and the
+      // arithmetic is one character different. [Codex review R7 P2.]
+      // …at COLUMN 0, where being one character out writes over the newline itself and the
+      // finding moves to the line above. Indented, the same error is invisible.
+      ["unquoted", ["<img", "  src=dashboard.png", "  alt=", "kernel>"]],
+    ]) {
+      const wrappedTag = vocabularyLeaks(lines.join("\n"), { kind: "html" }).map(
+        (f) => `${f.line}:${f.word}`,
+      );
+      if (JSON.stringify(wrappedTag) !== JSON.stringify(["4:kernel"])) {
+        vocabFailures.push(
+          `  a word in a wrapped tag's ${why} alt text was reported at ${JSON.stringify(wrappedTag)}, not ["4:kernel"]`,
+        );
+      }
     }
 
     // The filler a hidden region leaves behind must never reach a REPORT. It exists only so

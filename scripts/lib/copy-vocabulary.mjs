@@ -182,7 +182,7 @@ function flatten(text, kind) {
   // Code ranges come from the ORIGINAL text and are shared by both steps: a fence survives
   // hidden-markup masking, and the tag inside it has to survive tag-blanking too.
   const masked = maskLinkDestinations(maskHiddenMarkup(text, { kind }), { kind });
-  return blankTags(masked, codeRanges(masked), { kind })
+  return blankTags(masked, codeRanges(masked, { kind }), { kind })
     // …and `blankTags` keeps what a reader meets without viewing source: `alt`, `title`,
     // `aria-label`, and a `<meta>` `content`. Blanking the whole tag hid the landing page's
     // Open Graph description, which is marketing copy in a social preview.

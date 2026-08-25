@@ -83,12 +83,20 @@ function blankHiddenHtml(span) {
  * styled notes as "code", to protect none that exist. [Codex review R4 P2, taken as the
  * measurement and not as the change.]
  */
-export function codeRanges(text) {
+export function codeRanges(text, { kind = "markdown" } = {}) {
+  // Only markdown has them. A backtick in HTML is a backtick — `<p>`<!-- x -->`</p>` shows
+  // the reader two backticks and hides the comment — and treating it as a code span
+  // preserved the comment and reported words no reader meets. [Codex review R7 P2.]
+  if (kind !== "markdown") return [];
   const ranges = [];
   for (const m of text.matchAll(/^[ \t]*(`{3,}|~{3,})[\s\S]*?^[ \t]*\1[ \t]*$/gm)) {
     ranges.push([m.index, m.index + m[0].length]);
   }
-  for (const m of text.matchAll(/`+[^`\n]*`+/g)) {
+  // An inline span MAY wrap: Python-Markdown renders `` `<!-- the\nkernel -->` `` as
+  // `<code>&lt;!-- the\nkernel --&gt;</code>`, visible code across two lines. What it may not
+  // contain is a blank line, which ends the paragraph. Asked the renderer.
+  // [Codex review R7 P2.]
+  for (const m of text.matchAll(/`+(?:[^`\n]|\n(?![ \t]*\n))*`+/g)) {
     if (!inRanges(m.index, ranges)) ranges.push([m.index, m.index + m[0].length]);
   }
   return ranges;
@@ -136,14 +144,25 @@ export function maskHiddenMarkup(text, { kind = "markdown" } = {}) {
   // <adapter>` came to be erased as if it were a tag, in the very corpus this rule started
   // from. [Codex review R5 P2.]
   if (kind === "plain") return text;
-  const code = codeRanges(text);
+  const code = codeRanges(text, { kind });
   return text.replace(HIDDEN_REGION, (region, at) => {
     // Only the OPENER's position counts. A `<script>` whose body contains a backtick — a
     // template literal, say — makes `codeRanges` see an inline span INSIDE the script, and an
     // overlap test would then preserve the whole script and report words no reader sees.
     // [Codex review R4 P2.]
     if (inRanges(at, code)) return region;
-    return startsABlock(text, at, kind) ? blank(region) : blankHiddenHtml(region);
+    const block = startsABlock(text, at, kind);
+    // An INLINE hidden region may not span a blank line, and this is the renderer's answer
+    // rather than a guess. Asked directly:
+    //
+    //   'claim <!--\nnote\n--> unless'        → <p>claim <!--\nnote\n--> unless</p>
+    //   'claim <!--\nnote\n\nmore\n--> unless' → <p>claim &lt;!--\nnote</p><p>more\n--&gt; …</p>
+    //
+    // The second is not a comment at all: the blank line ends the paragraph and the markers
+    // render as literal text, so `more` is on the screen. A BLOCK comment may hold a blank
+    // line and stays a comment. Masking the inline one erased words a reader meets.
+    if (kind === "markdown" && !block && /\n[ \t]*\n/.test(region)) return region;
+    return block ? blank(region) : blankHiddenHtml(region);
   });
 }
 
@@ -184,7 +203,7 @@ function startsABlock(text, at, kind) {
  */
 export function maskLinkDestinations(text, { kind = "markdown" } = {}) {
   if (kind !== "markdown") return text;
-  const code = codeRanges(text);
+  const code = codeRanges(text, { kind });
   // The optional TITLE is not part of the destination — `[text](url "the kernel decides")`
   // renders that string as a tooltip, so a reader meets it. Only the URL goes.
   // [Codex review R6 P2.]
@@ -192,10 +211,7 @@ export function maskLinkDestinations(text, { kind = "markdown" } = {}) {
     const [, lead, url, rest] = /^(\s*)(<[^>\n]*>|\S*)([\s\S]*)$/.exec(payload);
     return `${lead}${blank(url)}${rest}`;
   };
-  return text
-    .replace(/\]\(([^)\n]*)\)/g, (whole, payload, at) =>
-      inRanges(at, code) ? whole : `](${maskDestinationOnly(payload)})`,
-    )
+  return maskInlineDestinations(text, code, maskDestinationOnly)
     // …and a reference definition, whose line is a destination and may carry a title too.
     .replace(/^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(\S.*)$/gm, (whole, head, payload, at) =>
       inRanges(at, code) ? whole : head + maskDestinationOnly(payload),
@@ -219,7 +235,7 @@ export function maskLinkDestinations(text, { kind = "markdown" } = {}) {
  * The rest of the tag goes: an element name, a class, an href are not sentences.
  */
 const VISIBLE_ATTRIBUTE =
-  /(?<![-\w])(alt|title|aria-label|content)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+  /(?<![-\w])(alt|title|aria-label|content)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
 
 /**
  * A `<meta>` tag's `content` is TEXT only when the key beside it names text.
@@ -238,8 +254,12 @@ const TEXTUAL_META_KEY = /(?:^|:)(?:description|title|alt|site_name|author|keywo
 /** Whether this tag's `content` attribute holds a sentence rather than a URL or a number. */
 function contentIsText(tag) {
   if (!/^<meta\b/i.test(tag)) return false;
-  const key = /\b(?:name|property)\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
-  return TEXTUAL_META_KEY.test((key?.[1] ?? key?.[2] ?? "").trim());
+  // `(?<![-\w])`, not `\b` — the boundary `VISIBLE_ATTRIBUTE` already uses. With `\b`,
+  // `data-name="description"` matched as `name` and an asset path in the `content` beside it
+  // was read as a page description. The same bug as R4's, in the sibling written to fix it.
+  // [Codex review R7 P2.]
+  const key = /(?<![-\w])(?:name|property)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i.exec(tag);
+  return TEXTUAL_META_KEY.test((key?.[1] ?? key?.[2] ?? key?.[3] ?? "").trim());
 }
 
 /**
@@ -267,15 +287,23 @@ export function blankTags(text, code = codeRanges(text), { kind = "markdown" } =
   if (kind === "plain") return text;
   return text.replace(TAG, (tag, at) => {
     if (inRanges(at, code)) return tag;
+    // In markdown a tag may not span a BLANK line: the paragraph ends there, and the renderer
+    // escapes what is left. `Type \`<div\n\nclass="kernel-box">\`` comes back as
+    // `<p>Type \`&lt;div</p><p>class="kernel-box"&gt;\` here.</p>` — the class is on the
+    // screen. Blanking it as one tag erased a word a reader meets. The same rule the comment
+    // reader and the code-span reader keep, in the third place it applies.
+    if (kind === "markdown" && /\n[ \t]*\n/.test(tag)) return tag;
     let out = blank(tag);
     const keepsContent = contentIsText(tag);
     for (const m of tag.matchAll(VISIBLE_ATTRIBUTE)) {
       if (m[1].toLowerCase() === "content" && !keepsContent) continue;
-      const value = m[2] ?? m[3] ?? "";
+      // …quoted or not: HTML allows `<img alt=kernel>`, and a screen reader reads it out.
+      // [Codex review R7 P2.]
+      const value = m[2] ?? m[3] ?? m[4] ?? "";
       // The value's offset inside the tag: the whole match, less the closing quote and the
       // value itself. Using the attribute NAME's offset instead is five characters out, and
       // nothing notices until a tag wraps and the value lands on the next line.
-      const valueAt = m.index + m[0].length - value.length - 1;
+      const valueAt = m.index + m[0].length - value.length - (m[4] === undefined ? 1 : 0);
       out = out.slice(0, valueAt) + value + out.slice(valueAt + value.length);
     }
     return out;
@@ -300,4 +328,37 @@ export function blankTags(text, code = codeRanges(text), { kind = "markdown" } =
  */
 export function wrappablePhrase(...words) {
   return new RegExp(`\\b${words.join("[^\\S\\n]*\\n?[^\\S\\n]*")}\\b`, "gi");
+}
+
+/**
+ * `](…)` payloads, found by BALANCING the parentheses rather than stopping at the first `)`.
+ *
+ * Markdown allows them: `[detail](./foo(bar)-kernel.md)` renders as
+ * `<a href="./foo(bar)-kernel.md">`, one URL. Stopping at the first `)` left `-kernel.md`
+ * standing as prose and reported a page that is correct. A backslash escapes the next
+ * character, and a payload that runs to the end of its line is not a link at all.
+ * [Codex review R7 P2.]
+ */
+function maskInlineDestinations(text, code, maskPayload) {
+  let out = "";
+  let from = 0;
+  for (let i = 0; i < text.length - 1; i++) {
+    if (text[i] !== "]" || text[i + 1] !== "(") continue;
+    let depth = 1;
+    let j = i + 2;
+    for (; j < text.length && depth > 0; j++) {
+      const ch = text[j];
+      if (ch === "\\") j++;
+      else if (ch === "\n") break;
+      else if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+    }
+    if (depth !== 0) continue;
+    const payload = text.slice(i + 2, j - 1);
+    out += text.slice(from, i + 2);
+    out += inRanges(i, code) ? payload : maskPayload(payload);
+    from = j - 1;
+    i = j - 2;
+  }
+  return out + text.slice(from);
 }
