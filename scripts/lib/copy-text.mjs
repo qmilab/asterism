@@ -185,13 +185,20 @@ function startsABlock(text, at, kind) {
 export function maskLinkDestinations(text, { kind = "markdown" } = {}) {
   if (kind !== "markdown") return text;
   const code = codeRanges(text);
+  // The optional TITLE is not part of the destination — `[text](url "the kernel decides")`
+  // renders that string as a tooltip, so a reader meets it. Only the URL goes.
+  // [Codex review R6 P2.]
+  const maskDestinationOnly = (payload) => {
+    const [, lead, url, rest] = /^(\s*)(<[^>\n]*>|\S*)([\s\S]*)$/.exec(payload);
+    return `${lead}${blank(url)}${rest}`;
+  };
   return text
-    .replace(/\]\(([^)\n]*)\)/g, (whole, dest, at) =>
-      inRanges(at, code) ? whole : `](${blank(dest)})`,
+    .replace(/\]\(([^)\n]*)\)/g, (whole, payload, at) =>
+      inRanges(at, code) ? whole : `](${maskDestinationOnly(payload)})`,
     )
-    // …and a reference definition, whose whole line is a destination.
-    .replace(/^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(\S.*)$/gm, (whole, head, dest, at) =>
-      inRanges(at, code) ? whole : head + blank(dest),
+    // …and a reference definition, whose line is a destination and may carry a title too.
+    .replace(/^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(\S.*)$/gm, (whole, head, payload, at) =>
+      inRanges(at, code) ? whole : head + maskDestinationOnly(payload),
     );
 }
 
@@ -212,7 +219,28 @@ export function maskLinkDestinations(text, { kind = "markdown" } = {}) {
  * The rest of the tag goes: an element name, a class, an href are not sentences.
  */
 const VISIBLE_ATTRIBUTE =
-  /(?<![-\w])(?:alt|title|aria-label|content)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+  /(?<![-\w])(alt|title|aria-label|content)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+
+/**
+ * A `<meta>` tag's `content` is TEXT only when the key beside it names text.
+ *
+ * `landing/index.html` carries sixteen meta tags and eleven of them hold something a reader
+ * never reads as a sentence: `og:image` and `twitter:image` are URLs, `og:image:width` is
+ * `1200`, `theme-color` is a hex colour, `og:type` is `website`. Scanning those means an
+ * ordinary asset rename — `/adapter-card.png` — reds the build over a path.
+ * [Codex review R6 P2.]
+ *
+ * Matched on what the key ENDS with, so the `og:` and `twitter:` prefixes need no list of
+ * their own and `og:image:alt` — which really is alt text, for the social card — is kept.
+ */
+const TEXTUAL_META_KEY = /(?:^|:)(?:description|title|alt|site_name|author|keywords)$/i;
+
+/** Whether this tag's `content` attribute holds a sentence rather than a URL or a number. */
+function contentIsText(tag) {
+  if (!/^<meta\b/i.test(tag)) return false;
+  const key = /\b(?:name|property)\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+  return TEXTUAL_META_KEY.test((key?.[1] ?? key?.[2] ?? "").trim());
+}
 
 /**
  * A tag, read the way a parser reads one: a `>` inside a quoted attribute does not end it.
@@ -240,8 +268,10 @@ export function blankTags(text, code = codeRanges(text), { kind = "markdown" } =
   return text.replace(TAG, (tag, at) => {
     if (inRanges(at, code)) return tag;
     let out = blank(tag);
+    const keepsContent = contentIsText(tag);
     for (const m of tag.matchAll(VISIBLE_ATTRIBUTE)) {
-      const value = m[1] ?? m[2] ?? "";
+      if (m[1].toLowerCase() === "content" && !keepsContent) continue;
+      const value = m[2] ?? m[3] ?? "";
       // The value's offset inside the tag: the whole match, less the closing quote and the
       // value itself. Using the attribute NAME's offset instead is five characters out, and
       // nothing notices until a tag wraps and the value lands on the next line.

@@ -2892,6 +2892,25 @@ function report(total, tally, groups, coverageWork) {
       ["hides the word in an image's alt text",
         "<img src=\"assets/img/dashboard.png\" alt=\"The dashboard, where the kernel decides.\">",
         ["kernel"], { kind: "html" }],
+      // …but eleven of the landing page's sixteen meta tags hold a URL, a number or a colour,
+      // and scanning those means an asset rename reds the build over a path.
+      // [Codex review R6 P2.]
+      ["puts an internal word in a social-card image URL",
+        '<meta property="og:image" content="https://qmilab.com/adapter-card.png" />',
+        [], { kind: "html" }],
+      ["puts one in a page URL and a theme colour",
+        '<meta property="og:url" content="https://x/registry/" />\n<meta name="theme-color" content="#1B2A4A" />',
+        [], { kind: "html" }],
+      // …and the social card's ALT text is still text, prefix and all.
+      ["puts one in the social card's alt text",
+        '<meta property="og:image:alt" content="The kernel diagram" />',
+        ["kernel"], { kind: "html" }],
+      // …and `content` is a meta tag's attribute. RDFa puts one on ordinary elements, where it
+      // OVERRIDES the visible text for a metadata consumer rather than being shown — the
+      // reader meets the element's text, which is scanned anyway.
+      ["carries an RDFa `content` override on an ordinary element",
+        '<span property="og:title" content="the kernel decides">Asterism</span>',
+        [], { kind: "html" }],
       ["hides it in the Open Graph description a social preview shows",
         "<meta property=\"og:description\" content=\"Agents whose boundary the kernel enforces.\" />",
         ["kernel"], { kind: "html" }],
@@ -2965,6 +2984,14 @@ function report(total, tally, groups, coverageWork) {
       // and nothing exercised it until a mutation said so.)
       ["writes the URL as an autolink, which renders as its own text",
         "Read <https://example.com/the-kernel-notes> for the detail.",
+        ["kernel"]],
+      // …but a link's optional TITLE is not part of its destination: markdown renders it as a
+      // tooltip, so a reader meets it. [Codex review R6 P2.]
+      ["puts the word in a link's tooltip title",
+        'See [the threat model](./threat-model.md#detail "what the kernel enforces").',
+        ["kernel"]],
+      ["puts it in a reference definition's title",
+        'See [the model][tm].\n\n[tm]: ./threat-model.md#detail "what the kernel enforces"',
         ["kernel"]],
       ["names it in the words the link is written on",
         "See [what the kernel enforces](./threat-model.md#detail) for the detail.",
