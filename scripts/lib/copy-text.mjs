@@ -96,8 +96,16 @@ export function codeRanges(text, { kind = "markdown" } = {}) {
   // `<code>&lt;!-- the\nkernel --&gt;</code>`, visible code across two lines. What it may not
   // contain is a blank line, which ends the paragraph. Asked the renderer.
   // [Codex review R7 P2.]
-  for (const m of text.matchAll(/`+(?:[^`\n]|\n(?![ \t]*\n))*`+/g)) {
-    if (!inRanges(m.index, ranges)) ranges.push([m.index, m.index + m[0].length]);
+  // Scanned with the FENCES already blanked, not filtered afterwards. A stray backtick inside
+  // a fence would otherwise start a match that runs on and swallows the opening backtick of a
+  // real span below it — the match is then discarded for starting inside a fence, and the
+  // span it ate is never recorded. [Codex review R8 P2.]
+  let outsideFences = text;
+  for (const [a, b] of ranges) {
+    outsideFences = outsideFences.slice(0, a) + blank(text.slice(a, b)) + outsideFences.slice(b);
+  }
+  for (const m of outsideFences.matchAll(/`+(?:[^`\n]|\n(?![ \t]*\n))*`+/g)) {
+    ranges.push([m.index, m.index + m[0].length]);
   }
   return ranges;
 }
@@ -344,14 +352,29 @@ function maskInlineDestinations(text, code, maskPayload) {
   let from = 0;
   for (let i = 0; i < text.length - 1; i++) {
     if (text[i] !== "]" || text[i + 1] !== "(") continue;
+    // `\](…)` is not a link — the bracket is escaped, so the renderer shows the whole thing
+    // and the words in it are copy. Nor is a `](` with no `[` opening it on the same line.
+    // [Codex review R8 P2.]
+    if (isEscaped(text, i) || !opensALink(text, i)) continue;
     let depth = 1;
     let j = i + 2;
-    for (; j < text.length && depth > 0; j++) {
-      const ch = text[j];
-      if (ch === "\\") j++;
-      else if (ch === "\n") break;
-      else if (ch === "(") depth++;
-      else if (ch === ")") depth--;
+    // An ANGLE destination is delimited, not balanced: `[x](<https://e.test/foo(kernel>)` is
+    // one URL, and counting that `(` left the real closing paren unmatched — so a URL a
+    // reader never sees was reported. [Codex review R8 P2.]
+    if (text[i + 2] === "<") {
+      const close = text.indexOf(">", i + 3);
+      const nl = text.indexOf("\n", i + 2);
+      if (close < 0 || (nl >= 0 && nl < close) || text[close + 1] !== ")") continue;
+      j = close + 2;
+      depth = 0;
+    } else {
+      for (; j < text.length && depth > 0; j++) {
+        const ch = text[j];
+        if (ch === "\\") j++;
+        else if (ch === "\n") break;
+        else if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+      }
     }
     if (depth !== 0) continue;
     const payload = text.slice(i + 2, j - 1);
@@ -361,4 +384,61 @@ function maskInlineDestinations(text, code, maskPayload) {
     i = j - 2;
   }
   return out + text.slice(from);
+}
+
+/** Is the character at `at` preceded by an odd number of backslashes? */
+function isEscaped(text, at) {
+  let slashes = 0;
+  while (at - 1 - slashes >= 0 && text[at - 1 - slashes] === "\\") slashes++;
+  return slashes % 2 === 1;
+}
+
+/** Does an unescaped `[` open a link this `]` could close, on the same line? */
+function opensALink(text, at) {
+  for (let k = at - 1; k >= 0 && text[k] !== "\n"; k--) {
+    if (text[k] === "[" && !isEscaped(text, k)) return true;
+  }
+  return false;
+}
+
+/**
+ * The entities this repo's hand-written HTML uses, kept as CHARACTERS and padded back out to
+ * the length they had.
+ *
+ * A named one is a table lookup. A NUMERIC one is just a letter written the long way —
+ * `ker&#110;el` is `kernel` on the screen, and `&#x6e;` is the same letter in hexadecimal —
+ * so it is decoded, or a forbidden word could be spelled past this rule one character at a
+ * time. [Codex review R8 P2.]
+ *
+ * One implementation, because there were two: a table here and three hard-coded replacements
+ * in the gate rule's `plainClaim`, neither knowing about numbers. That is the shape this file
+ * exists to stop.
+ */
+const NAMED_ENTITIES = {
+  "&mdash;": "\u2014",
+  "&ndash;": "\u2013",
+  "&hellip;": "\u2026",
+  "&amp;": "&",
+  "&quot;": '"',
+  "&nbsp;": " ",
+};
+
+export function decodeEntities(text) {
+  return text.replace(/&[a-z]+;|&#\d+;|&#x[0-9a-f]+;/gi, (m) => {
+    const numeric = /^&#(x)?([0-9a-f]+);$/i.exec(m);
+    let ch;
+    if (numeric) {
+      const code = Number.parseInt(numeric[2], numeric[1] ? 16 : 10);
+      ch = Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
+    } else {
+      ch = NAMED_ENTITIES[m.toLowerCase()] ?? " ";
+    }
+    // A newline would change how many LINES the text has, which is the one thing every
+    // caller here counts on; nothing else does. So this does NOT pad the decoded character
+    // back out to the entity's length — padding is what kept `ker&#110;el` from reading as
+    // one word, since the `n` arrived followed by five spaces. Length has never been the
+    // invariant: a line number is a count of newlines, and the line a report quotes is
+    // looked up by index. This runs last, after everything that compares offsets.
+    return ch === "\n" || ch === "\r" ? " " : ch;
+  });
 }

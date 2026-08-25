@@ -2553,6 +2553,12 @@ function report(total, tally, groups, coverageWork) {
         ["no-exception"]],
       // The same attribute values the vocabulary rule reads: a gate promise in an Open Graph
       // description is a promise made to everyone who sees the link previewed.
+      // Backticks on an HTML page are not code spans, and taking them for some preserved the
+      // tag between them — putting an `unless` from a CLASS NAME into the claim's window,
+      // where it excused an unqualified promise. [Codex review R8 P2.]
+      ["writes backticks around a tag whose class reads like a qualifier",
+        '<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action. Type `<span class="unless you have allowed it">` to style one.</p>',
+        ["no-exception"], { kind: "html" }],
       ["makes a bare guarantee in the description a social preview shows",
         "<meta property=\"og:description\" content=\"A destructive action never happens without you.\" />",
         ["no-exception"]],
@@ -2924,6 +2930,14 @@ function report(total, tally, groups, coverageWork) {
       // preserve the tag and report it.
       // …and in HTML a tag MAY span a blank line: there is no paragraph to end, so the class
       // stays inside the tag and out of sight. The markdown rule must not follow it here.
+      // A numeric entity is a letter written the long way, and the browser shows the word.
+      // [Codex review R8 P2.]
+      ["spells a forbidden word through a numeric entity",
+        "<p>ker&#110;el decides what it may do</p>",
+        ["kernel"], { kind: "html" }],
+      ["spells one through a hexadecimal entity",
+        "<p>ker&#x6E;el decides what it may do</p>",
+        ["kernel"], { kind: "html" }],
       ["breaks a tag across a blank line on an HTML page",
         '<div\n\nclass="kernel-box">Agents run alone.</div>',
         [], { kind: "html" }],
@@ -2958,6 +2972,11 @@ function report(total, tally, groups, coverageWork) {
       // A blank line ends the paragraph, and with it the span AND the comment: the renderer
       // escapes the markers and puts `kernel` on the screen. Found by chasing a surviving
       // mutation to the renderer rather than reported.
+      // A stray backtick inside a fence must not start a match that swallows the opening
+      // backtick of a real span below it. [Codex review R8 P2.]
+      ["opens a real code span below a fence holding one stray backtick",
+        "~~~\nno closing ` here\n~~~\nWrite `<!-- the kernel decides -->` at the top.",
+        ["kernel"]],
       ["puts a blank line inside what looked like a code span",
         "Write `<!-- the\n\nkernel decides -->` here.",
         ["kernel"]],
@@ -3045,6 +3064,22 @@ function report(total, tally, groups, coverageWork) {
         "See [the detail](./foo(bar)-kernel-notes.md) for more.",
         []],
       // …and a `](` with no closing paren is not a link, so the words after it are prose.
+      // `\](…)` is not a link: the bracket is escaped, so the renderer shows all of it.
+      // [Codex review R8 P2.]
+      // …with a REAL link earlier on the line, so the "is there a bracket at all" test cannot
+      // stand in for the escape test. Without a real link before it, both refusals give the
+      // same answer and neither is exercised.
+      ["writes an escaped bracket after a real link on the same line",
+        "See [the docs](./a.md) and \\](./the-kernel-notes) too.",
+        ["kernel"]],
+      ["writes a `](` with no bracket opening it",
+        "Text ](./the-kernel-notes) more prose.",
+        ["kernel"]],
+      // An ANGLE destination is delimited, not balanced — its parentheses are URL characters.
+      // [Codex review R8 P2.]
+      ["uses an angle-bracket destination with a paren in the URL",
+        "See [the detail](<https://example.test/foo(kernel-notes>) for more.",
+        []],
       ["opens a destination it never closes",
         "See [the detail](./a.md#kernel-notes and more prose after it.",
         ["kernel"]],

@@ -52,6 +52,7 @@ import {
   blankTags,
   codeRanges,
   HIDDEN_FILLER,
+  decodeEntities,
   maskHiddenMarkup,
   maskLinkDestinations,
   wrappablePhrase,
@@ -182,31 +183,16 @@ function flatten(text, kind) {
   // Code ranges come from the ORIGINAL text and are shared by both steps: a fence survives
   // hidden-markup masking, and the tag inside it has to survive tag-blanking too.
   const masked = maskLinkDestinations(maskHiddenMarkup(text, { kind }), { kind });
-  return blankTags(masked, codeRanges(masked, { kind }), { kind })
+  return decodeEntities(blankTags(masked, codeRanges(masked, { kind }), { kind }))
     // …and `blankTags` keeps what a reader meets without viewing source: `alt`, `title`,
     // `aria-label`, and a `<meta>` `content`. Blanking the whole tag hid the landing page's
     // Open Graph description, which is marketing copy in a social preview.
-    // An entity keeps its CHARACTER where there is an obvious one, padded back out to the
-    // length it had. The report quotes this, and a landing page full of `&mdash;` reads very
-    // differently with the dashes silently gone.
-    .replace(/&[a-z]+;|&#\d+;/gi, (m) => {
-      const ch = ENTITIES[m.toLowerCase()] ?? "";
-      return ch + " ".repeat(m.length - ch.length);
-    })
+    // An entity keeps its CHARACTER, numeric ones decoded — see `decodeEntities`.
     // The filler a hidden line is left holding, out before anything reads or prints this.
     .replace(new RegExp(HIDDEN_FILLER, "g"), " ")
     .replace(/[*_`>]/g, " ");
 }
 
-/** The entities this repo's hand-written HTML actually uses. Anything else becomes space. */
-const ENTITIES = {
-  "&mdash;": "—",
-  "&ndash;": "–",
-  "&hellip;": "…",
-  "&amp;": "&",
-  "&quot;": '"',
-  "&#39;": "'",
-};
 
 /**
  * One line of the original, as a reader would see it — for the report, where collapsing
