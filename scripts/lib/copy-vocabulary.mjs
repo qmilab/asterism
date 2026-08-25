@@ -47,6 +47,8 @@
 // "manufactures defects" failure this file exists to avoid — to catch one site that cost six
 // words. The site was taken; the rule was not.
 
+import { blank, maskHiddenMarkup } from "./copy-text.mjs";
+
 /**
  * The words, each with the sense it is allowed in.
  *
@@ -144,21 +146,6 @@ export function isVocabularyExempt(rel) {
   return VOCABULARY_EXEMPT_PAGES.includes(rel);
 }
 
-/**
- * Blank a span to spaces, keeping its LENGTH and — the part that is easy to miss — its
- * NEWLINES.
- *
- * Length alone is not enough. The one thing here that spans a line break is the allowed
- * sense, because prose is hard-wrapped: `container\nregistry` is exactly what a rewrap
- * produces, and it is exactly what has to be masked. Blanking that to two runs of spaces and
- * one more space where the newline was keeps every offset and loses a LINE, so the next
- * finding on the page is reported one line early — and every other fixture here has its
- * finding on line 1, where no offset can be wrong.
- */
-function blank(text) {
-  return text.replace(/[^\n]/g, " ");
-}
-
 /** Blank out every match. See {@link blank} for what "blank" has to preserve. */
 function mask(text, pattern) {
   return text.replace(pattern, blank);
@@ -179,7 +166,12 @@ function mask(text, pattern) {
  * still offsets into the real file.
  */
 function flatten(text) {
-  return text
+  // What the markup HIDES goes first and whole: a reader never meets a comment, a
+  // stylesheet or a script, and a rule about what the copy SAYS that fired on one would
+  // be asking someone to rename a CSS class to satisfy a prose gate. Shared with the
+  // destructive-action rule, which had the same blind spot over the same page.
+  // [Codex review R1 P2.]
+  return maskHiddenMarkup(text)
     // A tag may wrap across a line, so this blanks rather than deletes — see `blank`.
     .replace(/<\/?[a-z][^>]*>/gi, blank)
     // An entity keeps its CHARACTER where there is an obvious one, padded back out to the
@@ -236,8 +228,28 @@ export function vocabularyLeaks(text, { packageNames = [] } = {}) {
   // published name and a prefix of all seven others, so masking it first leaves
   // `-adapter-pi` standing and reports the adapter's own npm page — a red over a correct
   // page, the failure this file is most concerned with.
+  //
+  // …and bounded, which is the same mistake pointing the other way: unbounded, a token that
+  // merely BEGINS with a published name — `@qmilab/asterism-adapter-pipeline`, or a typo
+  // like `…-adapter-pi2` — has the real name blanked out of the middle of it, `adapter`
+  // included, and the leak is never reported. The exemption is for a package's actual
+  // published name, not for anything that starts with one. [Codex review R1 P2.]
+  //
+  // `/` is deliberately NOT a boundary character, and the reason is a FUTURE site rather
+  // than a present one — which is worth saying precisely, because a sentence explaining why
+  // a check is narrow is where this repo keeps hiding defects. Measured: every mention
+  // preceded by a slash in today's copy is `@qmilab/asterism` inside an npm URL, and that
+  // name carries no forbidden word, so making `/` a boundary reds nothing right now. What it
+  // would red is `npmjs.com/package/@qmilab/asterism-adapter-pi` — the obvious next line for
+  // an adapter README to add, since every other package README already links to npm this
+  // way, one word short of this. The self-test carries that URL as a fixture, so the choice
+  // is falsifiable instead of merely explained.
+  //
+  // `.` is not a boundary either, so a name ending a sentence is still a name.
+  const NAME_CHAR = "[A-Za-z0-9_-]";
   for (const name of [...packageNames].sort((a, b) => b.length - a.length)) {
-    masked = mask(masked, new RegExp(name.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&"), "gi"));
+    const literal = name.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+    masked = mask(masked, new RegExp(`(?<!${NAME_CHAR})${literal}(?!${NAME_CHAR})`, "gi"));
   }
   for (const { senses } of INTERNAL_VOCABULARY) {
     for (const sense of senses) masked = mask(masked, sense);

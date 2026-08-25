@@ -43,6 +43,8 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
+import { maskHiddenMarkup } from "./copy-text.mjs";
+
 /**
  * Strip the typography and read the CLAIM.
  *
@@ -314,7 +316,16 @@ export const NEARBY = 150;
  * `{ line, rule, sentence }`, `rule` being `every-level` or `no-exception`.
  */
 export function gateOverclaims(text) {
-  const masked = maskEvidenceBlocks(text);
+  // What a reader never meets goes first: an HTML comment, a stylesheet, a script. The
+  // landing page is hand-written HTML with thirteen comments and an inlined stylesheet, and
+  // a note in one of them saying "a destructive action always pauses for your confirmation"
+  // is a fact about the file, not a promise to anybody — this rule reported it as an
+  // unqualified guarantee. No live instance; found by auditing the identical defect Codex
+  // caught in the vocabulary rule next door, which reads the SAME corpus. Fixing one and
+  // leaving the other is precisely the mirror this file exists because of.
+  //
+  // Length- and newline-preserving, because the line numbers below are offsets into this.
+  const masked = maskEvidenceBlocks(maskHiddenMarkup(text));
   const found = [];
   for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
     const claim = plainClaim(piece);

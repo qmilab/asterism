@@ -2498,6 +2498,20 @@ function report(total, tally, groups, coverageWork) {
       ["quotes one in a block whose header this reader cannot parse",
         '> **Evidence** – `bun test x.test.ts`\n> - "an autonomous agent still pauses on a destructive action"\n',
         []],
+      // What the markup HIDES is not copy. The landing page is hand-written HTML with
+      // thirteen comments and an inlined stylesheet; a maintainer's note in one of them is a
+      // fact about the file, not a promise to a reader, and this rule reported it as an
+      // unqualified guarantee. Found by auditing the identical defect Codex caught in the
+      // vocabulary rule, which reads the SAME corpus — see `scripts/lib/copy-text.mjs`.
+      ["puts a bare guarantee inside an HTML comment nobody reads",
+        "<!--\n  Note: a destructive action always pauses for your confirmation.\n-->\n<p>Agents run alone.</p>",
+        []],
+      ["puts one inside the inlined stylesheet",
+        "<style>\n  /* even an autonomous agent pauses before a destructive action */\n</style>",
+        []],
+      ["says it in the visible text beside both",
+        "<!-- a note -->\n<style>.x{}</style>\n<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.</p>",
+        ["no-exception"]],
       ["makes a bare guarantee in prose right AFTER an Evidence block closes",
         '> **Evidence** — `bun test x.test.ts`\n> - "a real test title"\n\nEven an `autonomous` agent pauses for your confirmation before a destructive action.',
         ["no-exception"]],
@@ -2517,16 +2531,24 @@ function report(total, tally, groups, coverageWork) {
     // to the person fixing it. Two claims, four lines apart, with a blank line between —
     // which also pins the blank line as a claim boundary, so a paragraph cannot be swallowed
     // into its neighbour and reported at the wrong place.
+    //
+    // The leading COMMENT is load-bearing twice over: it carries a gate-shaped sentence, so a
+    // reader that stopped blanking comments would report three findings here instead of two;
+    // and it spans lines, so a mask that blanked its newlines along with everything else
+    // would keep every offset and lose two LINES, reporting both real claims early.
     const twoClaims = [
-      "# A page",                                     // 1
-      "",                                             // 2
-      "Even an `autonomous` agent pauses before a **destructive** action.", // 3
-      "",                                             // 4
-      "A deletion always pauses for your confirmation.", // 5
+      "<!-- Maintainer's note: a destructive action always pauses for your", // 1
+      "     confirmation. Not copy — nobody reads this. -->",                // 2
+      "",                                             // 3
+      "# A page",                                     // 4
+      "",                                             // 5
+      "Even an `autonomous` agent pauses before a **destructive** action.", // 6
+      "",                                             // 7
+      "A deletion always pauses for your confirmation.", // 8
     ].join("\n");
     const twoLines = gateOverclaims(twoClaims).map((f) => f.line);
-    if (JSON.stringify(twoLines) !== JSON.stringify([3, 5])) {
-      gateFailures.push(`  two claims four lines apart were reported at ${JSON.stringify(twoLines)}, not [3,5]`);
+    if (JSON.stringify(twoLines) !== JSON.stringify([6, 8])) {
+      gateFailures.push(`  two claims below a two-line comment were reported at ${JSON.stringify(twoLines)}, not [6,8]`);
     }
     // …and a very long sentence is cut rather than printed whole, or one bad page fills the
     // terminal and the rest of the report scrolls away.
@@ -2637,6 +2659,12 @@ function report(total, tally, groups, coverageWork) {
       ["names the adapter as a component rather than as a package",
         "The adapter never holds a credential and never reaches the store.",
         ["adapter"]],
+      // A token that merely BEGINS with a published name is not that package. Unbounded, the
+      // real name is blanked out of the middle of this and the `adapter` in it disappears
+      // with it — the exemption swallowing a leak instead of a name. [Codex review R1 P2.]
+      ["names a package-ish token that only starts with a published name",
+        "See @qmilab/asterism-adapter-pipeline for the experimental build.",
+        ["adapter"]],
       ["uses a plural",
         "Two kernels, two substrates, two registries, two adapters.",
         ["adapter", "kernel", "registry", "substrate"]],
@@ -2680,9 +2708,35 @@ function report(total, tally, groups, coverageWork) {
       ["is the other adapter package's page",
         "# @qmilab/asterism-adapter-lodestar\n",
         []],
+      // A slash is not a name boundary, and this is the site that decides it: every package
+      // README already links to npm this way, and the adapter's own URL is one word short of
+      // the umbrella's. Nothing in today's copy would red without this — the measurement is
+      // in `copy-vocabulary.mjs` — so this row is the only thing holding the decision.
+      ["links to the adapter package's own npm page, where the name follows a slash",
+        "Install it from [npm](https://www.npmjs.com/package/@qmilab/asterism-adapter-pi).",
+        []],
       ["mentions the umbrella package beside the adapter one",
         "This is an internal building block. To use Asterism, install the umbrella package: [`@qmilab/asterism`](https://www.npmjs.com/package/@qmilab/asterism).\n",
         []],
+      // What the markup HIDES. `landing/index.html` is hand-written HTML with thirteen
+      // comments and an inlined stylesheet, and a design token or a CSS class is exactly
+      // where one of these words turns up without anyone having said it to a reader. A gate
+      // firing there would be asking someone to rename a class to satisfy a prose rule.
+      // [Codex review R1 P2.]
+      ["hides the word in an HTML comment, as the landing page's header comment could",
+        "<!--\n  Asterism landing page — the kernel owns the /asterism/* path here.\n-->\n<p>Agents run alone.</p>",
+        []],
+      ["hides it in the inlined stylesheet",
+        "<style>\n  /* ---- Design tokens ---- */\n  .registry-grid { --adapter-gap: 1rem; }\n</style>\n<p>Agents run alone.</p>",
+        []],
+      ["hides it in a script block",
+        "<script>\n  const kernel = document.querySelector('.substrate');\n</script>\n<p>Agents run alone.</p>",
+        []],
+      // …and the visible half of the very same page still fires, or the three rows above
+      // would pass just as well with the whole page thrown away.
+      ["says it in the visible text beside all three",
+        "<!-- a comment -->\n<style>.x{}</style>\n<p>enforced by the kernel</p>",
+        ["kernel"]],
       ["says nothing about the machine at all",
         "Every agent starts with the standard toolkit, and staying that way is perfectly normal.",
         []],
