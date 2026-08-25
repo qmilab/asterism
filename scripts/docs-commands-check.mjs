@@ -83,6 +83,7 @@ import {
   publishedPredicate,
   publishedPackages,
   publishedPackageNames,
+  publishedPackageDescriptions,
   publishedAssets,
   landingFiles,
   readLandingRemovals,
@@ -2520,6 +2521,21 @@ function report(total, tally, groups, coverageWork) {
       ["puts a multi-line comment between a guarantee and its `unless`, inside one paragraph",
         "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n  a maintainer note about this section\n-->\nUnless you have allowed that capability for it.</p>",
         []],
+      // The same attribute values the vocabulary rule reads: a gate promise in an Open Graph
+      // description is a promise made to everyone who sees the link previewed.
+      ["makes a bare guarantee in the description a social preview shows",
+        "<meta property=\"og:description\" content=\"A destructive action never happens without you.\" />",
+        ["no-exception"]],
+      // ⚠ A hidden region whose line was ALREADY EMPTY still ends a block, and that is a
+      // decision rather than an oversight. In HTML the browser renders one paragraph, so this
+      // row is a known false red; in MARKDOWN — 23 of the 24 pages — a blank line really does
+      // end the block, and filling it would join two separate paragraphs and buy a false
+      // green on every one of them. No instance exists in this repo's copy. Pinned so the
+      // trade is falsifiable rather than merely explained. [Codex review R3 P2, taken as the
+      // measurement and not as the change.]
+      ["puts a comment with an EMPTY line between a guarantee and its `unless`",
+        "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n\n  a note\n-->\nUnless you have allowed that capability for it.</p>",
+        ["no-exception"]],
       ["makes a bare guarantee in prose right AFTER an Evidence block closes",
         '> **Evidence** — `bun test x.test.ts`\n> - "a real test title"\n\nEven an `autonomous` agent pauses for your confirmation before a destructive action.',
         ["no-exception"]],
@@ -2611,9 +2627,11 @@ function report(total, tally, groups, coverageWork) {
     // `docs/getting-started.md` while a guard for it passed in `packages/cli`.
     const gatePages = userFacingPages();
     const gateVerbs = advertisedVerbSet(coverageWork);
-    if (gatePages.length === 0 || gateVerbs.size === 0) {
+    const gateDescriptions = publishedPackageDescriptions();
+    if (gatePages.length === 0 || gateVerbs.size === 0 || gateDescriptions.length === 0) {
       console.log(
-        `\nSELF-TEST FAILED: the gate rule reads ${gatePages.length} pages and ${gateVerbs.size} help screens.`,
+        `\nSELF-TEST FAILED: the copy rules read ${gatePages.length} pages,` +
+          ` ${gateDescriptions.length} npm descriptions and ${gateVerbs.size} help screens.`,
       );
       process.exit(1);
     }
@@ -2624,10 +2642,16 @@ function report(total, tally, groups, coverageWork) {
     // this costs no child process; the real halves are checked non-empty above.
     const shape = userFacingCopy(null, {
       pages: ["README.md"],
+      descriptions: [["x/package.json (description)", "a one-line description"]],
       verbs: ["run"],
       help: (verb) => `help for ${verb || "the root"}`,
     }).map(([label]) => label);
-    const wantShape = ["README.md", "asterism --help", "asterism run --help"];
+    const wantShape = [
+      "README.md",
+      "x/package.json (description)",
+      "asterism --help",
+      "asterism run --help",
+    ];
     if (JSON.stringify(shape) !== JSON.stringify(wantShape)) {
       console.log(
         `\nSELF-TEST FAILED: the copy corpus assembled ${JSON.stringify(shape)},` +
@@ -2638,8 +2662,8 @@ function report(total, tally, groups, coverageWork) {
     console.log(
       `The destructive-action gate rule holds on ${GATE_CASES.length} real sentences, fires inside` +
         ` emphasis, markup and colons, never inside an Evidence citation, and reads` +
-        ` ${gatePages.length} pages plus ${gateVerbs.size} help screens — both halves, checked` +
-        ` on the function that assembles them.`,
+        ` ${gatePages.length} pages, ${gateDescriptions.length} npm descriptions and` +
+        ` ${gateVerbs.size} help screens — every half, checked on the function that assembles them.`,
     );
 
     // --- golden rule 7: internal architecture vocabulary ------------------------------
@@ -2773,6 +2797,27 @@ function report(total, tally, groups, coverageWork) {
       ["says it in the visible text beside all three",
         "<!-- a comment -->\n<style>.x{}</style>\n<p>enforced by the kernel</p>",
         ["kernel"]],
+      // A tag's attribute values are copy when a reader meets them without viewing source:
+      // `alt` is read aloud, a `<meta>` `content` is what a search result and a social
+      // preview show. Blanking the whole tag hid all of it. [Codex review R3 P2.]
+      ["hides the word in an image's alt text",
+        "<img src=\"assets/img/dashboard.png\" alt=\"The dashboard, where the kernel decides.\">",
+        ["kernel"]],
+      ["hides it in the Open Graph description a social preview shows",
+        "<meta property=\"og:description\" content=\"Agents whose boundary the kernel enforces.\" />",
+        ["kernel"]],
+      // …but a class, an id and an href are not sentences, and must stay out.
+      ["puts it in a class name and an href, which no reader meets",
+        "<a class=\"registry-grid\" id=\"kernel-box\" href=\"/adapter/substrate\">Read on</a>",
+        []],
+      // A fenced example is a PICTURE of markup: every character is on the screen, and the
+      // word rule already treats a fence as copy. [Codex review R3 P2.]
+      ["shows hidden markup inside a fenced example, where a reader reads it",
+        "```html\n<!-- the kernel decides what it may do -->\n```",
+        ["kernel"]],
+      ["shows it in an inline code span",
+        "Write `<!-- the kernel -->` at the top of the file.",
+        ["kernel"]],
       ["says nothing about the machine at all",
         "Every agent starts with the standard toolkit, and staying that way is perfectly normal.",
         []],
@@ -2840,6 +2885,17 @@ function report(total, tally, groups, coverageWork) {
     )[0];
     if (htmlFinding?.sentence !== "enforced by the kernel, not the OS — see the threat model") {
       vocabFailures.push(`  an HTML finding was reported as ${JSON.stringify(htmlFinding?.sentence)}`);
+    }
+
+    // An attribute value is put back at ITS offset inside the blanked tag, not at the offset
+    // of the attribute NAME. The two differ by five characters and nothing notices — until a
+    // tag wraps and the value sits on the next line, when the difference is the line number
+    // the report sends the reader to. Every other fixture here has a one-line tag.
+    const wrappedTag = vocabularyLeaks(
+      ["<img", '  src="dashboard.png"', "  alt=", '       "The dashboard, where the kernel decides.">'].join("\n"),
+    ).map((f) => `${f.line}:${f.word}`);
+    if (JSON.stringify(wrappedTag) !== JSON.stringify(["4:kernel"])) {
+      vocabFailures.push(`  a word in a wrapped tag's alt text was reported at ${JSON.stringify(wrappedTag)}, not ["4:kernel"]`);
     }
 
     // The filler a hidden region leaves behind must never reach a REPORT. It exists only so
@@ -3975,8 +4031,8 @@ function report(total, tally, groups, coverageWork) {
     for (const g of gateClaims) console.log(`  ${g}`);
   } else if (!SELF_TEST) {
     console.log(
-      `Every guarantee about the destructive-action gate across ${copySources.length} pages and` +
-        ` help screens names its exception.`,
+      `Every guarantee about the destructive-action gate across ${copySources.length} pages, npm` +
+        ` descriptions and help screens names its exception.`,
     );
   }
 
@@ -3993,7 +4049,7 @@ function report(total, tally, groups, coverageWork) {
   } else if (!SELF_TEST) {
     const exempt = copySources.filter(([label]) => isVocabularyExempt(label)).length;
     console.log(
-      `No page or help screen a user meets names an internal part` +
+      `No page, npm description or help screen a user meets names an internal part` +
         ` (${VOCABULARY_WORDS.join(", ")}) — ${copySources.length - exempt} read, ${exempt} exempt` +
         ` (the safety case, where naming the part that enforces a guarantee IS the document).`,
     );
@@ -4271,7 +4327,7 @@ function checkGateClaims(sources) {
  * auditing the first as a category. Two rules, one blind spot: the set is named once and read
  * by both, and a pass that wants a different one has to say so out loud.
  */
-function userFacingCopy(work, { pages = null, verbs = null, help = null } = {}) {
+function userFacingCopy(work, { pages = null, descriptions = null, verbs = null, help = null } = {}) {
   // The three sources are injectable so the self-test can assert the SHAPE of what this
   // assembles without spawning thirty-six help screens. That is not a convenience: the
   // corpus check that existed before this read `userFacingPages()` and `advertisedVerbSet()`
@@ -4281,6 +4337,11 @@ function userFacingCopy(work, { pages = null, verbs = null, help = null } = {}) 
   const readPage = (rel) => readFileSync(join(ROOT, rel), "utf8");
   const readHelp = help ?? ((verb) => helpFor(work, verb));
   const sources = (pages ?? userFacingPages()).map((rel) => [rel, readPage(rel)]);
+  // npm's one-line description, which is what SEARCH shows and what the sidebar of every
+  // dependent package shows — copy a reader meets before opening the README that is already
+  // here. A set built from files could never notice a string that is not one.
+  // [Codex review R3 P2.]
+  sources.push(...(descriptions ?? publishedPackageDescriptions()));
   sources.push(["asterism --help", readHelp("")]);
   for (const verb of verbs ?? [...advertisedVerbSet(work)].sort()) {
     sources.push([`asterism ${verb} --help`, readHelp(verb)]);

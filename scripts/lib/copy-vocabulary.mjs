@@ -47,7 +47,7 @@
 // "manufactures defects" failure this file exists to avoid — to catch one site that cost six
 // words. The site was taken; the rule was not.
 
-import { blank, HIDDEN_FILLER, maskHiddenMarkup, wrappablePhrase } from "./copy-text.mjs";
+import { blank, blankTags, HIDDEN_FILLER, maskHiddenMarkup, wrappablePhrase } from "./copy-text.mjs";
 
 /**
  * The words, each with the sense it is allowed in.
@@ -171,9 +171,10 @@ function flatten(text) {
   // be asking someone to rename a CSS class to satisfy a prose gate. Shared with the
   // destructive-action rule, which had the same blind spot over the same page.
   // [Codex review R1 P2.]
-  return maskHiddenMarkup(text)
-    // A tag may wrap across a line, so this blanks rather than deletes — see `blank`.
-    .replace(/<\/?[a-z][^>]*>/gi, blank)
+  return blankTags(maskHiddenMarkup(text))
+    // …and `blankTags` keeps what a reader meets without viewing source: `alt`, `title`,
+    // `aria-label`, and a `<meta>` `content`. Blanking the whole tag hid the landing page's
+    // Open Graph description, which is marketing copy in a social preview.
     // An entity keeps its CHARACTER where there is an obvious one, padded back out to the
     // length it had. The report quotes this, and a landing page full of `&mdash;` reads very
     // differently with the dashes silently gone.

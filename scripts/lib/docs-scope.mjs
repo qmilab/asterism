@@ -599,7 +599,26 @@ export function publishedPackageNames() {
   return publishedManifests().map(({ name }) => name);
 }
 
-/** Every published manifest, as `{ dir, name }` — one scan, two questions. */
+/**
+ * The one-line description npm shows for each published package, keyed by the manifest it
+ * came from.
+ *
+ * A package page is its README, and that is already in `userFacingMarkdown()` — but npm SEARCH
+ * shows this instead, and so does the sidebar of every page that depends on it. It is copy a
+ * reader meets before they ever open the README, and it was outside every checker here for
+ * the same reason the package READMEs were: a set built from files never notices a string
+ * that is not one. [Codex review R3 P2.]
+ *
+ * A missing description is not an error — npm publishes without one — so it is simply not in
+ * the set.
+ */
+export function publishedPackageDescriptions() {
+  return publishedManifests()
+    .filter(({ description }) => typeof description === "string" && description !== "")
+    .map(({ dir, description }) => [`${dir || "."}/package.json (description)`, description]);
+}
+
+/** Every published manifest, as `{ dir, name, description }` — one scan, three questions. */
 function publishedManifests() {
   const out = [];
   let listed;
@@ -625,6 +644,7 @@ function publishedManifests() {
     out.push({
       dir: rel === "package.json" ? "" : rel.slice(0, -"/package.json".length),
       name: manifest.name,
+      description: manifest.description,
     });
   }
   return out;

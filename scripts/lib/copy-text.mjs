@@ -46,9 +46,14 @@ export function blank(text) {
  * row or heading, and ends no sentence. Both rules strip it before they match or print, so
  * it is invisible in a report.
  *
- * A line that was ALREADY empty keeps its length of zero — there is nowhere to put a filler
- * without moving every offset after it, and an empty line was a block boundary before any
- * masking happened, so nothing here created it.
+ * ⚠ A line that was ALREADY empty stays empty, so a hidden region containing a blank line
+ * still ends a block. That is a TRADE, taken deliberately and with a count. In HTML the
+ * browser renders one paragraph, so this is a false red waiting to happen; in MARKDOWN a
+ * blank line really does end the block, and filling it would join two separate paragraphs
+ * into one — a false GREEN, on 23 of the 24 pages in the corpus, to remove a false red on the
+ * 1 that is HTML. Neither shape occurs in this repo's copy today; a fixture pins the
+ * behaviour so the trade can be re-argued against a real instance rather than re-derived.
+ * [Codex review R3 P2 — taken as the measurement, not as the change.]
  *
  * ⚠ This is for markup a reader never MEETS. `gate-claims.mjs` also blanks `> **Evidence**`
  * citations, to spaces, and that difference is deliberate rather than an oversight: a
@@ -58,6 +63,30 @@ export function blank(text) {
  * Filling those lines instead would buy a false green.
  */
 export const HIDDEN_FILLER = "\u0000";
+
+/**
+ * The spans of a markdown page that are CODE — fenced blocks and inline spans.
+ *
+ * A page showing an HTML example puts real, visible characters on the screen. `<!-- … -->`
+ * inside a fence is not markup the browser hides; it is a picture of markup, and a reader
+ * meets every character of it. The word rule already treats a fence as copy — `kernel` in a
+ * code span fires — so the hidden-markup masking has to agree with it, or one rule reads a
+ * fence and the other erases it. [Codex review R3 P2.]
+ *
+ * Fenced blocks first, so a backtick inside one cannot start an inline span.
+ */
+function codeRanges(text) {
+  const ranges = [];
+  for (const m of text.matchAll(/^[ \t]*(`{3,}|~{3,})[\s\S]*?^[ \t]*\1[ \t]*$/gm)) {
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  for (const m of text.matchAll(/`+[^`\n]*`+/g)) {
+    if (!ranges.some(([a, b]) => m.index < b && m.index + m[0].length > a)) {
+      ranges.push([m.index, m.index + m[0].length]);
+    }
+  }
+  return ranges;
+}
 
 /** Blank a span, leaving each line that HAD content non-blank. See {@link HIDDEN_FILLER}. */
 function blankHidden(span) {
@@ -81,10 +110,14 @@ function blankHidden(span) {
  * which errs toward reporting rather than toward hiding.
  */
 export function maskHiddenMarkup(text) {
+  // Every replacement below preserves LENGTH, so the ranges stay valid across all three.
+  const code = codeRanges(text);
+  const hide = (m, at) =>
+    code.some(([a, b]) => at < b && at + m.length > a) ? m : blankHidden(m);
   return text
-    .replace(/<!--[\s\S]*?-->/g, blankHidden)
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, blankHidden)
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, blankHidden);
+    .replace(/<!--[\s\S]*?-->/g, hide)
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, hide)
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, hide);
 }
 
 /**
@@ -102,4 +135,33 @@ export function maskHiddenMarkup(text) {
  */
 export function wrappablePhrase(...words) {
   return new RegExp(`\\b${words.join("[^\\S\\n]*\\n?[^\\S\\n]*")}\\b`, "gi");
+}
+
+/**
+ * The attribute values a reader really does meet, even though they sit inside a tag.
+ *
+ * `alt` is read aloud by a screen reader and shown when an image fails; `title` is a
+ * tooltip; `aria-label` is the accessible name; a `<meta>` `content` is the description
+ * Google and every social preview show. Golden rule 7 covers "any user-facing string", and
+ * these are strings a person meets without ever viewing source — `landing/index.html`
+ * carries sixteen of them, including its Open Graph description, which is marketing copy and
+ * exactly the kind that drifts. Blanking the whole tag hid all of it. [Codex review R3 P2.]
+ *
+ * The rest of the tag goes: an element name, a class, an href are not sentences.
+ */
+const VISIBLE_ATTRIBUTE = /\b(?:alt|title|aria-label|content)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+
+/** Blank every tag, keeping the values in {@link VISIBLE_ATTRIBUTE}. Length-preserving. */
+export function blankTags(text) {
+  return text.replace(/<\/?[a-z][^>]*>/gi, (tag) => {
+    let out = blank(tag);
+    for (const m of tag.matchAll(VISIBLE_ATTRIBUTE)) {
+      const value = m[1] ?? m[2] ?? "";
+      // The value's offset inside the tag: the whole match, less the closing quote and the
+      // value itself.
+      const at = m.index + m[0].length - value.length - 1;
+      out = out.slice(0, at) + value + out.slice(at + value.length);
+    }
+    return out;
+  });
 }

@@ -43,7 +43,7 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
-import { HIDDEN_FILLER, maskHiddenMarkup } from "./copy-text.mjs";
+import { blankTags, HIDDEN_FILLER, maskHiddenMarkup } from "./copy-text.mjs";
 
 /**
  * Strip the typography and read the CLAIM.
@@ -58,12 +58,14 @@ import { HIDDEN_FILLER, maskHiddenMarkup } from "./copy-text.mjs";
  * hand-written HTML, and it carried this exact defect.
  */
 export function plainClaim(text) {
-  return text
+  // Tags out — but NOT the attribute values a reader meets without viewing source. The
+  // landing page's Open Graph description is the sentence a social preview shows, and a gate
+  // promise made there is made to a reader. See `blankTags`. [Codex review R3 P2.]
+  return blankTags(text)
     // The filler a masked-out comment or stylesheet leaves on each of its lines, so that a
     // hidden region cannot split a visible paragraph. Out before anything is matched or
     // printed. See `copy-text.mjs`.
     .replace(new RegExp(HIDDEN_FILLER, "g"), " ")
-    .replace(/<\/?[a-z][^>]*>/gi, " ")
     .replace(/&mdash;/g, "—")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
