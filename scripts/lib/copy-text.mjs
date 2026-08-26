@@ -89,7 +89,10 @@ export function codeRanges(text, { kind = "markdown" } = {}) {
   // preserved the comment and reported words no reader meets. [Codex review R7 P2.]
   if (kind !== "markdown") return [];
   const ranges = [];
-  for (const m of text.matchAll(/^[ \t]*(`{3,}|~{3,})[\s\S]*?^[ \t]*\1[ \t]*$/gm)) {
+  // A closing fence must be AT LEAST as long as the opening one, not exactly as long:
+  // `~~~html … ~~~~` is a fence to the renderer, and a backreference alone missed it.
+  // [Codex review R9 P2.]
+  for (const m of text.matchAll(/^[ \t]*((`|~)\2{2,})[\s\S]*?^[ \t]*\1\2*[ \t]*$/gm)) {
     ranges.push([m.index, m.index + m[0].length]);
   }
   // An inline span MAY wrap: Python-Markdown renders `` `<!-- the\nkernel -->` `` as
@@ -104,9 +107,7 @@ export function codeRanges(text, { kind = "markdown" } = {}) {
   for (const [a, b] of ranges) {
     outsideFences = outsideFences.slice(0, a) + blank(text.slice(a, b)) + outsideFences.slice(b);
   }
-  for (const m of outsideFences.matchAll(/`+(?:[^`\n]|\n(?![ \t]*\n))*`+/g)) {
-    ranges.push([m.index, m.index + m[0].length]);
-  }
+  ranges.push(...inlineSpans(outsideFences));
   return ranges;
 }
 
@@ -153,7 +154,14 @@ export function maskHiddenMarkup(text, { kind = "markdown" } = {}) {
   // from. [Codex review R5 P2.]
   if (kind === "plain") return text;
   const code = codeRanges(text, { kind });
+  // Where the TAGS are, so a hidden region inside one can be told from a real one.
+  // `<meta content="What the <!-- kernel --> decides">` holds those characters as literal
+  // attribute text and a search result shows every word of them. STRICTLY inside: a
+  // `<style>` block opens exactly where its own tag does, and excluding that would stop
+  // stylesheets being masked at all. [Codex review R9 P2.]
+  const tags = tagRanges(text);
   return text.replace(HIDDEN_REGION, (region, at) => {
+    if (tags.some(([a, b]) => at > a && at < b)) return region;
     // Only the OPENER's position counts. A `<script>` whose body contains a backtick — a
     // template literal, say — makes `codeRanges` see an inline span INSIDE the script, and an
     // overlap test would then preserve the whole script and report words no reader sees.
@@ -393,10 +401,30 @@ function isEscaped(text, at) {
   return slashes % 2 === 1;
 }
 
-/** Does an unescaped `[` open a link this `]` could close, on the same line? */
+/**
+ * Is there an unmatched `[` that this `]` closes?
+ *
+ * BALANCED, not "is there a bracket somewhere": after `[first](url) prose ](the-kernel)` the
+ * earlier pair has already closed, so the second fragment is literal text the renderer shows
+ * — and masking it hid a visible word. [Codex review R9 P2.]
+ *
+ * And it may be on an EARLIER LINE: link text wraps, and this repo has one that does —
+ * `docs/dashboard.md:44` begins a line with `model](./commands.md#config)`. Scanning only the
+ * current line called that destination prose and read the URL as copy. Found by measuring the
+ * corpus for this finding rather than by the finding. It stops at a blank line, which is
+ * where the paragraph — and any link inside it — ends.
+ */
 function opensALink(text, at) {
-  for (let k = at - 1; k >= 0 && text[k] !== "\n"; k--) {
-    if (text[k] === "[" && !isEscaped(text, k)) return true;
+  let closed = 0;
+  for (let k = at - 1; k >= 0; k--) {
+    const ch = text[k];
+    if (ch === "\n" && /\n[ \t]*$/.test(text.slice(0, k))) return false;
+    if (isEscaped(text, k)) continue;
+    if (ch === "]") closed++;
+    else if (ch === "[") {
+      if (closed === 0) return true;
+      closed--;
+    }
   }
   return false;
 }
@@ -441,4 +469,43 @@ export function decodeEntities(text) {
     // looked up by index. This runs last, after everything that compares offsets.
     return ch === "\n" || ch === "\r" ? " " : ch;
   });
+}
+
+/**
+ * Inline code spans, paired by the LENGTH of their backtick runs.
+ *
+ * A span opened with two backticks closes on the next run of exactly two, and single
+ * backticks inside it are literal — that is the whole point of the form: `` `<!-- x -->` ``
+ * shows a reader a backtick. A matcher that closed at the first backtick it met left the
+ * comment inside unprotected, and it was then masked as real markup. [Codex review R9 P2.]
+ *
+ * A span may wrap but not span a blank line, which is where the paragraph ends.
+ */
+function inlineSpans(text) {
+  const runs = [...text.matchAll(/`+/g)].map((m) => [m.index, m[0].length]);
+  const out = [];
+  for (let i = 0; i < runs.length; i++) {
+    const [start, len] = runs[i];
+    for (let j = i + 1; j < runs.length; j++) {
+      if (runs[j][1] !== len) continue;
+      const end = runs[j][0] + len;
+      if (/\n[ \t]*\n/.test(text.slice(start, end))) break;
+      out.push([start, end]);
+      i = j;
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Where the tags are, so that a hidden region INSIDE one can be told from a real one.
+ *
+ * `<meta content="What the <!-- kernel --> decides">` holds those characters as literal
+ * attribute text — the tokenizer never sees a comment, and the reader meets every word of
+ * it in a search result. Masking it first hid copy the tag reader was about to restore.
+ * [Codex review R9 P2.]
+ */
+function tagRanges(text) {
+  return [...text.matchAll(TAG)].map((m) => [m.index, m.index + m[0].length]);
 }

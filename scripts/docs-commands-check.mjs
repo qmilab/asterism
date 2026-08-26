@@ -2932,6 +2932,11 @@ function report(total, tally, groups, coverageWork) {
       // stays inside the tag and out of sight. The markdown rule must not follow it here.
       // A numeric entity is a letter written the long way, and the browser shows the word.
       // [Codex review R8 P2.]
+      // Inside a quoted attribute those characters are literal text the tokenizer never reads
+      // as a comment, and a search result shows every word of them. [Codex review R9 P2.]
+      ["writes comment markers inside a description attribute",
+        '<meta property="og:description" content="What the <!-- kernel --> decides">',
+        ["kernel"], { kind: "html" }],
       ["spells a forbidden word through a numeric entity",
         "<p>ker&#110;el decides what it may do</p>",
         ["kernel"], { kind: "html" }],
@@ -2974,6 +2979,22 @@ function report(total, tally, groups, coverageWork) {
       // mutation to the renderer rather than reported.
       // A stray backtick inside a fence must not start a match that swallows the opening
       // backtick of a real span below it. [Codex review R8 P2.]
+      // A closing fence may be LONGER than the one that opened it; the renderer still calls
+      // the contents code. [Codex review R9 P2.]
+      ["closes a fence with more markers than it opened",
+        "~~~html\n<!-- the kernel decides -->\n~~~~",
+        ["kernel"]],
+      // A span opened with two backticks closes on a run of two, and the single backticks
+      // inside it are literal — that is what the form is for. [Codex review R9 P2.]
+      ["shows a backtick inside a double-backtick span",
+        "Write `` `<!-- the kernel decides -->` `` at the top.",
+        ["kernel"]],
+      // …and the comment AFTER the lone backtick, which is what tells "closes on a run of
+      // the same length" apart from "closes on the first run that is not longer". Closing
+      // early ends the span before the comment and masks it.
+      ["puts the comment after a lone backtick inside that span",
+        "Write `` a ` <!-- the kernel decides --> `` at the top.",
+        ["kernel"]],
       ["opens a real code span below a fence holding one stray backtick",
         "~~~\nno closing ` here\n~~~\nWrite `<!-- the kernel decides -->` at the top.",
         ["kernel"]],
@@ -3072,6 +3093,26 @@ function report(total, tally, groups, coverageWork) {
       ["writes an escaped bracket after a real link on the same line",
         "See [the docs](./a.md) and \\](./the-kernel-notes) too.",
         ["kernel"]],
+      // …and one whose opener has already been CLOSED by an earlier link on the same line.
+      // "is there a bracket somewhere" said yes; the renderer shows the second fragment.
+      // [Codex review R9 P2.]
+      ["writes a literal `](` after a link that already closed",
+        "See [the docs](./a.md) — prose ](the-kernel-notes) after it.",
+        ["kernel"]],
+      // …while a link whose TEXT wraps is still a link, and its destination is still a URL.
+      // `docs/dashboard.md:44` is one; scanning only the current line read that URL as prose.
+      // Found by measuring the corpus for the finding above, not by the finding.
+      // …but not across a BLANK line. The renderer confirms: `See [the\n\nkernel notes](./a.md)`
+      // comes back as two paragraphs with `kernel notes](./a.md)` as visible text, so the
+      // destination is not a destination and its words are copy.
+      // ⚠ The word has to be in the DESTINATION. A first version put it in the link TEXT,
+      // which is copy either way, so both branches agreed and the mutation survived it.
+      ["breaks a link's text across a blank line",
+        "See [the\n\nnotes](./the-kernel-page.md) here.",
+        ["kernel"]],
+      ["wraps a link's text across a line break",
+        "See the [configured\nmodel](./commands.md#what-the-kernel-does); the rest follows.",
+        []],
       ["writes a `](` with no bracket opening it",
         "Text ](./the-kernel-notes) more prose.",
         ["kernel"]],
