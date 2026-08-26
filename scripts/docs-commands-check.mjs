@@ -2557,6 +2557,17 @@ function report(total, tally, groups, coverageWork) {
       ["…and one in markdown PROSE is a boundary, because there the renderer decodes it",
         `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}&#46; An autonomous agent always pauses.`,
         []],
+      // …and a reference inside a TAG is not a boundary either, for the same reason: nobody
+      // meets it. `<span data-note="x&#46; y">` split the paragraph where a reader sees the
+      // middle of a sentence, and the claim behind it stopped being reported. The second row
+      // is the control — the same tag without the reference must still report, or the first
+      // is explained by the tag rather than by what is inside it. [Codex review R6 P2.]
+      ["hides a character reference in an attribute nobody meets",
+        `<p>Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}<span data-note="x&#46; y"></span> An autonomous agent always pauses.</p>`,
+        ["no-exception"], { kind: "html" }],
+      ["puts the same tag there with nothing hidden in it",
+        `<p>Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}<span data-note="x y"></span> An autonomous agent always pauses.</p>`,
+        ["no-exception"], { kind: "html" }],
       ["puts a bare guarantee inside an HTML comment nobody reads",
         "<!--\n  Note: a destructive action always pauses for your confirmation.\n-->\n<p>Agents run alone.</p>",
         []],

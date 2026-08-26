@@ -43,7 +43,14 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
-import { codeRanges, decodeEntities, flattenMarkup, HIDDEN_FILLER, maskInvisible } from "./copy-text.mjs";
+import {
+  blankTags,
+  codeRanges,
+  decodeEntities,
+  flattenMarkup,
+  HIDDEN_FILLER,
+  maskInvisible,
+} from "./copy-text.mjs";
 
 /**
  * Strip the typography and read the CLAIM.
@@ -131,29 +138,35 @@ function blocks(text) {
 /**
  * The copy with its character references decoded — but only where the RENDERER decodes them.
  *
- * A reference is a full stop where a reader sees a full stop, and `&#46;` is five characters
- * a reader MEETS in two of the three kinds this reads:
+ * ONE rule, arrived at twice: a full stop is where a READER meets one. Everything below is
+ * that rule applied to the three places this reads.
  *
- *   · **plain** — a help screen is printed by a terminal, which decodes nothing. Every
- *     reference is its own literal text.
- *   · **markdown, inside code** — `` `&#46;` `` renders as `<code>&amp;#46;</code>`; the
- *     reader is shown the reference, not the stop it stands for. Asked the renderer.
- *   · **markdown or HTML prose** — decoded, and the stop is real.
+ *   · **A tag.** `<span data-note="x&#46; y">` is invisible, and decoding inside it put a
+ *     sentence boundary where a reader sees the middle of a sentence. So the tags go first,
+ *     down to the attributes `blankTags` keeps because a person really does meet them.
+ *     [Codex review R6 P2.]
+ *   · **Code.** `` `&#46;` `` renders as `<code>&amp;#46;</code>` — the reader is shown the
+ *     reference, not the stop it stands for. Asked the renderer. So a code range goes back
+ *     exactly as it was written. [Codex review R5 P2.]
+ *   · **plain.** A help screen is printed by a terminal, which decodes nothing at all, so
+ *     every reference in one is its own literal text. [Codex review R5 P2.]
  *
- * Decoding all three alike invented a sentence boundary in the first two, and the cost was a
- * false NEGATIVE in the direction that matters most: the split moved a pause claim more than
+ * Decoding regardless of all three invented boundaries, and the cost each time was a false
+ * NEGATIVE in the direction that matters most: the split moved a pause claim more than
  * `NEARBY` away from the destructive action it was about, so the gate stopped reporting an
- * overclaim that is on the page. Measured, with a control that fires either way — a help
- * screen with no terminator at all reports `no-exception`, and the same screen with `&#46;`
- * between the two halves reported nothing. [Codex review R5 P2.]
+ * overclaim that is on the page. Measured against a control that fires either way — the same
+ * paragraph with no terminator between the two halves reports `no-exception`, and with the
+ * reference in a hidden attribute, a code span or a help screen it reported nothing.
  *
- * Length-preserving throughout, because every offset below is an offset into `text`: the
- * decode is padded, and a code range is put back verbatim, which is the same width it was.
+ * Length-preserving throughout, because every offset below is an offset into `text`:
+ * `blankTags` blanks in place, the decode is padded, and a code range is put back at the
+ * width it already had.
  */
 function sentenceView(text, kind) {
   if (kind === "plain") return text;
-  let view = decodeEntities(text, { padded: true });
-  for (const [from, to] of codeRanges(text, { kind })) {
+  const code = codeRanges(text, { kind });
+  let view = decodeEntities(blankTags(text, code, { kind }), { padded: true });
+  for (const [from, to] of code) {
     view = view.slice(0, from) + text.slice(from, to) + view.slice(to);
   }
   return view;
