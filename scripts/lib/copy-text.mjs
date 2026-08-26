@@ -341,8 +341,21 @@ const TAG = /<\/?[a-z][a-z0-9-]*(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi;
  * same reason: it is not whitespace, and both rules strip it before printing.
  * [Codex review R10 P2.]
  */
-const BLOCK_ELEMENT =
-  /^<\/?(?:address|article|aside|blockquote|details|div|dl|dd|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul|br)\b/i;
+export const BLOCK_ELEMENTS = [
+  "address", "article", "aside", "blockquote", "br", "details", "div", "dl", "dd", "dt",
+  "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+  "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td",
+  "tfoot", "th", "thead", "tr", "ul",
+];
+
+// A LIST rather than a regex literal, and exported, because `check:mkdocs-parity` needs the
+// same set on the other side of the comparison: `html.parser` reports `<p>a</p><p>b</p>` as
+// two data callbacks with nothing between them, so the renderer's text has to be given the
+// boundary this file gives it, or two words a reader sees as separate are compared as one
+// and a correct page is reported broken. It is sent to that check rather than written out
+// again in Python — a second copy of this list is the two-spellings failure the module
+// header opens with. [Codex review R3 P2.]
+const BLOCK_ELEMENT = new RegExp(`^</?(?:${BLOCK_ELEMENTS.join("|")})\\b`, "i");
 
 export function blankTags(text, code = codeRanges(text), { kind = "markdown" } = {}) {
   // PLAIN text has no tags. `<agent>`, `<from>`, `<adapter>` are placeholders in a help
@@ -512,7 +525,7 @@ export const NAMED_ENTITIES = {
   "&nbsp;": " ",
 };
 
-export function decodeEntities(text) {
+export function decodeEntities(text, { padded = false } = {}) {
   return text.replace(/&[a-z]+;|&#\d+;|&#x[0-9a-f]+;/gi, (m) => {
     const numeric = /^&#(x)?([0-9a-f]+);$/i.exec(m);
     let ch;
@@ -523,12 +536,20 @@ export function decodeEntities(text) {
       ch = NAMED_ENTITIES[m.toLowerCase()] ?? " ";
     }
     // A newline would change how many LINES the text has, which is the one thing every
-    // caller here counts on; nothing else does. So this does NOT pad the decoded character
-    // back out to the entity's length — padding is what kept `ker&#110;el` from reading as
-    // one word, since the `n` arrived followed by five spaces. Length has never been the
-    // invariant: a line number is a count of newlines, and the line a report quotes is
-    // looked up by index. This runs last, after everything that compares offsets.
-    return ch === "\n" || ch === "\r" ? " " : ch;
+    // caller here counts on; nothing else does. So by default this does NOT pad the decoded
+    // character back out to the entity's length — padding is what kept `ker&#110;el` from
+    // reading as one word, since the `n` arrived followed by five spaces. Length has never
+    // been the invariant: a line number is a count of newlines, and the line a report quotes
+    // is looked up by index. This runs last, after everything that compares offsets.
+    //
+    // `padded` is for the one caller that needs the opposite trade: `gate-claims.mjs` finds
+    // its sentence boundaries by OFFSET, so it needs a copy where `&#46;` is a full stop in
+    // the place the full stop belongs, and it does not care that the word around it has been
+    // split — it slices the claim itself out of the undecoded text. One implementation with
+    // one table and one number rule, because two decoders is what this file exists to stop:
+    // the last pair drifted until neither knew about numeric references. [Codex review R3 P2.]
+    const out = ch === "\n" || ch === "\r" ? " " : ch;
+    return padded ? out + " ".repeat(Math.max(0, m.length - out.length)) : out;
   });
 }
 
@@ -579,7 +600,7 @@ function tagRanges(text) {
 //
 // The ORDER is the one both rules have always used, carried over unchanged. It is not
 // defended here, because it turns out not to be defensible on today's evidence: swapping the
-// two changes nothing across the 15 pages the parity check reads, its 19 construct fixtures,
+// two changes nothing across the 15 pages the parity check reads, its 21 construct fixtures,
 // or `check:docs --self-test`. The one construct where a difference could be built — a
 // markdown link inside an HTML comment — the renderer decides the OTHER way, resolving the
 // link first, so the reasoning that would have justified this order was backwards. Left as

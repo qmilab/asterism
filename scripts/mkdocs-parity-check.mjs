@@ -76,7 +76,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { anchorsOf, MKDOCS_RULE, anchorOf } from "./lib/anchors.mjs";
-import { blank, NAMED_ENTITIES, readerText } from "./lib/copy-text.mjs";
+import { blank, BLOCK_ELEMENTS, NAMED_ENTITIES, readerText } from "./lib/copy-text.mjs";
 import {
   ROOT,
   siteDir,
@@ -258,36 +258,49 @@ class Visible(HTMLParser):
     Attributes never reach handle_data at all, which is why this is one direction only:
     the JS deliberately keeps alt, title, aria-label and a <meta> description, and a
     reader meets those without viewing source.
+
+    A block element leaves a newline where it opens and closes. Nothing in the markup
+    separates the two data callbacks of <p>a</p><p>b</p>, so joining them gives 'ab' —
+    one word where a reader sees two, and the masking, which does mark that boundary,
+    would then be reported for dropping a word it never had. The element names arrive
+    from the JS rather than being written again here.
     """
 
-    def __init__(self):
+    def __init__(self, blocks):
         super().__init__(convert_charrefs=True)
         self.parts = []
         self.hidden = 0
+        self.blocks = blocks
 
     def handle_starttag(self, tag, attrs):
         if tag in ('script', 'style'):
             self.hidden += 1
+        elif tag in self.blocks:
+            self.parts.append('\\n')
 
     def handle_endtag(self, tag):
         if tag in ('script', 'style') and self.hidden:
             self.hidden -= 1
+        elif tag in self.blocks:
+            self.parts.append('\\n')
 
     def handle_data(self, data):
         if not self.hidden:
             self.parts.append(data)
 
 
+payload = json.load(sys.stdin)
+blocks = set(payload['blockElements'])
 cfg = load_config(sys.argv[1])
 md = markdown.Markdown(extensions=cfg['markdown_extensions'], extension_configs=cfg['mdx_configs'])
 out = {}
-for source in json.load(sys.stdin):
+for source in payload['sources']:
     if source['kind'] == 'html':
         html = source['text']
     else:
         md.reset()
         html = md.convert(source['text'])
-    parser = Visible()
+    parser = Visible(blocks)
     parser.feed(html)
     parser.close()
     out[source['label']] = ''.join(parser.parts)
@@ -314,7 +327,7 @@ function renderedText(python, configPath, sources) {
   let out;
   try {
     out = execFileSync(python, ["-c", PY_VISIBLE_TEXT, configPath], {
-      input: JSON.stringify(sources),
+      input: JSON.stringify({ blockElements: BLOCK_ELEMENTS, sources }),
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
     });
@@ -517,6 +530,13 @@ const COPY_FIXTURES = [
   // this sentence in place, so comparing words passes it; the em dash a reader meets is gone.
   // Measured: this is the one fixture-and-broken-port pair the compared set catches and a
   // word-only one does not. [Codex review R2 P2.]
+  // Block markup with no whitespace in it. `html.parser` reports these as separate data
+  // callbacks with nothing between them, so joining them plainly gives `Zebraquokkamoose` —
+  // one token the masking, which does mark the boundary, has no chance of matching. Not a
+  // masking bug: a red over a page that is right, which is the failure this file's header
+  // calls the worse one. [Codex review R3 P2.]
+  ["block elements and a line break with no whitespace between them",
+    "html", "<p>Zebra</p><p>quokka<br>moose</p>"],
   ["a named character reference standing between two words",
     "html", "<p>Zebra decides&mdash;quokka waits.</p>"],
   ["a sentence the body shares with the `<meta>` description that a search result prints",

@@ -43,7 +43,7 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
-import { flattenMarkup, HIDDEN_FILLER, maskInvisible } from "./copy-text.mjs";
+import { decodeEntities, flattenMarkup, HIDDEN_FILLER, maskInvisible } from "./copy-text.mjs";
 
 /**
  * Strip the typography and read the CLAIM.
@@ -130,14 +130,29 @@ function blocks(text) {
  */
 function claims(text) {
   const out = [];
+  // Where the sentences END is read from a LENGTH-PRESERVING decoded copy, and the sentences
+  // themselves are sliced out of the text as given.
+  //
+  // `&#46;` is a full stop to a reader and eight characters to a splitter. Splitting before
+  // decoding merged the two sentences either side, which pulled a destructive-action mention
+  // into the window of a claim that is a hundred and fifty characters away from it and
+  // reported an overclaim nobody wrote. Measured: the same paragraph with a literal `.` is
+  // clean, and with `&#46;`, `&#x2e;` or `&period;` it reports `no-exception`.
+  //
+  // Padding is what makes it safe to read boundaries here: every offset below still lands in
+  // the same place, and the claim text itself comes from `text`, so `plainClaim` decodes it
+  // unpadded and `ker&#110;el` is still one word. An entity the table does NOT carry is still
+  // blanked to a space and still merges — that half is not silent either, because the parity
+  // check compares the characters a decode is supposed to produce and reports the loss.
+  // [Codex review R3 P2.]
+  const boundaries = decodeEntities(text, { padded: true });
   for (const [from, to] of blocks(text)) {
-    const slice = text.slice(from, to);
-    let at = 0;
-    for (const piece of slice.split(/(?<=[.!?])\s+/)) {
-      const idx = slice.indexOf(piece, at);
-      if (idx >= 0) at = idx + piece.length;
-      out.push({ text: piece, offset: from + (idx < 0 ? at : idx), block: [from, to] });
+    let start = from;
+    for (const m of boundaries.slice(from, to).matchAll(/(?<=[.!?])\s+/g)) {
+      out.push({ text: text.slice(start, from + m.index), offset: start, block: [from, to] });
+      start = from + m.index + m[0].length;
     }
+    out.push({ text: text.slice(start, to), offset: start, block: [from, to] });
   }
   return out;
 }
