@@ -43,14 +43,7 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
-import {
-  blankTags,
-  codeRanges,
-  decodeEntities,
-  HIDDEN_FILLER,
-  maskHiddenMarkup,
-  maskLinkDestinations,
-} from "./copy-text.mjs";
+import { flattenMarkup, HIDDEN_FILLER, maskInvisible } from "./copy-text.mjs";
 
 /**
  * Strip the typography and read the CLAIM.
@@ -72,7 +65,7 @@ export function plainClaim(text, kind = "markdown") {
   // are not code spans, and taking them for some meant a tag was preserved and its hidden
   // attributes entered the claim window — where an `unless` in a class name could excuse an
   // unqualified promise. [Codex review R8 P2.]
-  return decodeEntities(blankTags(text, codeRanges(text, { kind }), { kind }))
+  return flattenMarkup(text, { kind })
     // The filler a masked-out comment or stylesheet leaves on each of its lines, so that a
     // hidden region cannot split a visible paragraph. Out before anything is matched or
     // printed. See `copy-text.mjs`.
@@ -345,7 +338,7 @@ export function gateOverclaims(text, { kind = "markdown" } = {}) {
   // `>` prefixes blanked away, so the citation reader saw a line that no longer began with
   // `>`, ended the block there, and read the quoted TEST TITLES below it as public claims.
   // [Codex review R4 P2.]
-  const masked = maskLinkDestinations(maskHiddenMarkup(maskEvidenceBlocks(text), { kind }), { kind });
+  const masked = maskInvisible(maskEvidenceBlocks(text), { kind });
   const found = [];
   for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
     const claim = plainClaim(piece, kind);
