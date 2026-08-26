@@ -188,8 +188,10 @@ function flatten(text, kind) {
     // `aria-label`, and a `<meta>` `content`. Blanking the whole tag hid the landing page's
     // Open Graph description, which is marketing copy in a social preview.
     // An entity keeps its CHARACTER, numeric ones decoded — see `decodeEntities`.
-    // The filler a hidden line is left holding, out before anything reads or prints this.
-    .replace(new RegExp(HIDDEN_FILLER, "g"), " ")
+    // The filler a hidden line — and a block-level tag — is left holding STAYS here: it is
+    // what stops an allowed phrase reading across a boundary a reader sees. It is not
+    // whitespace and not a word character, so it changes no word match; `readableLine` takes
+    // it out before anything is printed. [Codex review R10 P2.]
     .replace(/[*_`>]/g, " ");
 }
 
@@ -201,6 +203,7 @@ function flatten(text, kind) {
 export function readableLine(text, kind = "markdown") {
   return (
     flatten(text, kind)
+      .replace(new RegExp(HIDDEN_FILLER, "g"), " ")
       .replace(/\s+/g, " ")
       // Markup sits between a word and its punctuation more often than not —
       // `<strong>kernel</strong>,` blanks to `kernel ,` — and a report that quotes a sentence

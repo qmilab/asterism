@@ -227,11 +227,21 @@ export function maskLinkDestinations(text, { kind = "markdown" } = {}) {
     const [, lead, url, rest] = /^(\s*)(<[^>\n]*>|\S*)([\s\S]*)$/.exec(payload);
     return `${lead}${blank(url)}${rest}`;
   };
-  return maskInlineDestinations(text, code, maskDestinationOnly)
-    // …and a reference definition, whose line is a destination and may carry a title too.
-    .replace(/^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(\S.*)$/gm, (whole, head, payload, at) =>
-      inRanges(at, code) ? whole : head + maskDestinationOnly(payload),
-    );
+  return (
+    maskInlineDestinations(text, code, maskDestinationOnly)
+      // A FULL reference link hides its identifier: `[details][adapter]` renders as
+      // `<a href="…">details</a>` and the reader never meets `adapter`. Only the second pair
+      // goes — in `[adapter][]` and in a bare `[adapter]`, the label IS the visible text.
+      // [Codex review R10 P2.]
+      .replace(/\]\[([^\]\n]+)\]/g, (whole, label, at) =>
+        inRanges(at, code) ? whole : `][${blank(label)}]`,
+      )
+      // …and a reference DEFINITION renders nothing at all: its label is as hidden as its
+      // URL, and only the title beside it is ever shown.
+      .replace(/^([ \t]{0,3}\[)([^\]\n]+)(\]:[ \t]*)(\S.*)$/gm, (whole, open, label, mid, payload, at) =>
+        inRanges(at, code) ? whole : open + blank(label) + mid + maskDestinationOnly(payload),
+      )
+  );
 }
 
 /**
@@ -297,6 +307,19 @@ const TAG = /<\/?[a-z][a-z0-9-]*(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi;
  * fence is a picture of a tag, and every character of it is on the screen — including the
  * attribute a reader would never meet in a rendered page. [Codex review R4 P2.]
  */
+/**
+ * The elements that put their contents on a line of their own.
+ *
+ * Blanking every tag to spaces left `<h2>Container</h2>` and the `<p>Registry …` beneath it
+ * looking like one phrase, so the allowed sense `container registry` swallowed a heading and
+ * a separate claim. A reader sees two blocks. So a block-level tag leaves a mark that a
+ * phrase cannot read across — the same {@link HIDDEN_FILLER} a hidden line keeps, for the
+ * same reason: it is not whitespace, and both rules strip it before printing.
+ * [Codex review R10 P2.]
+ */
+const BLOCK_ELEMENT =
+  /^<\/?(?:address|article|aside|blockquote|details|div|dl|dd|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul|br)\b/i;
+
 export function blankTags(text, code = codeRanges(text), { kind = "markdown" } = {}) {
   // PLAIN text has no tags. `<agent>`, `<from>`, `<adapter>` are placeholders in a help
   // synopsis, and blanking them erased a word this rule exists to find. [Codex review R5 P2.]
@@ -310,6 +333,7 @@ export function blankTags(text, code = codeRanges(text), { kind = "markdown" } =
     // reader and the code-span reader keep, in the third place it applies.
     if (kind === "markdown" && /\n[ \t]*\n/.test(tag)) return tag;
     let out = blank(tag);
+    if (BLOCK_ELEMENT.test(tag)) out = HIDDEN_FILLER + out.slice(1);
     const keepsContent = contentIsText(tag);
     for (const m of tag.matchAll(VISIBLE_ATTRIBUTE)) {
       if (m[1].toLowerCase() === "content" && !keepsContent) continue;
@@ -372,8 +396,14 @@ function maskInlineDestinations(text, code, maskPayload) {
     if (text[i + 2] === "<") {
       const close = text.indexOf(">", i + 3);
       const nl = text.indexOf("\n", i + 2);
-      if (close < 0 || (nl >= 0 && nl < close) || text[close + 1] !== ")") continue;
-      j = close + 2;
+      if (close < 0 || (nl >= 0 && nl < close)) continue;
+      // A TITLE may follow the destination, exactly as it may follow a bare one:
+      // `[x](<https://e.test/kernel> "safe title")` is a link with a tooltip, and demanding
+      // `)` immediately after the `>` rejected it and read the URL as prose.
+      // [Codex review R10 P2.]
+      const after = /^[ \t]*(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\))?[ \t]*\)/.exec(text.slice(close + 1));
+      if (!after) continue;
+      j = close + 1 + after[0].length + 1;
       depth = 0;
     } else {
       for (; j < text.length && depth > 0; j++) {

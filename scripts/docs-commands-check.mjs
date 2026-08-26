@@ -2849,6 +2849,22 @@ function report(total, tally, groups, coverageWork) {
       ["puts `Container` and `Registry` in two different blocks",
         "## Container\n\nRegistry controls the tool list an agent is handed.",
         ["registry"]],
+      // …and not across a BLOCK. `<h2>Container</h2>` above a `<p>Registry …` is two things a
+      // reader meets separately, and blanking every tag to spaces made them one phrase — the
+      // exemption swallowing a heading and a claim. [Codex review R10 P2.]
+      ["puts `Container` and `Registry` in two HTML blocks",
+        "<h2>Container</h2>\n<p>Registry controls the tool list an agent is handed.</p>",
+        ["registry"], { kind: "html" }],
+      // …with the HEADING as the only tag between them, so the paragraph's own tag cannot
+      // stand in for it. Every block element in the list needs a row it is alone in, or the
+      // list is only as checked as its most common entry.
+      ["ends a heading and carries straight on",
+        "<h2>Container</h2>Registry controls the tool list an agent is handed.",
+        ["registry"], { kind: "html" }],
+      // …while an INLINE tag between them changes nothing a reader sees.
+      ["names one with an inline tag between the two words",
+        "<p>published to the GitHub <em>Container</em> Registry</p>",
+        [], { kind: "html" }],
       ["names one with emphasis between the two words",
         "The released image is published to the GitHub **Container** Registry.",
         []],
@@ -3118,6 +3134,23 @@ function report(total, tally, groups, coverageWork) {
         ["kernel"]],
       // An ANGLE destination is delimited, not balanced — its parentheses are URL characters.
       // [Codex review R8 P2.]
+      // A FULL reference link hides its identifier: the renderer shows only the first pair.
+      // [Codex review R10 P2.]
+      ["names the machine in a reference identifier",
+        "See [the details][adapter] for more.\n\n[adapter]: ./runtime.md",
+        []],
+      // …but a SHORTCUT reference has no second pair, so its label is the visible text.
+      // …but a SHORTCUT reference has no second pair, so its label IS the link text the
+      // renderer shows — while the DEFINITION beneath renders nothing at all, label included.
+      // One finding, not two.
+      ["uses the label itself as the link text",
+        "See [adapter] for more.\n\n[adapter]: ./runtime.md",
+        ["adapter"]],
+      // An angle destination may carry a title, exactly as a bare one may.
+      // [Codex review R10 P2.]
+      ["puts a title after an angle-bracket destination",
+        '[the details](<https://example.test/kernel-notes> "a safe title")',
+        []],
       ["uses an angle-bracket destination with a paren in the URL",
         "See [the detail](<https://example.test/foo(kernel-notes>) for more.",
         []],
