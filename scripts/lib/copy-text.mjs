@@ -495,8 +495,15 @@ function opensALink(text, at) {
  * One implementation, because there were two: a table here and three hard-coded replacements
  * in the gate rule's `plainClaim`, neither knowing about numbers. That is the shape this file
  * exists to stop.
+ *
+ * Exported so `check:mkdocs-parity` can compare the CHARACTERS this claims to preserve as
+ * well as the words around them. An entity that decodes to a letter is already caught —
+ * `caf&eacute;` masked to `caf ` loses a word — but one that decodes to punctuation is not,
+ * and a lost `.` moves a sentence boundary, which is what the gate rule splits claims on.
+ * Deriving the compared set from this table rather than listing it there means adding a row
+ * here extends the check with it. [Codex review R2 P2.]
  */
-const NAMED_ENTITIES = {
+export const NAMED_ENTITIES = {
   "&mdash;": "\u2014",
   "&ndash;": "\u2013",
   "&hellip;": "\u2026",

@@ -57,6 +57,15 @@
 //     are kept on purpose, because a screen reader reads the first and a search result
 //     prints the last. Five of the thirteen replayed bugs are of that kind, and all five
 //     are caught by `check:docs --self-test` instead.
+//   · The BLOCK structure a reader sees. This compares a sequence of visible tokens, not
+//     where the paragraphs fall — and whether a blank line lands between a promise and the
+//     `unless` that qualifies it is exactly what the gate rule turns on. Two reasons it is
+//     not here. The masked side has no block model of its own: `gate-claims.mjs` derives one
+//     from the text, so comparing structure would mean moving that rule in here, and policy
+//     is the thing this pass deliberately holds none of. And the one block-boundary
+//     regression in this port's history is caught anyway — reading every markdown comment as
+//     a block blanks the lines of an inline one and the words go with them, which the
+//     fixtures report. [Codex review R2 P2, the half not taken.]
 //   · Which KIND a page is read as. Sending `landing/index.html` through the markdown
 //     renderer instead of taking it as HTML changes none of its visible words — measured —
 //     so nothing here would notice that distinction going wrong. `check:docs --self-test`
@@ -67,7 +76,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { anchorsOf, MKDOCS_RULE, anchorOf } from "./lib/anchors.mjs";
-import { blank, readerText } from "./lib/copy-text.mjs";
+import { blank, NAMED_ENTITIES, readerText } from "./lib/copy-text.mjs";
 import {
   ROOT,
   siteDir,
@@ -320,15 +329,33 @@ function renderedText(python, configPath, sources) {
 }
 
 /**
- * The words of a piece of text, IN ORDER, each with where it starts.
+ * What is compared: runs of letters or digits, the marks that END A SENTENCE, and every
+ * character the masking claims to decode an entity into.
  *
- * A word is a run of letters or digits, so `kernel-box`, `snake_case` and `22.19` are read
- * the same way on both sides. That is what lets the two be compared at all: the rules
- * downstream substitute markup for spaces, and a comparison over raw strings would report
- * every emphasis mark as a difference.
+ * Not the raw strings. The rules downstream substitute markup for spaces, so a comparison
+ * over characters would report every emphasis mark as a difference; a word is a run of
+ * letters or digits, so `kernel-box`, `snake_case` and `22.19` read the same on both sides.
+ *
+ * ⚠ Words alone were not enough, and the gap had a downstream consequence. `.!?` is not a
+ * chosen set: it is exactly what `gate-claims.mjs` splits claims on. An entity the masking's
+ * table does not carry is blanked to a space, so `evaluated&period; Ordinary work…` masks to
+ * one sentence where a reader sees two — and the gate rule then reads the two halves as one
+ * claim and reports an overclaim that is not there. Reproduced: that input yields a
+ * `no-exception` finding, and the same sentence with a literal `.` yields none. A word-only
+ * comparison sees an identical list either way. [Codex review R2 P2.]
+ *
+ * The entity characters come FROM the table rather than being listed again here, so adding a
+ * row there extends this with it. Whitespace is dropped: `&nbsp;` decodes to a space, and a
+ * space is not something this can tell apart from the space beside it.
  */
+const DECODED_CHARACTERS = [...new Set(Object.values(NAMED_ENTITIES))].filter((c) => c.trim() !== "");
+const COMPARED = new RegExp(
+  `[\\p{L}\\p{N}]+|[.!?]|[${DECODED_CHARACTERS.map((c) => `\\u{${c.codePointAt(0).toString(16)}}`).join("")}]`,
+  "gu",
+);
+
 function wordsOf(text) {
-  return [...text.matchAll(/[\p{L}\p{N}]+/gu)].map((m) => ({ word: m[0].toLowerCase(), at: m.index }));
+  return [...text.matchAll(COMPARED)].map((m) => ({ word: m[0].toLowerCase(), at: m.index }));
 }
 
 /**
@@ -345,6 +372,9 @@ function wordsOf(text) {
  *
  * Greedy, which is exact for this question: taking each word at the earliest place it still
  * can leaves the most room for the ones after it, so if any embedding exists this finds one.
+ * It is exact about WHETHER, not about WHERE: when the dropped token occurs again further on,
+ * greedy spends that later copy and names the next token instead. The excerpt a report prints
+ * is the thing to read — it quotes the rendered page around the token the renderer shows.
  *
  * What it still cannot see, said rather than left to be assumed: a dropped span whose words
  * are repeated, in the same order and in the same place, by text the masking keeps — an
@@ -392,7 +422,7 @@ function compareCopy(sources, rendered, mask) {
       label,
       line:
         `  ${label}: the masking drops '${shown[at].word}', which the renderer shows` +
-        ` ${at + 1} words in\n      around it: ${excerpt(rendered[label], shown[at].at)}`,
+        ` ${at + 1} of ${shown.length} in\n      around it: ${excerpt(rendered[label], shown[at].at)}`,
     });
   }
   return { failures, words };
@@ -482,6 +512,13 @@ const COPY_FIXTURES = [
   // words around the hole no longer line up behind the copy in the `<head>`. The paragraphs
   // either side are not decoration: with the shared sentence alone, the `<head>` copy sits in
   // front of it in the right order and even reading in order would pass. [Codex review R1 P2.]
+  // The only row where the words are identical either way and a CHARACTER is the whole
+  // difference. A masking that blanked `&mdash;` instead of decoding it leaves every word of
+  // this sentence in place, so comparing words passes it; the em dash a reader meets is gone.
+  // Measured: this is the one fixture-and-broken-port pair the compared set catches and a
+  // word-only one does not. [Codex review R2 P2.]
+  ["a named character reference standing between two words",
+    "html", "<p>Zebra decides&mdash;quokka waits.</p>"],
   ["a sentence the body shares with the `<meta>` description that a search result prints",
     "html",
     '<meta name="description" content="Agents run alone. Quokka decides.">\n' +
@@ -667,7 +704,7 @@ function selfTestCopy(python) {
   const real = compareCopy(fixtures, rendered, REAL_MASK);
   for (const { line } of real.failures) failures.push(line);
   if (real.failures.length === 0) {
-    console.log(`The real masking keeps all ${real.words} words the renderer shows across those fixtures.`);
+    console.log(`The real masking keeps all ${real.words} the renderer shows across those fixtures.`);
   }
 
   const overCorpus = BROKEN_MASKS.filter(([, mask]) => compareCopy(corpus, rendered, mask).failures.length > 0);
@@ -889,8 +926,9 @@ if (SELF_TEST) {
   );
   const unasked = userFacingPages().length - copyPages.length;
   console.log(
-    `The copy masking keeps every one of the ${copy.words} words the renderer shows across those` +
-      ` ${copyPages.length} pages and the ${copyFixtures.length} construct fixtures beside them.`,
+    `The copy masking keeps every one of the ${copy.words} words, sentence marks and decoded` +
+      ` characters the renderer shows across those ${copyPages.length} pages and the` +
+      ` ${copyFixtures.length} construct fixtures beside them, in order.`,
   );
   console.log(
     `  (${unasked} of the ${userFacingPages().length} pages a user meets are rendered by GitHub and` +
