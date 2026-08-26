@@ -320,30 +320,48 @@ function renderedText(python, configPath, sources) {
 }
 
 /**
- * Every word a piece of text contains, COUNTED.
- *
- * Counted rather than merely collected, and the difference is most of the sensitivity: a
- * word that a page uses in prose AND inside a fence is still present as a set when the
- * masking stops reading fences. Measured, on a masking that has stopped reading fences: 68
- * words fall short across the real pages, and only 12 of them are missing outright. A set
- * comparison would report those 12 and pass the other 56.
+ * The words of a piece of text, IN ORDER, each with where it starts.
  *
  * A word is a run of letters or digits, so `kernel-box`, `snake_case` and `22.19` are read
  * the same way on both sides. That is what lets the two be compared at all: the rules
  * downstream substitute markup for spaces, and a comparison over raw strings would report
  * every emphasis mark as a difference.
  */
-function wordCounts(text) {
-  const counts = new Map();
-  for (const m of text.matchAll(/[\p{L}\p{N}]+/gu)) {
-    const word = m[0].toLowerCase();
-    counts.set(word, (counts.get(word) ?? 0) + 1);
-  }
-  return counts;
+function wordsOf(text) {
+  return [...text.matchAll(/[\p{L}\p{N}]+/gu)].map((m) => ({ word: m[0].toLowerCase(), at: m.index }));
 }
 
 /**
- * The comparison: every word the renderer SHOWS, the masking must KEEP.
+ * Is every word the renderer shows still there, in the SAME ORDER? → the index of the first
+ * one that is not, or `-1`.
+ *
+ * ⚠ ORDER, not counts, and the difference is a false negative rather than a nicety. The
+ * masking keeps text the renderer does not show — `alt`, `title`, `aria-label`, a `<meta>`
+ * description — and on `landing/index.html` that is **85 spare occurrences**. A per-word
+ * count lets any of them stand in for a word the masking wrongly dropped somewhere else
+ * entirely: that page's Open Graph description carries the tagline, so `runtime` is kept
+ * eight times and shown three, and a masking that erased all three from the body still
+ * satisfied `8 >= 3` and left this gate green. [Codex review R1 P2.]
+ *
+ * Greedy, which is exact for this question: taking each word at the earliest place it still
+ * can leaves the most room for the ones after it, so if any embedding exists this finds one.
+ *
+ * What it still cannot see, said rather than left to be assumed: a dropped span whose words
+ * are repeated, in the same order and in the same place, by text the masking keeps — an
+ * `alt` that echoes the caption beside it. Narrow, and far narrower than counting allowed.
+ */
+function firstDropped(shown, kept) {
+  let k = 0;
+  for (let s = 0; s < shown.length; s++) {
+    while (k < kept.length && kept[k].word !== shown[s].word) k++;
+    if (k === kept.length) return s;
+    k++;
+  }
+  return -1;
+}
+
+/**
+ * The comparison: every word the renderer SHOWS, the masking must KEEP, in order.
  *
  * One direction, deliberately. The other is not an equality and never will be — the JS
  * keeps `alt`, `title`, `aria-label` and a `<meta>` description on purpose, because a
@@ -355,34 +373,37 @@ function wordCounts(text) {
  * The masking is passed IN, for the reason `compareAnchors` takes its slug rule: a
  * comparison only ever run against a correct port has not been shown to be able to report
  * anything.
+ *
+ * Failures carry their source's LABEL as well as a printable line, so the self-test can ask
+ * which fixture reported without parsing its own output back.
  */
 function compareCopy(sources, rendered, mask) {
   const failures = [];
   let words = 0;
   for (const { label, kind, text } of sources) {
-    const shown = wordCounts(rendered[label]);
-    const kept = wordCounts(mask(text, kind));
-    for (const [word, n] of shown) {
-      words += n;
-      const have = kept.get(word) ?? 0;
-      if (have >= n) continue;
-      failures.push(
-        `  ${label}: the renderer shows '${word}' ${n}\u00d7 and the masking keeps ${have}\u00d7` +
-          `\n      around it: ${excerpt(rendered[label], word)}`,
-      );
-    }
+    const shown = wordsOf(rendered[label]);
+    const kept = wordsOf(mask(text, kind));
+    words += shown.length;
+    // One finding per source: after a dropped word the ones behind it no longer line up
+    // either, so reporting each would bury the place to look under its own consequences.
+    const at = firstDropped(shown, kept);
+    if (at < 0) continue;
+    failures.push({
+      label,
+      line:
+        `  ${label}: the masking drops '${shown[at].word}', which the renderer shows` +
+        ` ${at + 1} words in\n      around it: ${excerpt(rendered[label], shown[at].at)}`,
+    });
   }
   return { failures, words };
 }
 
-/** The rendered text around a word, so a report says where to look rather than only what. */
-function excerpt(text, word, width = 48) {
-  const flat = text.replace(/\s+/g, " ");
-  const at = flat.toLowerCase().indexOf(word);
-  if (at < 0) return JSON.stringify(flat.slice(0, width * 2));
+/** The rendered text around an offset, so a report says where to look rather than only what. */
+function excerpt(text, at, width = 48) {
   const from = Math.max(0, at - width);
-  const to = Math.min(flat.length, at + word.length + width);
-  return `${from > 0 ? "…" : ""}${JSON.stringify(flat.slice(from, to))}${to < flat.length ? "…" : ""}`;
+  const to = Math.min(text.length, at + width);
+  const body = text.slice(from, to).replace(/\s+/g, " ");
+  return `${from > 0 ? "…" : ""}${JSON.stringify(body)}${to < text.length ? "…" : ""}`;
 }
 
 /**
@@ -454,6 +475,19 @@ const COPY_FIXTURES = [
     "html", "<script>const label = `zebra`;</script>\n<p>Quokka runs alone.</p>"],
   ["prose after an inlined stylesheet, on the hand-written page",
     "html", "<style>.zebra-box { color: red }</style>\n<p>Quokka runs alone.</p>"],
+  // The row the ORDER comparison exists for. The `<meta>` description repeats a sentence the
+  // body also carries — exactly what `landing/index.html` does with its tagline — so erasing
+  // that sentence from the BODY leaves every one of its words still present, once, in what
+  // the masking keeps. Counting this page is green; reading it in order is not, because the
+  // words around the hole no longer line up behind the copy in the `<head>`. The paragraphs
+  // either side are not decoration: with the shared sentence alone, the `<head>` copy sits in
+  // front of it in the right order and even reading in order would pass. [Codex review R1 P2.]
+  ["a sentence the body shares with the `<meta>` description that a search result prints",
+    "html",
+    '<meta name="description" content="Agents run alone. Quokka decides.">\n' +
+      "<p>Zebra opens the page.</p>\n" +
+      "<p>Agents run alone. Quokka decides.</p>\n" +
+      "<p>Moose closes it.</p>"],
 ];
 
 /** The fixtures as sources, labelled so a failure quotes the construct rather than an index. */
@@ -553,6 +587,18 @@ const BROKEN_MASKS = [
     (text, kind) => readerText(text.replace(/&#?\w+;/g, blank), { kind })],
   ["lets a `<script>` or a `<style>` swallow everything after it",
     (text, kind) => readerText(text.replace(/<(?:script|style)\b[\s\S]*$/i, blank), { kind })],
+  // Not a belief taken away — the SHAPE the ordered comparison exists for. One span of
+  // visible text goes, and every word in it is still on the page somewhere else, so nothing
+  // is missing from a tally. Measured against the fixture written for it: counting this page
+  // is GREEN and reading it in order is not. [Codex review R1 P2.]
+  ["loses one block element's text, where the page says those words again elsewhere",
+    (text, kind) => {
+      let n = 0;
+      return readerText(
+        text.replace(/<p\b[^>]*>[\s\S]*?<\/p>/gi, (element) => (++n === 2 ? blank(element) : element)),
+        { kind },
+      );
+    }],
 ];
 
 /**
@@ -604,7 +650,7 @@ function selfTestCopy(python) {
       failures.push(`  a port that ${what} was reported as agreeing with the renderer`);
       continue;
     }
-    for (const line of reported.failures) killed.add(line.slice(0, line.indexOf(":")).trim());
+    for (const { label } of reported.failures) killed.add(label);
   }
   if (failures.length === 0) {
     console.log(`All ${BROKEN_MASKS.length} deliberately broken ports are reported, not passed.`);
@@ -619,7 +665,7 @@ function selfTestCopy(python) {
   }
 
   const real = compareCopy(fixtures, rendered, REAL_MASK);
-  for (const line of real.failures) failures.push(line);
+  for (const { line } of real.failures) failures.push(line);
   if (real.failures.length === 0) {
     console.log(`The real masking keeps all ${real.words} words the renderer shows across those fixtures.`);
   }
@@ -808,7 +854,7 @@ if (SELF_TEST) {
   const copyFixtures = fixtureSources();
   const copyAll = [...copyPages, ...copyFixtures];
   const copy = compareCopy(copyAll, renderedText(python, join(ROOT, "mkdocs.yml"), copyAll), REAL_MASK);
-  for (const line of copy.failures) failures.push(line);
+  for (const { line } of copy.failures) failures.push(line);
 
   if (failures.length) {
     console.log(`The checkers' model of the site disagrees with mkdocs (${failures.length}):`);

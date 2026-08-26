@@ -572,7 +572,7 @@ function tagRanges(text) {
 //
 // The ORDER is the one both rules have always used, carried over unchanged. It is not
 // defended here, because it turns out not to be defensible on today's evidence: swapping the
-// two changes nothing across the 15 pages the parity check reads, its 18 construct fixtures,
+// two changes nothing across the 15 pages the parity check reads, its 19 construct fixtures,
 // or `check:docs --self-test`. The one construct where a difference could be built — a
 // markdown link inside an HTML comment — the renderer decides the OTHER way, resolving the
 // link first, so the reasoning that would have justified this order was backwards. Left as

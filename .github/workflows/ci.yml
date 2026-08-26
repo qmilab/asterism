@@ -181,7 +181,8 @@ jobs:
       # that against, and it is the PINNED one the site is built with, so the comparison is
       # against what ships. Self-test first, same reason as the checks above: it plants an
       # anchor port carrying the historical bug, a scope rule blind to `exclude_docs`, and
-      # six copy maskings each missing one belief the real one holds — so a green comparison
-      # cannot be vacuous.
+      # seven copy maskings — six each missing one belief the real one holds, one that merely
+      # loses a span of text the page repeats elsewhere — so a green comparison cannot be
+      # vacuous.
       - run: node scripts/mkdocs-parity-check.mjs --self-test
       - run: node scripts/mkdocs-parity-check.mjs
