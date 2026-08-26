@@ -580,7 +580,94 @@ export function readLandingDir(workflowText, rel = ".github/workflows/docs.yml")
  * way and a checker that disagreed with it would be checking a different product.
  */
 export function publishedPackages() {
-  const dirs = [];
+  return publishedManifests()
+    .map(({ dir }) => dir)
+    .filter(Boolean);
+}
+
+/**
+ * The names npm publishes this repo under — `@qmilab/asterism`, `@qmilab/asterism-core`,
+ * and the rest.
+ *
+ * The same scan as {@link publishedPackages}, reading the other field, because a package's
+ * NAME is a thing copy is allowed to say where the component behind it is not: `adapter-pi`'s
+ * README is the npm page for `@qmilab/asterism-adapter-pi`, and its first line has to be that
+ * name. Derived rather than listed, so renaming a package cannot leave a stale spelling
+ * exempt from a rule that reads it.
+ */
+export function publishedPackageNames() {
+  return publishedManifests().map(({ name }) => name);
+}
+
+/**
+ * The one-line description npm shows for each published package, keyed by the manifest it
+ * came from.
+ *
+ * A package page is its README, and that is already in `userFacingMarkdown()` — but npm SEARCH
+ * shows this instead, and so does the sidebar of every page that depends on it. It is copy a
+ * reader meets before they ever open the README, and it was outside every checker here for
+ * the same reason the package READMEs were: a set built from files never notices a string
+ * that is not one. [Codex review R3 P2.]
+ *
+ * A missing description is not an error — npm publishes without one — so it is simply not in
+ * the set.
+ */
+export function publishedPackageDescriptions() {
+  return publishedManifests()
+    .filter(({ description }) => typeof description === "string" && description !== "")
+    .map(({ dir, description }) => [`${dir || "."}/package.json (description)`, description]);
+}
+
+/**
+ * The strings `mkdocs.yml` itself puts in front of a reader.
+ *
+ * `site_name` is the header of every page and the browser tab; `site_description` becomes the
+ * `<meta name="description">` a search result quotes; a nav LABEL is what the sidebar calls a
+ * page. None of them is in any file this repo checks, so a forbidden word in one would be
+ * published while `check:docs` stayed green — the same shape as the package READMEs and the
+ * npm descriptions before them. [Codex review R5 P2.]
+ *
+ * ⚠ Read by a line scan, not by mkdocs. `check:docs` must run with no Python, and
+ * `check:mkdocs-parity` — which does ask mkdocs — compares `docs_dir`, `exclude_docs` and
+ * `use_directory_urls`, not these. So a nav written as a YAML flow sequence, or a label with
+ * a colon in it, would be read as one string or missed; this repo's nav is 17 plain
+ * `- Label: page.md` lines and its two site strings are plain scalars.
+ */
+export function siteCopyStrings(configText) {
+  let text = configText;
+  if (text === undefined) {
+    try {
+      text = readFileSync(join(ROOT, "mkdocs.yml"), "utf8");
+    } catch (err) {
+      refuse(`mkdocs.yml puts strings in front of a reader and could not be read (${err.message}).`);
+    }
+  }
+  const out = [];
+  const scalar = (key) => {
+    const m = new RegExp(`^${key}:\\s*(.*)$`, "m").exec(text);
+    const value = m?.[1]?.trim().replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");
+    if (value) out.push([`mkdocs.yml (${key})`, value]);
+  };
+  scalar("site_name");
+  scalar("site_description");
+
+  const lines = text.split("\n");
+  const navAt = lines.findIndex((line) => /^nav:\s*$/.test(line));
+  if (navAt >= 0) {
+    const labels = [];
+    for (let i = navAt + 1; i < lines.length; i++) {
+      if (/^\S/.test(lines[i])) break;
+      const m = /^\s+-\s+([^:]+):/.exec(lines[i]);
+      if (m) labels.push(m[1].trim().replace(/^["']|["']$/g, ""));
+    }
+    if (labels.length) out.push(["mkdocs.yml (nav)", labels.join("\n")]);
+  }
+  return out;
+}
+
+/** Every published manifest, as `{ dir, name, description }` — one scan, three questions. */
+function publishedManifests() {
+  const out = [];
   let listed;
   try {
     listed = execFileSync("git", ["ls-files", "-z", "--", "*package.json"], { cwd: ROOT, encoding: "utf8" });
@@ -595,9 +682,19 @@ export function publishedPackages() {
       refuse(`${rel} could not be parsed (${err.message}), so this cannot say whether npm publishes it.`);
     }
     if (manifest.private === true) continue;
-    dirs.push(rel === "package.json" ? "" : rel.slice(0, -"/package.json".length));
+    if (typeof manifest.name !== "string" || manifest.name === "") {
+      // npm cannot publish a manifest with no name, so this is a broken tree rather than one
+      // more package to skip — and skipping it quietly would leave whatever reads these names
+      // recognising one fewer of them, which is a false red on that package's own page.
+      refuse(`${rel} is published (it is not \`private\`) but declares no \`name\`.`);
+    }
+    out.push({
+      dir: rel === "package.json" ? "" : rel.slice(0, -"/package.json".length),
+      name: manifest.name,
+      description: manifest.description,
+    });
   }
-  return dirs.filter(Boolean);
+  return out;
 }
 
 /**

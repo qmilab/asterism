@@ -64,6 +64,13 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import { gateOverclaims, GATE_RULE_ADVICE, TRUST_LEVEL_NAMES } from "./lib/gate-claims.mjs";
+import { codeRanges } from "./lib/copy-text.mjs";
+import {
+  vocabularyLeaks,
+  isVocabularyExempt,
+  VOCABULARY_WORDS,
+  VOCABULARY_EXEMPT_PAGES,
+} from "./lib/copy-vocabulary.mjs";
 import {
   ROOT,
   siteDir,
@@ -76,6 +83,9 @@ import {
   publishedPages,
   publishedPredicate,
   publishedPackages,
+  publishedPackageNames,
+  publishedPackageDescriptions,
+  siteCopyStrings,
   publishedAssets,
   landingFiles,
   readLandingRemovals,
@@ -2488,16 +2498,77 @@ function report(total, tally, groups, coverageWork) {
       ["quotes a test title inside an Evidence block",
         '> **Evidence** — `bun test packages/core/src/delegation.test.ts`\n> - "a delegated call always pauses — at notify AND at autonomous, and standing cannot buy it out"\n',
         []],
+      // A multi-line comment INSIDE a citation block. Hiding it before the citations are
+      // masked blanks the `>` prefixes of its continuation lines, so the citation reader sees
+      // a line that no longer begins with `>`, ends the block there, and reads the quoted
+      // TEST TITLES below it as public claims. Order decides it. [Codex review R4 P2.]
+      ["puts a multi-line comment inside an Evidence block, above the titles",
+        '> **Evidence** — `bun test x.test.ts`\n> <!-- a note\n> spanning two lines -->\n> - "an autonomous agent always pauses on a destructive action"\n',
+        []],
       ["quotes one in a block whose header this reader cannot parse",
         '> **Evidence** – `bun test x.test.ts`\n> - "an autonomous agent still pauses on a destructive action"\n',
         []],
+      // What the markup HIDES is not copy. The landing page is hand-written HTML with
+      // thirteen comments and an inlined stylesheet; a maintainer's note in one of them is a
+      // fact about the file, not a promise to a reader, and this rule reported it as an
+      // unqualified guarantee. Found by auditing the identical defect Codex caught in the
+      // vocabulary rule, which reads the SAME corpus — see `scripts/lib/copy-text.mjs`.
+      ["puts a bare guarantee inside an HTML comment nobody reads",
+        "<!--\n  Note: a destructive action always pauses for your confirmation.\n-->\n<p>Agents run alone.</p>",
+        []],
+      ["puts one inside the inlined stylesheet",
+        "<style>\n  /* even an autonomous agent pauses before a destructive action */\n</style>",
+        []],
+      ["says it in the visible text beside both",
+        "<!-- a note -->\n<style>.x{}</style>\n<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.</p>",
+        ["no-exception"]],
+      // Blanking a hidden region must not turn its lines into BLANK ones: a paragraph is one
+      // block, a blank line ends it, and a comment sitting between a guarantee and its
+      // `unless` clause inside one `<p>` closed the claim before the qualifier and reported
+      // correct copy as an unqualified promise. The browser shows one paragraph.
+      // [Codex review R2 P2.]
+      ["puts a multi-line comment between a guarantee and its `unless`, inside one paragraph",
+        "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n  a maintainer note about this section\n-->\nUnless you have allowed that capability for it.</p>",
+        [], { kind: "html" }],
+      // …EMPTY lines inside that comment included. An empty line is still inside the
+      // comment, so the browser still renders one paragraph — and filling it costs a
+      // character of length, which nothing here needs, where a line number is a count of
+      // newlines. [Codex review R3 P2, resolved in R4 once the page's kind was known.]
+      ["puts one with an EMPTY line in it between a guarantee and its `unless`",
+        "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n<!--\n\n  a note\n-->\nUnless you have allowed that capability for it.</p>",
+        [], { kind: "html" }],
+      // …and the SAME text read as markdown must fire, because there `<!--` at the start of
+      // a line opens an HTML block and the `unless` is a different paragraph. One renderer's
+      // invisible comment is the other's block boundary. [Codex review R4 P2.]
+      // …but a comment that starts AFTER visible text is inline, and Python-Markdown keeps the
+      // paragraph whole around it. Asked directly:
+      //   'claim <!--\nnote\n--> unless allowed' → <p>claim <!--\nnote\n--> unless allowed</p>
+      // Blanking its continuation lines made them paragraph breaks and reported a correctly
+      // qualified claim as an overclaim. [Codex review R5 P2.]
+      ["puts an INLINE multi-line comment between the two, in markdown",
+        "Even an `autonomous` agent pauses before a **destructive** action <!--\n  a note\n--> unless you have allowed that capability for it.",
+        []],
+      ["puts a comment between the two in MARKDOWN, where it ends the paragraph",
+        "A destructive action never happens without you, at every trust level.\n<!--\n  a note\n-->\nUnless you have allowed that capability for it.",
+        ["no-exception"]],
+      // The same attribute values the vocabulary rule reads: a gate promise in an Open Graph
+      // description is a promise made to everyone who sees the link previewed.
+      // Backticks on an HTML page are not code spans, and taking them for some preserved the
+      // tag between them — putting an `unless` from a CLASS NAME into the claim's window,
+      // where it excused an unqualified promise. [Codex review R8 P2.]
+      ["writes backticks around a tag whose class reads like a qualifier",
+        '<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action. Type `<span class="unless you have allowed it">` to style one.</p>',
+        ["no-exception"], { kind: "html" }],
+      ["makes a bare guarantee in the description a social preview shows",
+        "<meta property=\"og:description\" content=\"A destructive action never happens without you.\" />",
+        ["no-exception"]],
       ["makes a bare guarantee in prose right AFTER an Evidence block closes",
         '> **Evidence** — `bun test x.test.ts`\n> - "a real test title"\n\nEven an `autonomous` agent pauses for your confirmation before a destructive action.',
         ["no-exception"]],
     ];
     const gateFailures = [];
-    for (const [why, text, wantRules] of GATE_CASES) {
-      const got = gateOverclaims(text).map((f) => f.rule).sort();
+    for (const [why, text, wantRules, opts] of GATE_CASES) {
+      const got = gateOverclaims(text, opts ?? {}).map((f) => f.rule).sort();
       const want = [...wantRules].sort();
       if (JSON.stringify(got) !== JSON.stringify(want)) {
         gateFailures.push(
@@ -2510,17 +2581,33 @@ function report(total, tally, groups, coverageWork) {
     // to the person fixing it. Two claims, four lines apart, with a blank line between —
     // which also pins the blank line as a claim boundary, so a paragraph cannot be swallowed
     // into its neighbour and reported at the wrong place.
+    //
+    // The leading COMMENT is load-bearing twice over: it carries a gate-shaped sentence, so a
+    // reader that stopped blanking comments would report three findings here instead of two;
+    // and it spans lines, so a mask that blanked its newlines along with everything else
+    // would keep every offset and lose two LINES, reporting both real claims early.
     const twoClaims = [
-      "# A page",                                     // 1
-      "",                                             // 2
-      "Even an `autonomous` agent pauses before a **destructive** action.", // 3
-      "",                                             // 4
-      "A deletion always pauses for your confirmation.", // 5
+      "<!-- Maintainer's note: a destructive action always pauses for your", // 1
+      "     confirmation. Not copy — nobody reads this. -->",                // 2
+      "",                                             // 3
+      "# A page",                                     // 4
+      "",                                             // 5
+      "Even an `autonomous` agent pauses before a **destructive** action.", // 6
+      "",                                             // 7
+      "A deletion always pauses for your confirmation.", // 8
     ].join("\n");
     const twoLines = gateOverclaims(twoClaims).map((f) => f.line);
-    if (JSON.stringify(twoLines) !== JSON.stringify([3, 5])) {
-      gateFailures.push(`  two claims four lines apart were reported at ${JSON.stringify(twoLines)}, not [3,5]`);
+    if (JSON.stringify(twoLines) !== JSON.stringify([6, 8])) {
+      gateFailures.push(`  two claims below a two-line comment were reported at ${JSON.stringify(twoLines)}, not [6,8]`);
     }
+    // The same for the gate rule's report — it shares the masking, so it shares the filler.
+    const inlineNote = gateOverclaims(
+      "<p>Even an <code>autonomous</code> agent <!-- inline note --> pauses before a <strong>destructive</strong> action.</p>",
+    )[0];
+    if (inlineNote?.sentence !== "Even an autonomous agent pauses before a destructive action.") {
+      gateFailures.push(`  a claim beside an inline comment was reported as ${JSON.stringify(inlineNote?.sentence)}`);
+    }
+
     // …and a very long sentence is cut rather than printed whole, or one bad page fills the
     // terminal and the rest of the report scrolls away.
     const longOne = gateOverclaims(
@@ -2549,11 +2636,40 @@ function report(total, tally, groups, coverageWork) {
     }
 
     // The rule this one grew out of, asserted as a CAPABILITY rather than trusted: the
-    // sentence `help.test.ts` has forbidden since #139 must still be caught here, or
-    // widening the corpus quietly narrowed the rule.
+    // sentence #139 fixed in eight places must still be caught here, or widening the corpus
+    // quietly narrowed the rule. (A hand-written guard for exactly this lived in
+    // `help.test.ts` until #183 measured that it caught nothing this does not and missed
+    // three shapes this does — including two #177 had to fix by hand.)
     if (!gateOverclaims("A destructive action pauses for confirmation at every trust level.").some((f) => f.rule === "every-level")) {
-      gateFailures.push("  the `pauses at every trust level` sentence `help.test.ts` forbids is not caught here");
+      gateFailures.push("  the `pauses at every trust level` sentence #139 fixed in eight places is not caught here");
     }
+    // The page's KIND, as the PASS reads it off a label. Without this the flag could be wired
+    // to a constant — every source markdown, or every source HTML — and every row above would
+    // still pass, because each of them passes its own option directly.
+    //
+    // ⚠ This block first sat in the vocabulary section, after the check that reads
+    // `gateFailures` had already run, so it could not fail. A mutation making every source
+    // markdown survived it. [Codex review R4 P2; the dead placement found by the sweep.]
+    const commentBetween =
+      "<p>Even an <code>autonomous</code> agent pauses before a <strong>destructive</strong> action.\n" +
+      "<!--\n  a note\n-->\nUnless you have allowed that capability for it.</p>";
+    for (const [label, want] of [
+      // HTML: one paragraph, the comment invisible inside it.
+      ["landing/index.html", 0],
+      // Markdown: `<!--` opens a block, so the `unless` below is a different paragraph.
+      ["docs/commands.md", 1],
+      // A help screen is neither: no comments, no tags, so the whole thing is one claim and
+      // the `unless` is right there in it. [Codex review R5 P2.]
+      ["asterism run --help", 0],
+    ]) {
+      const got = checkGateClaims([[label, commentBetween]]).length;
+      if (got !== want) {
+        gateFailures.push(
+          `  one paragraph with a comment in it reported ${got} time(s) under \`${label}\`, not ${want}`,
+        );
+      }
+    }
+
     if (gateFailures.length) {
       console.log("\nSELF-TEST FAILED: the destructive-action gate rule does not hold:");
       for (const f of gateFailures) console.log(f);
@@ -2564,16 +2680,723 @@ function report(total, tally, groups, coverageWork) {
     // `docs/getting-started.md` while a guard for it passed in `packages/cli`.
     const gatePages = userFacingPages();
     const gateVerbs = advertisedVerbSet(coverageWork);
-    if (gatePages.length === 0 || gateVerbs.size === 0) {
+    const gateDescriptions = publishedPackageDescriptions();
+    // The site's OWN strings — its name, its meta description, its nav labels — are published
+    // by mkdocs and live in no file this otherwise reads. [Codex review R5 P2.]
+    const gateSiteStrings = siteCopyStrings();
+    if (
+      gatePages.length === 0 ||
+      gateVerbs.size === 0 ||
+      gateDescriptions.length === 0 ||
+      gateSiteStrings.length === 0
+    ) {
       console.log(
-        `\nSELF-TEST FAILED: the gate rule reads ${gatePages.length} pages and ${gateVerbs.size} help screens.`,
+        `\nSELF-TEST FAILED: the copy rules read ${gatePages.length} pages,` +
+          ` ${gateDescriptions.length} npm descriptions, ${gateSiteStrings.length} site strings` +
+          ` and ${gateVerbs.size} help screens.`,
+      );
+      process.exit(1);
+    }
+    // …and the reader really does find the three kinds in a config shaped like this one, or
+    // it is a scan that returns nothing while the pass reports a green over it.
+    const plantedSite = siteCopyStrings(
+      'site_name: A Site\nsite_description: One line.\nnav:\n  - Home: index.md\n  - Guides:\n      - Models: models.md\n',
+    );
+    const wantSite = [
+      ["mkdocs.yml (site_name)", "A Site"],
+      ["mkdocs.yml (site_description)", "One line."],
+      ["mkdocs.yml (nav)", "Home\nGuides\nModels"],
+    ];
+    if (JSON.stringify(plantedSite) !== JSON.stringify(wantSite)) {
+      console.log(`\nSELF-TEST FAILED: the site-string reader returned ${JSON.stringify(plantedSite)}`);
+      process.exit(1);
+    }
+    // …and the SET, asserted against the function that builds it rather than against its
+    // ingredients. Both copy rules read `userFacingCopy`, and the two checks above only ever
+    // saw `userFacingPages()` and `advertisedVerbSet()` — so deleting either half from the
+    // assembler left every rule reading half a corpus behind a green. Driven with stubs so
+    // this costs no child process; the real halves are checked non-empty above.
+    const shape = userFacingCopy(null, {
+      pages: ["README.md"],
+      descriptions: [
+        ["x/package.json (description)", "a one-line description"],
+        ["mkdocs.yml (site_name)", "A Site"],
+      ],
+      verbs: ["run"],
+      help: (verb) => `help for ${verb || "the root"}`,
+    }).map(([label]) => label);
+    const wantShape = [
+      "README.md",
+      "x/package.json (description)",
+      "mkdocs.yml (site_name)",
+      "asterism --help",
+      "asterism run --help",
+    ];
+    // …and with the strings left to their DEFAULT, both sources are reached. Without this the
+    // assembler could stop asking for either and the row above — which supplies its own —
+    // would not notice. Driven with no verbs and a stub help, so it costs no child process.
+    const defaulted = userFacingCopy(null, { pages: [], verbs: [], help: () => "" }).map(
+      ([label]) => label,
+    );
+    for (const [what, prefix] of [
+      ["an npm description", "packages/"],
+      ["a string from the site's own config", "mkdocs.yml ("],
+    ]) {
+      if (!defaulted.some((label) => label.startsWith(prefix))) {
+        console.log(`\nSELF-TEST FAILED: the copy corpus reaches for no ${what}.`);
+        process.exit(1);
+      }
+    }
+    if (JSON.stringify(shape) !== JSON.stringify(wantShape)) {
+      console.log(
+        `\nSELF-TEST FAILED: the copy corpus assembled ${JSON.stringify(shape)},` +
+          ` not ${JSON.stringify(wantShape)} — a half of it is missing.`,
       );
       process.exit(1);
     }
     console.log(
       `The destructive-action gate rule holds on ${GATE_CASES.length} real sentences, fires inside` +
         ` emphasis, markup and colons, never inside an Evidence citation, and reads` +
-        ` ${gatePages.length} pages plus ${gateVerbs.size} help screens.`,
+        ` ${gatePages.length} pages, ${gateDescriptions.length} npm descriptions,` +
+        ` ${gateSiteStrings.length} site strings and ${gateVerbs.size} help screens — every part,` +
+        ` checked on the function that assembles them.`,
+    );
+
+    // --- golden rule 7: internal architecture vocabulary ------------------------------
+    //
+    // Every row is a REAL sentence from this repo (or the sentence a fix replaced), never a
+    // paraphrase. A paraphrase of mine was inert on the gate rule two slices ago — "always
+    // asks" is not a pause verb, so the mutation it was meant to kill survived the fix I had
+    // just made — and the tell was that nothing changed when I "fixed" it.
+    //
+    // The rows that must NOT fire are the more valuable half here. A word list is one
+    // sed away from firing on a container registry, on a package's own npm page, or on the
+    // name the product itself uses for a feature, and a red over correct copy is the worse
+    // failure of the two: a green merely misses something, while a red gets a correct
+    // sentence "fixed" until the checker agrees.
+    const NPM_NAMES = publishedPackageNames();
+    const VOCAB_CASES = [
+      // --- must fire ------------------------------------------------------------------
+      ["names the kernel in the walkthrough's own claim (fixed by #183)",
+        "  agent, and the kernel decides what it may actually do.",
+        ["kernel"]],
+      ["names it twice in one wrapped sentence",
+        "[environment](./installation.md#api-keys)); the per-agent kernel settings are kept in\nthe kernel store, scoped to each agent.",
+        ["kernel", "kernel"]],
+      ["names it inside HTML on the site's front page (fixed by #183)",
+        "              to come, and so is <strong>stronger execution isolation</strong>: today's boundary is\n              enforced by the kernel, not by the operating system, and the",
+        ["kernel"]],
+      ["carries the safety case's thesis on a page that is NOT the safety case",
+        "**The kernel/substrate boundary** is what keeps the model loop from being the",
+        ["kernel", "substrate"]],
+      ["names the TOOL registry, which is the internal one",
+        "filters them by trust level, and hands the substrate a finished registry. The",
+        ["registry", "substrate"]],
+      ["names the adapter as a component rather than as a package",
+        "The adapter never holds a credential and never reaches the store.",
+        ["adapter"]],
+      // A token that merely BEGINS with a published name is not that package. Unbounded, the
+      // real name is blanked out of the middle of this and the `adapter` in it disappears
+      // with it — the exemption swallowing a leak instead of a name. [Codex review R1 P2.]
+      ["names a package-ish token that only starts with a published name",
+        "See @qmilab/asterism-adapter-pipeline for the experimental build.",
+        ["adapter"]],
+      // …and the same shape one character narrower. A dot CONTINUES the token when a name
+      // character follows it, which is what makes `…-adapter-pi.next` not a published name;
+      // the row below keeps a dot that ends a sentence from being read the same way.
+      // [Codex review R2 P2.]
+      ["extends a published name through a dot",
+        "See @qmilab/asterism-adapter-pi.next for the experimental build.",
+        ["adapter"]],
+      // ⚠ This row was inert first time round: it wrapped the name in backticks, so the
+      // character after it was a backtick and the sentence-ending DOT — the whole point of
+      // the row — was never exercised. A mutation making a dot never end a name survived it.
+      ["ends a sentence with a published name",
+        "Install @qmilab/asterism-adapter-pi. Then point the CLI at it.",
+        []],
+      ["uses a plural",
+        "Two kernels, two substrates, two registries, two adapters.",
+        ["adapter", "kernel", "registry", "substrate"]],
+
+      // --- must NOT fire --------------------------------------------------------------
+      // `firewall` came OFF the list, and this is the sentence that decides it: the product
+      // calls the feature "the memory firewall" to the reader's face, on this page and in
+      // the binary, the dashboard and the HTTP endpoint. Putting the word back turns this
+      // row red, which is the only reason the decision is a decision.
+      ["calls the feature by the name the product uses for it",
+        "a **memory firewall** that flags anything unsafe to remember before you ever see",
+        []],
+      ["says `the firewall` a second time, as the page does",
+        "a flagged one anyway, the firewall still refuses to save it (`⛔ blocked`).",
+        []],
+      // A CONTAINER registry is a different thing spelled the same way.
+      ["names a container registry",
+        "The released image is published to the GitHub Container Registry and runs **natively on",
+        []],
+      // …and the same phrase after a rewrap. Without `\s+` in the sense, the orphaned half
+      // is reported and `container.md` goes red on a line that is correct.
+      ["names one that a rewrap split across two lines",
+        "The released image is published to the GitHub Container\nRegistry and runs natively on both architectures.",
+        []],
+      // …and the same phrase with markup between its two words. This is why the scan runs
+      // on a flattened copy rather than on the raw text: `container <em>registry</em>` is
+      // one phrase to a reader and two strings to a matcher, and the site's front page is
+      // hand-written HTML throughout.
+      // …but ONE wrap is the whole allowance. `\s+` between the words spans a blank line too,
+      // so a heading `## Container` followed by a paragraph opening `Registry …` masked a
+      // real claim out of existence — the exemption swallowing a sentence rather than a
+      // phrase. [Codex review R2 P2.]
+      ["puts `Container` and `Registry` in two different blocks",
+        "## Container\n\nRegistry controls the tool list an agent is handed.",
+        ["registry"]],
+      // …and not across a BLOCK. `<h2>Container</h2>` above a `<p>Registry …` is two things a
+      // reader meets separately, and blanking every tag to spaces made them one phrase — the
+      // exemption swallowing a heading and a claim. [Codex review R10 P2.]
+      ["puts `Container` and `Registry` in two HTML blocks",
+        "<h2>Container</h2>\n<p>Registry controls the tool list an agent is handed.</p>",
+        ["registry"], { kind: "html" }],
+      // …with the HEADING as the only tag between them, so the paragraph's own tag cannot
+      // stand in for it. Every block element in the list needs a row it is alone in, or the
+      // list is only as checked as its most common entry.
+      ["ends a heading and carries straight on",
+        "<h2>Container</h2>Registry controls the tool list an agent is handed.",
+        ["registry"], { kind: "html" }],
+      // …while an INLINE tag between them changes nothing a reader sees.
+      ["names one with an inline tag between the two words",
+        "<p>published to the GitHub <em>Container</em> Registry</p>",
+        [], { kind: "html" }],
+      ["names one with emphasis between the two words",
+        "The released image is published to the GitHub **Container** Registry.",
+        []],
+      ["names one with an HTML tag between them",
+        "<p>published to the GitHub Container <em>registry</em>, multi-arch</p>",
+        []],
+      ["names one with a non-breaking space between them",
+        "<p>published to the GitHub Container&nbsp;Registry, multi-arch</p>",
+        []],
+      ["is the adapter package's own npm page, which opens with its published name",
+        "# @qmilab/asterism-adapter-pi\n",
+        []],
+      ["is the other adapter package's page",
+        "# @qmilab/asterism-adapter-lodestar\n",
+        []],
+      // A slash is not a name boundary, and this is the site that decides it: every package
+      // README already links to npm this way, and the adapter's own URL is one word short of
+      // the umbrella's. Nothing in today's copy would red without this — the measurement is
+      // in `copy-vocabulary.mjs` — so this row is the only thing holding the decision.
+      ["links to the adapter package's own npm page, where the name follows a slash",
+        "Install it from [npm](https://www.npmjs.com/package/@qmilab/asterism-adapter-pi).",
+        []],
+      ["mentions the umbrella package beside the adapter one",
+        "This is an internal building block. To use Asterism, install the umbrella package: [`@qmilab/asterism`](https://www.npmjs.com/package/@qmilab/asterism).\n",
+        []],
+      // What the markup HIDES. `landing/index.html` is hand-written HTML with thirteen
+      // comments and an inlined stylesheet, and a design token or a CSS class is exactly
+      // where one of these words turns up without anyone having said it to a reader. A gate
+      // firing there would be asking someone to rename a class to satisfy a prose rule.
+      // [Codex review R1 P2.]
+      ["hides the word in an HTML comment, as the landing page's header comment could",
+        "<!--\n  Asterism landing page — the kernel owns the /asterism/* path here.\n-->\n<p>Agents run alone.</p>",
+        []],
+      ["hides it in the inlined stylesheet",
+        "<style>\n  /* ---- Design tokens ---- */\n  .registry-grid { --adapter-gap: 1rem; }\n</style>\n<p>Agents run alone.</p>",
+        []],
+      ["hides it in a script block",
+        "<script>\n  const kernel = document.querySelector('.substrate');\n</script>\n<p>Agents run alone.</p>",
+        []],
+      // …and the visible half of the very same page still fires, or the three rows above
+      // would pass just as well with the whole page thrown away.
+      ["says it in the visible text beside all three",
+        "<!-- a comment -->\n<style>.x{}</style>\n<p>enforced by the kernel</p>",
+        ["kernel"]],
+      // A tag's attribute values are copy when a reader meets them without viewing source:
+      // `alt` is read aloud, a `<meta>` `content` is what a search result and a social
+      // preview show. Blanking the whole tag hid all of it. [Codex review R3 P2.]
+      ["hides the word in an image's alt text",
+        "<img src=\"assets/img/dashboard.png\" alt=\"The dashboard, where the kernel decides.\">",
+        ["kernel"], { kind: "html" }],
+      // …but eleven of the landing page's sixteen meta tags hold a URL, a number or a colour,
+      // and scanning those means an asset rename reds the build over a path.
+      // [Codex review R6 P2.]
+      ["puts an internal word in a social-card image URL",
+        '<meta property="og:image" content="https://qmilab.com/adapter-card.png" />',
+        [], { kind: "html" }],
+      ["puts one in a page URL and a theme colour",
+        '<meta property="og:url" content="https://x/registry/" />\n<meta name="theme-color" content="#1B2A4A" />',
+        [], { kind: "html" }],
+      // …and the social card's ALT text is still text, prefix and all.
+      ["puts one in the social card's alt text",
+        '<meta property="og:image:alt" content="The kernel diagram" />',
+        ["kernel"], { kind: "html" }],
+      // …and `content` is a meta tag's attribute. RDFa puts one on ordinary elements, where it
+      // OVERRIDES the visible text for a metadata consumer rather than being shown — the
+      // reader meets the element's text, which is scanned anyway.
+      // A backtick in HTML is a backtick. Reading it as a code span preserved the comment
+      // beside it and reported words no reader meets. [Codex review R7 P2.]
+      ["writes backticks around a comment on an HTML page",
+        "<p>Type `<!-- the kernel -->` to hide a note.</p>",
+        [], { kind: "html" }],
+      // HTML allows an unquoted attribute value, and a screen reader still reads it out.
+      // [Codex review R7 P2.]
+      ["writes its alt text without quotes",
+        "<img src=dashboard.png alt=kernel>",
+        ["kernel"], { kind: "html" }],
+      // A backtick on an HTML page is a backtick, for TAGS as well as comments: the class
+      // inside this one is not on the screen, and reading the backticks as a code span would
+      // preserve the tag and report it.
+      // …and in HTML a tag MAY span a blank line: there is no paragraph to end, so the class
+      // stays inside the tag and out of sight. The markdown rule must not follow it here.
+      // A numeric entity is a letter written the long way, and the browser shows the word.
+      // [Codex review R8 P2.]
+      // Inside a quoted attribute those characters are literal text the tokenizer never reads
+      // as a comment, and a search result shows every word of them. [Codex review R9 P2.]
+      ["writes comment markers inside a description attribute",
+        '<meta property="og:description" content="What the <!-- kernel --> decides">',
+        ["kernel"], { kind: "html" }],
+      ["spells a forbidden word through a numeric entity",
+        "<p>ker&#110;el decides what it may do</p>",
+        ["kernel"], { kind: "html" }],
+      ["spells one through a hexadecimal entity",
+        "<p>ker&#x6E;el decides what it may do</p>",
+        ["kernel"], { kind: "html" }],
+      ["breaks a tag across a blank line on an HTML page",
+        '<div\n\nclass="kernel-box">Agents run alone.</div>',
+        [], { kind: "html" }],
+      ["writes backticks around a tag on an HTML page",
+        '<p>Type `<div class="kernel-box">` to open one.</p>',
+        [], { kind: "html" }],
+      // `data-name` is not `name`. The `\b` that let it through is the bug R4 fixed in the
+      // attribute reader, left standing in the meta-key reader written to use it.
+      // [Codex review R7 P2.]
+      ["puts an asset path beside a data-name that only looks like a key",
+        '<meta data-name="description" content="https://x/adapter-card.png">',
+        [], { kind: "html" }],
+      ["carries an RDFa `content` override on an ordinary element",
+        '<span property="og:title" content="the kernel decides">Asterism</span>',
+        [], { kind: "html" }],
+      ["hides it in the Open Graph description a social preview shows",
+        "<meta property=\"og:description\" content=\"Agents whose boundary the kernel enforces.\" />",
+        ["kernel"], { kind: "html" }],
+      // …but a class, an id and an href are not sentences, and must stay out.
+      ["puts it in a class name and an href, which no reader meets",
+        "<a class=\"registry-grid\" id=\"kernel-box\" href=\"/adapter/substrate\">Read on</a>",
+        [], { kind: "html" }],
+      // A fenced example is a PICTURE of markup: every character is on the screen, and the
+      // word rule already treats a fence as copy. [Codex review R3 P2.]
+      ["shows hidden markup inside a fenced example, where a reader reads it",
+        "```html\n<!-- the kernel decides what it may do -->\n```",
+        ["kernel"]],
+      // …and an inline span may WRAP. Python-Markdown renders it as one `<code>` across two
+      // lines, so every character is still on the screen; excluding newlines from the span
+      // reader turned it back into a comment and erased it. Asked the renderer.
+      // [Codex review R7 P2.]
+      // A blank line ends the paragraph, and with it the span AND the comment: the renderer
+      // escapes the markers and puts `kernel` on the screen. Found by chasing a surviving
+      // mutation to the renderer rather than reported.
+      // A stray backtick inside a fence must not start a match that swallows the opening
+      // backtick of a real span below it. [Codex review R8 P2.]
+      // A closing fence may be LONGER than the one that opened it; the renderer still calls
+      // the contents code. [Codex review R9 P2.]
+      ["closes a fence with more markers than it opened",
+        "~~~html\n<!-- the kernel decides -->\n~~~~",
+        ["kernel"]],
+      // A span opened with two backticks closes on a run of two, and the single backticks
+      // inside it are literal — that is what the form is for. [Codex review R9 P2.]
+      ["shows a backtick inside a double-backtick span",
+        "Write `` `<!-- the kernel decides -->` `` at the top.",
+        ["kernel"]],
+      // …and the comment AFTER the lone backtick, which is what tells "closes on a run of
+      // the same length" apart from "closes on the first run that is not longer". Closing
+      // early ends the span before the comment and masks it.
+      ["puts the comment after a lone backtick inside that span",
+        "Write `` a ` <!-- the kernel decides --> `` at the top.",
+        ["kernel"]],
+      ["opens a real code span below a fence holding one stray backtick",
+        "~~~\nno closing ` here\n~~~\nWrite `<!-- the kernel decides -->` at the top.",
+        ["kernel"]],
+      ["puts a blank line inside what looked like a code span",
+        "Write `<!-- the\n\nkernel decides -->` here.",
+        ["kernel"]],
+      // …while a BLOCK comment may hold a blank line and stays a comment. The renderer says
+      // so; the two cases differ only in where the region starts.
+      // …and the same for a TAG. The renderer escapes what a blank line leaves behind, so the
+      // class is visible text. Found by chasing a surviving mutation, not reported.
+      ["puts a blank line inside what looked like a tag",
+        'Type `<div\n\nclass="kernel-box">` to open one.',
+        ["kernel"]],
+      ["puts a blank line inside a block comment, which survives it",
+        "Text.\n\n<!--\nnote\n\nthe kernel decides\n-->\n\nMore text.",
+        []],
+      ["shows hidden markup in a code span that wraps across a line",
+        "Write `<!-- the\nkernel decides -->` at the top.",
+        ["kernel"]],
+      ["shows it in an inline code span",
+        "Write `<!-- the kernel -->` at the top of the file.",
+        ["kernel"]],
+      // A `<script>` whose body holds a backtick — a template literal — used to look like an
+      // inline code span to the fence reader, which then preserved the whole script and
+      // reported words no reader meets. Only the region's OPENER decides.
+      // [Codex review R4 P2.]
+      ["puts a backtick inside a script, which is not a code span",
+        "<script>\n  const label = `the kernel decides`;\n</script>\n<p>Agents run alone.</p>",
+        [], { kind: "html" }],
+      // A tag shown INSIDE a code example is a picture of a tag: every character is on the
+      // screen, the attribute a rendered page would hide included. [Codex review R4 P2.]
+      ["shows a tag with an internal word in its class, inside a fence",
+        "```html\n<div class=\"kernel-box\">Hello</div>\n```",
+        ["kernel"]],
+      ["shows one in an inline code span",
+        "Write `<div class=\"registry-grid\">` at the top.",
+        ["registry"]],
+      // …but a real tag on a real page keeps its class hidden — and a `>` inside a quoted
+      // attribute does not end the tag, which used to leave the class behind as prose.
+      // [Codex review R4 P2.]
+      ["hides a class behind a quoted `>` in a title",
+        "<a title=\"more x > y\" class=\"kernel-box\" id=\"registry\">Read on</a>",
+        [], { kind: "html" }],
+      // `data-title` is implementation state. A word boundary alone matched the tail of it
+      // and restored the value as copy. [Codex review R4 P2.]
+      ["puts internal words in data- attributes nobody meets",
+        "<div data-title=\"kernel\" data-content=\"registry\" data-alt=\"substrate\">ok</div>",
+        [], { kind: "html" }],
+      // The allowed sense has to cover the same inflections the word list does.
+      // [Codex review R4 P2.]
+      ["names container registries in the plural",
+        "The image is mirrored across two container registries.",
+        []],
+      // A help synopsis is PLAIN text. `<adapter>` is a placeholder, not a tag, and reading it
+      // as one erased the word in the corpus this rule started from. [Codex review R5 P2.]
+      ["puts an internal word in a help synopsis placeholder",
+        "Usage: asterism config <adapter> [options]",
+        ["adapter"], { kind: "plain" }],
+      ["shows comment markers as a literal string, which plain text is full of",
+        "Usage: asterism note add <text>    e.g. asterism note add '<!-- the kernel -->'",
+        ["kernel"], { kind: "plain" }],
+      ["is an npm description, which has no markup either",
+        "The engine behind Asterism: the kernel, scoped memory, and the event log.",
+        ["kernel"], { kind: "plain" }],
+      // A link's DESTINATION is a path this repo chose for a heading, not a sentence it wrote
+      // for a reader — and the safety case really does have headings with these words in
+      // them. The words the link is written ON are copy, and still fire.
+      // [Codex review R5 P2.]
+      ["links to a heading whose anchor names the machine",
+        "See [the threat model](./threat-model.md#what-the-kernel-enforces) for the detail.",
+        []],
+      ["carries the word in a reference definition's URL",
+        "See [the model][tm] for detail.\n\n[tm]: ./threat-model.md#the-kernel-substrate-boundary",
+        []],
+      // An AUTOLINK is not a tag: markdown renders `<https://…>` with the URL itself as the
+      // visible link text, so every character of it is copy. A tag scan that accepted any
+      // name at all swallowed it. (Added while fixing the plain-text case, not asked for —
+      // and nothing exercised it until a mutation said so.)
+      ["writes the URL as an autolink, which renders as its own text",
+        "Read <https://example.com/the-kernel-notes> for the detail.",
+        ["kernel"]],
+      // …but a link's optional TITLE is not part of its destination: markdown renders it as a
+      // tooltip, so a reader meets it. [Codex review R6 P2.]
+      // Markdown allows balanced parentheses in a destination — the renderer takes the whole
+      // thing as the URL. Stopping at the first `)` left the tail standing as prose.
+      // [Codex review R7 P2.]
+      ["links to a path with parentheses in it",
+        "See [the detail](./foo(bar)-kernel-notes.md) for more.",
+        []],
+      // …and a `](` with no closing paren is not a link, so the words after it are prose.
+      // `\](…)` is not a link: the bracket is escaped, so the renderer shows all of it.
+      // [Codex review R8 P2.]
+      // …with a REAL link earlier on the line, so the "is there a bracket at all" test cannot
+      // stand in for the escape test. Without a real link before it, both refusals give the
+      // same answer and neither is exercised.
+      ["writes an escaped bracket after a real link on the same line",
+        "See [the docs](./a.md) and \\](./the-kernel-notes) too.",
+        ["kernel"]],
+      // …and one whose opener has already been CLOSED by an earlier link on the same line.
+      // "is there a bracket somewhere" said yes; the renderer shows the second fragment.
+      // [Codex review R9 P2.]
+      ["writes a literal `](` after a link that already closed",
+        "See [the docs](./a.md) — prose ](the-kernel-notes) after it.",
+        ["kernel"]],
+      // …while a link whose TEXT wraps is still a link, and its destination is still a URL.
+      // `docs/dashboard.md:44` is one; scanning only the current line read that URL as prose.
+      // Found by measuring the corpus for the finding above, not by the finding.
+      // …but not across a BLANK line. The renderer confirms: `See [the\n\nkernel notes](./a.md)`
+      // comes back as two paragraphs with `kernel notes](./a.md)` as visible text, so the
+      // destination is not a destination and its words are copy.
+      // ⚠ The word has to be in the DESTINATION. A first version put it in the link TEXT,
+      // which is copy either way, so both branches agreed and the mutation survived it.
+      ["breaks a link's text across a blank line",
+        "See [the\n\nnotes](./the-kernel-page.md) here.",
+        ["kernel"]],
+      ["wraps a link's text across a line break",
+        "See the [configured\nmodel](./commands.md#what-the-kernel-does); the rest follows.",
+        []],
+      ["writes a `](` with no bracket opening it",
+        "Text ](./the-kernel-notes) more prose.",
+        ["kernel"]],
+      // An ANGLE destination is delimited, not balanced — its parentheses are URL characters.
+      // [Codex review R8 P2.]
+      // A FULL reference link hides its identifier: the renderer shows only the first pair.
+      // [Codex review R10 P2.]
+      ["names the machine in a reference identifier",
+        "See [the details][adapter] for more.\n\n[adapter]: ./runtime.md",
+        []],
+      // …but a SHORTCUT reference has no second pair, so its label is the visible text.
+      // …but a SHORTCUT reference has no second pair, so its label IS the link text the
+      // renderer shows — while the DEFINITION beneath renders nothing at all, label included.
+      // One finding, not two.
+      ["uses the label itself as the link text",
+        "See [adapter] for more.\n\n[adapter]: ./runtime.md",
+        ["adapter"]],
+      // An angle destination may carry a title, exactly as a bare one may.
+      // [Codex review R10 P2.]
+      ["puts a title after an angle-bracket destination",
+        '[the details](<https://example.test/kernel-notes> "a safe title")',
+        []],
+      ["uses an angle-bracket destination with a paren in the URL",
+        "See [the detail](<https://example.test/foo(kernel-notes>) for more.",
+        []],
+      ["opens a destination it never closes",
+        "See [the detail](./a.md#kernel-notes and more prose after it.",
+        ["kernel"]],
+      ["puts the word in a link's tooltip title",
+        'See [the threat model](./threat-model.md#detail "what the kernel enforces").',
+        ["kernel"]],
+      ["puts it in a reference definition's title",
+        'See [the model][tm].\n\n[tm]: ./threat-model.md#detail "what the kernel enforces"',
+        ["kernel"]],
+      ["names it in the words the link is written on",
+        "See [what the kernel enforces](./threat-model.md#detail) for the detail.",
+        ["kernel"]],
+      ["says nothing about the machine at all",
+        "Every agent starts with the standard toolkit, and staying that way is perfectly normal.",
+        []],
+    ];
+    const vocabFailures = [];
+    for (const [why, text, wantWords, opts] of VOCAB_CASES) {
+      const got = vocabularyLeaks(text, { packageNames: NPM_NAMES, ...opts }).map((f) => f.word).sort();
+      const want = [...wantWords].sort();
+      if (JSON.stringify(got) !== JSON.stringify(want)) {
+        vocabFailures.push(
+          `  copy that ${why}\n      want: ${JSON.stringify(want)}\n      got:  ${JSON.stringify(got)}`,
+        );
+      }
+    }
+
+    // The npm names are masked LONGEST FIRST, and this is the row that says why.
+    // `@qmilab/asterism` is itself a published name and a prefix of all seven others, so a
+    // reader that masked in the order git happened to list them would blank the prefix and
+    // leave `-adapter-pi` standing — a red over the adapter's own npm page, the exact
+    // failure the rows above exist to prevent. Passed shortest-first on purpose.
+    const shortestFirst = [...NPM_NAMES].sort((a, b) => a.length - b.length);
+    if (vocabularyLeaks("# @qmilab/asterism-adapter-pi\n", { packageNames: shortestFirst }).length) {
+      vocabFailures.push(
+        "  the adapter package's own npm page was reported when the names arrived shortest-first",
+      );
+    }
+
+    // WHERE, not just whether, and in what ORDER. The line is the whole value of the report
+    // to the person fixing it, and nothing else here could tell a correct line number from
+    // one off by any amount.
+    //
+    // Two more properties ride on this one fixture, because both are invisible without it:
+    //
+    //   · the allowed sense is masked ACROSS a line break, so a mask that shortened the text
+    //     instead of blanking it would swallow that newline and report both words one line
+    //     early — every other row has its finding on line 1, where no offset can be wrong;
+    //   · `substrate` is reported BEFORE `kernel` even though the word list has `kernel`
+    //     first, so a report that came out in word order rather than reading order fails
+    //     here. Findings are collected per word, so without the sort a page's second word is
+    //     listed after every occurrence of its first.
+    //   · a multi-line COMMENT above them is masked rather than deleted, so its lines still
+    //     count — deleting it would keep every finding and move both of them up by three.
+    const vocabLines = vocabularyLeaks(
+      [
+        "<!-- a maintainer note",                         // 1
+        "     spanning three lines",                      // 2
+        "     about this page -->",                       // 3
+        "The image is published to the GitHub Container", // 4
+        "Registry, multi-arch.",                          // 5
+        "",                                               // 6
+        "The substrate is swappable.",                    // 7
+        "",                                               // 8
+        "The kernel decides.",                            // 9
+      ].join("\n"),
+    ).map((f) => `${f.line}:${f.word}`);
+    if (JSON.stringify(vocabLines) !== JSON.stringify(["7:substrate", "9:kernel"])) {
+      vocabFailures.push(
+        `  two words below a comment and a wrapped container-registry mention were reported at` +
+          ` ${JSON.stringify(vocabLines)}, not ["7:substrate","9:kernel"]`,
+      );
+    }
+
+    // …and WHAT it prints. A finding on the site's front page comes out of hand-written HTML,
+    // so a report quoting the raw line hands the reader a mouthful of tags to search for —
+    // and an entity has to keep its character rather than become a hole, because the landing
+    // page writes its dashes as `&mdash;` and the reader searches the page for the sentence
+    // this quotes.
+    const htmlFinding = vocabularyLeaks(
+      "<p>enforced by the <strong>kernel</strong>,   not the OS &mdash; see the threat model</p>",
+    )[0];
+    if (htmlFinding?.sentence !== "enforced by the kernel, not the OS — see the threat model") {
+      vocabFailures.push(`  an HTML finding was reported as ${JSON.stringify(htmlFinding?.sentence)}`);
+    }
+
+    // The code-span reader itself, because everything downstream now keeps the same blank-line
+    // rule and no page-level input can tell the two apart. A span may WRAP and may not span a
+    // BLANK line — the renderer escapes the backticks there and puts the text on the screen.
+    for (const [why, text, want] of [
+      ["a span that wraps once", "Write `<!-- the\nkernel -->` here.", 1],
+      ["a span split by a blank line", "Write `<!-- the\n\nkernel -->` here.", 0],
+      ["a span on one line", "Write `<!-- kernel -->` here.", 1],
+    ]) {
+      const got = codeRanges(text).length;
+      if (got !== want) vocabFailures.push(`  ${why} gave ${got} code range(s), not ${want}`);
+    }
+
+    // An attribute value is put back at ITS offset inside the blanked tag, not at the offset
+    // of the attribute NAME. The two differ by five characters and nothing notices — until a
+    // tag wraps and the value sits on the next line, when the difference is the line number
+    // the report sends the reader to. Every other fixture here has a one-line tag.
+    for (const [why, lines] of [
+      ["quoted", ["<img", '  src="dashboard.png"', "  alt=", '       "The dashboard, where the kernel decides.">']],
+      // …and UNQUOTED, where the value has no closing quote to count back from and the
+      // arithmetic is one character different. [Codex review R7 P2.]
+      // …at COLUMN 0, where being one character out writes over the newline itself and the
+      // finding moves to the line above. Indented, the same error is invisible.
+      ["unquoted", ["<img", "  src=dashboard.png", "  alt=", "kernel>"]],
+    ]) {
+      const wrappedTag = vocabularyLeaks(lines.join("\n"), { kind: "html" }).map(
+        (f) => `${f.line}:${f.word}`,
+      );
+      if (JSON.stringify(wrappedTag) !== JSON.stringify(["4:kernel"])) {
+        vocabFailures.push(
+          `  a word in a wrapped tag's ${why} alt text was reported at ${JSON.stringify(wrappedTag)}, not ["4:kernel"]`,
+        );
+      }
+    }
+
+    // The filler a hidden region leaves behind must never reach a REPORT. It exists only so
+    // that blanking a comment cannot split a visible paragraph; a reader searching the page
+    // for the sentence this quotes would not find it with a NUL in the middle.
+    const inlineComment = vocabularyLeaks("<p>enforced by the kernel</p> <!-- maintainer note -->")[0];
+    if (inlineComment?.sentence !== "enforced by the kernel") {
+      vocabFailures.push(`  a finding beside an inline comment was reported as ${JSON.stringify(inlineComment?.sentence)}`);
+    }
+
+    // A package name is matched LITERALLY. Every name this repo publishes today is free of
+    // regex metacharacters, so nothing real can tell an escaped name from an unescaped one —
+    // and an unescaped `.` in some later name would blank a DIFFERENT string and exempt a
+    // real leak. Driven with a synthetic name for exactly that reason.
+    if (!vocabularyLeaks("the aXb-adapter runs the turn", { packageNames: ["a.b-adapter"] }).some(
+      (f) => f.word === "adapter",
+    )) {
+      vocabFailures.push("  a package name was matched as a pattern rather than literally");
+    }
+
+    // …and a very long line is cut rather than printed whole.
+    const longLine = vocabularyLeaks(`The kernel ${"and on ".repeat(80)}forever.`)[0];
+    if (!longLine || !longLine.sentence.endsWith("...") || longLine.sentence.length > 200) {
+      vocabFailures.push(
+        `  a ${longLine ? longLine.sentence.length : 0}-character finding was not truncated for the report`,
+      );
+    }
+
+    // The rule this one replaced, asserted as a CAPABILITY rather than trusted: the words
+    // `help.test.ts` refused before #183 must still be caught, or widening the corpus
+    // quietly narrowed the rule.
+    for (const word of ["kernel", "adapter", "registry", "substrate"]) {
+      if (!vocabularyLeaks(`This is handled by the ${word}.`).some((f) => f.word === word)) {
+        vocabFailures.push(`  \`${word}\`, refused in the CLI help since the CLI existed, is not caught here`);
+      }
+    }
+
+    // The exemption as the PASS applies it, not just as the list declares it. Without this,
+    // `isVocabularyExempt` could be made to return true for everything — every page exempt,
+    // the real corpus reporting nothing, the build green — and the rows above would not
+    // notice, because they call the predicate directly and never go through the pass.
+    const exemptLabel = VOCABULARY_EXEMPT_PAGES[0];
+    const sameSentence = "The kernel decides what it may actually do.";
+    const throughThePass = checkCopyVocabulary(
+      [
+        [exemptLabel, sameSentence],
+        ["docs/commands.md", sameSentence],
+        ["asterism run --help", sameSentence],
+      ],
+      NPM_NAMES,
+    );
+    if (throughThePass.length !== 2 || throughThePass.some((f) => f.startsWith(`${exemptLabel}:`))) {
+      vocabFailures.push(
+        `  one sentence in three sources — one of them exempt — was reported ${throughThePass.length} time(s):` +
+          `\n      ${JSON.stringify(throughThePass)}`,
+      );
+    }
+
+    // …and the pass itself hides one, whichever page it is on. The vocabulary rule takes no
+    // page kind: that flag decides whether a hidden region is a block BOUNDARY, and a rule
+    // about single words has no blocks. Threading it here changed no answer any fixture could
+    // vary — a parameter nothing can vary is a claim, not a check — so it was removed.
+    const inHiddenComment = "<p>Agents run alone.</p>\n<!--\n  the kernel decides\n-->";
+    for (const label of ["landing/index.html", "docs/commands.md"]) {
+      const got = checkCopyVocabulary([[label, inHiddenComment]], NPM_NAMES).length;
+      if (got !== 0) {
+        vocabFailures.push(`  a word inside a comment reported ${got} time(s) under \`${label}\``);
+      }
+    }
+    // …and the pass hands the rule the source's KIND. Every row above passes its own, so a
+    // pass that dropped the argument would leave a help screen read as markdown — and its
+    // `<placeholder>` erased as if it were a tag — with all of them still green.
+    const helpPlaceholder = checkCopyVocabulary(
+      [["asterism config --help", "Usage: asterism config <adapter> [options]"]],
+      NPM_NAMES,
+    );
+    if (helpPlaceholder.length !== 1) {
+      vocabFailures.push(
+        `  a help synopsis naming <adapter> reported ${helpPlaceholder.length} time(s), not 1`,
+      );
+    }
+
+    // …and the LINE the pass reports is the line in the file, which is only true while the
+    // comment above it is masked rather than removed. Asserted through the pass, because
+    // everything above calls the rule directly and a pass that mangled its input first would
+    // pass all of it.
+    const belowComment = checkCopyVocabulary(
+      [["docs/commands.md", "<!-- a note\n     over two lines -->\n\nThe kernel decides."]],
+      NPM_NAMES,
+    );
+    if (!belowComment[0]?.startsWith("docs/commands.md:4 [kernel]")) {
+      vocabFailures.push(`  a word below a two-line comment was reported as ${JSON.stringify(belowComment[0])}`);
+    }
+
+    // THE EXEMPTION, in both directions.
+    //
+    // `docs/threat-model.md` is exempt by name because naming the enforcing component is
+    // the point of a safety case. An exemption is only honest if it is still needed and
+    // still narrow, so both halves are checked: the page must really carry the vocabulary
+    // (an exemption for a page that no longer does is dead and should be deleted), and it
+    // must be a page this corpus actually reads (one naming a path nothing reads exempts
+    // nothing and hides the fact).
+    const vocabPages = userFacingPages();
+    for (const rel of VOCABULARY_EXEMPT_PAGES) {
+      if (!vocabPages.includes(rel)) {
+        vocabFailures.push(`  \`${rel}\` is exempt from the vocabulary rule but is not a page this reads`);
+        continue;
+      }
+      const leaks = vocabularyLeaks(readFileSync(join(ROOT, rel), "utf8"), { packageNames: NPM_NAMES });
+      if (leaks.length === 0) {
+        vocabFailures.push(
+          `  \`${rel}\` is exempt from the vocabulary rule and no longer needs to be — delete the exemption`,
+        );
+      }
+    }
+    if (vocabFailures.length) {
+      console.log("\nSELF-TEST FAILED: the internal-vocabulary rule does not hold:");
+      for (const f of vocabFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      `Golden rule 7 holds on ${VOCAB_CASES.length} real sentences — it fires on the ${VOCABULARY_WORDS.join(", ")}` +
+        ` through emphasis and markup, and never on a container registry, a published package's own` +
+        ` name, or the memory firewall the product names out loud; ${VOCABULARY_EXEMPT_PAGES.length} page is` +
+        ` exempt and still needs to be.`,
     );
 
     // The `Commands:` extraction, on the shapes that decide whether a derived verb list is
@@ -3610,8 +4433,8 @@ function report(total, tally, groups, coverageWork) {
     );
   }
 
-  const gateSources = SELF_TEST ? [] : gateClaimSources(coverageWork);
-  const gateClaims = checkGateClaims(gateSources);
+  const copySources = SELF_TEST ? [] : userFacingCopy(coverageWork);
+  const gateClaims = checkGateClaims(copySources);
   if (gateClaims.length) {
     console.log(
       `\nTHE DESTRUCTIVE-ACTION GATE, PROMISED WIDER THAN IT FIRES (${gateClaims.length}) —` +
@@ -3620,8 +4443,27 @@ function report(total, tally, groups, coverageWork) {
     for (const g of gateClaims) console.log(`  ${g}`);
   } else if (!SELF_TEST) {
     console.log(
-      `Every guarantee about the destructive-action gate across ${gateSources.length} pages and` +
-        ` help screens names its exception.`,
+      `Every guarantee about the destructive-action gate across ${copySources.length} pages, npm` +
+        ` descriptions, site strings and help screens names its exception.`,
+    );
+  }
+
+  const vocabulary = checkCopyVocabulary(copySources);
+  if (vocabulary.length) {
+    console.log(
+      `\nINTERNAL ARCHITECTURE VOCABULARY IN PUBLIC COPY (${vocabulary.length}) — a page or a help` +
+        ` screen names a part of the machine where it could name what the product does.` +
+        `\n  If the word means something ELSE here — a container registry, a package's published` +
+        ` name — add the sense to scripts/lib/copy-vocabulary.mjs rather than rewording copy` +
+        ` that is already right:`,
+    );
+    for (const v of vocabulary) console.log(`  ${v}`);
+  } else if (!SELF_TEST) {
+    const exempt = copySources.filter(([label]) => isVocabularyExempt(label)).length;
+    console.log(
+      `No page, npm description, site string or help screen a user meets names an internal part` +
+        ` (${VOCABULARY_WORDS.join(", ")}) — ${copySources.length - exempt} read, ${exempt} exempt` +
+        ` (the safety case, where naming the part that enforces a guarantee IS the document).`,
     );
   }
 
@@ -3716,6 +4558,7 @@ function report(total, tally, groups, coverageWork) {
     providerGaps.length ||
     catalogGaps.length ||
     gateClaims.length ||
+    vocabulary.length ||
     landingLinks.broken.length ||
     landingLinks.checked === 0 ||
     siteLinks.broken.length ||
@@ -3873,7 +4716,7 @@ function checkToolCatalog(pages = userFacingPages().map((rel) => [rel, readFileS
 function checkGateClaims(sources) {
   const found = [];
   for (const [label, text] of sources) {
-    for (const claim of gateOverclaims(text)) {
+    for (const claim of gateOverclaims(text, { kind: sourceKind(label) })) {
       found.push(`${label}:${claim.line} [${claim.rule}] ${claim.sentence}\n      → ${GATE_RULE_ADVICE[claim.rule]}`);
     }
   }
@@ -3881,20 +4724,81 @@ function checkGateClaims(sources) {
 }
 
 /**
- * What the gate pass reads: every page a user meets, plus the rendered help of every verb
- * the root help advertises (and the root help itself).
+ * How is this source RENDERED — as HTML, as markdown, or not at all?
+ *
+ * It decides two things a text rule cannot guess: whether an HTML comment is a block boundary
+ * (invisible in a browser, a paragraph break in markdown), and whether angle brackets are
+ * markup at all. A help screen and an npm description are PLAIN: `asterism config <adapter>`
+ * is a synopsis, not a tag, and reading it as one erased a word this rule exists to find.
+ * See `scripts/lib/copy-text.mjs`. [Codex review R4, R5 P2.]
+ */
+function sourceKind(label) {
+  if (label.endsWith(".html")) return "html";
+  if (label.endsWith(".md")) return "markdown";
+  return "plain";
+}
+
+/**
+ * THE CORPUS: every page a user meets, plus the rendered help of every verb the root help
+ * advertises (and the root help itself). Labelled by the path or the command that produced
+ * it, so a finding says where to go.
  *
  * Derived from `advertisedVerbSet` — the same list the command-coverage pass uses — rather
- * than from a list of the verbs that happen to mention the gate today. Eleven verbs mention
- * it now; a twelfth that starts to is exactly the case a hand-kept list misses.
+ * than from a list of the verbs that happen to say the thing today. Eleven verbs mention the
+ * gate now; a twelfth that starts to is exactly the case a hand-kept list misses.
+ *
+ * ONE corpus, shared by every pass that asks what the copy SAYS, because the corpus is where
+ * both of those rules have been wrong. The destructive-gate rule was right about the binary's
+ * help and blind to the pages (#177); the internal-vocabulary rule was right about the same
+ * help and blind to the same pages, front page included (#183) — the second found by
+ * auditing the first as a category. Two rules, one blind spot: the set is named once and read
+ * by both, and a pass that wants a different one has to say so out loud.
  */
-function gateClaimSources(work) {
-  const pages = userFacingPages().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]);
-  const help = [["asterism --help", helpFor(work, "")]];
-  for (const verb of [...advertisedVerbSet(work)].sort()) {
-    help.push([`asterism ${verb} --help`, helpFor(work, verb)]);
+function userFacingCopy(work, { pages = null, descriptions = null, verbs = null, help = null } = {}) {
+  // The three sources are injectable so the self-test can assert the SHAPE of what this
+  // assembles without spawning thirty-six help screens. That is not a convenience: the
+  // corpus check that existed before this read `userFacingPages()` and `advertisedVerbSet()`
+  // — the INGREDIENTS — and a sweep that deleted either half from this function left both
+  // rules reading half a corpus with every fixture still green. A guarantee about a set has
+  // to be asserted against the thing that builds the set.
+  const readPage = (rel) => readFileSync(join(ROOT, rel), "utf8");
+  const readHelp = help ?? ((verb) => helpFor(work, verb));
+  const sources = (pages ?? userFacingPages()).map((rel) => [rel, readPage(rel)]);
+  // npm's one-line description, which is what SEARCH shows and what the sidebar of every
+  // dependent package shows — copy a reader meets before opening the README that is already
+  // here. A set built from files could never notice a string that is not one.
+  // [Codex review R3 P2.]
+  sources.push(...(descriptions ?? [...publishedPackageDescriptions(), ...siteCopyStrings()]));
+  sources.push(["asterism --help", readHelp("")]);
+  for (const verb of verbs ?? [...advertisedVerbSet(work)].sort()) {
+    sources.push([`asterism ${verb} --help`, readHelp(verb)]);
   }
-  return [...pages, ...help];
+  return sources;
+}
+
+/**
+ * Golden rule 7: public copy sells the behavioural outcome, not the architecture.
+ * `scripts/lib/copy-vocabulary.mjs` holds the word list, the senses each word is still
+ * allowed in, and the reasons; this is the corpus and the exemption.
+ *
+ * The corpus is the point here for the second time. A guard for exactly this already existed
+ * and was already named "public copy" — `help.test.ts` refused five words in `USAGE`,
+ * `AUTONOMY_HELP` and `COMMAND_HELP`, and read nothing else — so `kernel` sat in eight
+ * passages of published copy, including the site's own front page, where it could not see
+ * them.
+ *
+ * The safety case is exempt BY NAME rather than by the corpus stopping short of it, which is
+ * the difference between a decision and an accident; see `VOCABULARY_EXEMPT_PAGES`.
+ */
+function checkCopyVocabulary(sources, packageNames = publishedPackageNames()) {
+  const found = [];
+  for (const [label, text] of sources) {
+    if (isVocabularyExempt(label)) continue;
+    for (const leak of vocabularyLeaks(text, { packageNames, kind: sourceKind(label) })) {
+      found.push(`${label}:${leak.line} [${leak.word}] ${leak.sentence}\n      → ${leak.instead}`);
+    }
+  }
+  return found;
 }
 
 /**

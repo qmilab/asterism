@@ -43,6 +43,15 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
+import {
+  blankTags,
+  codeRanges,
+  decodeEntities,
+  HIDDEN_FILLER,
+  maskHiddenMarkup,
+  maskLinkDestinations,
+} from "./copy-text.mjs";
+
 /**
  * Strip the typography and read the CLAIM.
  *
@@ -55,12 +64,19 @@
  * HTML tags go too, because the landing page — the page a reader arrives at FIRST — is
  * hand-written HTML, and it carried this exact defect.
  */
-export function plainClaim(text) {
-  return text
-    .replace(/<\/?[a-z][^>]*>/gi, " ")
-    .replace(/&mdash;/g, "—")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
+export function plainClaim(text, kind = "markdown") {
+  // Tags out — but NOT the attribute values a reader meets without viewing source. The
+  // landing page's Open Graph description is the sentence a social preview shows, and a gate
+  // promise made there is made to a reader. See `blankTags`. [Codex review R3 P2.]
+  // The ranges are computed for THIS kind, not left to the default. An HTML page's backticks
+  // are not code spans, and taking them for some meant a tag was preserved and its hidden
+  // attributes entered the claim window — where an `unless` in a class name could excuse an
+  // unqualified promise. [Codex review R8 P2.]
+  return decodeEntities(blankTags(text, codeRanges(text, { kind }), { kind }))
+    // The filler a masked-out comment or stylesheet leaves on each of its lines, so that a
+    // hidden region cannot split a visible paragraph. Out before anything is matched or
+    // printed. See `copy-text.mjs`.
+    .replace(new RegExp(HIDDEN_FILLER, "g"), " ")
     .replace(/[*_`>]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -310,14 +326,29 @@ export const NEARBY = 150;
 /**
  * Every overclaim in one page of copy.
  *
- * `text` is raw — markdown, HTML, or the binary's own `--help` output. Returns
+ * `text` is raw, and `kind` says how to read it — `"markdown"`, `"html"`, or `"plain"` for a
+ * help screen, which is not markup. It decides whether a hidden region is a block boundary,
+ * which decides whether a clause on the far side of one still qualifies the claim. Returns
  * `{ line, rule, sentence }`, `rule` being `every-level` or `no-exception`.
  */
-export function gateOverclaims(text) {
-  const masked = maskEvidenceBlocks(text);
+export function gateOverclaims(text, { kind = "markdown" } = {}) {
+  // What a reader never meets goes first: an HTML comment, a stylesheet, a script. The
+  // landing page is hand-written HTML with thirteen comments and an inlined stylesheet, and
+  // a note in one of them saying "a destructive action always pauses for your confirmation"
+  // is a fact about the file, not a promise to anybody — this rule reported it as an
+  // unqualified guarantee. No live instance; found by auditing the identical defect Codex
+  // caught in the vocabulary rule next door, which reads the SAME corpus. Fixing one and
+  // leaving the other is precisely the mirror this file exists because of.
+  //
+  // Length- and newline-preserving, because the line numbers below are offsets into this.
+  // Evidence blocks FIRST. A multi-line HTML comment inside one would otherwise have its
+  // `>` prefixes blanked away, so the citation reader saw a line that no longer began with
+  // `>`, ended the block there, and read the quoted TEST TITLES below it as public claims.
+  // [Codex review R4 P2.]
+  const masked = maskLinkDestinations(maskHiddenMarkup(maskEvidenceBlocks(text), { kind }), { kind });
   const found = [];
   for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
-    const claim = plainClaim(piece);
+    const claim = plainClaim(piece, kind);
     if (!claim) continue;
     if (!UNIVERSAL.some((re) => re.test(claim)) && !levelWide(claim)) continue;
     if (!PAUSE.test(claim)) continue;
@@ -327,6 +358,7 @@ export function gateOverclaims(text) {
         Math.max(blockFrom, offset - NEARBY),
         Math.min(blockTo, offset + piece.length + NEARBY),
       ),
+      kind,
     );
     if (!DESTRUCTIVE.test(window)) continue;
     const line = masked.slice(0, offset).split("\n").length;

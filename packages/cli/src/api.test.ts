@@ -133,6 +133,30 @@ test("api add refuses a --credential with no value rather than binding the strin
   expect(h.err.join("\n")).toContain("needs --credential <KEY>");
 });
 
+test("api add refuses a reserved credential key in the product's own words", async () => {
+  const h = await install();
+
+  // The kernel refuses this too — `bindEndpoint` throws, and that is what actually
+  // protects the reserved namespace. But its message is written for an embedder and names
+  // the machine ("reserved for the kernel's own internal use"), and `api add` printed it
+  // straight to the terminal: golden rule 7's one live violation outside the pages and the
+  // help, and the only route to a reserved key that did not already answer in plain English
+  // (`secrets add` and `capabilities set` both do).
+  expect(
+    await runCli(
+      ["api", "add", "work", "issues", URL_A, "--credential", "__asterism.action_fingerprint_key"],
+      h.io,
+    ),
+  ).toBe(1);
+  const err = h.err.join("\n");
+  expect(err).toContain("reserved for internal use");
+  expect(err).not.toMatch(/\bkernel\b/i);
+  // …and nothing was bound on the way to saying so.
+  h.err.length = 0;
+  expect(await runCli(["api", "list", "work"], h.io)).toBe(0);
+  expect(h.out.join("\n")).not.toContain("__asterism");
+});
+
 test("a mistyped option is refused, not allowed to swallow the URL", async () => {
   const h = await install();
 

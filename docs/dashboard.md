@@ -28,10 +28,10 @@ $ asterism dashboard
 ## A thin client, nothing more
 
 The dashboard holds **no behavior of its own**. Every action you take is one request
-to a small local console endpoint that spans your agents — the same kernel-backed
-surface the command line and [`serve`](./http.md) use. So everything behind it is
-unchanged: trust enforcement, the destructive-action gate, the memory firewall, and
-the agent boundary all apply exactly as they do on the command line. If the dashboard
+to a small local console endpoint that spans your agents — the same surface the
+command line and [`serve`](./http.md) use. So everything behind it is unchanged:
+trust enforcement, the destructive-action gate, the memory firewall, and the agent
+boundary all apply exactly as they do on the command line. If the dashboard
 can do something, it is because the endpoint can — there is no second path.
 
 It shows many agents, but it never crosses between them. It only ever asks the

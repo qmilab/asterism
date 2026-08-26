@@ -54,7 +54,7 @@ All five claims are demonstrable from a fresh install:
   true the moment you create the agents, with or without a model.
 - **Claims 3, 4, and 5** run end to end with a
   [configured model](./installation.md#configuring-a-model): the model drives the
-  agent, and the kernel decides what it may actually do.
+  agent, and Asterism decides what it may actually do.
 
 **Claims 3 and 4 are about an agent's *actions* — the tools it uses.** The shipped
 CLI registers a default catalog of **workspace-scoped file tools** —
