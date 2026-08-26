@@ -43,7 +43,7 @@
 // is allow-listed. Demanding the clause on all 43 is the outcome the issue that raised
 // this explicitly ruled out.
 
-import { decodeEntities, flattenMarkup, HIDDEN_FILLER, maskInvisible } from "./copy-text.mjs";
+import { codeRanges, decodeEntities, flattenMarkup, HIDDEN_FILLER, maskInvisible } from "./copy-text.mjs";
 
 /**
  * Strip the typography and read the CLAIM.
@@ -128,7 +128,38 @@ function blocks(text) {
  * defect in `docs/getting-started.md` read as clean. Em dashes and semicolons are internal
  * for the same reason. Only `.`, `!`, `?` — and the end of a block — end a claim.
  */
-function claims(text) {
+/**
+ * The copy with its character references decoded — but only where the RENDERER decodes them.
+ *
+ * A reference is a full stop where a reader sees a full stop, and `&#46;` is five characters
+ * a reader MEETS in two of the three kinds this reads:
+ *
+ *   · **plain** — a help screen is printed by a terminal, which decodes nothing. Every
+ *     reference is its own literal text.
+ *   · **markdown, inside code** — `` `&#46;` `` renders as `<code>&amp;#46;</code>`; the
+ *     reader is shown the reference, not the stop it stands for. Asked the renderer.
+ *   · **markdown or HTML prose** — decoded, and the stop is real.
+ *
+ * Decoding all three alike invented a sentence boundary in the first two, and the cost was a
+ * false NEGATIVE in the direction that matters most: the split moved a pause claim more than
+ * `NEARBY` away from the destructive action it was about, so the gate stopped reporting an
+ * overclaim that is on the page. Measured, with a control that fires either way — a help
+ * screen with no terminator at all reports `no-exception`, and the same screen with `&#46;`
+ * between the two halves reported nothing. [Codex review R5 P2.]
+ *
+ * Length-preserving throughout, because every offset below is an offset into `text`: the
+ * decode is padded, and a code range is put back verbatim, which is the same width it was.
+ */
+function sentenceView(text, kind) {
+  if (kind === "plain") return text;
+  let view = decodeEntities(text, { padded: true });
+  for (const [from, to] of codeRanges(text, { kind })) {
+    view = view.slice(0, from) + text.slice(from, to) + view.slice(to);
+  }
+  return view;
+}
+
+function claims(text, kind = "markdown") {
   const out = [];
   // Where the sentences END is read from a LENGTH-PRESERVING decoded copy, and the sentences
   // themselves are sliced out of the text as given.
@@ -145,7 +176,7 @@ function claims(text) {
   // blanked to a space and still merges — that half is not silent either, because the parity
   // check compares the characters a decode is supposed to produce and reports the loss.
   // [Codex review R3 P2.]
-  const boundaries = decodeEntities(text, { padded: true });
+  const boundaries = sentenceView(text, kind);
   for (const [from, to] of blocks(text)) {
     let start = from;
     for (const m of boundaries.slice(from, to).matchAll(/(?<=[.!?])\s+/g)) {
@@ -355,7 +386,7 @@ export function gateOverclaims(text, { kind = "markdown" } = {}) {
   // [Codex review R4 P2.]
   const masked = maskInvisible(maskEvidenceBlocks(text), { kind });
   const found = [];
-  for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
+  for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked, kind)) {
     const claim = plainClaim(piece, kind);
     if (!claim) continue;
     if (!UNIVERSAL.some((re) => re.test(claim)) && !levelWide(claim)) continue;

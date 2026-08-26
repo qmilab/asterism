@@ -2536,6 +2536,27 @@ function report(total, tally, groups, coverageWork) {
       ["puts the destructive action right beside the same claim",
         "<p>Deleting a file is a destructive action&#46; An autonomous agent always pauses.</p>",
         ["no-exception"], { kind: "html" }],
+      // …and a reference is a boundary only where the RENDERER makes one. A terminal decodes
+      // nothing, and `` `&#46;` `` renders as `<code>&amp;#46;</code>` — the reader is shown
+      // the reference, not the stop it stands for. Splitting there invented a boundary that
+      // moved the claim more than NEARBY away from the destructive action it was about, and
+      // the gate stopped reporting an overclaim that IS on the page: a false negative, the
+      // direction that reports a clean page forever. [Codex review R5 P2.]
+      //
+      // The first two rows are the defect; the third and fourth are what stop them being
+      // explained by a rule that has simply stopped splitting anything.
+      ["prints a character reference in a help screen, which a terminal shows literally",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}&#46; An autonomous agent always pauses.`,
+        ["no-exception"], { kind: "plain" }],
+      ["shows one inside a code span, where the renderer shows the reference itself",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}\`&#46; y\` An autonomous agent always pauses.`,
+        ["no-exception"]],
+      ["…while a literal full stop in a help screen IS a boundary",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}. An autonomous agent always pauses.`,
+        [], { kind: "plain" }],
+      ["…and one in markdown PROSE is a boundary, because there the renderer decodes it",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}&#46; An autonomous agent always pauses.`,
+        []],
       ["puts a bare guarantee inside an HTML comment nobody reads",
         "<!--\n  Note: a destructive action always pauses for your confirmation.\n-->\n<p>Agents run alone.</p>",
         []],
