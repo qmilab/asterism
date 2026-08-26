@@ -2643,6 +2643,22 @@ function report(total, tally, groups, coverageWork) {
       );
     }
 
+    // …and the claim that ENDS in that reference is reported whole. A boundary is a POSITION,
+    // and the position a reader sees the full stop at is where the entity ENDS — so the
+    // decoded mark is padded onto its last character, not its first. Padded the other way the
+    // splitter found whitespace INSIDE the entity, cut the sentence one character in, and
+    // reported `…destructive action&`: a sentence nobody wrote and nobody can search the page
+    // for. [Codex review R4 P2.]
+    const endsWithEntity = gateOverclaims(
+      "<p>An autonomous agent always pauses before a destructive action&#46; It waits.</p>",
+      { kind: "html" },
+    )[0];
+    if (endsWithEntity?.sentence !== "An autonomous agent always pauses before a destructive action.") {
+      gateFailures.push(
+        `  a claim ending in a character reference was reported as ${JSON.stringify(endsWithEntity?.sentence)}`,
+      );
+    }
+
     // The same for the gate rule's report — it shares the masking, so it shares the filler.
     const inlineNote = gateOverclaims(
       "<p>Even an <code>autonomous</code> agent <!-- inline note --> pauses before a <strong>destructive</strong> action.</p>",

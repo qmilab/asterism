@@ -548,8 +548,15 @@ export function decodeEntities(text, { padded = false } = {}) {
     // split — it slices the claim itself out of the undecoded text. One implementation with
     // one table and one number rule, because two decoders is what this file exists to stop:
     // the last pair drifted until neither knew about numeric references. [Codex review R3 P2.]
+    //
+    // The padding goes BEFORE the character, so the decoded mark lands on the entity's LAST
+    // character rather than its first. A sentence boundary is a position, and the position a
+    // reader sees a full stop at is where the entity ENDS. Padding after put it at the `&`,
+    // so the whitespace a splitter then found was inside the entity: the sentence before it
+    // was sliced one character in and reported as `…destructive action&`, a sentence nobody
+    // wrote and nobody can search the page for. [Codex review R4 P2.]
     const out = ch === "\n" || ch === "\r" ? " " : ch;
-    return padded ? out + " ".repeat(Math.max(0, m.length - out.length)) : out;
+    return padded ? " ".repeat(Math.max(0, m.length - out.length)) + out : out;
   });
 }
 
