@@ -43,15 +43,63 @@ export function isLine(value) {
 }
 
 /**
+ * A list of printable lines.
+ *
+ * The spread is load-bearing. `Array.prototype.every` SKIPS holes, so `new Array(1)` and
+ * `[, "real"]` both satisfy `arr.every(isLine)` while having a length that counts them —
+ * a pass reporting a finding it prints as `undefined`. Spreading materialises each hole as
+ * `undefined`, which `isLine` rejects. [Codex review P2.]
+ */
+export function isLines(value) {
+  return Array.isArray(value) && [...value].every(isLine);
+}
+
+/**
  * Refuse, loudly, at exit 2 — the code this repo's checkers reserve for "this script is
  * broken", as distinct from exit 1's "the thing being checked is". A malformed
  * registration is not a finding about the docs; it is a report that does not know what it
  * checked, and continuing would print a verdict nobody should believe.
  */
-/** What a value actually was, short enough to sit in a refusal. */
+/**
+ * What a value actually was, short enough to sit in a refusal.
+ *
+ * This runs only on its way to `refuse`, so it must not be the thing that fails: a `BigInt`
+ * or a circular reference makes `JSON.stringify` throw, and it threw here — before the exit
+ * 2 it was building the message for, leaving exit 1 and a raw `TypeError`. A describer that
+ * can fail turns every refusal it serves into the misclassification the refusal exists to
+ * prevent. [Codex review P2.]
+ */
 function describe(value) {
-  const shown = JSON.stringify(value);
-  return shown === undefined ? String(value) : shown.slice(0, 80);
+  try {
+    const shown = JSON.stringify(value);
+    return (shown === undefined ? String(value) : shown).slice(0, 80);
+  } catch {
+    try {
+      return String(value).slice(0, 80);
+    } catch {
+      return `a ${typeof value} that cannot be printed`;
+    }
+  }
+}
+
+/**
+ * Run one of a registration's callbacks, and refuse if it throws.
+ *
+ * This is the general form of the describer above, and it is written as one statement
+ * because the first two attempts at this file each fixed one instance of it. NOTHING a
+ * registration supplies can make this file exit 1: not `find`, not `heading`, not `green`,
+ * not `advisories`, and not whatever field is added next. A check that cannot run is this
+ * script's problem, and exit 1 is reserved for the documentation being wrong.
+ */
+function call(id, what, fn) {
+  try {
+    return fn();
+  } catch (err) {
+    // The stack goes with it — a named refusal that loses where it happened is a worse
+    // trade than the bare stack trace this replaces.
+    console.error(err?.stack ?? String(err));
+    refuse(`pass '${id}' ${what}() threw: ${err?.message ?? describe(err)}`);
+  }
 }
 
 function refuse(what) {
@@ -93,8 +141,8 @@ export function emit(verdicts, pass) {
     refuse(`pass '${pass.id}' declares advisories that are not a function`);
   }
 
-  const findings = pass.find();
-  if (!Array.isArray(findings) || !findings.every(isLine)) {
+  const findings = call(pass.id, "find", () => pass.find());
+  if (!isLines(findings)) {
     refuse(
       `pass '${pass.id}' find() returned ${describe(findings)}, where a list of lines was` +
         ` expected. Anything else is read as "found nothing" on every run.`,
@@ -104,12 +152,12 @@ export function emit(verdicts, pass) {
   verdicts.push({ id: pass.id, count: findings.length });
 
   if (findings.length) {
-    const heading = pass.heading(findings.length);
+    const heading = call(pass.id, "heading", () => pass.heading(findings.length));
     if (!isLine(heading)) refuse(`pass '${pass.id}' heading() printed nothing over ${findings.length} finding(s)`);
     console.log(`\n${heading}`);
     for (const line of findings) console.log(`  ${line}`);
   } else if (pass.green) {
-    const sentence = pass.green();
+    const sentence = call(pass.id, "green", () => pass.green());
     if (!isLine(sentence)) refuse(`pass '${pass.id}' green() printed nothing`);
     console.log(sentence);
   }
@@ -120,7 +168,7 @@ export function emit(verdicts, pass) {
   // returned a non-iterable threw where nobody caught it — exit 1, which in this repo means
   // "the docs are wrong" rather than "the checker is". [Codex review P2.]
   if (pass.advisories) {
-    const advisories = pass.advisories();
+    const advisories = call(pass.id, "advisories", () => pass.advisories());
     if (!Array.isArray(advisories)) {
       refuse(
         `pass '${pass.id}' advisories() returned ${describe(advisories)}, where a list of` +
@@ -133,7 +181,7 @@ export function emit(verdicts, pass) {
         refuse(`pass '${pass.id}' produced an advisory that is not a [heading, lines] pair: ${describe(advisory)}`);
       }
       const [heading, lines] = advisory;
-      if (!Array.isArray(lines) || !lines.every(isLine)) refuse(`pass '${pass.id}' produced an advisory whose lines are ${describe(lines)}`);
+      if (!isLines(lines)) refuse(`pass '${pass.id}' produced an advisory whose lines are ${describe(lines)}`);
       if (!lines.length) continue;
       if (!isLine(heading)) refuse(`pass '${pass.id}' produced ${lines.length} advisory line(s) under no heading`);
       console.log(`\n${heading}`);

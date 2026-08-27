@@ -4597,6 +4597,73 @@ function report(total, tally, groups, coverageWork) {
         ["advisory whose lines are"],
         [],
       ],
+      // --- the validation layer must not be the thing that fails ------------------------
+      // Every row below ends in exit 2. Each one used to end in exit 1 — a broken checker
+      // wearing the exit code this repo reserves for the documentation being wrong — or,
+      // for the sparse advisory, in a green build printing `undefined`.
+      [
+        "a sparse find() is refused, not counted with a hole in it",
+        `emit(v, { ...${CLEAN}, find: () => new Array(1) });`,
+        2,
+        ["find() returned"],
+        [],
+      ],
+      [
+        "a hole among real findings is refused too",
+        `emit(v, { ...${CLEAN}, find: () => [, "real"] });`,
+        2,
+        ["find() returned"],
+        [],
+      ],
+      [
+        "a find() returning a value JSON cannot serialise is refused, not thrown at exit 1",
+        `emit(v, { ...${CLEAN}, find: () => 10n });`,
+        2,
+        ["find() returned"],
+        ["TypeError"],
+      ],
+      [
+        "a find() returning a circular object is refused, not thrown at exit 1",
+        `emit(v, { ...${CLEAN}, find: () => { const o = {}; o.self = o; return o; } });`,
+        2,
+        ["find() returned"],
+        ["TypeError"],
+      ],
+      [
+        "a find() that throws is refused, and says which pass and which callback",
+        `emit(v, { ...${CLEAN}, find: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' find() threw: boom"],
+        [],
+      ],
+      [
+        "a heading() that throws is refused",
+        `emit(v, { ...${CLEAN}, find: () => ["x"], heading: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' heading() threw: boom"],
+        [],
+      ],
+      [
+        "a green() that throws is refused",
+        `emit(v, { ...${CLEAN}, green: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' green() threw: boom"],
+        [],
+      ],
+      [
+        "an advisories() that throws is refused",
+        `emit(v, { ...${CLEAN}, advisories: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' advisories() threw: boom"],
+        [],
+      ],
+      [
+        "sparse advisory lines are refused, not printed as `undefined` behind a green",
+        `emit(v, { ...${CLEAN}, advisories: () => [["H (1):", new Array(1)]] });`,
+        2,
+        ["advisory whose lines are"],
+        ["All 1 checks in this report are clean."],
+      ],
       // These two call `finish` themselves; the template's own call is never reached.
       ["finish() handed a non-iterable is refused, not thrown at exit 1", `finish(3, "green");`, 2, ["BUG IN THIS CHECKER"], ["TypeError"]],
       ["finish() handed a string is refused too", `finish("not a list", "green");`, 2, ["BUG IN THIS CHECKER"], []],
