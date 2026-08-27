@@ -47,9 +47,9 @@ import {
   blankTags,
   codeRanges,
   decodeEntities,
+  flattenMarkup,
   HIDDEN_FILLER,
-  maskHiddenMarkup,
-  maskLinkDestinations,
+  maskInvisible,
 } from "./copy-text.mjs";
 
 /**
@@ -72,7 +72,7 @@ export function plainClaim(text, kind = "markdown") {
   // are not code spans, and taking them for some meant a tag was preserved and its hidden
   // attributes entered the claim window — where an `unless` in a class name could excuse an
   // unqualified promise. [Codex review R8 P2.]
-  return decodeEntities(blankTags(text, codeRanges(text, { kind }), { kind }))
+  return flattenMarkup(text, { kind })
     // The filler a masked-out comment or stylesheet leaves on each of its lines, so that a
     // hidden region cannot split a visible paragraph. Out before anything is matched or
     // printed. See `copy-text.mjs`.
@@ -135,16 +135,68 @@ function blocks(text) {
  * defect in `docs/getting-started.md` read as clean. Em dashes and semicolons are internal
  * for the same reason. Only `.`, `!`, `?` — and the end of a block — end a claim.
  */
-function claims(text) {
+/**
+ * The copy with its character references decoded — but only where the RENDERER decodes them.
+ *
+ * ONE rule, arrived at twice: a full stop is where a READER meets one. Everything below is
+ * that rule applied to the three places this reads.
+ *
+ *   · **A tag.** `<span data-note="x&#46; y">` is invisible, and decoding inside it put a
+ *     sentence boundary where a reader sees the middle of a sentence. So the tags go first,
+ *     down to the attributes `blankTags` keeps because a person really does meet them.
+ *     [Codex review R6 P2.]
+ *   · **Code.** `` `&#46;` `` renders as `<code>&amp;#46;</code>` — the reader is shown the
+ *     reference, not the stop it stands for. Asked the renderer. So a code range goes back
+ *     exactly as it was written. [Codex review R5 P2.]
+ *   · **plain.** A help screen is printed by a terminal, which decodes nothing at all, so
+ *     every reference in one is its own literal text. [Codex review R5 P2.]
+ *
+ * Decoding regardless of all three invented boundaries, and the cost each time was a false
+ * NEGATIVE in the direction that matters most: the split moved a pause claim more than
+ * `NEARBY` away from the destructive action it was about, so the gate stopped reporting an
+ * overclaim that is on the page. Measured against a control that fires either way — the same
+ * paragraph with no terminator between the two halves reports `no-exception`, and with the
+ * reference in a hidden attribute, a code span or a help screen it reported nothing.
+ *
+ * Length-preserving throughout, because every offset below is an offset into `text`:
+ * `blankTags` blanks in place, the decode is padded, and a code range is put back at the
+ * width it already had.
+ */
+function sentenceView(text, kind) {
+  if (kind === "plain") return text;
+  const code = codeRanges(text, { kind });
+  let view = decodeEntities(blankTags(text, code, { kind }), { padded: true });
+  for (const [from, to] of code) {
+    view = view.slice(0, from) + text.slice(from, to) + view.slice(to);
+  }
+  return view;
+}
+
+function claims(text, kind = "markdown") {
   const out = [];
+  // Where the sentences END is read from a LENGTH-PRESERVING decoded copy, and the sentences
+  // themselves are sliced out of the text as given.
+  //
+  // `&#46;` is a full stop to a reader and eight characters to a splitter. Splitting before
+  // decoding merged the two sentences either side, which pulled a destructive-action mention
+  // into the window of a claim that is a hundred and fifty characters away from it and
+  // reported an overclaim nobody wrote. Measured: the same paragraph with a literal `.` is
+  // clean, and with `&#46;`, `&#x2e;` or `&period;` it reports `no-exception`.
+  //
+  // Padding is what makes it safe to read boundaries here: every offset below still lands in
+  // the same place, and the claim text itself comes from `text`, so `plainClaim` decodes it
+  // unpadded and `ker&#110;el` is still one word. An entity the table does NOT carry is still
+  // blanked to a space and still merges — that half is not silent either, because the parity
+  // check compares the characters a decode is supposed to produce and reports the loss.
+  // [Codex review R3 P2.]
+  const boundaries = sentenceView(text, kind);
   for (const [from, to] of blocks(text)) {
-    const slice = text.slice(from, to);
-    let at = 0;
-    for (const piece of slice.split(/(?<=[.!?])\s+/)) {
-      const idx = slice.indexOf(piece, at);
-      if (idx >= 0) at = idx + piece.length;
-      out.push({ text: piece, offset: from + (idx < 0 ? at : idx), block: [from, to] });
+    let start = from;
+    for (const m of boundaries.slice(from, to).matchAll(/(?<=[.!?])\s+/g)) {
+      out.push({ text: text.slice(start, from + m.index), offset: start, block: [from, to] });
+      start = from + m.index + m[0].length;
     }
+    out.push({ text: text.slice(start, to), offset: start, block: [from, to] });
   }
   return out;
 }
@@ -345,9 +397,9 @@ export function gateOverclaims(text, { kind = "markdown" } = {}) {
   // `>` prefixes blanked away, so the citation reader saw a line that no longer began with
   // `>`, ended the block there, and read the quoted TEST TITLES below it as public claims.
   // [Codex review R4 P2.]
-  const masked = maskLinkDestinations(maskHiddenMarkup(maskEvidenceBlocks(text), { kind }), { kind });
+  const masked = maskInvisible(maskEvidenceBlocks(text), { kind });
   const found = [];
-  for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked)) {
+  for (const { text: piece, offset, block: [blockFrom, blockTo] } of claims(masked, kind)) {
     const claim = plainClaim(piece, kind);
     if (!claim) continue;
     if (!UNIVERSAL.some((re) => re.test(claim)) && !levelWide(claim)) continue;

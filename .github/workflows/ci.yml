@@ -174,12 +174,15 @@ jobs:
       - run: mkdocs build --strict --site-dir _site/docs
 
       # The JS checkers carry a model of this site — which directory it publishes, which
-      # pages survive `exclude_docs`, and the anchor Python-Markdown emits for each heading
-      # — and a wrong model does not merely miss a dead link, it reports a LIVE one as dead,
-      # which is how a correct link once got "fixed" into a 404. This job is the only place
-      # with the renderer to check that against, and it is the PINNED one the site is built
-      # with, so the comparison is against what ships. Self-test first, same reason as the
-      # checks above: it plants a port carrying the historical bug and a scope rule blind to
-      # `exclude_docs`, so a green comparison cannot be vacuous.
+      # pages survive `exclude_docs`, the anchor Python-Markdown emits for each heading, and
+      # which of a page's characters a reader actually meets — and a wrong model does not
+      # merely miss a defect, it reports a LIVE thing as dead, which is how a correct link
+      # once got "fixed" into a 404. This job is the only place with the renderer to check
+      # that against, and it is the PINNED one the site is built with, so the comparison is
+      # against what ships. Self-test first, same reason as the checks above: it plants an
+      # anchor port carrying the historical bug, a scope rule blind to `exclude_docs`, and
+      # seven copy maskings — six each missing one belief the real one holds, one that merely
+      # loses a span of text the page repeats elsewhere — so a green comparison cannot be
+      # vacuous.
       - run: node scripts/mkdocs-parity-check.mjs --self-test
       - run: node scripts/mkdocs-parity-check.mjs

@@ -47,16 +47,7 @@
 // "manufactures defects" failure this file exists to avoid — to catch one site that cost six
 // words. The site was taken; the rule was not.
 
-import {
-  blank,
-  blankTags,
-  codeRanges,
-  HIDDEN_FILLER,
-  decodeEntities,
-  maskHiddenMarkup,
-  maskLinkDestinations,
-  wrappablePhrase,
-} from "./copy-text.mjs";
+import { blank, HIDDEN_FILLER, readerText, wrappablePhrase } from "./copy-text.mjs";
 
 /**
  * The words, each with the sense it is allowed in.
@@ -161,7 +152,7 @@ function mask(text, pattern) {
 }
 
 /**
- * Strip the typography, keeping the text the same LENGTH.
+ * Strip the typography, keeping every LINE where it was.
  *
  * The same discipline `gate-claims.mjs` keeps, for the same reason: `**kernel**` and
  * `<strong>kernel</strong>` are the word a reader sees, and the site's front page — the page
@@ -171,28 +162,29 @@ function mask(text, pattern) {
  * be easy to think this only affects how a finding is PRINTED. It does not. The allowed
  * senses are multi-word — `container registry` — and `container <em>registry</em>` is the
  * same phrase to a reader and two different ones to a matcher. So the scan runs on this,
- * not on the raw text, and this preserves length precisely so the offsets it produces are
- * still offsets into the real file.
+ * not on the raw text.
+ *
+ * The invariant is the NEWLINE count, not the length. Every step blanks in place except
+ * `decodeEntities`, which shortens — `ker&#110;el` has to come out as one word, not as a
+ * letter followed by five spaces — and it runs last, after everything that compares offsets.
+ * A line number is a count of newlines, and the line a report quotes is looked up by index.
  */
 function flatten(text, kind) {
-  // What the markup HIDES goes first and whole: a reader never meets a comment, a
-  // stylesheet or a script, and a rule about what the copy SAYS that fired on one would
-  // be asking someone to rename a CSS class to satisfy a prose gate. Shared with the
-  // destructive-action rule, which had the same blind spot over the same page.
-  // [Codex review R1 P2.]
-  // Code ranges come from the ORIGINAL text and are shared by both steps: a fence survives
-  // hidden-markup masking, and the tag inside it has to survive tag-blanking too.
-  const masked = maskLinkDestinations(maskHiddenMarkup(text, { kind }), { kind });
-  return decodeEntities(blankTags(masked, codeRanges(masked, { kind }), { kind }))
-    // …and `blankTags` keeps what a reader meets without viewing source: `alt`, `title`,
-    // `aria-label`, and a `<meta>` `content`. Blanking the whole tag hid the landing page's
-    // Open Graph description, which is marketing copy in a social preview.
-    // An entity keeps its CHARACTER, numeric ones decoded — see `decodeEntities`.
-    // The filler a hidden line — and a block-level tag — is left holding STAYS here: it is
-    // what stops an allowed phrase reading across a boundary a reader sees. It is not
-    // whitespace and not a word character, so it changes no word match; `readableLine` takes
-    // it out before anything is printed. [Codex review R10 P2.]
-    .replace(/[*_`>]/g, " ");
+  // What the markup HIDES goes first and whole — a comment, a stylesheet, a script, a link
+  // destination — and then what a reader sees THROUGH: a tag blanked down to the `alt`,
+  // `title`, `aria-label` and `<meta content>` a person really meets, and every character
+  // reference decoded. A rule about what the copy SAYS that fired on a CSS class would be
+  // asking someone to rename it to satisfy a prose gate. [Codex review R1 P2.]
+  //
+  // The steps and their ORDER live in `copy-text.mjs`, where `check:mkdocs-parity` compares
+  // the whole pipeline against the renderer that serves the page. What is left here is this
+  // rule's own business:
+  //
+  // The filler a hidden line — and a block-level tag — is left holding STAYS: it is what
+  // stops an allowed phrase reading across a boundary a reader sees. It is not whitespace
+  // and not a word character, so it changes no word match; `readableLine` takes it out
+  // before anything is printed. [Codex review R10 P2.]
+  return readerText(text, { kind }).replace(/[*_`>]/g, " ");
 }
 
 

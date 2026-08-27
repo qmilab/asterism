@@ -16,6 +16,23 @@
 // the answer depends on the RENDERER, which is why `maskHiddenMarkup` takes the page's kind.
 // The same three characters are a block boundary in one and invisible in the other.
 //
+// ⚠ THIS IS A PORT, AND IT IS CHECKED AGAINST THE RENDERER, NOT AGAINST REASONING ABOUT ONE.
+// `check:mkdocs-parity` renders every page the site serves, reads the visible text back with
+// Python's own `html.parser`, and fails if a word a reader meets is one this file has hidden
+// — the same treatment `anchors.mjs` gets, and for the same reason. It was written without
+// that: ten rounds of review found 26 things wrong with it by inspection, the last five of
+// them arguing about inputs the corpus does not contain, while both defects that turned out
+// to be real were found by counting pages instead. **When a question about this file comes
+// up, ask the renderer** — `.venv/bin/python -c "import markdown; print(markdown.markdown(src))"`
+// settled five of them in seconds after reasoning had got them wrong.
+//
+// What the parity check cannot answer, so that a green there is not read as more than it is:
+// text this file KEEPS and the renderer does not show (`alt`, `title`, a `<meta>`
+// description — kept deliberately), the `plain` kind (nothing renders a help screen), and
+// the pages GitHub and npm render rather than mkdocs. Those stay with the hand-written rows
+// in `check:docs --self-test`. Between them the two cover all thirteen of this file's
+// historical bugs when they are replayed as mutations; neither covers them alone.
+//
 // Both callers report a line number computed from an offset into the masked text, so nothing
 // here may change how many NEWLINES the text has.
 
@@ -89,9 +106,16 @@ export function codeRanges(text, { kind = "markdown" } = {}) {
   // preserved the comment and reported words no reader meets. [Codex review R7 P2.]
   if (kind !== "markdown") return [];
   const ranges = [];
-  // A closing fence must be AT LEAST as long as the opening one, not exactly as long:
-  // `~~~html … ~~~~` is a fence to the renderer, and a backreference alone missed it.
-  // [Codex review R9 P2.]
+  // A closing run LONGER than the opening one closes the fence — and WHICH renderer that is
+  // right for depends on the page. Both were asked, rather than reasoned about, while
+  // building this file's parity check: `pymdownx.superfences`, which renders the site,
+  // wants the two runs the same length and hands `~~~html … ~~~~` back as `<p>~~~html</p>`
+  // followed by raw HTML, no fence anywhere; GitHub, which renders the READMEs, takes it.
+  // The permissive reading is kept deliberately, because it can only ever over-keep: a code
+  // range that runs too long preserves text the renderer hides, and every rule downstream
+  // reports words it KEEPS. Neither reading is exercised today — 209 fenced blocks across
+  // the 24 pages a user meets, 0 tilde-fenced and 0 closed by a longer run.
+  // [Codex review R9 P2, whose "at least as long" is GitHub's rule and not the site's.]
   for (const m of text.matchAll(/^[ \t]*((`|~)\2{2,})[\s\S]*?^[ \t]*\1\2*[ \t]*$/gm)) {
     ranges.push([m.index, m.index + m[0].length]);
   }
@@ -317,8 +341,21 @@ const TAG = /<\/?[a-z][a-z0-9-]*(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi;
  * same reason: it is not whitespace, and both rules strip it before printing.
  * [Codex review R10 P2.]
  */
-const BLOCK_ELEMENT =
-  /^<\/?(?:address|article|aside|blockquote|details|div|dl|dd|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul|br)\b/i;
+export const BLOCK_ELEMENTS = [
+  "address", "article", "aside", "blockquote", "br", "details", "div", "dl", "dd", "dt",
+  "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+  "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td",
+  "tfoot", "th", "thead", "tr", "ul",
+];
+
+// A LIST rather than a regex literal, and exported, because `check:mkdocs-parity` needs the
+// same set on the other side of the comparison: `html.parser` reports `<p>a</p><p>b</p>` as
+// two data callbacks with nothing between them, so the renderer's text has to be given the
+// boundary this file gives it, or two words a reader sees as separate are compared as one
+// and a correct page is reported broken. It is sent to that check rather than written out
+// again in Python — a second copy of this list is the two-spellings failure the module
+// header opens with. [Codex review R3 P2.]
+const BLOCK_ELEMENT = new RegExp(`^</?(?:${BLOCK_ELEMENTS.join("|")})\\b`, "i");
 
 export function blankTags(text, code = codeRanges(text), { kind = "markdown" } = {}) {
   // PLAIN text has no tags. `<agent>`, `<from>`, `<adapter>` are placeholders in a help
@@ -471,8 +508,15 @@ function opensALink(text, at) {
  * One implementation, because there were two: a table here and three hard-coded replacements
  * in the gate rule's `plainClaim`, neither knowing about numbers. That is the shape this file
  * exists to stop.
+ *
+ * Exported so `check:mkdocs-parity` can compare the CHARACTERS this claims to preserve as
+ * well as the words around them. An entity that decodes to a letter is already caught —
+ * `caf&eacute;` masked to `caf ` loses a word — but one that decodes to punctuation is not,
+ * and a lost `.` moves a sentence boundary, which is what the gate rule splits claims on.
+ * Deriving the compared set from this table rather than listing it there means adding a row
+ * here extends the check with it. [Codex review R2 P2.]
  */
-const NAMED_ENTITIES = {
+export const NAMED_ENTITIES = {
   "&mdash;": "\u2014",
   "&ndash;": "\u2013",
   "&hellip;": "\u2026",
@@ -481,7 +525,7 @@ const NAMED_ENTITIES = {
   "&nbsp;": " ",
 };
 
-export function decodeEntities(text) {
+export function decodeEntities(text, { padded = false } = {}) {
   return text.replace(/&[a-z]+;|&#\d+;|&#x[0-9a-f]+;/gi, (m) => {
     const numeric = /^&#(x)?([0-9a-f]+);$/i.exec(m);
     let ch;
@@ -492,12 +536,27 @@ export function decodeEntities(text) {
       ch = NAMED_ENTITIES[m.toLowerCase()] ?? " ";
     }
     // A newline would change how many LINES the text has, which is the one thing every
-    // caller here counts on; nothing else does. So this does NOT pad the decoded character
-    // back out to the entity's length — padding is what kept `ker&#110;el` from reading as
-    // one word, since the `n` arrived followed by five spaces. Length has never been the
-    // invariant: a line number is a count of newlines, and the line a report quotes is
-    // looked up by index. This runs last, after everything that compares offsets.
-    return ch === "\n" || ch === "\r" ? " " : ch;
+    // caller here counts on; nothing else does. So by default this does NOT pad the decoded
+    // character back out to the entity's length — padding is what kept `ker&#110;el` from
+    // reading as one word, since the `n` arrived followed by five spaces. Length has never
+    // been the invariant: a line number is a count of newlines, and the line a report quotes
+    // is looked up by index. This runs last, after everything that compares offsets.
+    //
+    // `padded` is for the one caller that needs the opposite trade: `gate-claims.mjs` finds
+    // its sentence boundaries by OFFSET, so it needs a copy where `&#46;` is a full stop in
+    // the place the full stop belongs, and it does not care that the word around it has been
+    // split — it slices the claim itself out of the undecoded text. One implementation with
+    // one table and one number rule, because two decoders is what this file exists to stop:
+    // the last pair drifted until neither knew about numeric references. [Codex review R3 P2.]
+    //
+    // The padding goes BEFORE the character, so the decoded mark lands on the entity's LAST
+    // character rather than its first. A sentence boundary is a position, and the position a
+    // reader sees a full stop at is where the entity ENDS. Padding after put it at the `&`,
+    // so the whitespace a splitter then found was inside the entity: the sentence before it
+    // was sliced one character in and reported as `…destructive action&`, a sentence nobody
+    // wrote and nobody can search the page for. [Codex review R4 P2.]
+    const out = ch === "\n" || ch === "\r" ? " " : ch;
+    return padded ? " ".repeat(Math.max(0, m.length - out.length)) + out : out;
   });
 }
 
@@ -538,4 +597,58 @@ function inlineSpans(text) {
  */
 function tagRanges(text) {
   return [...text.matchAll(TAG)].map((m) => [m.index, m.index + m[0].length]);
+}
+
+// --------------------------------------------------------------- the whole pipeline
+//
+// The functions above are steps; these are the composition, in one place, because it was
+// previously written out at each call site and this file exists to stop one idea being kept
+// in two spellings.
+//
+// The ORDER is the one both rules have always used, carried over unchanged. It is not
+// defended here, because it turns out not to be defensible on today's evidence: swapping the
+// two changes nothing across the 15 pages the parity check reads, its 21 construct fixtures,
+// or `check:docs --self-test`. The one construct where a difference could be built — a
+// markdown link inside an HTML comment — the renderer decides the OTHER way, resolving the
+// link first, so the reasoning that would have justified this order was backwards. Left as
+// it is because it is what shipped; changed only with a case that says which way is right.
+//
+// This composition is what `check:mkdocs-parity` compares against the renderer. One the
+// parity check assembled for itself would be a fiction — it would verify an arrangement of
+// these steps that nothing ships. Both rules call these, so the pipeline that is checked is
+// the pipeline that runs.
+
+/**
+ * The spans a reader never meets, blanked: an HTML comment, a `<style>`, a `<script>`, and
+ * what a markdown link points AT.
+ *
+ * Length- and newline-preserving, so an offset into the result is still an offset into the
+ * file — which is what lets `gate-claims.mjs` slice this into claims and report a line.
+ */
+export function maskInvisible(text, { kind = "markdown" } = {}) {
+  return maskLinkDestinations(maskHiddenMarkup(text, { kind }), { kind });
+}
+
+/**
+ * The markup a reader sees THROUGH: every tag blanked down to the attribute values a person
+ * really does meet, and every character reference decoded to the character it stands for.
+ *
+ * Separate from {@link maskInvisible} rather than folded into it because the gate rule needs
+ * the text in between: it finds its claims by offset in the masked text and flattens each
+ * claim on its own.
+ */
+export function flattenMarkup(text, { kind = "markdown" } = {}) {
+  return decodeEntities(blankTags(text, codeRanges(text, { kind }), { kind }));
+}
+
+/**
+ * What a reader meets, from raw file to readable text: {@link maskInvisible}, then
+ * {@link flattenMarkup}.
+ *
+ * Still carries {@link HIDDEN_FILLER} where a hidden line or a block-level tag left one, and
+ * still carries the emphasis characters — both are boundaries a caller may need, and both
+ * are the caller's to strip before it prints.
+ */
+export function readerText(text, { kind = "markdown" } = {}) {
+  return flattenMarkup(maskInvisible(text, { kind }), { kind });
 }

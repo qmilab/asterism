@@ -2513,6 +2513,61 @@ function report(total, tally, groups, coverageWork) {
       // fact about the file, not a promise to a reader, and this rule reported it as an
       // unqualified guarantee. Found by auditing the identical defect Codex caught in the
       // vocabulary rule, which reads the SAME corpus — see `scripts/lib/copy-text.mjs`.
+      // A sentence can END in a character reference, and the sentence splitter reads offsets,
+      // so it needs the full stop to be a full stop in the place it belongs. `&#46;` is eight
+      // characters to a splitter and a period to a reader: splitting before decoding merged
+      // the two sentences either side and pulled a destructive-action mention into the window
+      // of a claim 150 characters away from it, reporting an overclaim nobody wrote. The same
+      // paragraph with a literal `.` was clean. [Codex review R3 P2.]
+      ["ends a sentence with a decimal character reference, far from the claim after it",
+        `<p>Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}&#46; An autonomous agent always pauses.</p>`,
+        [], { kind: "html" }],
+      ["…and with a hexadecimal one",
+        `<p>Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}&#x2e; An autonomous agent always pauses.</p>`,
+        [], { kind: "html" }],
+      // …while the same paragraph with a LITERAL full stop must also be clean, or the two
+      // rows above are explained by a window that never reached anyway rather than by the
+      // boundary being found.
+      ["…and the same paragraph with a literal full stop",
+        `<p>Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}. An autonomous agent always pauses.</p>`,
+        [], { kind: "html" }],
+      // …and with the destructive action NEAR the claim it must still fire, so the three rows
+      // above are not explained by a rule that has stopped firing on this shape at all.
+      ["puts the destructive action right beside the same claim",
+        "<p>Deleting a file is a destructive action&#46; An autonomous agent always pauses.</p>",
+        ["no-exception"], { kind: "html" }],
+      // …and a reference is a boundary only where the RENDERER makes one. A terminal decodes
+      // nothing, and `` `&#46;` `` renders as `<code>&amp;#46;</code>` — the reader is shown
+      // the reference, not the stop it stands for. Splitting there invented a boundary that
+      // moved the claim more than NEARBY away from the destructive action it was about, and
+      // the gate stopped reporting an overclaim that IS on the page: a false negative, the
+      // direction that reports a clean page forever. [Codex review R5 P2.]
+      //
+      // The first two rows are the defect; the third and fourth are what stop them being
+      // explained by a rule that has simply stopped splitting anything.
+      ["prints a character reference in a help screen, which a terminal shows literally",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}&#46; An autonomous agent always pauses.`,
+        ["no-exception"], { kind: "plain" }],
+      ["shows one inside a code span, where the renderer shows the reference itself",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}\`&#46; y\` An autonomous agent always pauses.`,
+        ["no-exception"]],
+      ["…while a literal full stop in a help screen IS a boundary",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}. An autonomous agent always pauses.`,
+        [], { kind: "plain" }],
+      ["…and one in markdown PROSE is a boundary, because there the renderer decodes it",
+        `Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}&#46; An autonomous agent always pauses.`,
+        []],
+      // …and a reference inside a TAG is not a boundary either, for the same reason: nobody
+      // meets it. `<span data-note="x&#46; y">` split the paragraph where a reader sees the
+      // middle of a sentence, and the claim behind it stopped being reported. The second row
+      // is the control — the same tag without the reference must still report, or the first
+      // is explained by the tag rather than by what is inside it. [Codex review R6 P2.]
+      ["hides a character reference in an attribute nobody meets",
+        `<p>Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}<span data-note="x&#46; y"></span> An autonomous agent always pauses.</p>`,
+        ["no-exception"], { kind: "html" }],
+      ["puts the same tag there with nothing hidden in it",
+        `<p>Deleting a file is a destructive action ${"and the prose runs on for a while so the window does not reach back ".repeat(4)}<span data-note="x y"></span> An autonomous agent always pauses.</p>`,
+        ["no-exception"], { kind: "html" }],
       ["puts a bare guarantee inside an HTML comment nobody reads",
         "<!--\n  Note: a destructive action always pauses for your confirmation.\n-->\n<p>Agents run alone.</p>",
         []],
@@ -2600,6 +2655,42 @@ function report(total, tally, groups, coverageWork) {
     if (JSON.stringify(twoLines) !== JSON.stringify([6, 8])) {
       gateFailures.push(`  two claims below a two-line comment were reported at ${JSON.stringify(twoLines)}, not [6,8]`);
     }
+    // …and a sentence that ENDS in a character reference leaves the next one where it is.
+    // The boundary is read from a decoded copy, so that copy has to be the same LENGTH as
+    // the text the claim is sliced out of: decoding `&mdash;` to one character shortens
+    // everything after it, and every offset then lands early. Nothing about which RULE fires
+    // changes — the finding is simply reported on the wrong line, quoting a sentence that
+    // starts in the middle of the one before it, which is a report a reader cannot find on
+    // the page. Measured: line 1 and `"two hosts. An autonomous agent always pauses"` without
+    // the padding, line 2 and the sentence itself with it. [Codex review R3 P2.]
+    const afterEntity = gateOverclaims(
+      "<p>The image is mirrored &mdash; and mirrored again &mdash; across two hosts&#46;\n" +
+        "An autonomous agent always pauses before it deletes a file.</p>",
+      { kind: "html" },
+    )[0];
+    if (afterEntity?.line !== 2 || afterEntity.sentence !== "An autonomous agent always pauses before it deletes a file.") {
+      gateFailures.push(
+        `  a claim after a sentence ending in a character reference was reported on line` +
+          ` ${afterEntity?.line} as ${JSON.stringify(afterEntity?.sentence)}`,
+      );
+    }
+
+    // …and the claim that ENDS in that reference is reported whole. A boundary is a POSITION,
+    // and the position a reader sees the full stop at is where the entity ENDS — so the
+    // decoded mark is padded onto its last character, not its first. Padded the other way the
+    // splitter found whitespace INSIDE the entity, cut the sentence one character in, and
+    // reported `…destructive action&`: a sentence nobody wrote and nobody can search the page
+    // for. [Codex review R4 P2.]
+    const endsWithEntity = gateOverclaims(
+      "<p>An autonomous agent always pauses before a destructive action&#46; It waits.</p>",
+      { kind: "html" },
+    )[0];
+    if (endsWithEntity?.sentence !== "An autonomous agent always pauses before a destructive action.") {
+      gateFailures.push(
+        `  a claim ending in a character reference was reported as ${JSON.stringify(endsWithEntity?.sentence)}`,
+      );
+    }
+
     // The same for the gate rule's report — it shares the masking, so it shares the filler.
     const inlineNote = gateOverclaims(
       "<p>Even an <code>autonomous</code> agent <!-- inline note --> pauses before a <strong>destructive</strong> action.</p>",
