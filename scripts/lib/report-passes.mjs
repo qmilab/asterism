@@ -48,6 +48,12 @@ export function isLine(value) {
  * registration is not a finding about the docs; it is a report that does not know what it
  * checked, and continuing would print a verdict nobody should believe.
  */
+/** What a value actually was, short enough to sit in a refusal. */
+function describe(value) {
+  const shown = JSON.stringify(value);
+  return shown === undefined ? String(value) : shown.slice(0, 80);
+}
+
 function refuse(what) {
   console.error(`\nBUG IN THIS CHECKER: ${what}`);
   process.exit(2);
@@ -56,11 +62,21 @@ function refuse(what) {
 /**
  * Print one pass and record its verdict, in that order and in one call.
  *
- * The `find()` shape check is not ceremony. Every pass in the file this was extracted from
- * has a result to report, but two of them compute an OBJECT (`{ broken, offSite, checked }`)
- * and report one of its fields. Registering the object itself would read as a pass with no
- * findings, forever, on every run — `.length` on it is `undefined`, which the chain this
- * replaces treated exactly like zero.
+ * **Every value a registration hands this function is checked before it is used — the
+ * function, and what the function returns.** That is the whole rule, and it is written as a
+ * rule because the first version of this file applied it to `find()` alone, with a
+ * paragraph explaining why it mattered there, and left the same hole open one field over.
+ *
+ * Why it matters at all, in the words of the case that motivated it: every pass in the file
+ * this was extracted from has a result to report, but two of them compute an OBJECT
+ * (`{ broken, offSite, checked }`) and report one of its fields. Registering the object
+ * itself would read as a pass with no findings, forever, on every run — `.length` on it is
+ * `undefined`, which the chain this replaces treated exactly like zero. Nothing about that
+ * argument is special to `find()`.
+ *
+ * Refusals are exit 2 rather than a thrown error, and that distinction is the point: in
+ * this repo exit 1 means the thing being checked is wrong, and a checker that cannot report
+ * must not be able to look like a page that is.
  */
 export function emit(verdicts, pass) {
   if (!Array.isArray(verdicts)) refuse("emit() was handed something other than a list of verdicts");
@@ -80,8 +96,8 @@ export function emit(verdicts, pass) {
   const findings = pass.find();
   if (!Array.isArray(findings) || !findings.every(isLine)) {
     refuse(
-      `pass '${pass.id}' find() returned ${JSON.stringify(findings)?.slice(0, 80) ?? typeof findings},` +
-        ` where a list of lines was expected. Anything else is read as "found nothing" on every run.`,
+      `pass '${pass.id}' find() returned ${describe(findings)}, where a list of lines was` +
+        ` expected. Anything else is read as "found nothing" on every run.`,
     );
   }
 
@@ -98,18 +114,48 @@ export function emit(verdicts, pass) {
     console.log(sentence);
   }
 
-  for (const advisory of pass.advisories?.() ?? []) {
-    const [heading, lines] = advisory ?? [];
-    if (!Array.isArray(lines) || !lines.every(isLine)) refuse(`pass '${pass.id}' printed an advisory that is not a list of lines`);
-    if (!lines.length) continue;
-    if (!isLine(heading)) refuse(`pass '${pass.id}' printed ${lines.length} advisory line(s) under no heading`);
-    console.log(`\n${heading}`);
-    for (const line of lines) console.log(`  ${line}`);
+  // Declaring no advisories and declaring some that come back as nothing are different
+  // things, and `pass.advisories?.() ?? []` could not tell them apart: a function that
+  // forgot its `return` dropped every advisory line and still reported clean, and one that
+  // returned a non-iterable threw where nobody caught it — exit 1, which in this repo means
+  // "the docs are wrong" rather than "the checker is". [Codex review P2.]
+  if (pass.advisories) {
+    const advisories = pass.advisories();
+    if (!Array.isArray(advisories)) {
+      refuse(
+        `pass '${pass.id}' advisories() returned ${describe(advisories)}, where a list of` +
+          ` [heading, lines] pairs was expected. A pass that declares advisories and produces` +
+          ` none is reporting less than it says it does.`,
+      );
+    }
+    for (const advisory of advisories) {
+      if (!Array.isArray(advisory) || advisory.length !== 2) {
+        refuse(`pass '${pass.id}' produced an advisory that is not a [heading, lines] pair: ${describe(advisory)}`);
+      }
+      const [heading, lines] = advisory;
+      if (!Array.isArray(lines) || !lines.every(isLine)) refuse(`pass '${pass.id}' produced an advisory whose lines are ${describe(lines)}`);
+      if (!lines.length) continue;
+      if (!isLine(heading)) refuse(`pass '${pass.id}' produced ${lines.length} advisory line(s) under no heading`);
+      console.log(`\n${heading}`);
+      for (const line of lines) console.log(`  ${line}`);
+    }
   }
 }
 
-/** The passes that found something. This is the whole verdict; there is nothing else. */
+/**
+ * The passes that found something. This is the whole verdict; there is nothing else.
+ *
+ * The entry check is here, and not in `finish`, because this is the only place `count` is
+ * read: an entry without one is `undefined > 0`, which is false — a pass that found
+ * something reading as clean, which is the failure this whole file exists to remove.
+ */
 export function failing(verdicts) {
+  if (!Array.isArray(verdicts)) refuse(`a verdict list was expected, and this is ${describe(verdicts)}`);
+  for (const v of verdicts) {
+    if (!isLine(v?.id) || !Number.isInteger(v?.count) || v.count < 0) {
+      refuse(`a verdict is ${describe(v)}, where { id, count } was expected`);
+    }
+  }
   return verdicts.filter((v) => v.count > 0);
 }
 

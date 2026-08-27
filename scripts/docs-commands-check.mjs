@@ -4569,6 +4569,39 @@ function report(total, tally, groups, coverageWork) {
         ["BUG IN THIS CHECKER"],
         [],
       ],
+      [
+        "an advisories() that produced nothing is refused, not read as no advisories",
+        `emit(v, { ...${CLEAN}, advisories: () => undefined });`,
+        2,
+        ["BUG IN THIS CHECKER"],
+        [],
+      ],
+      [
+        "an advisories() returning a non-iterable is refused, not thrown at exit 1",
+        `emit(v, { ...${CLEAN}, advisories: () => 3 });`,
+        2,
+        ["BUG IN THIS CHECKER"],
+        ["TypeError"],
+      ],
+      [
+        "an advisory carrying more than a [heading, lines] pair is refused",
+        `emit(v, { ...${CLEAN}, advisories: () => [["H (1):", ["x"], "extra"]] });`,
+        2,
+        ["not a [heading, lines] pair"],
+        [],
+      ],
+      [
+        "an advisory whose lines are not a list is refused",
+        `emit(v, { ...${CLEAN}, advisories: () => [["H (1):", "x"]] });`,
+        2,
+        ["advisory whose lines are"],
+        [],
+      ],
+      // These two call `finish` themselves; the template's own call is never reached.
+      ["finish() handed a non-iterable is refused, not thrown at exit 1", `finish(3, "green");`, 2, ["BUG IN THIS CHECKER"], ["TypeError"]],
+      ["finish() handed a string is refused too", `finish("not a list", "green");`, 2, ["BUG IN THIS CHECKER"], []],
+      ["a verdict with no count is refused, not read as clean", `finish([{ id: "a" }], "green");`, 2, ["where { id, count } was expected"], []],
+      ["finish() with no closing sentence is refused", `finish(v, "");`, 2, ["BUG IN THIS CHECKER"], []],
     ];
     for (const [why, body, want, mustPrint, mustNotPrint] of VERDICT_CASES) {
       const source =
