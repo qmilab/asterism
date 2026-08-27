@@ -2,7 +2,7 @@
 
 All notable changes to Asterism are documented here. Versions follow [SemVer](https://semver.org); all `@qmilab/asterism*` packages are versioned and released together.
 
-## 0.9.3
+## 0.9.3 — 2026-08-27
 
 Asterism's own documentation kept calling part of Asterism "the kernel". It is the name the code uses for the component that holds identity, trust and the destructive-action gate, and it means nothing to someone deciding whether to run an agent on their laptop — the point of that component is that *Asterism* decides what an agent may do, not the operating system and not the model. Eight passages said the word out loud, including the first paragraph a reader meets on the project's own site.
 
