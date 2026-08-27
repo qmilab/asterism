@@ -65,6 +65,7 @@ import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import { gateOverclaims, GATE_RULE_ADVICE, TRUST_LEVEL_NAMES } from "./lib/gate-claims.mjs";
 import { codeRanges } from "./lib/copy-text.mjs";
+import { emit, failing, finish, isLine } from "./lib/report-passes.mjs";
 import {
   vocabularyLeaks,
   isVocabularyExempt,
@@ -1708,6 +1709,9 @@ function main() {
   report(total, tally, { failures, excused, skipped, inexact, unsubstituted, documented }, scratch);
 }
 
+/** Where a finding is, as `file:line` — clickable in a terminal that makes them so. */
+const at = (i) => `${i.file}:${i.line}`;
+
 /**
  * Values that legitimately differ between the page's install and the checker's are
  * masked before comparison: ids, timestamps, ports and absolute paths.
@@ -1736,8 +1740,6 @@ function outputDrift(item, stdout, stderr) {
 }
 
 function report(total, tally, groups, coverageWork) {
-  const at = (i) => `${i.file}:${i.line}`;
-
   if (groups.skipped.length) {
     console.log(`\nSkipped — not executable by a checker (${groups.skipped.length}):`);
     for (const i of groups.skipped) console.log(`  ${at(i)}  ${i.command}\n      ${i.why}`);
@@ -1765,11 +1767,13 @@ function report(total, tally, groups, coverageWork) {
     );
     for (const i of groups.inexact) console.log(`  ${at(i)}  ${i.command}`);
   }
-  if (groups.failures.length) {
-    console.log(`\nFAILED (${groups.failures.length}):`);
-    for (const i of groups.failures)
-      console.log(`  ${at(i)}  ${i.command}\n      ${i.why}${i.detail ? `\n      → ${i.detail}` : ""}`);
-  }
+  // Everything above is the invocation run's own accounting: printed, added up by the
+  // tally below, and never a verdict on its own. From here down, every finding this file
+  // reports goes through `emit`, which prints it and records it in the same call — so a
+  // pass cannot report something the exit code does not see. See lib/report-passes.mjs.
+  const verdicts = [];
+  const [invocations, ...checks] = reportPasses({ groups, coverageWork });
+  emit(verdicts, invocations);
 
   const accounted =
     tally.ran + tally.synopsis + tally.skipped + tally.excused + tally.documented + groups.failures.length;
@@ -4446,6 +4450,262 @@ function report(total, tally, groups, coverageWork) {
     }
     console.log("Every verb with subcommands rejects an invented one, recognisably.");
 
+    // --- a pass that reports something must STOP THE BUILD -----------------------------
+    // The verdict at the end of this report used to be a hand-written chain, one
+    // `x.length ||` term per pass, sitting two hundred lines from the pass it belonged to.
+    // Nothing proved a term was in it: the corpus is clean, so deleting one changed no
+    // verdict. It took planting a defect AND deleting its term to see anything — and then
+    // the finding printed, in full, above a passing build (#186; reproduced for a second
+    // pass, so it was the file's shape and not one check's).
+    //
+    // `emit` prints a pass and records it in the same call, so there is no chain to leave a
+    // term out of. What is asserted here is the derivation that replaced it, over the REAL
+    // registration list rather than over an example — so a pass added tomorrow is covered
+    // the day it is written, not the day someone remembers to add a row here.
+    const verdictFailures = [];
+    const registered = reportPasses({ groups, coverageWork });
+    if (registered.length !== REPORT_PASSES) {
+      verdictFailures.push(
+        `  reportPasses() returned ${registered.length} passes, not the ${REPORT_PASSES} declared —` +
+          ` one was added without saying so, or one was taken out`,
+      );
+    }
+    for (const [i, pass] of registered.entries()) {
+      // One pass finds something and every other reports clean. The verdict must fail, and
+      // must name THIS one — a derivation reading only the first entry, or only the last,
+      // satisfies an assertion made with a single pass.
+      const failed = failing(registered.map((p, j) => ({ id: p.id, count: j === i ? 1 : 0 })));
+      if (failed.length !== 1 || failed[0].id !== pass.id) {
+        verdictFailures.push(`  a finding in '${pass.id}' alone was judged ${JSON.stringify(failed.map((f) => f.id))}`);
+      }
+      // Shape, because `emit` refuses these at exit 2 and a check that refuses to run is a
+      // docs check nobody gets an answer from. `find` and `green` are NOT called: they read
+      // the real corpus, which is the one thing `--self-test` exists in order not to do.
+      if (!isLine(pass.id)) verdictFailures.push(`  pass ${i} carries no id`);
+      if (registered.filter((p) => p.id === pass.id).length !== 1) {
+        verdictFailures.push(`  '${pass.id}' is registered more than once`);
+      }
+      if (typeof pass.find !== "function") verdictFailures.push(`  '${pass.id}' has no find()`);
+      if (!isLine(pass.heading(1))) verdictFailures.push(`  '${pass.id}' heading() prints nothing over one finding`);
+      if (pass.green !== null && typeof pass.green !== "function") {
+        verdictFailures.push(`  '${pass.id}' declares neither \`green: null\` nor a function`);
+      }
+      if (pass.advisories != null && typeof pass.advisories !== "function") {
+        verdictFailures.push(`  '${pass.id}' declares advisories that are not a function`);
+      }
+    }
+    // …and the other direction, which is half the assertion: a verdict that fails whatever
+    // it is handed proves nothing by failing, and the loop above passes just as happily
+    // against a derivation hard-wired to `true`.
+    if (failing(registered.map((p) => ({ id: p.id, count: 0 }))).length) {
+      verdictFailures.push("  a report in which every pass found nothing was judged failing");
+    }
+    // The exit CODE and what was PRINTED, in a child, because running `process.exit` is the
+    // only way to observe it — the same reason the config refusals above are spawned rather
+    // than read. Both halves are asserted in the same case on purpose: "printing is
+    // registering" is the claim this whole shape rests on, and a mechanism that counted
+    // correctly while printing nothing would satisfy the exit code alone.
+    const PASS_LIB = join(ROOT, "scripts/lib/report-passes.mjs");
+    // The green sentence here is a string NOTHING ELSE prints. It was "clean" first, which
+    // `finish`'s own "All N checks … are clean." also satisfies — so silencing the green
+    // sentence altogether left the case below passing. A fixture written to kill a bug has
+    // to be watched killing it.
+    const CLEAN = `{ id: "a", find: () => [], heading: (n) => "A (" + n + ")", green: () => "A FOUND NOTHING" }`;
+    const VERDICT_CASES = [
+      [
+        "a pass that found something prints it and stops the build",
+        `emit(v, { ...${CLEAN}, find: () => ["a finding"] });`,
+        1,
+        ["A (1)", "  a finding", "1 of 1 checks failed: a (1)."],
+        [],
+      ],
+      [
+        "a pass that found nothing says so and does not",
+        `emit(v, ${CLEAN});`,
+        0,
+        ["A FOUND NOTHING", "All 1 checks in this report are clean."],
+        ["checks failed"],
+      ],
+      [
+        "one pass finding something among others that did not",
+        `emit(v, ${CLEAN}); emit(v, { ...${CLEAN}, id: "b", find: () => ["x"] }); emit(v, { ...${CLEAN}, id: "c" });`,
+        1,
+        ["1 of 3 checks failed: b (1)."],
+        [],
+      ],
+      [
+        "an advisory prints beside a pass that found nothing, and does not fail it",
+        `emit(v, { ...${CLEAN}, advisories: () => [["UNDECIDED (1):", ["a line"]]] });`,
+        0,
+        ["A FOUND NOTHING", "UNDECIDED (1):", "  a line", "All 1 checks in this report are clean."],
+        ["checks failed"],
+      ],
+      [
+        "an advisory with nothing in it prints no heading",
+        `emit(v, { ...${CLEAN}, advisories: () => [["UNDECIDED (0):", []]] });`,
+        0,
+        [],
+        ["UNDECIDED"],
+      ],
+      [
+        "a find() returning a result OBJECT is refused, not read as empty",
+        `emit(v, { ...${CLEAN}, find: () => ({ broken: [], checked: 0 }) });`,
+        2,
+        ["BUG IN THIS CHECKER"],
+        [],
+      ],
+      ["a pass registered twice under one id is refused", `emit(v, ${CLEAN}); emit(v, ${CLEAN});`, 2, ["BUG IN THIS CHECKER"], []],
+      [
+        "a pass carrying no id is refused",
+        `emit(v, { find: () => [], heading: () => "A", green: null });`,
+        2,
+        ["BUG IN THIS CHECKER"],
+        [],
+      ],
+      [
+        "a pass that never declared a green sentence is refused",
+        `emit(v, { id: "a", find: () => [], heading: () => "A" });`,
+        2,
+        ["BUG IN THIS CHECKER"],
+        [],
+      ],
+      [
+        "an advisories() that produced nothing is refused, not read as no advisories",
+        `emit(v, { ...${CLEAN}, advisories: () => undefined });`,
+        2,
+        ["BUG IN THIS CHECKER"],
+        [],
+      ],
+      [
+        "an advisories() returning a non-iterable is refused, not thrown at exit 1",
+        `emit(v, { ...${CLEAN}, advisories: () => 3 });`,
+        2,
+        ["BUG IN THIS CHECKER"],
+        ["TypeError"],
+      ],
+      [
+        "an advisory carrying more than a [heading, lines] pair is refused",
+        `emit(v, { ...${CLEAN}, advisories: () => [["H (1):", ["x"], "extra"]] });`,
+        2,
+        ["not a [heading, lines] pair"],
+        [],
+      ],
+      [
+        "an advisory whose lines are not a list is refused",
+        `emit(v, { ...${CLEAN}, advisories: () => [["H (1):", "x"]] });`,
+        2,
+        ["advisory whose lines are"],
+        [],
+      ],
+      // --- the validation layer must not be the thing that fails ------------------------
+      // Every row below ends in exit 2. Each one used to end in exit 1 — a broken checker
+      // wearing the exit code this repo reserves for the documentation being wrong — or,
+      // for the sparse advisory, in a green build printing `undefined`.
+      [
+        "a sparse find() is refused, not counted with a hole in it",
+        `emit(v, { ...${CLEAN}, find: () => new Array(1) });`,
+        2,
+        ["find() returned"],
+        [],
+      ],
+      [
+        "a hole among real findings is refused too",
+        `emit(v, { ...${CLEAN}, find: () => [, "real"] });`,
+        2,
+        ["find() returned"],
+        [],
+      ],
+      [
+        "a find() returning a value JSON cannot serialise is refused, not thrown at exit 1",
+        `emit(v, { ...${CLEAN}, find: () => 10n });`,
+        2,
+        ["find() returned"],
+        ["TypeError"],
+      ],
+      [
+        "a find() returning a circular object is refused, not thrown at exit 1",
+        `emit(v, { ...${CLEAN}, find: () => { const o = {}; o.self = o; return o; } });`,
+        2,
+        ["find() returned"],
+        ["TypeError"],
+      ],
+      [
+        "a find() that throws is refused, and says which pass and which callback",
+        `emit(v, { ...${CLEAN}, find: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' find() threw: boom"],
+        [],
+      ],
+      [
+        "a heading() that throws is refused",
+        `emit(v, { ...${CLEAN}, find: () => ["x"], heading: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' heading() threw: boom"],
+        [],
+      ],
+      [
+        "a green() that throws is refused",
+        `emit(v, { ...${CLEAN}, green: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' green() threw: boom"],
+        [],
+      ],
+      [
+        "an advisories() that throws is refused",
+        `emit(v, { ...${CLEAN}, advisories: () => { throw new Error("boom"); } });`,
+        2,
+        ["pass 'a' advisories() threw: boom"],
+        [],
+      ],
+      [
+        "sparse advisory lines are refused, not printed as `undefined` behind a green",
+        `emit(v, { ...${CLEAN}, advisories: () => [["H (1):", new Array(1)]] });`,
+        2,
+        ["advisory whose lines are"],
+        ["All 1 checks in this report are clean."],
+      ],
+      // These two call `finish` themselves; the template's own call is never reached.
+      ["finish() handed a non-iterable is refused, not thrown at exit 1", `finish(3, "green");`, 2, ["BUG IN THIS CHECKER"], ["TypeError"]],
+      ["finish() handed a string is refused too", `finish("not a list", "green");`, 2, ["BUG IN THIS CHECKER"], []],
+      ["a verdict with no count is refused, not read as clean", `finish([{ id: "a" }], "green");`, 2, ["where { id, count } was expected"], []],
+      ["finish() with no closing sentence is refused", `finish(v, "");`, 2, ["BUG IN THIS CHECKER"], []],
+    ];
+    for (const [why, body, want, mustPrint, mustNotPrint] of VERDICT_CASES) {
+      const source =
+        `import(${JSON.stringify(PASS_LIB)}).then(({ emit, finish }) => { const v = []; ${body} finish(v, "green"); });`;
+      let code = 0;
+      let printed = "";
+      try {
+        printed = execFileSync(process.execPath, ["-e", source], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          cwd: ROOT,
+        });
+      } catch (err) {
+        code = err.status;
+        printed = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+      }
+      if (code !== want) verdictFailures.push(`  ${why}: exit ${code}, wanted ${want}`);
+      for (const expected of mustPrint) {
+        if (!printed.includes(expected)) {
+          verdictFailures.push(`  ${why}: printed nothing matching ${JSON.stringify(expected)}`);
+        }
+      }
+      for (const unwanted of mustNotPrint) {
+        if (printed.includes(unwanted)) verdictFailures.push(`  ${why}: printed ${JSON.stringify(unwanted)}, which it should not`);
+      }
+    }
+    if (verdictFailures.length) {
+      console.log("\nSELF-TEST FAILED: a pass can report a finding without stopping the build:");
+      for (const f of verdictFailures) console.log(f);
+      process.exit(1);
+    }
+    console.log(
+      `Each of the ${registered.length} passes this report makes stops the build on its own, a report` +
+        ` that found nothing does not, what \`emit\` prints is what it counts, and a registration that` +
+        ` could not report is refused rather than read as clean.`,
+    );
+
     // The planted lines are the point: every one must be reported as a failure. If
     // the harness excuses or skips any of them, its zero is worth nothing.
     const planted = total;
@@ -4460,208 +4720,238 @@ function report(total, tally, groups, coverageWork) {
     return;
   }
 
-  const undocumented = SELF_TEST ? [] : checkCommandCoverage(coverageWork);
-  if (undocumented.length) {
-    console.log(
-      `\nUNDOCUMENTED COMMANDS (${undocumented.length}) — \`${join(siteDir(), "commands.md")}\` claims` +
+  for (const pass of checks) emit(verdicts, pass);
+
+  rmSync(coverageWork, { recursive: true, force: true });
+  finish(
+    verdicts,
+    `Every command those ${sourceFiles().length} pages advertise runs, or matches the binary's own help.`,
+  );
+}
+
+/**
+ * How many passes `reportPasses` returns. Raise it when you add one.
+ *
+ * A number kept in step by hand is what this slice removed everywhere else, and it earns its
+ * place here for one reason: once the chain was gone, DELETING a registration became the
+ * last way left to take a check out silently. The pass stops printing, its findings stop
+ * counting, and the report is one line shorter. This is compared against the real list on
+ * every `--self-test` run, so it cannot drift out of true — it can only be changed
+ * deliberately, which is the point.
+ */
+const REPORT_PASSES = 14;
+
+/**
+ * Every pass this report makes, in the order it prints them, as one list.
+ *
+ * Each entry says three things at once — what it found, what it prints when it found
+ * something, and what it prints when it did not — and `emit` derives the fourth, whether
+ * the build stops, from the first. Those four used to be four separate statements, and the
+ * fourth was a term in a hand-written `a.length || b.length || …` chain two hundred lines
+ * below the pass it belonged to. Deleting a term left the pass printing its findings above
+ * a green build, and nothing noticed: measured on #186 with a compound mutation, because a
+ * single one cannot show it — the corpus is clean, so the term is dead weight until the day
+ * it matters. `--self-test` now asserts this list, so a pass added tomorrow is covered the
+ * day it is written.
+ *
+ * The first entry is the invocation run itself, which is why the caller destructures it: it
+ * prints where it always has, above the tally that counts it, and the checks that follow
+ * print after.
+ *
+ * Results shared by two passes are read through `once`, so the work still happens in report
+ * order (each pass's cost lands where its output does) and happens once.
+ */
+function reportPasses({ groups, coverageWork }) {
+  const links = once(() => checkLinks());
+  const landing = once(() => checkLandingLinks());
+  const site = once(() => checkSiteLinks());
+  const copySources = once(() => userFacingCopy(coverageWork));
+
+  return [
+    {
+      id: "invocations",
+      find: () =>
+        groups.failures.map(
+          (i) => `${at(i)}  ${i.command}\n      ${i.why}${i.detail ? `\n      → ${i.detail}` : ""}`,
+        ),
+      heading: (n) => `FAILED (${n}):`,
+      // The sentence `finish` prints is this pass's green, and it is deliberately last:
+      // "every command those pages advertise runs" is only worth saying once everything
+      // below has also been looked at.
+      green: null,
+    },
+    {
+      id: "undocumented-commands",
+      find: () => checkCommandCoverage(coverageWork).map((v) => `asterism ${v}`),
+      heading: (n) =>
+        `UNDOCUMENTED COMMANDS (${n}) — \`${join(siteDir(), "commands.md")}\` claims` +
         ` to document every command, and has no section for:`,
-    );
-    for (const v of undocumented) console.log(`  asterism ${v}`);
-  } else if (!SELF_TEST) {
-    console.log("Every command in `asterism --help` has a section in the command reference.");
-  }
-
-  const links = SELF_TEST ? { broken: [], unchecked: [], links: 0, files: 0 } : checkLinks();
-  if (links.broken.length) {
-    console.log(`\nBROKEN INTERNAL LINKS (${links.broken.length}):`);
-    for (const b of links.broken) console.log(`  ${b}`);
-  } else if (!SELF_TEST) {
-    // The numbers are the point. "Every internal doc link resolves" was true of a pass
-    // that had looked at a fraction of them; saying how many were read, and out of what,
-    // is what stops the sentence from outgrowing the check again.
-    console.log(linkSummary(links));
-  }
-  if (links.unchecked.length) {
-    console.log(`\nINTERNAL LINKS THIS PASS CANNOT DECIDE (${links.unchecked.length}):`);
-    for (const u of links.unchecked) console.log(`  ${u}`);
-  }
-
-  // A published package with NO README is the one gap the scope rule above cannot see: a
-  // set built from the files that exist can never notice a file that does not, so a blank
-  // npm page for something people install would just be one fewer page to check.
-  const readmeless = SELF_TEST ? [] : publishedPackagesWithoutReadme();
-  if (readmeless.length) {
-    console.log(
-      `\nPUBLISHED PACKAGES WITH NO README (${readmeless.length}) — npm renders a package's page` +
+      green: () => "Every command in `asterism --help` has a section in the command reference.",
+    },
+    {
+      id: "internal-links",
+      find: () => links().broken,
+      heading: (n) => `BROKEN INTERNAL LINKS (${n}):`,
+      // The numbers are the point. "Every internal doc link resolves" was true of a pass
+      // that had looked at a fraction of them; saying how many were read, and out of what,
+      // is what stops the sentence from outgrowing the check again.
+      green: () => linkSummary(links()),
+      advisories: () => [
+        [`INTERNAL LINKS THIS PASS CANNOT DECIDE (${links().unchecked.length}):`, links().unchecked],
+      ],
+    },
+    {
+      // A published package with NO README is the one gap the scope rule cannot see: a set
+      // built from the files that exist can never notice a file that does not, so a blank
+      // npm page for something people install would just be one fewer page to check.
+      id: "package-readmes",
+      find: () => publishedPackagesWithoutReadme(),
+      heading: (n) =>
+        `PUBLISHED PACKAGES WITH NO README (${n}) — npm renders a package's page` +
         ` from its README, and shows only the one-line description without one:`,
-    );
-    for (const dir of readmeless) console.log(`  ${dir}`);
-  } else if (!SELF_TEST) {
-    console.log("Every package this repo publishes to npm has a README, and it is checked above.");
-  }
-
-  const providerGaps = SELF_TEST ? [] : checkProviderCoverage();
-  if (providerGaps.length) {
-    console.log(
-      `\nPROVIDER TABLE OUT OF DATE (${providerGaps.length}) — \`${join(siteDir(), "models.md")}\` claims` +
+      green: () => "Every package this repo publishes to npm has a README, and it is checked above.",
+    },
+    {
+      id: "provider-table",
+      find: () => checkProviderCoverage(),
+      heading: (n) =>
+        `PROVIDER TABLE OUT OF DATE (${n}) — \`${join(siteDir(), "models.md")}\` claims` +
         ` to list every built-in provider and the variable it reads:`,
-    );
-    for (const g of providerGaps) console.log(`  ${g}`);
-  } else if (!SELF_TEST) {
-    console.log("Every built-in provider appears in the models page, with the key it reads.");
-  }
-
-  const catalogGaps = SELF_TEST ? [] : checkToolCatalog();
-  if (catalogGaps.length) {
-    console.log(
-      `\nPARTIAL TOOL CATALOG (${catalogGaps.length}) — a page presenting the tools an agent is` +
+      green: () => "Every built-in provider appears in the models page, with the key it reads.",
+    },
+    {
+      id: "tool-catalog",
+      find: () => checkToolCatalog(),
+      heading: (n) =>
+        `PARTIAL TOOL CATALOG (${n}) — a page presenting the tools an agent is` +
         ` given names some of them and not the rest:`,
-    );
-    for (const g of catalogGaps) console.log(`  ${g}`);
-  } else if (!SELF_TEST) {
-    console.log(
-      `Every page naming a catalog tool names all ${catalogToolNames().length} the CLI ships.`,
-    );
-  }
-
-  const copySources = SELF_TEST ? [] : userFacingCopy(coverageWork);
-  const gateClaims = checkGateClaims(copySources);
-  if (gateClaims.length) {
-    console.log(
-      `\nTHE DESTRUCTIVE-ACTION GATE, PROMISED WIDER THAN IT FIRES (${gateClaims.length}) —` +
+      green: () => `Every page naming a catalog tool names all ${catalogToolNames().length} the CLI ships.`,
+    },
+    {
+      id: "gate-claims",
+      find: () => checkGateClaims(copySources()),
+      heading: (n) =>
+        `THE DESTRUCTIVE-ACTION GATE, PROMISED WIDER THAN IT FIRES (${n}) —` +
         ` a sentence stating the gate as a guarantee has to carry what the kernel actually does:`,
-    );
-    for (const g of gateClaims) console.log(`  ${g}`);
-  } else if (!SELF_TEST) {
-    console.log(
-      `Every guarantee about the destructive-action gate across ${copySources.length} pages, npm` +
+      green: () =>
+        `Every guarantee about the destructive-action gate across ${copySources().length} pages, npm` +
         ` descriptions, site strings and help screens names its exception.`,
-    );
-  }
-
-  const vocabulary = checkCopyVocabulary(copySources);
-  if (vocabulary.length) {
-    console.log(
-      `\nINTERNAL ARCHITECTURE VOCABULARY IN PUBLIC COPY (${vocabulary.length}) — a page or a help` +
+    },
+    {
+      id: "copy-vocabulary",
+      find: () => checkCopyVocabulary(copySources()),
+      heading: (n) =>
+        `INTERNAL ARCHITECTURE VOCABULARY IN PUBLIC COPY (${n}) — a page or a help` +
         ` screen names a part of the machine where it could name what the product does.` +
         `\n  If the word means something ELSE here — a container registry, a package's published` +
         ` name — add the sense to scripts/lib/copy-vocabulary.mjs rather than rewording copy` +
         ` that is already right:`,
-    );
-    for (const v of vocabulary) console.log(`  ${v}`);
-  } else if (!SELF_TEST) {
-    const exempt = copySources.filter(([label]) => isVocabularyExempt(label)).length;
-    console.log(
-      `No page, npm description, site string or help screen a user meets names an internal part` +
-        ` (${VOCABULARY_WORDS.join(", ")}) — ${copySources.length - exempt} read, ${exempt} exempt` +
-        ` (the safety case, where naming the part that enforces a guarantee IS the document).`,
-    );
-  }
-
-  // A page in the corpus whose terminal blocks this could not find at all. Reported rather
-  // than counted as zero: for the HTML half the answer "no commands" is far more often "the
-  // markup changed" than it is true, and a checker reading nothing while printing a green
-  // total is the exact failure this file has now paid for twice.
-  const landingLinks = SELF_TEST ? { broken: [], offSite: [], checked: 1 } : checkLandingLinks();
-  if (landingLinks.checked === 0) {
-    // Zero over the REAL root page, which is full of absolute links, means they no longer
-    // begin with the prefix `site_url` derives — so every one went to the undecidable pile,
-    // which is printed but does not fail the build. The self-test proves this is reachable
-    // by pointing a wrong prefix at the real page and watching `checked` go to zero.
-    console.log(
-      `\nNOT ONE LINK ON THE SITE'S ROOT PAGE WAS CHECKED — none of them begins with` +
-        ` \`${landingLinks.siteRoot}\`, the path derived from \`site_url\`. Either the site moved` +
-        ` or the page's links did; nothing here was looked at.`,
-    );
-  }
-  if (landingLinks.broken.length) {
-    console.log(`\nBROKEN LINKS ON THE SITE'S ROOT PAGE (${landingLinks.broken.length}):`);
-    for (const b of landingLinks.broken) console.log(`  ${b}`);
-  } else if (!SELF_TEST) {
-    console.log(
-      `All ${landingLinks.checked} links from the site's root page into this site resolve to a` +
+      green: () => {
+        const exempt = copySources().filter(([label]) => isVocabularyExempt(label)).length;
+        return (
+          `No page, npm description, site string or help screen a user meets names an internal part` +
+          ` (${VOCABULARY_WORDS.join(", ")}) — ${copySources().length - exempt} read, ${exempt} exempt` +
+          ` (the safety case, where naming the part that enforces a guarantee IS the document).`
+        );
+      },
+    },
+    {
+      // A page in the corpus whose links this could not find at all. A separate pass from
+      // the broken ones, and a separate verdict, because it is a different claim: not "the
+      // links resolve" but "links were looked at". Zero over the REAL root page, which is
+      // full of absolute links, means none of them begins with the prefix `site_url`
+      // derives — so every one went to the undecidable pile, which is printed and does not
+      // fail. The self-test proves this is reachable by pointing a wrong prefix at the real
+      // page and watching `checked` go to zero.
+      id: "root-page-links-looked-at",
+      find: () =>
+        landing().checked === 0
+          ? [
+              `none of them begins with \`${landing().siteRoot}\`, the path derived from` +
+                ` \`site_url\`. Either the site moved or the page's links did; nothing here` +
+                ` was looked at.`,
+            ]
+          : [],
+      heading: () => "NOT ONE LINK ON THE SITE'S ROOT PAGE WAS CHECKED —",
+      // Silence is this pass's green: the pass below reports the count it looked at.
+      green: null,
+    },
+    {
+      id: "root-page-links",
+      find: () => landing().broken,
+      heading: (n) => `BROKEN LINKS ON THE SITE'S ROOT PAGE (${n}):`,
+      green: () =>
+        `All ${landing().checked} links from the site's root page into this site resolve to a` +
         ` page mkdocs builds, headings included.`,
-    );
-  }
-  if (landingLinks.offSite.length) {
-    console.log(
-      `\nLINKS FROM THE ROOT PAGE THIS PASS CANNOT DECIDE (${landingLinks.offSite.length}):`,
-    );
-    for (const u of landingLinks.offSite) console.log(`  ${u}`);
-  }
-
-  const siteLinks = SELF_TEST ? { broken: [], offSite: [], checked: 1 } : checkSiteLinks();
-  if (siteLinks.checked === 0) {
-    // The same tripwire the root page has, for the same reason, and the caller makes the
-    // call for the same reason: only the code looking at the REAL corpus knows that this
-    // repo's pages do link into this repo's site. They do — the npm page's every link is
-    // one of these — so a zero means the prefix `site_url` derives no longer matches what
-    // the pages write, and every one of them went unlooked-at behind a green.
-    console.log(
-      `\nNOT ONE ABSOLUTE LINK INTO THIS SITE WAS CHECKED — no markdown page links to` +
-        ` a URL under \`${siteUrlParts().origin}${siteUrlPath().replace(/[^/]+\/$/, "")}\`,` +
-        ` derived from \`site_url\`. Either the site moved or the pages' links did.`,
-    );
-  }
-  if (siteLinks.broken.length) {
-    console.log(`\nBROKEN LINKS INTO THIS SITE (${siteLinks.broken.length}):`);
-    for (const b of siteLinks.broken) console.log(`  ${b}`);
-  } else if (!SELF_TEST) {
-    console.log(
-      `All ${siteLinks.checked} links from a markdown page into this site resolve to a page the` +
+      advisories: () => [
+        [`LINKS FROM THE ROOT PAGE THIS PASS CANNOT DECIDE (${landing().offSite.length}):`, landing().offSite],
+      ],
+    },
+    {
+      // The same tripwire the root page has, for the same reason: only the code looking at
+      // the REAL corpus knows that this repo's pages do link into this repo's site. They do
+      // — the npm page's every link is one of these — so a zero means the prefix `site_url`
+      // derives no longer matches what the pages write, and every one of them went
+      // unlooked-at behind a green.
+      id: "site-links-looked-at",
+      find: () =>
+        site().checked === 0
+          ? [
+              `no markdown page links to a URL under` +
+                ` \`${siteUrlParts().origin}${siteUrlPath().replace(/[^/]+\/$/, "")}\`, derived from` +
+                ` \`site_url\`. Either the site moved or the pages' links did.`,
+            ]
+          : [],
+      heading: () => "NOT ONE ABSOLUTE LINK INTO THIS SITE WAS CHECKED —",
+      green: null,
+    },
+    {
+      id: "site-links",
+      find: () => site().broken,
+      heading: (n) => `BROKEN LINKS INTO THIS SITE (${n}):`,
+      green: () =>
+        `All ${site().checked} links from a markdown page into this site resolve to a page the` +
         ` site serves, headings included.`,
-    );
-  }
-  if (siteLinks.offSite.length) {
-    console.log(
-      `\nLINKS TO THIS HOST THIS PASS CANNOT DECIDE (${siteLinks.offSite.length}):`,
-    );
-    for (const u of siteLinks.offSite) console.log(`  ${u}`);
-  }
-
-  const renderGaps = SELF_TEST ? [] : checkTerminalRendering();
-  if (renderGaps.length) {
-    console.log(
-      `\nTERMINAL BLOCK RENDERS AS ONE PARAGRAPH (${renderGaps.length}) — its lines are` +
+      advisories: () => [
+        [`LINKS TO THIS HOST THIS PASS CANNOT DECIDE (${site().offSite.length}):`, site().offSite],
+      ],
+    },
+    {
+      id: "terminal-rendering",
+      find: () => checkTerminalRendering(),
+      heading: (n) =>
+        `TERMINAL BLOCK RENDERS AS ONE PARAGRAPH (${n}) — its lines are` +
         ` correct and its markup collapses them:`,
-    );
-    for (const g of renderGaps) console.log(`  ${g}`);
-  } else if (!SELF_TEST) {
-    console.log("Every multi-line terminal block on the site's root page keeps its line breaks.");
-  }
-
-  const blockless = SELF_TEST ? [] : blocklessPages();
-  if (blockless.length) {
-    console.log(
-      `\nNO TERMINAL BLOCK FOUND ON ANY PAGE (${blockless.length}) — commands are read from an` +
+      green: () => "Every multi-line terminal block on the site's root page keeps its line breaks.",
+    },
+    {
+      // Reported rather than counted as zero: for the HTML half the answer "no commands" is
+      // far more often "the markup changed" than it is true, and a checker reading nothing
+      // while printing a green total is the exact failure this file has now paid for twice.
+      id: "terminal-blocks-found",
+      find: () => blocklessPages(),
+      heading: (n) =>
+        `NO TERMINAL BLOCK FOUND ON ANY PAGE (${n}) — commands are read from an` +
         ` element whose class names a terminal, and not one page published at the site's root has` +
         ` one. A renamed class looks exactly like this, and so does a checker reading nothing:`,
-    );
-    for (const rel of blockless) console.log(`  ${rel}`);
-  }
+      // Every page's blocks are already reported on by the invocation counts above; this
+      // pass only speaks when the set is empty.
+      green: null,
+    },
+  ];
+}
 
-  rmSync(coverageWork, { recursive: true, force: true });
-  if (
-    groups.failures.length ||
-    links.broken.length ||
-    undocumented.length ||
-    readmeless.length ||
-    providerGaps.length ||
-    catalogGaps.length ||
-    gateClaims.length ||
-    vocabulary.length ||
-    landingLinks.broken.length ||
-    landingLinks.checked === 0 ||
-    siteLinks.broken.length ||
-    siteLinks.checked === 0 ||
-    renderGaps.length ||
-    blockless.length
-  ) {
-    process.exit(1);
-  }
-  console.log(
-    `Every command those ${sourceFiles().length} pages advertise runs, or matches the binary's own help.`,
-  );
+/** Run `fn` at most once, at the moment the first pass that needs its result prints. */
+function once(fn) {
+  let called = false;
+  let value;
+  return () => {
+    if (!called) {
+      value = fn();
+      called = true;
+    }
+    return value;
+  };
 }
 
 /**
