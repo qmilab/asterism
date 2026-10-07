@@ -92,14 +92,62 @@ function describe(value) {
  * script's problem, and exit 1 is reserved for the documentation being wrong.
  */
 function call(id, what, fn) {
-  try {
-    return fn();
-  } catch (err) {
+  const outcome = attempt(id, what, fn);
+  if (outcome.problem) {
     // The stack goes with it — a named refusal that loses where it happened is a worse
     // trade than the bare stack trace this replaces.
-    console.error(err?.stack ?? String(err));
-    refuse(`pass '${id}' ${what}() threw: ${err?.message ?? describe(err)}`);
+    console.error(outcome.stack ?? outcome.problem);
+    refuse(outcome.problem);
   }
+  return outcome.value;
+}
+
+/**
+ * Run a registration's callback and report rather than decide: `{ value }` or `{ problem }`.
+ *
+ * The same guard `emit` uses, without the exit, because `--self-test` has to call these
+ * callbacks too and must DIAGNOSE a malformed registration rather than die on it. It died
+ * on it: `pass.heading(1)` was invoked bare in the self-test's own registration loop, so a
+ * pass with no `heading` — one of the shapes that loop exists to name — took the whole
+ * check down with an uncaught `TypeError` at exit 1. [Codex review P2.]
+ *
+ * This never throws, whatever the callback does.
+ */
+export function attempt(id, what, fn) {
+  try {
+    return { value: fn() };
+  } catch (err) {
+    const name = isLine(id) ? `pass '${id}'` : "an unnamed pass";
+    return { problem: `${name} ${what}() threw: ${err?.message ?? describe(err)}`, stack: err?.stack };
+  }
+}
+
+/**
+ * Everything wrong with a registration's SHAPE, as sentences, or an empty list.
+ *
+ * One statement of what a valid registration is, with two readers: `emit`, which refuses on
+ * anything this returns, and `--self-test`, which reports it. They used to be two
+ * statements — the same five checks written once in each file — and all three review rounds
+ * this file has had were that duplication paying out: a field checked in one copy and not
+ * the other, a check that could itself fail, and finally the self-test's copy crashing on
+ * the malformed input `emit`'s copy handles. That is the same defect #186 was about, one
+ * level up: a hand-written parallel of a rule that already exists somewhere else.
+ *
+ * Calls nothing and throws nothing, so it is safe to run on whatever a caller has.
+ */
+export function problemsWith(pass) {
+  const problems = [];
+  const named = isLine(pass?.id) ? `pass '${pass.id}'` : "an unnamed pass";
+  if (!isLine(pass?.id)) problems.push("a pass was registered with no id; the verdict names failing passes by id");
+  if (typeof pass?.find !== "function") problems.push(`${named} has no find()`);
+  if (typeof pass?.heading !== "function") problems.push(`${named} has no heading()`);
+  if (pass?.green !== null && typeof pass?.green !== "function") {
+    problems.push(`${named} must declare \`green: null\` or a function; it declared ${typeof pass?.green}`);
+  }
+  if (pass?.advisories != null && typeof pass?.advisories !== "function") {
+    problems.push(`${named} declares advisories that are not a function`);
+  }
+  return problems;
 }
 
 function refuse(what) {
@@ -128,17 +176,11 @@ function refuse(what) {
  */
 export function emit(verdicts, pass) {
   if (!Array.isArray(verdicts)) refuse("emit() was handed something other than a list of verdicts");
-  if (!isLine(pass?.id)) refuse("a pass was registered with no id; the verdict names failing passes by id");
+  for (const problem of problemsWith(pass)) refuse(problem);
+  // Not part of the shape: this one needs the passes already emitted, which is why it is
+  // the only registration check `emit` still makes on its own.
   if (verdicts.some((v) => v.id === pass.id)) {
     refuse(`two passes are registered as '${pass.id}'; the verdict would name one of them for both`);
-  }
-  if (typeof pass.find !== "function") refuse(`pass '${pass.id}' has no find()`);
-  if (typeof pass.heading !== "function") refuse(`pass '${pass.id}' has no heading()`);
-  if (pass.green !== null && typeof pass.green !== "function") {
-    refuse(`pass '${pass.id}' must declare \`green: null\` or a function; it declared ${typeof pass.green}`);
-  }
-  if (pass.advisories != null && typeof pass.advisories !== "function") {
-    refuse(`pass '${pass.id}' declares advisories that are not a function`);
   }
 
   const findings = call(pass.id, "find", () => pass.find());

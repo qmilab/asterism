@@ -65,7 +65,7 @@ import { join, dirname, resolve, relative, sep } from "node:path";
 import { anchorOf, githubAnchorOf, anchorsOf, anchorRuleFor, headingLines, MKDOCS_RULE } from "./lib/anchors.mjs";
 import { gateOverclaims, GATE_RULE_ADVICE, TRUST_LEVEL_NAMES } from "./lib/gate-claims.mjs";
 import { codeRanges } from "./lib/copy-text.mjs";
-import { emit, failing, finish, isLine } from "./lib/report-passes.mjs";
+import { attempt, emit, failing, finish, isLine, problemsWith } from "./lib/report-passes.mjs";
 import {
   vocabularyLeaks,
   isVocabularyExempt,
@@ -4463,6 +4463,20 @@ function report(total, tally, groups, coverageWork) {
     // registration list rather than over an example — so a pass added tomorrow is covered
     // the day it is written, not the day someone remembers to add a row here.
     const verdictFailures = [];
+    // What is wrong with one registration, in the words the mechanism itself uses. Both the
+    // loop below and the table after it go through this, so a shape that breaks it is
+    // REPORTED by that table rather than discovered when a real registration trips it.
+    const inspect = (pass) => {
+      const problems = problemsWith(pass).map((p) => `  ${p}`);
+      // `heading` is the one callback with a cheap, corpus-free answer, so it is the one the
+      // self-test can check — through the same guard `emit` uses, because a pass with no
+      // `heading` is precisely one of the shapes this is here to name, and calling it bare
+      // took the whole check down at exit 1. [Codex review P2.]
+      const heading = attempt(pass?.id, "heading", () => pass.heading(1));
+      if (heading.problem) problems.push(`  ${heading.problem}`);
+      else if (!isLine(heading.value)) problems.push(`  '${pass?.id}' heading() prints nothing over one finding`);
+      return problems;
+    };
     const registered = reportPasses({ groups, coverageWork });
     if (registered.length !== REPORT_PASSES) {
       verdictFailures.push(
@@ -4479,19 +4493,48 @@ function report(total, tally, groups, coverageWork) {
         verdictFailures.push(`  a finding in '${pass.id}' alone was judged ${JSON.stringify(failed.map((f) => f.id))}`);
       }
       // Shape, because `emit` refuses these at exit 2 and a check that refuses to run is a
-      // docs check nobody gets an answer from. `find` and `green` are NOT called: they read
-      // the real corpus, which is the one thing `--self-test` exists in order not to do.
-      if (!isLine(pass.id)) verdictFailures.push(`  pass ${i} carries no id`);
+      // docs check nobody gets an answer from — asked of the same code `emit` asks, not
+      // restated here. `find` and `green` are NOT called: they read the real corpus, which
+      // is the one thing `--self-test` exists in order not to do.
+      verdictFailures.push(...inspect(pass));
       if (registered.filter((p) => p.id === pass.id).length !== 1) {
         verdictFailures.push(`  '${pass.id}' is registered more than once`);
       }
-      if (typeof pass.find !== "function") verdictFailures.push(`  '${pass.id}' has no find()`);
-      if (!isLine(pass.heading(1))) verdictFailures.push(`  '${pass.id}' heading() prints nothing over one finding`);
-      if (pass.green !== null && typeof pass.green !== "function") {
-        verdictFailures.push(`  '${pass.id}' declares neither \`green: null\` nor a function`);
+    }
+    // …and `inspect` must survive every shape it is there to name. It did not: three review
+    // rounds running, the finding was in the previous round's fix, and this was the third —
+    // the self-test's own copy of the shape rules crashing on the input `emit`'s copy
+    // handles. There is one copy now, and this is what holds it to being total. Each row
+    // is fed in-process, and `inspect` throwing is itself reported rather than fatal,
+    // because a harness that dies proves nothing about the case that killed it.
+    const WHOLE = { id: "a", find: () => [], heading: () => "A", green: null };
+    const SHAPE_CASES = [
+      ["a whole registration", WHOLE, []],
+      ["a pass with no id", { ...WHOLE, id: undefined }, ["no id"]],
+      ["a pass with no find()", { ...WHOLE, find: undefined }, ["has no find()"]],
+      ["a pass with no heading()", { ...WHOLE, heading: undefined }, ["has no heading()", "heading() threw"]],
+      ["a pass whose heading() throws", { ...WHOLE, heading: () => { throw new Error("boom"); } }, ["heading() threw: boom"]],
+      ["a pass whose heading() prints nothing", { ...WHOLE, heading: () => "" }, ["prints nothing over one finding"]],
+      ["a pass that never declared green", { id: "a", find: () => [], heading: () => "A" }, ["green"]],
+      ["a pass whose advisories are not a function", { ...WHOLE, advisories: [] }, ["advisories"]],
+      ["nothing at all", null, ["no id", "has no find()", "has no heading()"]],
+      ["a string", "not a pass", ["no id", "has no find()", "has no heading()"]],
+    ];
+    for (const [why, pass, wanted] of SHAPE_CASES) {
+      let said;
+      try {
+        said = inspect(pass);
+      } catch (err) {
+        verdictFailures.push(`  inspect(${why}) threw instead of reporting: ${err?.message ?? err}`);
+        continue;
       }
-      if (pass.advisories != null && typeof pass.advisories !== "function") {
-        verdictFailures.push(`  '${pass.id}' declares advisories that are not a function`);
+      if (!wanted.length && said.length) {
+        verdictFailures.push(`  inspect(${why}) reported ${JSON.stringify(said)} against a registration with nothing wrong`);
+      }
+      for (const want of wanted) {
+        if (!said.some((line) => line.includes(want))) {
+          verdictFailures.push(`  inspect(${why}) said ${JSON.stringify(said)}, nothing matching ${JSON.stringify(want)}`);
+        }
       }
     }
     // …and the other direction, which is half the assertion: a verdict that fails whatever
