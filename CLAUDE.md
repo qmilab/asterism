@@ -169,7 +169,7 @@ asterism serve <agent>                               start the local HTTP endpoi
   Two things this floor does *not* mean, both worth knowing before leaning on it:
 
   - **"Tested" means `verify:node`** — the acceptance script — not `bun test`, which runs under Bun's test runner and only there. The floor guarantees the product boots, resolves its drivers, and completes runs on Node; it does not guarantee kernel-level parity.
-  - **The floor is the oldest supported line, not the only tested one.** CI runs the floor *and* the current Active LTS (22 and 24 today), because a floor nothing above it is tested against is a claim about one version wearing a `+`.
+  - **The floor is the oldest supported line, not the only tested one.** CI runs the floor *and* the current Active LTS (22 and 26 today), because a floor nothing above it is tested against is a claim about one version wearing a `+`. The upper leg keeps its own calendar: a new line becomes Active LTS each October, so re-check it then, the way the floor is re-checked each April.
 
   When raising it: the eight package manifests and the root `engines`, `README.md` (prose **and** the URL-encoded shields.io runtime badge), `packages/cli/README.md` (two places), `CONTRIBUTING.md`, `docs/installation.md` (two places), `docs/getting-started.md`, the CI matrix, and any `Node <n>+` in source comments. Shipped `CHANGELOG.md` entries are history — never retro-edit them.
 
